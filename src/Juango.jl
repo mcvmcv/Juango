@@ -63,7 +63,7 @@ export Model, @model, Field, CharField, TextField, EmailField, SlugField, URLFie
        FloatField, BooleanField, DateTimeField, DateField, ForeignKey, Q, QuerySet, objects,
        exclude, order_by, exists, values_list, update!, create, get_or_create, update_or_create,
        save!, refresh!, full_clean, aggregate, none, migrate, makemigrations, showmigrations, sqlmigrate,
-       atomic, IntegrityError, DoesNotExist,
+       atomic, IntegrityError, select_related, prefetch_related, Prefetch, count_queries, DoesNotExist,
        MultipleObjectsReturned, ProtectedError, get_absolute_url
 # forms
 export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data

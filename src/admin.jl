@@ -196,6 +196,9 @@ function changelist(req::Request; model)
              filter(qs, Q(f.name => v))
     end
     isempty(ma.ordering) || (qs = order_by(qs, ma.ordering...))
+    # Load the objects behind foreign-key columns in the same query (no query per row).
+    fks = [c for c in ma.list_display if c isa Symbol && (f = findfield(meta, c)) !== nothing && f.kind === :fk && f.name === c]
+    isempty(fks) || (qs = Juango.select_related(qs, fks...))
     p = Paginator(qs, ma.list_per_page)
     pg = try
         page(p, get(req.GET, "page", "1"))

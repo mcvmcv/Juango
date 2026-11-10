@@ -274,9 +274,15 @@ function Base.getproperty(m::Model, s::Symbol)
         cache[s] = obj
         return obj
     end
+    cache = getfield(m, :_cache)
+    pre = get(cache, s, NOTFOUND)
     for (rn, M, rf) in reverse_relations(T)
-        rn === s && return filter(objects(M), Q(attname(rf) => data[:id]))
+        rn === s || continue
+        qs = filter(objects(M), Q(attname(rf) => data[:id]))
+        pre isa PrefetchedList && return QuerySet{M}(qs.where, qs.order, nothing, 0, false, Vector{Symbol}[], Prefetch[], pre.items)
+        return qs
     end
+    pre === NOTFOUND || return pre isa PrefetchedList ? pre.items : pre    # Prefetch(...; to_attr)
     r = tattr(m, Val(s))
     r === NOTFOUND || return r
     throw(ArgumentError("$(T) has no attribute '$s'"))
@@ -395,43 +401,112 @@ struct LookupError <: Exception
 end
 Base.showerror(io::IO, e::LookupError) = print(io, "FieldError: ", e.msg)
 
-function compile_lookup(T::Type, key::Symbol, value)
+# --- SQL compilation -----------------------------------------------------------------------
+#
+# A query compiles to `SELECT ... FROM base [JOIN ...] WHERE ...`. Lookups across relations
+# (`author__name`, reverse `comment__body`) become JOINs:
+#
+# * Forward FKs: INNER JOIN when the FK is NOT NULL (every row has a match), LEFT OUTER JOIN
+#   when it is nullable or hangs off a LEFT JOIN. One join per path, reused by the whole query.
+# * Reverse FKs: LEFT OUTER JOIN, and the query becomes SELECT DISTINCT. As in Django,
+#   conditions inside one filter() call share the join (one related row must satisfy all of
+#   them) while separate filter() calls join again (each may be satisfied by a different row).
+# * Under negation (`exclude`, `!Q`) relations compile to correlated EXISTS subqueries, so
+#   `exclude(author__name="Ann")` keeps posts that have no author at all.
+# * `rel__isnull` on a reverse relation is an EXISTS test (no join needed).
+
+mutable struct SQLCompiler
+    T::Type
+    base::String                # unquoted table name; base columns are "table"."col"
+    joins::Vector{String}
+    aliases::Dict{Any,String}   # (parent alias, relation, scope) => alias
+    leftjoined::Set{String}
+    counter::Base.RefValue{Int}
+    distinct::Bool
+    scope::Int
+end
+SQLCompiler(T::Type) = SQLCompiler(T, modelmeta(T).table, String[], Dict{Any,String}(), Set{String}(), Ref(0), false, 0)
+
+new_alias!(c::SQLCompiler) = (c.counter[] += 1; "j$(c.counter[])")
+qcol(alias, col) = qname(alias) * "." * qname(col)
+
+"Join `table` (as a new alias) to `parent` on child.`childcol` = parent.`parentcol`; reuse an existing join for `key`."
+function join!(c::SQLCompiler, parent, key, table, childcol, parentcol; left::Bool)
+    haskey(c.aliases, key) && return c.aliases[key]
+    a = new_alias!(c)
+    left = left || parent in c.leftjoined
+    left && push!(c.leftjoined, a)
+    push!(c.joins, " $(left ? "LEFT OUTER" : "INNER") JOIN $(qname(table)) $(qname(a)) ON $(qcol(a, childcol)) = $(qcol(parent, parentcol))")
+    c.aliases[key] = a
+end
+
+function find_reverse(T::Type, name)
+    for (rn, M, rf) in reverse_relations(T)
+        (string(rn) == name || lowercase(string(nameof(M))) == name) && return (rn, M, rf)
+    end
+    nothing
+end
+
+function lookup_error(T, fname)
+    meta = modelmeta(T)
+    names = join(vcat(["id"], [string(x.name) for x in meta.fields], [string(r[1]) for r in reverse_relations(T)]), ", ")
+    LookupError("cannot resolve keyword '$fname' into a field of $T. Choices are: $names")
+end
+
+"Compile one `field__path__lookup = value` against model `T` whose table is reachable as `alias`."
+function compile_lookup(c::SQLCompiler, alias, T::Type, key, value, negated::Bool)
     parts = split(string(key), "__")
     lookup = "exact"
-    if length(parts) > 1 && parts[end] in LOOKUPS
-        lookup = String(pop!(parts))
-    end
+    (length(parts) > 1 && parts[end] in LOOKUPS) && (lookup = String(pop!(parts)))
     meta = modelmeta(T)
     fname = parts[1] == "pk" ? "id" : String(parts[1])
-    rest = parts[2:end]
-    tbl = qname(meta.table)
-
+    rest = String.(parts[2:end])
+    f = nothing
     if fname == "id"
-        f = nothing
-        col = "$tbl.$(qname("id"))"
+        isempty(rest) || throw(LookupError("'id' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
+        col = qcol(alias, "id")
     else
         f = findfield(meta, Symbol(fname))
         if f === nothing
-            # reverse relation, e.g. filter(Author; post__title="x") or post_set__title
-            for (rn, M, rf) in reverse_relations(T)
-                if string(rn) == fname || lowercase(string(nameof(M))) == fname
-                    subkey = Symbol(join(isempty(rest) ? ["id", lookup] : vcat(rest, lookup), "__"))
-                    sql, ps = compile_lookup(M, subkey, value)
-                    return ("$tbl.$(qname("id")) IN (SELECT $(qname(column(rf))) FROM $(qname(modelmeta(M).table)) WHERE $sql)", ps)
-                end
+            rel = find_reverse(T, fname)
+            rel === nothing && throw(lookup_error(T, fname))
+            rn, M, rf = rel
+            mt = qname(modelmeta(M).table)
+            if isempty(rest) && lookup == "isnull"
+                a = new_alias!(c)
+                ex = "EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(qcol(a, column(rf))) = $(qcol(alias, "id")))"
+                return (truthy(value) ? "NOT " * ex : ex, Any[])
             end
-            names = join(vcat(["id"], [string(x.name) for x in meta.fields]), ", ")
-            throw(LookupError("cannot resolve keyword '$fname' into a field of $T. Choices are: $names"))
+            subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
+            if negated
+                a = new_alias!(c)
+                sql, ps = compile_lookup(c, a, M, subkey, value, negated)
+                return ("EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(qcol(a, column(rf))) = $(qcol(alias, "id")) AND $sql)", ps)
+            end
+            a = join!(c, alias, (alias, rn, c.scope), modelmeta(M).table, column(rf), "id"; left = true)
+            c.distinct = true
+            return compile_lookup(c, a, M, subkey, value, negated)
         end
         if !isempty(rest)
             f.kind === :fk || throw(LookupError("'$fname' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
-            R = related_model(f)
-            sql, ps = compile_lookup(R, Symbol(join(vcat(rest, lookup), "__")), value)
-            return ("$tbl.$(qname(column(f))) IN (SELECT $(qname("id")) FROM $(qname(modelmeta(R).table)) WHERE $sql)", ps)
+            if rest in (["id"], ["pk"])
+                col = qcol(alias, column(f))     # author__id is just author_id: no join
+            else
+                R = related_model(f)
+                subkey = join(vcat(rest, lookup), "__")
+                if negated
+                    a = new_alias!(c)
+                    sql, ps = compile_lookup(c, a, R, subkey, value, negated)
+                    return ("EXISTS (SELECT 1 FROM $(qname(modelmeta(R).table)) $(qname(a)) WHERE $(qcol(a, "id")) = $(qcol(alias, column(f))) AND $sql)", ps)
+                end
+                a = join!(c, alias, (alias, f.name), modelmeta(R).table, "id", column(f); left = f.null)
+                return compile_lookup(c, a, R, subkey, value, negated)
+            end
+        else
+            col = qcol(alias, column(f))
         end
-        col = "$tbl.$(qname(column(f)))"
     end
-    conv(v) = v isa Model ? v.id : (f === nothing ? dbparam(v) : to_db(f, v))
+    conv(v) = v isa Model ? v.id : (f === nothing || f.kind === :fk ? dbparam(v) : to_db(f, v))
 
     if lookup == "exact"
         value === nothing && return ("$col IS NULL", Any[])
@@ -446,7 +521,7 @@ function compile_lookup(T::Type, key::Symbol, value)
         return ("$col $op ?", Any[conv(value)])
     elseif lookup == "in"
         if value isa QuerySet
-            sql, ps = select_sql(value; columns = "$(qname(modelmeta(model_of(value)).table)).$(qname("id"))")
+            sql, ps = select_sql(value; columns = qcol(modelmeta(model_of(value)).table, "id"))
             return ("$col IN ($sql)", ps)
         end
         vals = collect(value)
@@ -463,16 +538,36 @@ function compile_lookup(T::Type, key::Symbol, value)
     throw(LookupError("unsupported lookup '$lookup'"))
 end
 
-function compile_q(T::Type, q::Q)
+function compile_q(c::SQLCompiler, alias, T::Type, q::Q, negated::Bool)
+    neg = negated ⊻ q.negated
     parts = String[]
     params = Any[]
-    for c in q.children
-        sql, ps = c isa Q ? compile_q(T, c) : compile_lookup(T, Symbol(c.first), c.second)
+    for ch in q.children
+        sql, ps = ch isa Q ? compile_q(c, alias, T, ch, neg) : compile_lookup(c, alias, T, Symbol(ch.first), ch.second, neg)
         push!(parts, sql)
         append!(params, ps)
     end
-    sql = isempty(parts) ? "1" : "(" * join(parts, q.connector === :OR ? " OR " : " AND ") * ")"
+    sql = isempty(parts) ? sql_true(backend()) : "(" * join(parts, q.connector === :OR ? " OR " : " AND ") * ")"
     q.negated ? "NOT $sql" : sql, params
+end
+
+"""
+    Prefetch(lookup; queryset=nothing, to_attr=nothing)
+
+A `prefetch_related` lookup with a custom queryset for the related objects, optionally
+stored under another attribute name (as a plain `Vector`).
+"""
+struct Prefetch
+    path::String
+    queryset::Any
+    to_attr::Union{Nothing,Symbol}
+end
+Prefetch(path; queryset = nothing, to_attr = nothing) =
+    Prefetch(string(path), queryset, to_attr === nothing ? nothing : Symbol(to_attr))
+
+"Related objects fetched by `prefetch_related`, kept in an instance's cache."
+struct PrefetchedList
+    items::Vector
 end
 
 # --- QuerySet --------------------------------------------------------------------------
@@ -483,12 +578,17 @@ Iterate it, `collect` it, index it (`qs[1]`, `qs[1:10]`), or call `count`,
 `first`, `exists`, `values`, `update!`, `delete!` on it.
 """
 struct QuerySet{T<:Model}
-    where::Vector{Q}
+    where::Vector{Q}                    # one entry per filter()/exclude() call
     order::Vector{String}
     limit::Union{Nothing,Int}
     offset::Int
     isnone::Bool
+    related::Vector{Vector{Symbol}}     # select_related paths
+    prefetch::Vector{Prefetch}          # prefetch_related lookups
+    cache::Union{Nothing,Vector}        # results already known (prefetched reverse relations)
 end
+QuerySet{T}(where, order, limit, offset, isnone) where {T} =
+    QuerySet{T}(where, order, limit, offset, isnone, Vector{Symbol}[], Prefetch[], nothing)
 
 model_of(::QuerySet{T}) where {T} = T
 
@@ -498,9 +598,48 @@ objects(::Type{T}) where {T<:Model} = QuerySet{T}(Q[], String[], nothing, 0, fal
 none(::Type{T}) where {T<:Model} = QuerySet{T}(Q[], String[], nothing, 0, true)
 none(qs::QuerySet{T}) where {T} = none(T)
 
-function chain(qs::QuerySet{T}; where = qs.where, order = qs.order, limit = qs.limit, offset = qs.offset) where {T}
-    QuerySet{T}(where, order, limit, offset, qs.isnone)
+"A new queryset with some parts replaced. Cached results never carry over."
+function chain(qs::QuerySet{T}; where = qs.where, order = qs.order, limit = qs.limit, offset = qs.offset,
+               related = qs.related, prefetch = qs.prefetch) where {T}
+    QuerySet{T}(where, order, limit, offset, qs.isnone, related, prefetch, nothing)
 end
+
+"""
+    select_related(qs, :author, :author__profile)
+
+Fetch the objects behind forward foreign keys in the same query (with JOINs), so
+`post.author` needs no extra query. Paths follow FKs with `__`.
+"""
+function select_related(qs::QuerySet{T}, paths...) where {T}
+    rel = copy(qs.related)
+    for p in paths
+        segs = Symbol.(split(string(p), "__"))
+        M = T
+        for s in segs
+            f = findfield(modelmeta(M), s)
+            (f !== nothing && f.kind === :fk && f.name === s) ||
+                throw(LookupError("select_related: '$s' is not a foreign key of $M (use prefetch_related for reverse relations)"))
+            M = related_model(f)
+        end
+        segs in rel || push!(rel, segs)
+    end
+    chain(qs; related = rel)
+end
+select_related(::Type{T}, paths...) where {T<:Model} = select_related(objects(T), paths...)
+select_related(paths::Union{AbstractString,Symbol}...) = qs -> select_related(qs, paths...)
+
+"""
+    prefetch_related(qs, :comment_set, :author, Prefetch(:comments; queryset=..., to_attr=:approved))
+
+After fetching, load related objects with one extra query per lookup: reverse relations
+(`author.post_set`, `post.comments`) and forward FKs. `__` follows relations further
+(`:comments__author`). Prefetched reverse relations answer `count`, iteration, `first`
+and `exists` from memory; further filtering queries the database again.
+"""
+prefetch_related(qs::QuerySet, lookups...) =
+    chain(qs; prefetch = vcat(qs.prefetch, Prefetch[l isa Prefetch ? l : Prefetch(l) for l in lookups]))
+prefetch_related(::Type{T}, lookups...) where {T<:Model} = prefetch_related(objects(T), lookups...)
+prefetch_related(lookups::Union{AbstractString,Symbol,Prefetch}...) = qs -> prefetch_related(qs, lookups...)
 
 function assert_unsliced(qs::QuerySet, what)
     (qs.limit === nothing && qs.offset == 0) || error("cannot $what a queryset once it has been sliced")
@@ -515,9 +654,9 @@ iendswith gt gte lt lte in isnull range year month day ne.
 """
 function Base.filter(qs::QuerySet{T}, qargs::Q...; kw...) where {T}
     assert_unsliced(qs, "filter")
+    (isempty(qargs) && isempty(kw)) && return chain(qs)
     w = copy(qs.where)
-    append!(w, qargs)
-    isempty(kw) || push!(w, Q(; kw...))
+    push!(w, Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], false))
     chain(qs; where = w)
 end
 Base.filter(::Type{T}, qargs::Q...; kw...) where {T<:Model} = filter(objects(T), qargs...; kw...)
@@ -525,11 +664,9 @@ Base.filter(::Type{T}, qargs::Q...; kw...) where {T<:Model} = filter(objects(T),
 "Exclude rows matching the lookups."
 function exclude(qs::QuerySet{T}, qargs::Q...; kw...) where {T}
     assert_unsliced(qs, "exclude")
+    (isempty(qargs) && isempty(kw)) && return chain(qs)
     w = copy(qs.where)
-    for q in qargs
-        push!(w, !q)
-    end
-    isempty(kw) || push!(w, !Q(; kw...))
+    push!(w, Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], true))
     chain(qs; where = w)
 end
 exclude(::Type{T}, qargs::Q...; kw...) where {T<:Model} = exclude(objects(T), qargs...; kw...)
@@ -544,47 +681,180 @@ order_by(qs::QuerySet, fields...) = chain(qs; order = String[string(f) for f in 
 order_by(::Type{T}, fields...) where {T<:Model} = order_by(objects(T), fields...)
 order_by(fields::Union{AbstractString,Symbol}...) = qs -> order_by(qs, fields...)
 
-function order_clause(T::Type, order::Vector{String})
+"ORDER BY clause plus extra SELECT columns (needed with DISTINCT when ordering by joined columns)."
+function order_clause(c::SQLCompiler, order::Vector{String})
+    T = c.T
     isempty(order) && (order = modelmeta(T).ordering)
-    isempty(order) && return ""
-    tbl = qname(modelmeta(T).table)
-    parts = String[]
+    isempty(order) && return "", String[]
+    parts, extra = String[], String[]
     for o in order
         o == "?" && (push!(parts, random_function(backend())); continue)
         desc = startswith(o, "-")
-        name = lstrip(o, '-')
-        col = if name in ("id", "pk")
-            qname("id")
-        else
-            f = findfield(modelmeta(T), Symbol(name))
-            f === nothing && throw(LookupError("cannot order $T by unknown field '$name'"))
-            qname(column(f))
+        segs = split(lstrip(o, '-'), "__")
+        alias, M = c.base, T
+        for s in segs[1:end-1]     # follow forward FKs: order_by("author__name")
+            f = findfield(modelmeta(M), Symbol(s))
+            (f !== nothing && f.kind === :fk) || throw(LookupError("cannot order $T by '$o': '$s' is not a foreign key of $M"))
+            alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, "id", column(f); left = true)
+            M = related_model(f)
         end
-        push!(parts, "$tbl.$col" * (desc ? " DESC" : " ASC"))
+        name = segs[end]
+        col = if name in ("id", "pk")
+            qcol(alias, "id")
+        else
+            f = findfield(modelmeta(M), Symbol(name))
+            f === nothing && throw(LookupError("cannot order $T by unknown field '$o'"))
+            qcol(alias, column(f))
+        end
+        if alias != c.base && c.distinct
+            push!(extra, "$col AS $(qname("__order$(length(extra) + 1)"))")
+        end
+        push!(parts, col * (desc ? " DESC" : " ASC"))
     end
-    " ORDER BY " * join(parts, ", ")
+    " ORDER BY " * join(parts, ", "), extra
 end
 
-function where_clause(qs::QuerySet{T}) where {T}
+function where_clause(c::SQLCompiler, qs::QuerySet)
     qs.isnone && return " WHERE " * sql_false(backend()), Any[]
     isempty(qs.where) && return "", Any[]
-    sql, ps = compile_q(T, Q(:AND, Any[qs.where...], false))
-    " WHERE " * sql, ps
+    parts, ps = String[], Any[]
+    for (i, q) in enumerate(qs.where)
+        c.scope = i
+        sql, p = compile_q(c, c.base, c.T, q, false)
+        push!(parts, sql)
+        append!(ps, p)
+    end
+    c.scope = 0
+    " WHERE " * join(parts, " AND "), ps
 end
 
-function select_sql(qs::QuerySet{T}; columns = "$(qname(modelmeta(T).table)).*", ordered = true) where {T}
-    w, ps = where_clause(qs)
-    sql = "SELECT $columns FROM $(qname(modelmeta(T).table))$w"
-    ordered && (sql *= order_clause(T, qs.order))
-    sql *= limit_offset_sql(backend(), qs.limit, qs.offset)
+"Joins and aliased columns for `select_related`; returns (path, model, alias) per related object."
+function related_columns!(c::SQLCompiler, paths)
+    out = Tuple{Vector{Symbol},Any,String}[]
+    cols = String[]
+    for path in sort(paths; by = length)
+        alias, M = c.base, c.T
+        for (i, s) in enumerate(path)
+            f = findfield(modelmeta(M), s)
+            alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, "id", column(f); left = f.null)
+            M = related_model(f)
+            sub = path[1:i]
+            any(x -> x[1] == sub, out) && continue
+            push!(out, (sub, M, alias))
+            push!(cols, "$(qcol(alias, "id")) AS $(qname(alias * "__id"))")
+            for g in modelmeta(M).fields
+                push!(cols, "$(qcol(alias, column(g))) AS $(qname(alias * "__" * column(g)))")
+            end
+        end
+    end
+    out, cols
+end
+
+"""
+    build_select(qs; columns=nothing, ordered=true) -> (sql, params, compiler, related)
+
+The SELECT for a queryset. `columns` replaces the default `table.*` (plus `select_related`
+columns).
+"""
+function build_select(qs::QuerySet{T}; columns = nothing, ordered = true) where {T}
+    c = SQLCompiler(T)
+    w, ps = where_clause(c, qs)
+    related, rcols = columns === nothing ? related_columns!(c, qs.related) : (Tuple{Vector{Symbol},Any,String}[], String[])
+    o, extra = ordered ? order_clause(c, qs.order) : ("", String[])
+    sel = join(vcat([something(columns, qname(c.base) * ".*")], rcols, extra), ", ")
+    sql = "SELECT $(c.distinct ? "DISTINCT " : "")$sel FROM $(qname(c.base))$(join(c.joins))$w$o" *
+          limit_offset_sql(backend(), qs.limit, qs.offset)
+    sql, ps, c, related
+end
+
+function select_sql(qs::QuerySet; columns = nothing, ordered = true)
+    sql, ps, _, _ = build_select(qs; columns = columns, ordered = ordered)
     sql, ps
+end
+
+"Build a model from columns labelled `prefix*column` (as produced for `select_related`)."
+function from_prefixed_row(::Type{T}, row, prefix) where {T<:Model}
+    id = get(row, Symbol(prefix, "id"), nothing)
+    id === nothing && return nothing
+    obj = T(Dict{Symbol,Any}(:id => id), Dict{Symbol,Any}())
+    data = getfield(obj, :_data)
+    for f in modelmeta(T).fields
+        data[attname(f)] = from_db(f, get(row, Symbol(prefix, column(f)), nothing))
+    end
+    obj
 end
 
 "Execute the query and return a `Vector` of model instances."
 function fetch(qs::QuerySet{T}) where {T}
+    qs.cache === nothing || return Vector{T}(qs.cache)
     qs.isnone && return T[]
-    sql, ps = select_sql(qs)
-    T[from_row(T, r) for r in execute(sql, ps)]
+    sql, ps, _, related = build_select(qs)
+    rows = execute(sql, ps)
+    objs = T[from_row(T, r) for r in rows]
+    if !isempty(related)
+        for (obj, row) in zip(objs, rows)
+            for (path, M, alias) in related
+                parent = obj
+                for s in path[1:end-1]
+                    parent = get(getfield(parent, :_cache), s, nothing)
+                    parent === nothing && break
+                end
+                parent === nothing && continue
+                r = from_prefixed_row(M, row, alias * "__")
+                r === nothing || (getfield(parent, :_cache)[path[end]] = r)
+            end
+        end
+    end
+    for p in qs.prefetch
+        do_prefetch!(objs, p)
+    end
+    objs
+end
+
+function do_prefetch!(objs::Vector, p::Prefetch)
+    segs = Symbol.(split(p.path, "__"))
+    level = objs
+    for (i, s) in enumerate(segs)
+        last_ = i == length(segs)
+        level = prefetch_level!(level, s, last_ ? p.queryset : nothing, last_ ? p.to_attr : nothing)
+    end
+    nothing
+end
+
+"Load relation `name` for all `objs` with one query; return the related objects."
+function prefetch_level!(objs::Vector, name::Symbol, qs, to_attr)
+    isempty(objs) && return Any[]
+    T = typeof(first(objs))
+    f = findfield(modelmeta(T), name)
+    if f !== nothing && f.kind === :fk && f.name === name
+        R = related_model(f)
+        ids = unique([getfield(o, :_data)[attname(f)] for o in objs if getfield(o, :_data)[attname(f)] !== nothing])
+        rel = isempty(ids) ? R[] : fetch(filter(something(qs, objects(R)); id__in = ids))
+        byid = Dict(r.id => r for r in rel)
+        for o in objs
+            id = getfield(o, :_data)[attname(f)]
+            r = id === nothing ? nothing : get(byid, id, nothing)
+            if to_attr !== nothing
+                getfield(o, :_cache)[to_attr] = r
+            elseif r !== nothing
+                getfield(o, :_cache)[name] = r
+            end
+        end
+        return rel
+    end
+    rel = find_reverse(T, string(name))
+    rel === nothing && throw(LookupError("prefetch_related: '$name' is not a relation of $T"))
+    rn, M, rf = rel
+    ids = [o.id for o in objs]
+    rows = fetch(filter(something(qs, objects(M)), Q(Symbol(attname(rf), "__in") => ids)))
+    groups = Dict{Any,Vector{M}}()
+    for r in rows
+        push!(get!(() -> M[], groups, getfield(r, :_data)[attname(rf)]), r)
+    end
+    for o in objs
+        getfield(o, :_cache)[something(to_attr, rn)] = PrefetchedList(get(groups, o.id, M[]))
+    end
+    rows
 end
 
 Base.collect(qs::QuerySet) = fetch(qs)
@@ -602,8 +872,9 @@ end
 
 "Number of matching rows (a `SELECT COUNT(*)`)."
 function Base.count(qs::QuerySet{T}) where {T}
+    qs.cache === nothing || return length(qs.cache)
     qs.isnone && return 0
-    sql, ps = select_sql(qs; columns = "1", ordered = false)
+    sql, ps = select_sql(qs; columns = qcol(modelmeta(T).table, "id"), ordered = false)
     execute("SELECT COUNT(*) AS n FROM ($sql) AS juango_sub", ps)[1][:n]
 end
 Base.count(::Type{T}) where {T<:Model} = count(objects(T))
@@ -611,6 +882,7 @@ Base.length(qs::QuerySet) = count(qs)
 
 "Whether any row matches."
 function exists(qs::QuerySet{T}) where {T}
+    qs.cache === nothing || return !isempty(qs.cache)
     qs.isnone && return false
     sql, ps = select_sql(chain(qs; limit = 1); columns = "1", ordered = false)
     !isempty(execute(sql, ps))
@@ -625,6 +897,7 @@ function Base.getindex(qs::QuerySet, r::AbstractUnitRange{<:Integer})
     chain(qs; offset = qs.offset + first(r) - 1, limit = n)
 end
 function Base.getindex(qs::QuerySet, i::Integer)
+    qs.cache === nothing || return qs.cache[i]
     v = fetch(qs[i:i])
     isempty(v) && throw(BoundsError(qs, i))
     v[1]
@@ -634,6 +907,7 @@ default_order(qs::QuerySet{T}) where {T} = isempty(qs.order) ? (isempty(modelmet
 
 "First object (by the queryset's ordering, or by id), or `nothing`."
 function Base.first(qs::QuerySet)
+    qs.cache === nothing || return isempty(qs.cache) ? nothing : qs.cache[1]
     v = fetch(chain(qs[1:1]; order = default_order(qs)))
     isempty(v) ? nothing : v[1]
 end
@@ -700,9 +974,10 @@ SQL aggregate over a column: `func` is `:count`, `:sum`, `:avg`, `:min` or `:max
 """
 function aggregate(qs::QuerySet{T}, func::Symbol, field::Symbol) where {T}
     func in (:count, :sum, :avg, :min, :max) || throw(ArgumentError("unknown aggregate $func"))
-    col = field in (:id, :pk) ? qname("id") : qname(column(getfield_meta(T, field)))
-    sql, ps = select_sql(qs; columns = "$col AS v", ordered = false)
-    execute("SELECT $(uppercase(string(func)))(v) AS r FROM ($sql) AS juango_sub", ps)[1][:r]
+    tbl = modelmeta(T).table
+    col = qcol(tbl, field in (:id, :pk) ? "id" : column(getfield_meta(T, field)))
+    sql, ps = select_sql(qs; columns = qcol(tbl, "id"), ordered = false)
+    execute("SELECT $(uppercase(string(func)))($col) AS r FROM $(qname(tbl)) WHERE $(qcol(tbl, "id")) IN ($sql)", ps)[1][:r]
 end
 
 """
@@ -721,7 +996,7 @@ function update!(qs::QuerySet{T}; kw...) where {T}
         push!(ps, to_db(f, v))
     end
     isempty(sets) && return 0
-    sub, sps = select_sql(qs; columns = "$(qname(meta.table)).$(qname("id"))", ordered = false)
+    sub, sps = select_sql(qs; columns = qcol(meta.table, "id"), ordered = false)
     execute_changes("UPDATE $(qname(meta.table)) SET $(join(sets, ", ")) WHERE $(qname("id")) IN ($sub)", vcat(ps, sps))
 end
 

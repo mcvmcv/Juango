@@ -310,10 +310,26 @@ function connection()
     end
 end
 
+const QUERY_COUNT = Ref(0)
+
+"""
+    count_queries(f) -> (result, n)
+
+Run `f()` and count the SQL statements it executed (useful for catching N+1 queries in tests).
+"""
+function count_queries(f)
+    lock(DB_LOCK) do
+        n0 = QUERY_COUNT[]
+        r = f()
+        r, QUERY_COUNT[] - n0
+    end
+end
+
 function run_driver(f, sql, params)
     lock(DB_LOCK) do
         b = backend()
         conn = connection()
+        QUERY_COUNT[] += 1
         settings.SQL_DEBUG && @info "SQL" sql params
         ps = Any[adapt_param(b, p) for p in params]
         try

@@ -1,5 +1,6 @@
 function post_list(req)
-    qs = filter(Post; published = true)
+    # author in the same query, all comments in one more: no queries per post in the template
+    qs = filter(Post; published = true) |> select_related(:author) |> prefetch_related(:comments)
     q = strip(get(req.GET, "q", ""))
     isempty(q) || (qs = filter(qs, Q(title__icontains = q) | Q(body__icontains = q)))
     pg = page(Paginator(qs, 5), get(req.GET, "page", "1"))
@@ -45,5 +46,5 @@ const drafts = login_required(ListView(Post; template = "blog/drafts.html",
 "A small JSON API."
 api_posts(req) = [Dict("title" => p.title, "url" => build_absolute_uri_for(req, p), "author" => p.author.username,
                        "created" => string(p.created), "comments" => count(p.comments))
-                  for p in filter(Post; published = true)]
+                  for p in filter(Post; published = true) |> select_related(:author) |> prefetch_related(:comments)]
 build_absolute_uri_for(req, p) = Juango.build_absolute_uri(req, Juango.get_absolute_url(p))

@@ -565,6 +565,103 @@ end
     end
 end
 
+@testset "relations: joins, select_related, prefetch_related" begin
+    sel(qs) = Juango.select_sql(qs)[1]
+    nq(f) = last(count_queries(f))
+    A = create(Author; name = "Rel A")
+    B = create(Author; name = "Rel B")
+    C = create(Author; name = "Rel C")          # no articles
+    a1 = create(Article; title = "rel-a1", author = A, published = true)
+    a2 = create(Article; title = "rel-a2", author = A, published = false)
+    b1 = create(Article; title = "rel-b1", author = B, published = true)
+    t0 = create(Tag; label = "rel-none")
+    tx = create(Tag; label = "rel-x", article = a1)
+    ty = create(Tag; label = "rel-y", article = b1)
+    rel = filter(Author; name__startswith = "Rel ")
+    reltags = filter(Tag; label__startswith = "rel-")
+    names(qs) = sort([x.name for x in qs])
+    labels(qs) = sort([x.label for x in qs])
+
+    # --- joins instead of IN subqueries ---------------------------------------------------
+    @test occursin("INNER JOIN", sel(filter(Article; author__name = "Rel A"))) &&
+          !occursin("IN (SELECT", sel(filter(Article; author__name = "Rel A")))
+    @test occursin("LEFT OUTER JOIN", sel(filter(Tag; article__title = "rel-a1")))
+    @test !occursin("JOIN", sel(filter(Article; author__id = A.id)))
+    @test sort([x.title for x in filter(Article; author__name = "Rel A")]) == ["rel-a1", "rel-a2"]
+    @test labels(filter(Tag; article__author__name = "Rel A")) == ["rel-x"]
+
+    # reverse relations: DISTINCT, and the same-row rule within one filter() call
+    @test occursin("SELECT DISTINCT", sel(filter(Author; articles__published = true)))
+    @test names(filter(rel; articles__title__startswith = "rel-a")) == ["Rel A"]
+    @test count(filter(rel; articles__title__startswith = "rel-a")) == 1
+    @test isempty(filter(rel; articles__title = "rel-a2", articles__published = true))
+    @test names(filter(filter(rel; articles__title = "rel-a2"); articles__published = true)) == ["Rel A"]
+    @test names(filter(rel, Q(articles__title = "rel-a2") & Q(articles__published = true))) == String[]
+    @test names(filter(rel; articles__isnull = true)) == ["Rel C"]
+    @test names(filter(rel; articles__isnull = false)) == ["Rel A", "Rel B"]
+
+    # negation uses EXISTS: rows without the related object survive an exclude
+    @test labels(exclude(reltags; article__title = "rel-a1")) == ["rel-none", "rel-y"]
+    @test names(exclude(rel; articles__published = false)) == ["Rel B", "Rel C"]
+    @test labels(filter(reltags, !Q(article__author__name = "Rel B"))) == ["rel-none", "rel-x"]
+    # OR across a nullable FK keeps rows whose FK is NULL
+    @test labels(filter(reltags, Q(article__title = "rel-a1") | Q(label = "rel-none"))) == ["rel-none", "rel-x"]
+
+    # ordering across a foreign key, also combined with DISTINCT
+    @test [x.title for x in order_by(filter(Article; title__startswith = "rel-"), "-author__name", "title")] == ["rel-b1", "rel-a1", "rel-a2"]
+    @test [x.name for x in order_by(filter(rel; articles__published = true), "name")] == ["Rel A", "Rel B"]
+    @test [t.label for t in order_by(filter(reltags; article__isnull = false), "article__author__name")] == ["rel-x", "rel-y"]
+
+    # counts, aggregates, updates and deletes over joined querysets
+    @test aggregate(filter(Article; author__name = "Rel A"), :count, :id) == 2
+    @test aggregate(filter(rel; articles__published = true), :count, :id) == 2
+    @test update!(filter(Article; author__name = "Rel B"); views = 9) == 1 && get(Article; id = b1.id).views == 9
+    @test count(filter(Article; id__in = filter(Article; author__name = "Rel A"))) == 2
+
+    # --- select_related ---------------------------------------------------------------------
+    arts, n = count_queries(() -> collect(select_related(filter(Article; title__startswith = "rel-"), :author)))
+    @test n == 1 && length(arts) == 3
+    @test nq(() -> [x.author.name for x in arts]) == 0
+    tags, n = count_queries(() -> collect(order_by(select_related(reltags, :article__author), "label")))
+    @test n == 1
+    @test nq(() -> [t.article === nothing ? nothing : t.article.author.name for t in tags]) == 0
+    @test [t.article === nothing ? nothing : t.article.author.name for t in tags] == [nothing, "Rel A", "Rel B"]
+    @test occursin("LEFT OUTER JOIN", sel(select_related(reltags, :article)))
+    @test_throws Juango.LookupError select_related(Author, :articles)
+    @test count(select_related(filter(Article; title__startswith = "rel-"), :author)) == 3
+
+    # --- prefetch_related -------------------------------------------------------------------
+    authors, n = count_queries(() -> collect(order_by(prefetch_related(rel, :articles), "name")))
+    @test n == 2
+    @test nq(() -> [count(x.articles) for x in authors]) == 0
+    @test [count(x.articles) for x in authors] == [2, 1, 0]
+    @test nq(() -> [[y.title for y in x.articles] for x in authors]) == 0
+    @test nq(() -> (first(authors[1].articles), exists(authors[3].articles))) == 0
+    @test count(filter(authors[1].articles; published = true)) == 1          # further filtering queries again
+
+    authors = collect(order_by(prefetch_related(rel, Prefetch(:articles; queryset = filter(Article; published = true), to_attr = :pub)), "name"))
+    @test [length(x.pub) for x in authors] == [1, 1, 0] && authors[1].pub[1].title == "rel-a1"
+
+    authors, n = count_queries(() -> collect(order_by(prefetch_related(rel, :articles__tag_set), "name")))
+    @test n == 3
+    @test nq(() -> sort([t.label for x in authors for y in x.articles for t in y.tag_set])) == 0
+    @test sort([t.label for x in authors for y in x.articles for t in y.tag_set]) == ["rel-x", "rel-y"]
+
+    tags, n = count_queries(() -> collect(prefetch_related(reltags, :article)))
+    @test n == 2 && nq(() -> [t.article for t in tags]) == 0
+    @test_throws Juango.LookupError collect(prefetch_related(rel, :nonsense))
+
+    # --- the admin change list doesn't run a query per row ----------------------------------
+    c = Client()
+    force_login!(c, get(User; username = "root"))
+    n1 = nq(() -> get(c, "/admin/article/"))
+    for i in 1:5
+        create(Article; title = "rel-extra-$i", author = create(Author; name = "Rel Extra $i"))
+    end
+    n2 = nq(() -> get(c, "/admin/article/"))
+    @test n2 == n1
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : B.SQLiteBackend)

@@ -92,6 +92,28 @@ end
 
 Lookups: `exact iexact contains icontains startswith istartswith endswith iendswith gt gte lt lte in isnull range year month day ne`, across relations (`author__name__iexact`) in both directions.
 
+Lookups across relations compile to JOINs, following Django's rules:
+
+- **Forward foreign keys** join once per path. The join is INNER when the column is NOT NULL and LEFT OUTER when it is nullable, so `Q(author__name="Ann") | Q(title="x")` still finds posts without an author.
+- **Reverse relations** (`filter(Author; posts__published=true)`) add `DISTINCT`, so each author appears once.
+- **Conditions in one `filter()` call must match the same related row.** `filter(Author; posts__title="x", posts__published=true)` needs one post that matches both. Chained calls, `filter(filter(Author; posts__title="x"); posts__published=true)`, may match different posts.
+- **`exclude()` and `!Q(...)` use `EXISTS`**, so `exclude(Post; author__name="Ann")` keeps posts that have no author.
+- **`order_by` follows foreign keys:** `order_by(qs, "author__name", "-created")`.
+
+Avoid a query per row with `select_related` and `prefetch_related`:
+
+```julia
+posts = filter(Post; published=true) |> select_related(:author) |> prefetch_related(:comments)
+for p in posts
+    p.author.name          # loaded by the same query (JOIN)
+    count(p.comments)      # loaded by one extra query for all posts
+end
+prefetch_related(objects(Author), :posts__comments)                 # follow relations further
+prefetch_related(objects(Author), Prefetch(:posts; queryset=filter(Post; published=true), to_attr=:published_posts))
+```
+
+`select_related` follows forward foreign keys (`:author__profile` works too). `prefetch_related` handles reverse relations and forward foreign keys. A prefetched relation answers iteration, `count`, `first` and `exists` from memory. Filtering it further queries the database again.
+
 Computed attributes for templates (and `obj.name` in Julia) use `tattr`:
 
 ```julia
@@ -278,6 +300,13 @@ r = post(c, "/posts/new/", Dict("title" => "X", ...); follow=true)
 
 The client keeps cookies, skips CSRF unless you pass `Client(enforce_csrf=true)`, and never opens a socket.
 
+To catch N+1 queries, `count_queries` runs a function and counts the SQL statements it executed:
+
+```julia
+r, n = count_queries(() -> get(c, "/posts/"))
+@test n <= 3
+```
+
 ### Management commands
 
 `runserver [host:]port`, `makemigrations`, `migrate`, `showmigrations`, `sqlmigrate`, `createsuperuser`, `changepassword`, `showurls`, `sqlschema`, `check`, `clearsessions`, `help`. Add your own with `Juango.register_command!("name", "help", args -> ...)`.
@@ -290,7 +319,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 
 - **Migrations can't be squashed yet.** Migration files describe tables and columns, and there are no historical model classes as in Django, so data migrations use raw SQL or today's models.
 - **SQLite and PostgreSQL only.** MySQL is [#11](https://github.com/mcvmcv/Juango/issues/11). Postgres uses a single connection behind a lock; a connection pool is [#30](https://github.com/mcvmcv/Juango/issues/30).
-- No many-to-many fields, `select_related`, annotations or `F()` expressions yet. Aggregates go through `aggregate(qs, :sum, :field)`.
+- No many-to-many fields, annotations or `F()` expressions yet. Aggregates go through `aggregate(qs, :sum, :field)`.
 - No `INSTALLED_APPS`/app registry. A project is a set of Julia files you `include`, as in the `startproject` layout.
 - File uploads: multipart fields are parsed, and uploaded files are exposed raw in `req.meta[:FILES]`. There is no `FileField`.
 - No i18n, caching framework, signals, or permission groups.
