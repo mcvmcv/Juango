@@ -71,6 +71,7 @@ end
 autoincrement_pk(b::SQLiteBackend) = quote_name(b, "id") * " INTEGER PRIMARY KEY AUTOINCREMENT"
 
 sql_literal(::SQLiteBackend, p::Bool) = p ? "1" : "0"
+inline_foreign_keys(::SQLiteBackend) = true   # SQLite can't add constraints to an existing table
 
 function limit_offset_sql(::SQLiteBackend, limit, offset)
     (limit === nothing && offset == 0) && return ""

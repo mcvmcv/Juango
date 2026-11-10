@@ -1,0 +1,37 @@
+name: CI
+
+# Runs only when a version tag is pushed (git tag v0.2.0 && git push --tags).
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  test:
+    name: Julia ${{ matrix.julia }} / ${{ matrix.database }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        julia: ["1.10", "1"]
+        database: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: juango
+          POSTGRES_PASSWORD: juango
+          POSTGRES_DB: juango
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+      - name: Select database
+        if: matrix.database == 'postgres'
+        run: echo "JUANGO_TEST_DATABASE=postgresql://juango:juango@localhost:5432/juango" >> "$GITHUB_ENV"
+      - uses: julia-actions/julia-runtest@v1

@@ -104,14 +104,39 @@ The ORM talks to the database through a `DatabaseBackend`. Each backend supplies
 configure!(DATABASE = "db.sqlite3")             # SQLite file (the default backend)
 configure!(DATABASE = ":memory:")               # in-memory SQLite
 configure!(DATABASE = "sqlite:///db.sqlite3")   # the same, as a URL
+configure!(DATABASE = "postgresql://user:pass@localhost:5432/mydb")   # PostgreSQL (needs LibPQ, below)
 configure!(DATABASE = MyBackend(...))           # any DatabaseBackend instance
 ```
 
+#### PostgreSQL
+
+PostgreSQL goes through [LibPQ.jl](https://github.com/JuliaDatabases/LibPQ.jl). LibPQ is an optional dependency, so SQLite-only projects never install it. To use Postgres:
+
+```sh
+julia --project -e 'using Pkg; Pkg.add("LibPQ")'
+```
+
+```julia
+using Juango
+using LibPQ          # loads Juango's PostgreSQL driver
+configure!(DATABASE = "postgresql://user:pass@localhost:5432/mydb")
+```
+
+The database must already exist (`createdb mydb`). `migrate()` creates the tables. Postgres uses native types: `BOOLEAN`, `TIMESTAMP`, `DATE`, `DOUBLE PRECISION`, `BIGINT` identity primary keys, and `VARCHAR(n)` for `CharField(max_length=n)`. Foreign keys become real constraints (`DEFERRABLE INITIALLY DEFERRED`). Deletes still cascade through the ORM according to `on_delete`, so `:DO_NOTHING` raises `IntegrityError` while referencing rows still exist. Case-insensitive lookups use `ILIKE`.
+
+SQLite stores booleans as 0/1 and timestamps as ISO-8601 text. The ORM converts both ways, so model code doesn't change between backends.
+
 Write raw SQL with `?` placeholders: `Juango.execute("SELECT * FROM post WHERE id = ?", [1])`. Each backend rewrites `?` into its own placeholder style. Constraint violations raise `IntegrityError` on every backend.
 
-To add a backend, subtype `Juango.DatabaseBackend`, implement the driver methods, override any dialect methods that differ from standard SQL, and call `register_backend!("scheme", url -> MyBackend(url))`. The interface is documented at the top of `src/db.jl`, and `src/backends/sqlite.jl` is the reference implementation. PostgreSQL ([#2](https://github.com/mcvmcv/Juango/issues/2)) is next.
+To add a backend, subtype `Juango.DatabaseBackend`, implement the driver methods, override any dialect methods that differ from standard SQL, and call `register_backend!("scheme", url -> MyBackend(url))`. The interface is documented at the top of `src/db.jl`. `src/backends/sqlite.jl` and `src/backends/postgres.jl` (with its driver in `ext/JuangoLibPQExt.jl`) are the two implementations.
 
-Run the test suite against a different database with `JUANGO_TEST_DATABASE=<setting> julia --project -e 'using Pkg; Pkg.test()'`.
+Run the test suite against another database with `JUANGO_TEST_DATABASE`:
+
+```sh
+JUANGO_TEST_DATABASE=postgresql://localhost/postgres julia --project -e 'using Pkg; Pkg.test()'
+```
+
+For Postgres, the tests create a throwaway database `juango_test_<pid>` on that server and drop it afterwards. They never touch the database named in the URL.
 
 ### URLs and views
 
@@ -223,7 +248,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 ## Differences from Django (current limitations)
 
 - **Migrations sync the schema; they are not versioned.** `migrate` creates missing tables, columns and indexes, and reports columns that are no longer used. It never renames or drops anything. Write SQL by hand for those changes (`Juango.execute(sql, params)`).
-- **SQLite only, for now.** The backend interface exists. PostgreSQL via LibPQ.jl is [#2](https://github.com/mcvmcv/Juango/issues/2).
+- **SQLite and PostgreSQL only.** MySQL is [#11](https://github.com/mcvmcv/Juango/issues/11). Postgres uses a single connection behind a lock; a connection pool is [#30](https://github.com/mcvmcv/Juango/issues/30).
 - No many-to-many fields, `select_related`, annotations or `F()` expressions yet. Aggregates go through `aggregate(qs, :sum, :field)`.
 - No `INSTALLED_APPS`/app registry. A project is a set of Julia files you `include`, as in the `startproject` layout.
 - File uploads: multipart fields are parsed, and uploaded files are exposed raw in `req.meta[:FILES]`. There is no `FileField`.
@@ -240,7 +265,7 @@ src/
   urls.jl        path/resolve/reverse    auth.jl      User, hashing, login views
   template.jl    template language       middleware.jl  middleware, CSRF
   db.jl          backend interface       views.jl     shortcuts, generic views
-  backends/      sqlite.jl
+  backends/      sqlite.jl, postgres.jl  ext/         LibPQ driver (optional)
   handler.jl     request pipeline        admin.jl     the admin
   server.jl      HTTP server             management.jl  CLI, startproject
   testclient.jl  test Client             templates/   built-in admin templates

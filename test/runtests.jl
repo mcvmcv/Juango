@@ -1,6 +1,30 @@
 using Test
 using Juango
 using Dates
+import LibPQ    # loads the PostgreSQL driver extension
+
+# JUANGO_TEST_DATABASE picks the database: unset for in-memory SQLite, a SQLite path or
+# sqlite:/// URL, or a postgresql:// URL. For Postgres a fresh database juango_test_<pid>
+# is created on that server and dropped afterwards; the database in the URL is untouched.
+const TEST_DB_SETTING = get(ENV, "JUANGO_TEST_DATABASE", ":memory:")
+const IS_POSTGRES = occursin(r"^postgres(ql)?://"i, TEST_DB_SETTING)
+const TEST_DATABASE = if IS_POSTGRES
+    name = "juango_test_$(getpid())"
+    admin = LibPQ.Connection(TEST_DB_SETTING)
+    LibPQ.execute(admin, "SET client_min_messages TO warning")
+    LibPQ.execute(admin, "DROP DATABASE IF EXISTS $name")
+    LibPQ.execute(admin, "CREATE DATABASE $name")
+    close(admin)
+    atexit() do
+        Juango.close_connection!()
+        c = LibPQ.Connection(TEST_DB_SETTING)
+        LibPQ.execute(c, "DROP DATABASE IF EXISTS $name WITH (FORCE)")
+        close(c)
+    end
+    replace(TEST_DB_SETTING, r"^(postgres(?:ql)?://[^/?]*)(/[^?]*)?" => SubstitutionString("\\1/$name"))
+else
+    TEST_DB_SETTING
+end
 import Juango: Template, render
 
 # ---------------------------------------------------------------------------------------------
@@ -16,7 +40,7 @@ Juango.placeholder(::NumberedSQLite, i::Int) = "?$i"
 struct GenericSQL <: Juango.DatabaseBackend end   # inherits only the standard-SQL defaults
 for f in (:open_connection, :close_connection, :driver_rows, :driver_rowcount, :driver_insert_id,
           :translate_error, :autoincrement_pk, :limit_offset_sql, :date_part_sql,
-          :table_exists, :table_columns)
+          :table_exists, :table_columns, :inline_foreign_keys)
     @eval Juango.$f(b::NumberedSQLite, args...) = Juango.$f(_sq(b), args...)
 end
 for T in (Bool, DateTime, Date)
@@ -134,7 +158,7 @@ const urlpatterns = [
     path("files/<path:rest>", (req; rest) -> HttpResponse(rest); name = "files"),
 ]
 
-configure!(DATABASE = get(ENV, "JUANGO_TEST_DATABASE", ":memory:"), ROOT_URLCONF = urlpatterns, TEMPLATE_DIRS = [TPL],
+configure!(DATABASE = TEST_DATABASE, ROOT_URLCONF = urlpatterns, TEMPLATE_DIRS = [TPL],
            PASSWORD_ITERATIONS = 1000, DEBUG = true)
 migrate(verbose = false)
 
@@ -543,13 +567,20 @@ end
 
 @testset "database backends" begin
     B = Juango
-    @test B.backend() isa B.SQLiteBackend
+    @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : B.SQLiteBackend)
     @test B.backend_from_setting("site.db") == B.SQLiteBackend("site.db")
     @test B.backend_from_setting("sqlite:///:memory:") == B.SQLiteBackend(":memory:")
     @test B.backend_from_setting("sqlite:////var/db/x.db") == B.SQLiteBackend("/var/db/x.db")
-    @test_throws B.ImproperlyConfigured B.backend_from_setting("postgresql://u@h/db")
-    err = try B.backend_from_setting("postgresql://u@h/db") catch e e end
-    @test occursin("issues/2", sprint(showerror, err))
+    @test B.backend_from_setting("postgresql://u@h/db") == B.PostgresBackend("postgresql://u@h/db")
+    @test B.backend_from_setting("postgres://u@h/db") isa B.PostgresBackend
+    @test_throws B.ImproperlyConfigured B.backend_from_setting("mysql://u@h/db")
+    pg = B.PostgresBackend("postgresql://u@h/db")
+    @test B.rewrite_placeholders(pg, "a = ? AND b = '?' AND c IN (?, ?)") == "a = \$1 AND b = '?' AND c IN (\$2, \$3)"
+    @test B.insert_sql(pg, "\"t\"", ["\"a\""]) == "INSERT INTO \"t\" (\"a\") VALUES (?) RETURNING \"id\""
+    @test B.lookup_sql(pg, Val(:icontains), "c", "50%") == ("c ILIKE ? ESCAPE '\\'", Any["%50\\%%"])
+    @test B.column_type(pg, :datetime, nothing) == "TIMESTAMP" && B.column_type(pg, :char, 30) == "VARCHAR(30)"
+    @test occursin("DEFERRABLE", B.foreign_key_sql(pg, "post", "author_id", "author"))
+    @test length(B.constraint_name(repeat("x", 80), "col", "fk")) == 63
     @test_throws B.ImproperlyConfigured B.backend_from_setting("nosuch://x")
     @test_throws B.ImproperlyConfigured B.backend_from_setting(42)
 
@@ -563,6 +594,20 @@ end
     # constraint violations become IntegrityError
     create(Author; name = "Unique Ursula")
     @test_throws IntegrityError create(Author; name = "Unique Ursula")
+
+    # explicit ids don't break later inserts (Postgres needs its sequence moved)
+    big = save!(Author(id = 5000, name = "Explicit Id"))
+    @test big.id == 5000 && create(Author; name = "After Explicit").id == 5001
+    # aggregates come back as plain Julia numbers on every backend
+    @test aggregate(filter(Author; id__gte = 5000), :sum, :id) === 10001
+    @test aggregate(filter(Author; id__gte = 5000), :avg, :id) == 5000.5
+    if IS_POSTGRES
+        # Postgres enforces foreign keys (deferred, so atomic blocks can insert in any order)
+        @test_throws IntegrityError Juango.execute("INSERT INTO \"tag\" (\"label\", \"article_id\") VALUES (?, ?)", ["x", 999999])
+        @test_throws IntegrityError atomic(() -> create(Author; name = "Explicit Id"))
+        @test exists(filter(Author; name = "After Explicit"))   # connection still usable after a failed transaction
+        @test !isempty(Juango.execute("SELECT 1 FROM pg_constraint WHERE contype = 'f' AND conname LIKE 'article_author_id_fk%'"))
+    end
 
     # generic SQL defaults (what a new backend inherits)
     g = GenericSQL()
@@ -609,7 +654,7 @@ end
     finally
         configure!(DATABASE = old)
     end
-    @test B.backend() isa B.SQLiteBackend
+    @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : B.SQLiteBackend)
 end
 
 @testset "startproject" begin

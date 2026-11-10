@@ -36,7 +36,7 @@ Base.showerror(io::IO, e::ImproperlyConfigured) = print(io, "ImproperlyConfigure
 
 # --- backend registry ---------------------------------------------------------------------
 
-const BACKEND_SCHEMES = Dict{String,Function}()
+const BACKEND_SCHEMES = Dict{String,Any}()
 
 """
     register_backend!(scheme, constructor)
@@ -131,6 +131,31 @@ end
 function insert_sql(b::DatabaseBackend, table, cols::Vector{String})
     isempty(cols) && return "INSERT INTO $table DEFAULT VALUES"
     "INSERT INTO $table (" * join(cols, ", ") * ") VALUES (" * join(fill("?", length(cols)), ", ") * ")"
+end
+
+"Called after an INSERT with an explicit id, so the id generator moves past it."
+sync_sequence(::DatabaseBackend, table) = nothing
+
+"""
+Whether foreign keys are declared inside CREATE TABLE (`true`, SQLite) or added afterwards
+with `foreign_key_sql` once every table exists (`false`, the default). Adding them afterwards
+lets tables reference each other in any order.
+"""
+inline_foreign_keys(::DatabaseBackend) = false
+
+"ALTER TABLE statement adding a foreign key constraint. Arguments are unquoted names."
+function foreign_key_sql(b::DatabaseBackend, table, col, reftable)
+    name = constraint_name(table, col, "fk", reftable, "id")
+    "ALTER TABLE $(quote_name(b, table)) ADD CONSTRAINT $(quote_name(b, name)) FOREIGN KEY ($(quote_name(b, col))) " *
+    "REFERENCES $(quote_name(b, reftable)) ($(quote_name(b, "id"))) DEFERRABLE INITIALLY DEFERRED"
+end
+
+"A constraint or index name of at most 63 bytes (Postgres's limit), stable across runs."
+function constraint_name(parts...)
+    s = join(string.(parts), "_")
+    ncodeunits(s) <= 63 && return s
+    h = bytes2hex(SHA.sha256(s))[1:8]
+    first(s, 54) * "_" * h
 end
 
 "LIMIT/OFFSET clause (with leading space), or an empty string."

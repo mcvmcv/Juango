@@ -776,6 +776,7 @@ function save!(obj::T) where {T<:Model}
                             vcat(vals, data[:id]))
         n > 0 && return obj
         execute_insert(insert_sql(backend(), tbl, vcat(qname("id"), cols)), vcat(data[:id], vals))
+        sync_sequence(backend(), meta.table)
         return obj
     end
     data[:id] = execute_insert(insert_sql(backend(), tbl, cols), vals)
@@ -885,7 +886,7 @@ sqltype(f::Field) = column_type(backend(), f.kind, f.max_length)
 
 sql_literal(f::Field, v) = v === nothing ? "NULL" : sql_literal(backend(), to_db(f, v))
 
-function column_def(f::Field; adding = false)
+function column_def(f::Field; adding = false, inline_fk = inline_foreign_keys(backend()))
     s = qname(column(f)) * " " * sqltype(f)
     f.null || (s *= " NOT NULL")
     d = f.default isa NoDefault || f.default isa Function ? nothing : f.default
@@ -894,11 +895,18 @@ function column_def(f::Field; adding = false)
             f.kind === :datetime ? DateTime(1970) : f.kind === :date ? Date(1970) : nothing
     end
     d === nothing || (s *= " DEFAULT " * sql_literal(f, d))
-    if f.kind === :fk
+    if f.kind === :fk && inline_fk
         R = related_model(f)
         s *= " REFERENCES $(qname(modelmeta(R).table)) ($(qname("id")))"
     end
     s
+end
+
+"ALTER TABLE statements for foreign keys, on backends that don't declare them inline."
+function foreign_key_statements(T::Type, fields = modelmeta(T).fields)
+    inline_foreign_keys(backend()) && return String[]
+    t = modelmeta(T).table
+    [foreign_key_sql(backend(), t, column(f), modelmeta(related_model(f)).table) for f in fields if f.kind === :fk]
 end
 
 function index_statements(T::Type)
@@ -906,9 +914,9 @@ function index_statements(T::Type)
     out = String[]
     for f in meta.fields
         if f.unique
-            push!(out, "CREATE UNIQUE INDEX IF NOT EXISTS $(qname(meta.table * "_" * column(f) * "_uniq")) ON $(qname(meta.table)) ($(qname(column(f))))")
+            push!(out, "CREATE UNIQUE INDEX IF NOT EXISTS $(qname(constraint_name(meta.table, column(f), "uniq"))) ON $(qname(meta.table)) ($(qname(column(f))))")
         elseif f.db_index
-            push!(out, "CREATE INDEX IF NOT EXISTS $(qname(meta.table * "_" * column(f) * "_idx")) ON $(qname(meta.table)) ($(qname(column(f))))")
+            push!(out, "CREATE INDEX IF NOT EXISTS $(qname(constraint_name(meta.table, column(f), "idx"))) ON $(qname(meta.table)) ($(qname(column(f))))")
         end
     end
     out
@@ -931,11 +939,13 @@ function migrate(; verbose = true, models = all_models())
     log("Running migrations:")
     changed = false
     atomic() do
+        fks = String[]      # added once all tables exist, so tables can reference each other in any order
         for T in models
             meta = modelmeta(T)
             exists_ = table_exists(backend(), meta.table)
             if !exists_
                 execute(create_table_sql(T))
+                append!(fks, foreign_key_statements(T))
                 log("  Creating table $(meta.table)... OK")
                 changed = true
             else
@@ -943,6 +953,7 @@ function migrate(; verbose = true, models = all_models())
                 for f in meta.fields
                     column(f) in cols && continue
                     execute("ALTER TABLE $(qname(meta.table)) ADD COLUMN " * column_def(f; adding = true))
+                    append!(fks, foreign_key_statements(T, [f]))
                     log("  Adding column $(meta.table).$(column(f))... OK")
                     changed = true
                 end
@@ -955,10 +966,13 @@ function migrate(; verbose = true, models = all_models())
                 execute(s)
             end
         end
+        foreach(execute, fks)
     end
     changed || log("  No migrations to apply.")
     nothing
 end
 
 "The full schema SQL for all registered models (like `sqlmigrate`)."
-schema_sql(models = all_models()) = join(vcat([[create_table_sql(T) * ";"; index_statements(T) .* ";"] for T in models]...), "\n")
+schema_sql(models = all_models()) =
+    join(vcat([[create_table_sql(T) * ";"; index_statements(T) .* ";"] for T in models]...,
+              [s * ";" for T in models for s in foreign_key_statements(T)]), "\n")
