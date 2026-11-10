@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{% if post %}Edit “{{ post.title }}”{% else %}New post{% endif %}</h1>
+<form method="post" class="stacked">{% csrf_token %}{{ form.as_p }}<button>Save</button></form>
+{% endblock %}

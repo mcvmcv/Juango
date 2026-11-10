@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<form class="search" method="get"><input type="search" name="q" value="{{ q }}" placeholder="Search posts"><button>Search</button></form>
+{% if q %}<p class="muted">Results for “{{ q }}” — <a href="{% url 'blog:list' %}">clear</a></p>{% endif %}
+{% for post in page_obj %}
+  <article class="card">
+    <h2><a href="{{ post.get_absolute_url }}">{{ post.title }}</a></h2>
+    <p class="meta">by {{ post.author.username }} · {{ post.created|date:"N j, Y" }} · {{ post.comments.count }} comment{{ post.comments.count|pluralize }}</p>
+    <p>{{ post.body|truncatewords:30 }}</p>
+  </article>
+{% empty %}
+  <p>No posts yet. {% if user.is_authenticated %}<a href="{% url 'blog:create' %}">Write one!</a>{% else %}Run <code>julia --project manage.jl seed</code>.{% endif %}</p>
+{% endfor %}
+{% if page_obj.has_other_pages %}
+<nav class="pager">
+  {% if page_obj.has_previous %}<a href="?page={{ page_obj.previous_page_number }}{% if q %}&q={{ q|urlencode }}{% endif %}">‹ Newer</a>{% endif %}
+  <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+  {% if page_obj.has_next %}<a href="?page={{ page_obj.next_page_number }}{% if q %}&q={{ q|urlencode }}{% endif %}">Older ›</a>{% endif %}
+</nav>
+{% endif %}
+{% endblock %}

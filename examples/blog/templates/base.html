@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Juango Blog{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'blog.css' %}">
+</head>
+<body>
+  <header class="site">
+    <a class="brand" href="{% url 'blog:list' %}">Juango<span>Blog</span></a>
+    <nav>
+      <a href="{% url 'about' %}">About</a>
+      {% if user.is_authenticated %}
+        <a href="{% url 'blog:create' %}">New post</a>
+        <a href="{% url 'blog:drafts' %}">Drafts</a>
+        {% if user.is_staff %}<a href="{% url 'admin:index' %}">Admin</a>{% endif %}
+        <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button>Log out {{ user.username }}</button></form>
+      {% else %}
+        <a href="{% url 'login' %}?next={{ request.path|urlencode }}">Log in</a>
+      {% endif %}
+    </nav>
+  </header>
+  <main>
+    {% for message in messages %}<p class="msg {{ message.tags }}">{{ message }}</p>{% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer>Built with Juango · <a href="{% url 'api_posts' %}">JSON API</a></footer>
+</body>
+</html>

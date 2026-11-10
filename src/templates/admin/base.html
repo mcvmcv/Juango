@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}{{ title }} | {{ site_title }}{% endblock %}</title>
+<style>
+:root{--primary:#3a6ea5;--primary-dark:#24507d;--accent:#f5dd5d;--bg:#fff;--fg:#222;--muted:#6b7280;--border:#e5e7eb;--row:#f8fafc;--ok:#15803d;--err:#b91c1c;--warn:#a16207}
+@media (prefers-color-scheme:dark){:root{--bg:#121417;--fg:#e5e7eb;--muted:#9ca3af;--border:#2b3038;--row:#1a1d22;--primary:#5b8fc7}}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
+#header{background:var(--primary-dark);color:#fff;padding:10px 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+#header h1{margin:0;font-size:20px;font-weight:400}#header h1 a{color:var(--accent)}
+#user-tools{font-size:12px;text-transform:uppercase;letter-spacing:.04em}#user-tools a,#user-tools button{color:#fff}
+#user-tools form{display:inline}#user-tools button{background:none;border:0;font:inherit;text-transform:uppercase;cursor:pointer;padding:0;text-decoration:underline}
+.breadcrumbs{background:var(--primary);color:#dbe7f3;padding:8px 24px;font-size:13px}.breadcrumbs a{color:#fff}
+#content{padding:20px 24px;max-width:1200px}
+h1.page{font-weight:400;font-size:22px;margin:0 0 16px}
+.messagelist{list-style:none;margin:0;padding:0}
+.messagelist li{padding:10px 24px;border-bottom:1px solid var(--border);background:#dfd}
+.messagelist li.error{background:#fdd}.messagelist li.warning{background:#ffc}
+@media (prefers-color-scheme:dark){.messagelist li{background:#14361f}.messagelist li.error{background:#4a1d1d}.messagelist li.warning{background:#433a12}}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+thead th{background:var(--row);font-size:12px;text-transform:uppercase;color:var(--muted);letter-spacing:.03em}
+tbody tr:hover{background:var(--row)}
+.module{border:1px solid var(--border);border-radius:6px;margin-bottom:20px;overflow:hidden}
+.module h2{margin:0;padding:8px 12px;background:var(--primary);color:#fff;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.button,input[type=submit],button.button{background:var(--primary);color:#fff;border:0;border-radius:4px;padding:8px 14px;font:inherit;cursor:pointer;display:inline-block}
+.button:hover,input[type=submit]:hover{background:var(--primary-dark);text-decoration:none}
+.button.secondary{background:#6b7280}.button.danger,a.deletelink{background:var(--err);color:#fff;border-radius:4px;padding:8px 14px}
+.yes{color:var(--ok)}.no{color:var(--err)}
+.layout{display:flex;gap:20px;align-items:flex-start}.layout .main{flex:1;min-width:0}
+#changelist-filter{width:220px;flex-shrink:0;border:1px solid var(--border);border-radius:6px;padding:10px 14px}
+#changelist-filter h3{font-size:13px;margin:12px 0 4px}#changelist-filter ul{list-style:none;margin:0;padding:0}
+#changelist-filter li.selected a{font-weight:700;color:var(--fg)}
+.toolbar{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
+input[type=text],input[type=email],input[type=url],input[type=password],input[type=number],input[type=date],input[type=datetime-local],select,textarea{font:inherit;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);max-width:100%}
+input[type=text],input[type=email],input[type=url],input[type=password],textarea{width:32rem}
+.form-row{padding:12px;border-bottom:1px solid var(--border);display:flex;gap:12px;flex-wrap:wrap}
+.form-row label{width:170px;font-weight:600;flex-shrink:0}.form-row .help{color:var(--muted);font-size:12px;margin-top:4px}
+ul.errorlist{color:var(--err);margin:0 0 6px;padding:0;list-style:none;font-weight:600}
+.submit-row{display:flex;gap:8px;justify-content:flex-end;padding:12px;background:var(--row);border-radius:6px;flex-wrap:wrap}
+.submit-row .deletelink{margin-right:auto}
+.paginator{padding:10px 0;color:var(--muted)}
+.muted{color:var(--muted)}
+@media (max-width:760px){.layout{flex-direction:column}#changelist-filter{width:100%}.form-row label{width:100%}input[type=text],textarea{width:100%}}
+</style>
+{% block extrahead %}{% endblock %}
+</head>
+<body>
+<div id="header">
+  <h1><a href="{% url 'admin:index' %}">{{ site_header }}</a></h1>
+  {% if user.is_authenticated and user.is_staff %}
+  <div id="user-tools">
+    Welcome, <strong>{% firstof user.first_name user.username %}</strong>.
+    <a href="/">View site</a> /
+    <form method="post" action="{% url 'admin:logout' %}">{% csrf_token %}<button type="submit">Log out</button></form>
+  </div>
+  {% endif %}
+</div>
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">Home</a>{% if title %} › {{ title }}{% endif %}</div>{% endblock %}
+{% if messages %}<ul class="messagelist">{% for message in messages %}<li class="{{ message.tags }}">{{ message }}</li>{% endfor %}</ul>{% endif %}
+<div id="content">
+{% block content %}{% endblock %}
+</div>
+</body>
+</html>

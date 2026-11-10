@@ -1,0 +1,43 @@
+{% extends "admin/base.html" %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">Home</a> › <a href="{% url 'admin:changelist' model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › {% if adding %}Add {{ opts.verbose_name }}{% else %}{{ object }}{% endif %}</div>{% endblock %}
+{% block content %}
+<div class="toolbar" style="justify-content:space-between">
+  <h1 class="page" style="margin:0">{{ title }}</h1>
+  {% if view_on_site %}<a class="button secondary" href="{{ view_on_site }}">View on site ›</a>{% endif %}
+</div>
+{% if form.errors %}<p class="errorlist" style="color:var(--err);font-weight:600">Please correct the error{{ form.errors|length|pluralize }} below.</p>{% endif %}
+<form method="post">
+  {% csrf_token %}
+  <div class="module">
+    {% if form.non_field_errors %}<div class="form-row"><ul class="errorlist">{% for e in form.non_field_errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+    {% for field in form %}
+    <div class="form-row">
+      {{ field.label_tag }}
+      <div>
+        {% if field.errors %}<ul class="errorlist">{% for e in field.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+        {{ field }}
+        {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+    {% for pf in password_fields %}
+    <div class="form-row">
+      <label for="id_{{ pf.name }}">{{ pf.label }}:</label>
+      <div>
+        <input type="password" name="{{ pf.name }}" id="id_{{ pf.name }}" autocomplete="new-password">
+        <div class="help">{% if adding %}Leave blank to create the account with an unusable password.{% else %}Leave blank to keep the current password. Passwords are stored hashed (PBKDF2-SHA256).{% endif %}</div>
+      </div>
+    </div>
+    {% endfor %}
+    {% for r in readonly %}
+    <div class="form-row"><label>{{ r.label }}:</label><div>{{ r.value }}</div></div>
+    {% endfor %}
+  </div>
+  <div class="submit-row">
+    {% if not adding %}<a class="deletelink" href="{% url 'admin:delete' model=opts.slug id=object.id %}">Delete</a>{% endif %}
+    <input type="submit" name="_addanother" value="Save and add another" class="button secondary">
+    <input type="submit" name="_continue" value="Save and continue editing" class="button secondary">
+    <input type="submit" name="_save" value="Save">
+  </div>
+</form>
+{% endblock %}

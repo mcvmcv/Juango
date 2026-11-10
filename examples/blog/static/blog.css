@@ -1,0 +1,21 @@
+:root { --fg:#1f2328; --muted:#656d76; --accent:#9558b2; --bg:#fff; --card:#f6f8fa; --border:#d0d7de; }
+@media (prefers-color-scheme: dark) { :root { --fg:#e6edf3; --muted:#9198a1; --bg:#0d1117; --card:#161b22; --border:#30363d; --accent:#c38bdc; } }
+* { box-sizing: border-box; }
+body { margin:0; font:17px/1.65 system-ui, -apple-system, sans-serif; color:var(--fg); background:var(--bg); }
+a { color:var(--accent); }
+header.site { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:.5rem; padding:1rem max(1rem, calc(50% - 22rem)); border-bottom:1px solid var(--border); }
+.brand { font-weight:700; font-size:1.3rem; text-decoration:none; color:var(--fg); } .brand span { color:var(--accent); }
+nav { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; } nav form { display:inline; }
+nav button, .search button, form button { font:inherit; border:1px solid var(--border); background:var(--card); color:var(--fg); border-radius:6px; padding:.25rem .75rem; cursor:pointer; }
+main { max-width:44rem; margin:0 auto; padding:1.5rem 1rem; }
+footer { text-align:center; color:var(--muted); padding:2rem 1rem; font-size:.9rem; }
+.card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1rem 1.25rem; margin:1rem 0; }
+.card h2 { margin:.2rem 0; } .meta, .muted { color:var(--muted); font-size:.9rem; }
+.msg { padding:.6rem 1rem; border-radius:8px; background:var(--card); border-left:4px solid var(--accent); }
+.search { display:flex; gap:.5rem; } .search input { flex:1; }
+input, textarea, select { font:inherit; padding:.4rem .6rem; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--fg); max-width:100%; }
+form p label { display:block; font-weight:600; } textarea { width:100%; } input[type=text] { width:100%; }
+.helptext { display:block; color:var(--muted); font-size:.85rem; }
+.errorlist { color:#cf222e; list-style:none; padding:0; margin:.25rem 0; }
+.comment { border-top:1px solid var(--border); padding:.75rem 0; }
+.pager { display:flex; justify-content:space-between; margin-top:1.5rem; }

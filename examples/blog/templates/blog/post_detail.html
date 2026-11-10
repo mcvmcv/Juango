@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ post.title }} · {{ block.super }}{% endblock %}
+{% block content %}
+<article>
+  <h1>{{ post.title }}</h1>
+  <p class="meta">by {{ post.author.username }} · {{ post.created|date:"l, F jS Y" }}{% if not post.published %} · <strong>draft</strong>{% endif %}
+  {% if user.id == post.author_id %} · <a href="{% url 'blog:edit' slug=post.slug %}">Edit</a>{% endif %}</p>
+  {{ post.body|linebreaks }}
+</article>
+<section class="comments">
+  {% with comments=post.approved_comments %}
+  <h2>{{ comments.count }} comment{{ comments.count|pluralize }}</h2>
+  {% for c in comments %}
+    <div class="comment"><strong>{{ c.name }}</strong> <span class="muted">{{ c.created|timesince }} ago</span>{{ c.body|linebreaks }}</div>
+  {% endfor %}
+  {% endwith %}
+  <h3>Leave a comment</h3>
+  <form method="post">{% csrf_token %}{{ form.as_p }}<button>Post comment</button></form>
+</section>
+{% endblock %}

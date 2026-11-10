@@ -1,0 +1,18 @@
+{% extends "admin/base.html" %}
+{% block breadcrumbs %}<div class="breadcrumbs">Home</div>{% endblock %}
+{% block content %}
+<h1 class="page">Site administration</h1>
+<div class="module">
+  <h2>Models</h2>
+  <table>
+    {% for m in model_list %}
+    <tr>
+      <th><a href="{% url 'admin:changelist' model=m.slug %}">{{ m.verbose_name_plural|capfirst }}</a> <span class="muted">({{ m.count }})</span></th>
+      <td style="text-align:right"><a href="{% url 'admin:add' model=m.slug %}">+ Add</a> &nbsp; <a href="{% url 'admin:changelist' model=m.slug %}">Change</a></td>
+    </tr>
+    {% empty %}
+    <tr><td>You don’t have permission to view or edit anything.</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

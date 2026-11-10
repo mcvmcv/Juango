@@ -1,0 +1,19 @@
+{% extends "admin/base.html" %}
+{% block breadcrumbs %}{% endblock %}
+{% block title %}Log in | {{ site_title }}{% endblock %}
+{% block content %}
+<div class="module" style="max-width:420px;margin:40px auto">
+  <h2>Log in</h2>
+  <form method="post" style="padding:16px">
+    {% csrf_token %}
+    {% if form.non_field_errors %}<ul class="errorlist">{% for e in form.non_field_errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+    {% if user.is_authenticated and not user.is_staff %}<p class="errorlist">You are authenticated as {{ user.username }}, but are not authorized to access this page.</p>{% endif %}
+    <p>{{ form.username.label_tag }}<br>{{ form.username }}</p>
+    {% for e in form.username.errors %}<ul class="errorlist"><li>{{ e }}</li></ul>{% endfor %}
+    <p>{{ form.password.label_tag }}<br>{{ form.password }}</p>
+    {% for e in form.password.errors %}<ul class="errorlist"><li>{{ e }}</li></ul>{% endfor %}
+    <input type="hidden" name="next" value="{{ next }}">
+    <p><input type="submit" value="Log in"></p>
+  </form>
+</div>
+{% endblock %}

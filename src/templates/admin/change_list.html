@@ -1,0 +1,55 @@
+{% extends "admin/base.html" %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">Home</a> › {{ opts.verbose_name_plural|capfirst }}</div>{% endblock %}
+{% block content %}
+<div class="toolbar" style="justify-content:space-between">
+  <h1 class="page" style="margin:0">{{ title }}</h1>
+  <a class="button" href="{% url 'admin:add' model=opts.slug %}">Add {{ opts.verbose_name }} +</a>
+</div>
+<div class="layout">
+  <div class="main">
+    {% if has_search %}
+    <form method="get" class="toolbar">
+      <input type="text" name="q" value="{{ q }}" placeholder="Search {{ opts.verbose_name_plural }}" autofocus>
+      <input type="submit" value="Search">
+      {% if q %}<span class="muted">{{ result_count }} result{{ result_count|pluralize }} (<a href="?">{{ total }} total</a>)</span>{% endif %}
+    </form>
+    {% endif %}
+    <form method="post">
+      {% csrf_token %}
+      <div class="toolbar">
+        <input type="hidden" name="action" value="delete_selected">
+        <button class="button secondary" type="submit" onclick="return confirm('Delete the selected {{ opts.verbose_name_plural }}?')">Delete selected</button>
+      </div>
+      <div class="module">
+      <table>
+        <thead><tr><th style="width:24px"><input type="checkbox" onclick="document.querySelectorAll('.action-select').forEach(c=>c.checked=this.checked)" aria-label="Select all"></th>{% for h in headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+        <tbody>
+        {% for row in rows %}
+          <tr>
+            <td><input type="checkbox" class="action-select" name="_selected_action" value="{{ row.id }}" aria-label="Select row"></td>
+            {% for cell in row.cells %}{% if forloop.first %}<th><a href="{{ row.url }}">{{ cell }}</a></th>{% else %}<td>{{ cell }}</td>{% endif %}{% endfor %}
+          </tr>
+        {% empty %}
+          <tr><td colspan="99" class="muted">0 {{ opts.verbose_name_plural }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </form>
+    <p class="paginator">
+      {% if prev_url %}<a href="{{ prev_url }}">‹ previous</a> · {% endif %}
+      Page {{ page_obj.number }} of {{ paginator.num_pages }} — {{ result_count }} {% if result_count == 1 %}{{ opts.verbose_name }}{% else %}{{ opts.verbose_name_plural }}{% endif %}
+      {% if next_url %} · <a href="{{ next_url }}">next ›</a>{% endif %}
+    </p>
+  </div>
+  {% if filters %}
+  <div id="changelist-filter">
+    <strong>Filter</strong>
+    {% for spec in filters %}
+      <h3>By {{ spec.title|lower }}</h3>
+      <ul>{% for c in spec.choices %}<li{% if c.selected %} class="selected"{% endif %}><a href="{{ c.url }}">{{ c.label }}</a></li>{% endfor %}</ul>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

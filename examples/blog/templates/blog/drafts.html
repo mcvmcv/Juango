@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Your drafts</h1>
+<ul>{% for p in object_list %}<li><a href="{{ p.get_absolute_url }}">{{ p.title }}</a> <span class="muted">updated {{ p.updated|timesince }} ago</span></li>{% empty %}<li>No drafts.</li>{% endfor %}</ul>
+{% endblock %}

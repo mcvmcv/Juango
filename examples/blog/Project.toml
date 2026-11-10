@@ -1,0 +1,6 @@
+[deps]
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Juango = "05cba04f-b8df-4159-83db-d292e8d0197f"
+
+[sources]
+Juango = {path = "../.."}

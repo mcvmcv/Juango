@@ -1,0 +1,107 @@
+# Test client -----------------------------------------------------------------------------------
+#
+#     c = Client()
+#     r = get(c, "/posts/")
+#     @test r.status == 200
+#     r = post(c, "/posts/new/", Dict("title" => "Hi"); follow=true)
+
+"""
+    Client(; enforce_csrf=false, host="testserver")
+
+Simulates a browser without opening a socket: keeps cookies between requests and
+calls `handle_request` directly. Responses carry `context` and `templates` from
+`render`.
+"""
+mutable struct Client
+    cookies::Dict{String,String}
+    enforce_csrf::Bool
+    host::String
+    default_headers::Dict{String,String}
+end
+Client(; enforce_csrf = false, host = "testserver", headers = Dict{String,String}()) =
+    Client(Dict{String,String}(), enforce_csrf, host, Dict{String,String}(string(k) => string(v) for (k, v) in headers))
+
+function store_cookies!(c::Client, resp::HttpResponse)
+    for sc in resp.cookies
+        nv = first(split(sc, ';'))
+        name, value = split(nv, '='; limit = 2)
+        if occursin(r"Max-Age=0\b", sc) || occursin("Expires=Thu, 01 Jan 1970", sc)
+            delete!(c.cookies, name)
+        else
+            c.cookies[name] = value
+        end
+    end
+end
+
+"""
+    request(c::Client, method, path; data=nothing, json=nothing, headers=Dict(), follow=false)
+"""
+function request(c::Client, method::AbstractString, target::AbstractString; data = nothing, json = nothing,
+                 headers = Dict{String,String}(), follow = false, content_type = nothing, body = nothing)
+    method = uppercase(method)
+    hs = merge(Dict{String,String}("host" => c.host), c.default_headers,
+               Dict{String,String}(lowercase(string(k)) => string(v) for (k, v) in pairs_of(headers)))
+    payload = UInt8[]
+    if json !== nothing
+        payload = Vector{UInt8}(codeunits(JSON.json(json)))
+        hs["content-type"] = "application/json"
+    elseif body !== nothing
+        payload = body isa AbstractString ? Vector{UInt8}(codeunits(body)) : Vector{UInt8}(body)
+        content_type === nothing || (hs["content-type"] = content_type)
+    elseif data !== nothing
+        if method in ("GET", "HEAD", "DELETE")
+            q = urlencode(data)
+            isempty(q) || (target *= (occursin('?', target) ? "&" : "?") * q)
+        else
+            payload = Vector{UInt8}(codeunits(urlencode(data)))
+            hs["content-type"] = "application/x-www-form-urlencoded"
+        end
+    end
+    isempty(c.cookies) || (hs["cookie"] = join(["$k=$v" for (k, v) in c.cookies], "; "))
+    req = Request(method, target; headers = hs, body = payload)
+    req.meta[:test_client] = true
+    c.enforce_csrf || (req.meta[:dont_enforce_csrf] = true)
+    resp = handle_request(req)
+    store_cookies!(c, resp)
+    if follow
+        chain = Tuple{String,Int}[]
+        while resp.status in (301, 302, 303, 307, 308) && length(chain) < 20
+            loc = getheader(resp, "Location")
+            push!(chain, (loc, resp.status))
+            m = resp.status in (307, 308) ? method : "GET"
+            resp = request(c, m, loc; data = m == "GET" ? nothing : data)
+        end
+        resp.context === nothing && (resp.context = Dict{String,Any}())
+        resp.context isa AbstractDict && (resp.context["__redirect_chain__"] = chain)
+    end
+    resp
+end
+
+"GET request with the test client: `get(client, \"/path\"; data=Dict(...))`."
+Base.get(c::Client, path::AbstractString; kw...) = request(c, "GET", path; kw...)
+"POST request with the test client: `post(client, \"/path\", Dict(\"field\" => \"value\"))`."
+post(c::Client, path::AbstractString, data = Dict{String,Any}(); kw...) = request(c, "POST", path; data = data, kw...)
+
+"Log a user in without a password check (creates a session and sets the cookie)."
+function force_login!(c::Client, u::User)
+    s = Session()
+    s["_auth_user_id"] = u.id
+    s["_auth_user_hash"] = session_auth_hash(u)
+    save_session!(s)
+    c.cookies[settings.SESSION_COOKIE_NAME] = s.key
+    u
+end
+
+"Authenticate with username/password and log the client in. Returns `true` on success."
+function login!(c::Client; username, password)
+    u = authenticate(username, password)
+    u === nothing && return false
+    force_login!(c, u)
+    true
+end
+
+"Forget the session cookie."
+logout!(c::Client) = (delete!(c.cookies, settings.SESSION_COOKIE_NAME); nothing)
+
+"Redirect chain recorded by `follow=true`: vector of `(url, status)`."
+redirect_chain(r::HttpResponse) = r.context isa AbstractDict ? get(r.context, "__redirect_chain__", Tuple{String,Int}[]) : Tuple{String,Int}[]
