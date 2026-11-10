@@ -93,7 +93,7 @@ function ModelForm(::Type{T}; data = nothing, instance = nothing, fields = nothi
                    labels = Dict{Symbol,String}(), help_texts = Dict{Symbol,String}(),
                    widgets = Dict{Symbol,Symbol}()) where {T<:Model}
     meta = modelmeta(T)
-    chosen = fields === nothing ? vcat([f.name for f in meta.fields if f.editable], [f.name for f in meta.m2m if f.editable]) :
+    chosen = fields === nothing ? vcat([f.name for f in all_fields(T) if f.editable], [f.name for f in meta.m2m if f.editable]) :
              Symbol.(collect(fields))
     fs = Pair{Symbol,Any}[]
     for n in chosen
@@ -140,11 +140,11 @@ end
 function to_julia(fld::Field, raw)
     k = fld.kind
     if k === :m2m
-        ids = Int[]
+        ids = Any[]
         for r in (raw === nothing ? [] : raw)
             sr = strip(string(r))
             isempty(sr) && continue
-            id = tryparse(Int, sr)
+            id = parse_pk(related_model(fld), sr)
             id === nothing && return nothing, "Enter a list of values."
             push!(ids, id)
         end
@@ -175,8 +175,34 @@ function to_julia(fld::Field, raw)
     elseif k === :date
         v = tryparse(Date, s, dateformat"yyyy-mm-dd")
         return v, v === nothing ? "Enter a valid date." : nothing
+    elseif k === :json
+        v = try
+            plainjson(JSON.parse(s))
+        catch
+            return nothing, "Enter a valid JSON."
+        end
+        return v, nothing
+    elseif k === :array
+        try
+            return Any[convert_elem(fld.related, strip(x)) for x in split(s, ',') if !isempty(strip(x))], nothing
+        catch
+            return nothing, "Enter a comma-separated list of valid values."
+        end
+    elseif k === :uuid
+        v = tryparse(UUID, s)
+        return v, v === nothing ? "Enter a valid UUID." : nothing
+    elseif k in RANGE_KINDS
+        parts = strip.(split(s, ','))
+        length(parts) == 2 || return nothing, "Enter the lower and upper bounds, separated by a comma."
+        try
+            ek = range_elem_kind(k)
+            conv(x) = isempty(x) ? nothing : convert_elem(ek, x)
+            return ValueRange(conv(parts[1]), conv(parts[2])), nothing
+        catch
+            return nothing, "Enter valid range bounds."
+        end
     elseif k === :fk
-        id = tryparse(Int, s)
+        id = parse_pk(related_model(fld), s)
         obj = id === nothing ? nothing : first(filter(objects(related_model(fld)); id = id))
         return obj, obj === nothing ? "Select a valid choice. That choice is not one of the available choices." : nothing
     end
@@ -288,6 +314,10 @@ function display_value(bf::BoundField)
     v = get(f.initial, fld.name, nothing)
     v === nothing && (v = fld.default isa NoDefault ? nothing : (fld.default isa Function ? fld.default() : fld.default))
     fld.kind === :m2m && return v === nothing ? Any[] : collect(v)
+    v === nothing && return v
+    fld.kind === :json && return JSON.json(json_scalar_tree(v))
+    fld.kind === :array && return join(string.(v), ", ")
+    v isa ValueRange && return string(something(v.lower, ""), ", ", something(v.upper, ""))
     v isa Model && return v.id
     v isa DateTime && return Dates.format(v, "yyyy-mm-ddTHH:MM")
     v
@@ -331,7 +361,7 @@ function widget_html(bf::BoundField)
         end
         print(io, "</select>")
         return String(take!(io))
-    elseif fld.kind === :text && fld.widget === nothing || fld.widget === :textarea
+    elseif (fld.kind in (:text, :json) && fld.widget === nothing) || fld.widget === :textarea
         return "<textarea$attrs cols=\"40\" rows=\"10\">" * escape_html(display_string(val)) * "</textarea>"
     end
     t = input_type(fld)

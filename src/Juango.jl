@@ -14,6 +14,7 @@ using Random
 using Base64
 using Printf
 using SHA
+using UUIDs
 import HTTP
 import SQLite
 import DBInterface
@@ -31,11 +32,14 @@ include("backends/sqlite.jl")
 include("backends/postgres.jl")
 include("orm.jl")
 include("expressions.jl")
+include("fields_extra.jl")
+include("backends/sqlite_extra.jl")
 include("schema.jl")
 include("migrations.jl")
 include("forms.jl")
 include("sessions.jl")
 include("auth.jl")
+include("contenttypes.jl")
 include("messages.jl")
 include("middleware.jl")
 include("views.jl")
@@ -60,7 +64,10 @@ export path, re_path, include_urls, reverse_url, resolve
 export Template, render_to_string, get_template, mark_safe, SafeString, register_filter!,
        register_tag!, tattr, escape_html
 # orm
-export Model, @model, Field, ManyToManyField, add!, remove!, set!, clear!, base_objects, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
+export JSONField, ArrayField, UUIDField, CICharField, IntegerRangeField, DateRangeField, DateTimeRangeField,
+       ValueRange, SearchVector, SearchQuery, SearchRank, uuid4, UUID
+export ContentType, GenericForeignKey, GenericRelation, get_for_model, model_class
+export Model, @model, @abstract_model, OneToOneField, Index, GinIndex, Field, ManyToManyField, add!, remove!, set!, clear!, base_objects, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
        FloatField, BooleanField, DateTimeField, DateField, ForeignKey, Q, QuerySet, objects,
        exclude, order_by, exists, values_list, update!, create, get_or_create, update_or_create,
        save!, refresh!, full_clean, aggregate, none, migrate, makemigrations, showmigrations, sqlmigrate,

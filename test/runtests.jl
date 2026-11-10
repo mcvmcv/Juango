@@ -40,7 +40,7 @@ Juango.placeholder(::NumberedSQLite, i::Int) = "?$i"
 struct GenericSQL <: Juango.DatabaseBackend end   # inherits only the standard-SQL defaults
 for f in (:open_connection, :close_connection, :driver_rows, :driver_rowcount, :driver_insert_id,
           :translate_error, :autoincrement_pk, :limit_offset_sql, :date_part_sql,
-          :table_exists, :table_columns, :inline_foreign_keys)
+          :table_exists, :table_columns, :inline_foreign_keys, :array_column_type)
     @eval Juango.$f(b::NumberedSQLite, args...) = Juango.$f(_sq(b), args...)
 end
 for T in (Bool, DateTime, Date)
@@ -48,6 +48,7 @@ for T in (Bool, DateTime, Date)
 end
 Juango.sql_literal(b::NumberedSQLite, x::Bool) = Juango.sql_literal(_sq(b), x)
 Juango.column_type(b::NumberedSQLite, kind::Symbol, ml) = Juango.column_type(_sq(b), kind, ml)
+Juango.supports_index_method(b::NumberedSQLite, m::Symbol) = Juango.supports_index_method(_sq(b), m)
 for L in (:contains, :startswith, :endswith)
     @eval Juango.lookup_sql(b::NumberedSQLite, v::Val{$(QuoteNode(L))}, col, x) = Juango.lookup_sql(_sq(b), v, col, x)
 end
@@ -110,6 +111,76 @@ end
     person = ForeignKey(:Person)
     club = ForeignKey(:Club)
     role = CharField(max_length = 20, default = "member")
+end
+
+@abstract_model struct Stamped
+    created = DateTimeField(auto_now_add = true)
+    note = CharField(max_length = 20, blank = true)
+    Meta(ordering = ["-id"])
+end
+@abstract_model struct Owned <: Stamped
+    owner = ForeignKey(:Author, null = true, on_delete = :SET_NULL)
+end
+@model struct Doc <: Owned
+    title = CharField(max_length = 30)
+end
+
+@model struct Place
+    name = CharField(max_length = 30)
+    city = CharField(max_length = 30, default = "Wellington")
+    Meta(ordering = ["name"])
+end
+Base.show(io::IO, p::Place) = print(io, p.name)
+@model struct Restaurant <: Place
+    serves_pizza = BooleanField(default = false)
+end
+@model struct Pizzeria <: Restaurant
+    oven = CharField(max_length = 10, default = "wood")
+end
+@model struct Review
+    place = ForeignKey(Place, on_delete = :CASCADE, related_name = :reviews)
+    stars = IntegerField(default = 3)
+end
+@model struct BigPlace <: Place
+    Meta(proxy = true, ordering = ["-name"])
+end
+Juango.default_queryset(::Type{BigPlace}) = filter(base_objects(BigPlace); city = "Auckland")
+
+@model struct Profile
+    user = OneToOneField(Author)
+    bio = TextField(blank = true)
+end
+
+@model struct Remark
+    content_type = ForeignKey(ContentType, null = true)
+    object_id = IntegerField(null = true)
+    content_object = GenericForeignKey()
+    text = CharField(max_length = 50)
+end
+@model struct Gallery
+    name = CharField(max_length = 30)
+    remarks = GenericRelation(:Remark)
+end
+
+@model struct Gadget
+    data = JSONField(default = Dict, blank = true)
+    tags = ArrayField(CharField(max_length = 20); default = Vector{String}, blank = true)
+    scores = ArrayField(IntegerField(); null = true, blank = true)
+    token = UUIDField(default = uuid4)
+    nick = CICharField(max_length = 30, blank = true)
+    ages = IntegerRangeField(null = true, blank = true)
+    window = DateTimeRangeField(null = true, blank = true)
+    title = CharField(max_length = 50, blank = true)
+    body = TextField(blank = true)
+    Meta(indexes = [GinIndex(:data)])
+end
+@model struct Ticket
+    name = CharField(max_length = 20)
+    Meta(pk = :uuid)
+end
+Base.show(io::IO, t::Ticket) = print(io, t.name)
+@model struct Stub
+    ticket = ForeignKey(:Ticket)
 end
 
 @model struct Locked
@@ -910,6 +981,307 @@ end
     @test_throws ArgumentError annotate(exa; title = Upper(:title))
 end
 
+@testset "model inheritance" begin
+    b = Juango.backend()
+    cols(t) = Set(Juango.table_columns(b, t))
+    nq(f) = last(count_queries(f))
+
+    # --- abstract base models ------------------------------------------------------------------
+    @test [f.name for f in Juango.all_fields(Doc)] == [:created, :note, :owner, :title]
+    @test cols("doc") == Set(["id", "created", "note", "owner_id", "title"]) && !Juango.table_exists(b, "stamped")
+    @test Doc <: Owned <: Stamped <: Model
+    @test Juango.modelmeta(Doc).ordering == ["-id"]
+    ann = create(Author; name = "Inh Ann")
+    d1 = create(Doc; title = "first", note = "n1", owner = ann)
+    d2 = create(Doc; title = "second")
+    @test d1.created isa DateTime && d1.owner.name == "Inh Ann"
+    @test [d.title for d in objects(Doc)] == ["second", "first"]          # inherited ordering
+    @test [d.title for d in filter(Doc; owner__name = "Inh Ann")] == ["first"]
+
+    # --- multi-table inheritance -----------------------------------------------------------------
+    @test cols("restaurant") == Set(["id", "serves_pizza"]) && cols("pizzeria") == Set(["id", "oven"])
+    r = create(Restaurant; name = "Pizza Hut", serves_pizza = true)
+    plain = create(Place; name = "Library")
+    @test count(filter(Place; name = "Pizza Hut")) == 1                  # a Place row too, same id
+    @test get(Place; id = r.id).name == "Pizza Hut"
+    got = get(Restaurant; name = "Pizza Hut")                             # inherited field lookup (join)
+    @test got.id == r.id && got.serves_pizza && got.city == "Wellington"
+    @test [x.name for x in filter(Restaurant; city = "Wellington")] == ["Pizza Hut"]
+    @test get(Place; id = r.id).restaurant.serves_pizza                  # parent -> child
+    @test get(Place; id = plain.id).restaurant === nothing
+    @test got.place_ptr isa Place && got.place_ptr.name == "Pizza Hut"   # child -> parent
+    @test [p.name for p in filter(Place; restaurant__serves_pizza = true)] == ["Pizza Hut"]
+    @test "Library" in [p.name for p in filter(Place; restaurant__isnull = true)]
+
+    got.name = "Pizza Palace"; got.serves_pizza = false
+    save!(got)
+    @test get(Place; id = r.id).name == "Pizza Palace" && !get(Restaurant; id = r.id).serves_pizza
+    @test update!(filter(Restaurant; id = r.id); name = "PP", serves_pizza = true) >= 1
+    @test get(Place; id = r.id).name == "PP" && get(Restaurant; id = r.id).serves_pizza
+    @test [v[:name] for v in values(filter(Restaurant; id = r.id))] == ["PP"]
+    @test values_list(filter(Restaurant; id = r.id), :name, :serves_pizza) == [("PP", true)]
+
+    # three levels
+    nap = create(Pizzeria; name = "Napoli", serves_pizza = true, oven = "coal", city = "Auckland")
+    g = get(Pizzeria; name = "Napoli")
+    @test g.oven == "coal" && g.serves_pizza && g.city == "Auckland"
+    @test count(filter(Pizzeria; city = "Auckland", serves_pizza = true)) == 1
+    @test get(Place; id = nap.id).restaurant.pizzeria.oven == "coal"
+    @test [p.name for p in order_by(filter(Restaurant; name__in = ["PP", "Napoli"]), "name")] == ["Napoli", "PP"]
+
+    # reverse relations of the parent work from the child
+    create(Review; place = get(Place; id = r.id), stars = 5)
+    @test count(get(Restaurant; id = r.id).reviews) == 1
+    @test [x.name for x in filter(Restaurant; reviews__stars__gte = 4)] == ["PP"]
+
+    # forms see inherited fields; saving writes both tables
+    f = ModelForm(Restaurant; data = Dict("name" => "Formed", "city" => "Nelson", "serves_pizza" => "on"))
+    @test [x.name for x in f.fields] == [:name, :city, :serves_pizza]
+    @test is_valid(f)
+    fr = save!(f)
+    @test get(Place; id = fr.id).city == "Nelson" && get(Restaurant; id = fr.id).serves_pizza
+
+    # deletes remove the child and parent rows (and cascade)
+    delete!(get(Restaurant; id = r.id))
+    @test !exists(filter(Place; id = r.id)) && !exists(filter(Review; stars = 5))
+    delete!(get(Place; id = nap.id))
+    @test !exists(filter(Restaurant; id = nap.id)) && !exists(filter(Pizzeria; id = nap.id))
+
+    # --- proxy models ------------------------------------------------------------------------------
+    @test !Juango.table_exists(b, "bigplace")
+    create(Place; name = "Sky Tower", city = "Auckland")
+    create(Place; name = "Auckland Museum", city = "Auckland")
+    bp = collect(objects(BigPlace))
+    @test [p.name for p in bp] == ["Sky Tower", "Auckland Museum"] && all(p -> p isa BigPlace, bp)
+    nb = create(BigPlace; name = "Harbour Bridge", city = "Auckland")
+    @test get(Place; id = nb.id).name == "Harbour Bridge"
+    delete!(nb)
+    @test !exists(filter(Place; name = "Harbour Bridge"))
+
+    # --- OneToOneField -------------------------------------------------------------------------------
+    bob = create(Author; name = "Inh Bob")
+    @test bob.profile === nothing
+    create(Profile; user = ann, bio = "writes")
+    @test get(Author; id = ann.id).profile.bio == "writes"
+    @test_throws IntegrityError create(Profile; user = ann)
+    @test [a.name for a in filter(Author; profile__bio = "writes")] == ["Inh Ann"]
+    authors = collect(order_by(prefetch_related(filter(Author; name__startswith = "Inh "), :profile), "name"))
+    @test nq(() -> [a.profile === nothing ? nothing : a.profile.bio for a in authors]) == 0
+    @test [a.profile === nothing ? nothing : a.profile.bio for a in authors] == ["writes", nothing]
+end
+
+@testset "migrations: inheritance and indexes" begin
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("miginh" => dir))
+    quiet(f) = redirect_stdout(f, devnull)
+    hastable(t) = Juango.table_exists(Juango.backend(), t)
+    try
+        @eval @abstract_model struct MiBase
+            label = CharField(max_length = 20, default = "")
+        end
+        @eval @model struct MiShop <: MiBase
+            name = CharField(max_length = 20)
+            Meta(table = "mi_shop", app_label = "miginh", indexes = [Index(:name, :label; name = "mi_shop_name_label")])
+        end
+        @eval @model struct MiCafe <: MiShop
+            seats = IntegerField(default = 0)
+            Meta(table = "mi_cafe", app_label = "miginh")
+        end
+        @eval @model struct MiProxy <: MiShop
+            Meta(proxy = true, app_label = "miginh")
+        end
+        p1 = only(quiet(() -> makemigrations(app = "miginh", questioner = _ -> false)))
+        src = read(p1, String)
+        @test occursin("CreateModel(\"mi_cafe\"", src) && occursin("parent = \"mi_shop\"", src)
+        @test occursin("Index([\"name\", \"label\"]; name = \"mi_shop_name_label\")", src)
+        @test !occursin("MiProxy", src)
+        @test findfirst("\"mi_shop\";", src)[1] < findfirst("\"mi_cafe\";", src)[1]
+        quiet(() -> migrate())
+        c = create(MiCafe; name = "Fidel's", label = "cafe", seats = 20)
+        @test get(MiShop; id = c.id).name == "Fidel's" && get(MiCafe; name = "Fidel's").seats == 20
+        @test count(objects(MiProxy)) == 1
+
+        Juango.unregister_model!(MiCafe); Juango.unregister_model!(MiProxy); Juango.unregister_model!(MiShop)
+        @eval @model struct MiShop2 <: MiBase
+            name = CharField(max_length = 20)
+            Meta(table = "mi_shop", name = "MiShop", app_label = "miginh", indexes = [Index(:name; name = "mi_shop_name", unique = true)])
+        end
+        @eval @model struct MiCafe2 <: MiShop2
+            seats = IntegerField(default = 0)
+            Meta(table = "mi_cafe", name = "MiCafe", app_label = "miginh")
+        end
+        p2 = only(quiet(() -> makemigrations(app = "miginh", questioner = _ -> false)))
+        src = read(p2, String)
+        @test occursin("RemoveIndex(\"mi_shop\", \"mi_shop_name_label\")", src)
+        @test occursin("AddIndex(\"mi_shop\", Index([\"name\"]; name = \"mi_shop_name\", unique = true))", src)
+        quiet(() -> migrate())
+        @test_throws IntegrityError create(MiShop2; name = "Fidel's")
+        quiet(() -> migrate(app = "miginh", target = "0001"))
+        create(MiShop2; name = "Fidel's")                          # unique index gone again
+        quiet(() -> migrate(app = "miginh", target = "zero"))
+        @test !hastable("mi_cafe") && !hastable("mi_shop")
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "miginh", Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end
+
+@testset "content types and generic relations" begin
+    nq(f) = last(count_queries(f))
+    ct = get_for_model(Gallery)
+    @test ct.app_label == "project" && ct.model == "gallery" && string(ct) == "project | gallery"
+    @test get_for_model(Gallery).id == ct.id && model_class(ct) === Gallery
+    @test get_for_model(BigPlace).id == get_for_model(Place).id
+    @test exists(filter(ContentType; app_label = "juango", model = "user"))     # filled in by migrate
+    @test Juango.table_exists(Juango.backend(), "juango_content_type")
+
+    g1, g2 = create(Gallery; name = "Te Papa"), create(Gallery; name = "City Gallery")
+    au = create(Author; name = "GR Author")
+    r1 = create(Remark; content_object = g1, text = "nice")
+    r2 = create(Remark; content_object = g1, text = "busy")
+    r3 = create(Remark; content_object = au, text = "prolific")
+    @test r1.content_object === g1 && r1.content_type_id == ct.id && r1.object_id == g1.id
+    @test get(Remark; id = r1.id).content_object == g1
+    @test get(Remark; id = r3.id).content_object isa Author
+    @test sort([r.text for r in g1.remarks]) == ["busy", "nice"] && count(g2.remarks) == 0
+    @test_throws ArgumentError create(Remark; content_object = Gallery(name = "unsaved"), text = "x")
+
+    # lookups through the generic relation (the content type is part of the join)
+    @test [g.name for g in filter(Gallery; remarks__text = "nice")] == ["Te Papa"]
+    @test isempty(filter(Gallery; remarks__text = "prolific"))          # same object_id space, other type
+    @test "City Gallery" in [g.name for g in filter(Gallery; remarks__isnull = true)]
+    @test [g.name for g in exclude(filter(Gallery; name__in = ["Te Papa", "City Gallery"]); remarks__text = "busy")] == ["City Gallery"]
+    @test [g.n for g in order_by(annotate(filter(Gallery; name__in = ["Te Papa", "City Gallery"]); n = Count(:remarks)), "name")] == [0, 2]
+
+    # reassigning and clearing
+    r2.content_object = g2
+    save!(r2)
+    @test [r.text for r in g2.remarks] == ["busy"]
+    r2.content_object = nothing
+    save!(r2)
+    @test get(Remark; id = r2.id).content_object === nothing
+
+    # prefetching both directions
+    rs = collect(prefetch_related(filter(Remark; id__in = [r1.id, r3.id]), :content_object))
+    @test nq(() -> [r.content_object for r in rs]) == 0
+    @test Set(typeof(r.content_object) for r in rs) == Set([Gallery, Author])
+    gs = collect(order_by(prefetch_related(filter(Gallery; name__in = ["Te Papa", "City Gallery"]), :remarks), "name"))
+    @test nq(() -> [count(g.remarks) for g in gs]) == 0
+    @test [count(g.remarks) for g in gs] == [0, 1]
+
+    # deleting the target deletes its generic relations (only where a GenericRelation is declared)
+    delete!(g1)
+    @test !exists(filter(Remark; id = r1.id)) && exists(filter(Remark; id = r3.id))
+    delete!(au)
+    @test exists(filter(Remark; id = r3.id))
+    @test get(Remark; id = r3.id).content_object === nothing           # points at a deleted row
+end
+
+@testset "JSON, array, UUID, range and text-search fields" begin
+    ids(qs) = sort([x.title for x in qs])
+    g1 = create(Gadget; data = Dict("owner" => Dict("name" => "Ann", "age" => 30), "tags" => ["a", "b"], "active" => true),
+                tags = ["julia", "web"], scores = [3, 5, 8], nick = "MiXeD", ages = ValueRange(18, 30; bounds = "[]"),
+                window = ValueRange(DateTime(2024, 1, 1, 10), DateTime(2024, 1, 1, 12)),
+                title = "Julia web apps", body = "Fast servers with multiple dispatch")
+    g2 = create(Gadget; data = Dict("owner" => Dict("name" => "Bob", "age" => 41)), tags = ["db"], nick = "other",
+                title = "Databases", body = "Postgres and SQLite")
+    gs = filter(Gadget; title__in = ["Julia web apps", "Databases"])
+
+    # round trip
+    r = get(Gadget; id = g1.id)
+    @test r.data == Dict("owner" => Dict("name" => "Ann", "age" => 30), "tags" => ["a", "b"], "active" => true)
+    @test r.tags == ["julia", "web"] && r.scores == [3, 5, 8] && r.token isa UUID && r.token == g1.token
+    @test r.ages == ValueRange(18, 31) && 30 in r.ages && !(31 in r.ages)
+    @test r.window == ValueRange(DateTime(2024, 1, 1, 10), DateTime(2024, 1, 1, 12))
+    @test get(Gadget; id = g2.id).scores === nothing && get(Gadget; id = g2.id).ages === nothing
+    @test Gadget().data == Dict() && Gadget().tags == String[]
+
+    # JSON lookups
+    @test ids(filter(gs; data__owner__name = "Ann")) == ["Julia web apps"]
+    @test ids(filter(gs; data__owner__age__gt = 35)) == ["Databases"]
+    @test ids(filter(gs; data__owner__age__in = [30, 41])) == ["Databases", "Julia web apps"]
+    @test ids(filter(gs; data__active = true)) == ["Julia web apps"]
+    @test ids(filter(gs; data__tags__0 = "a")) == ["Julia web apps"]
+    @test ids(filter(gs; data__has_key = "active")) == ["Julia web apps"]
+    @test ids(filter(gs; data__has_keys = ["owner", "tags"])) == ["Julia web apps"]
+    @test ids(filter(gs; data__has_any_keys = ["tags", "zzz"])) == ["Julia web apps"]
+    @test ids(filter(gs; data__contains = Dict("active" => true))) == ["Julia web apps"]
+    @test ids(filter(gs; data__missing__isnull = true)) == ["Databases", "Julia web apps"]
+    @test ids(filter(gs; data__active__isnull = false)) == ["Julia web apps"]
+    @test ids(exclude(gs; data__owner__name = "Ann")) == ["Databases"]
+
+    # arrays
+    @test ids(filter(gs; tags__contains = ["julia"])) == ["Julia web apps"]
+    @test ids(filter(gs; tags__overlap = ["db", "web"])) == ["Databases", "Julia web apps"]
+    @test ids(filter(gs; tags__contained_by = ["julia", "web", "x"])) == ["Julia web apps"]
+    @test ids(filter(gs; tags__len = 2)) == ["Julia web apps"]
+    @test ids(filter(gs; scores__len__gt = 1)) == ["Julia web apps"]
+    @test ids(filter(gs; tags__0 = "db")) == ["Databases"]
+    @test ids(filter(gs; tags = ["db"])) == ["Databases"]
+
+    # UUID and case-insensitive text
+    @test ids(filter(gs; token = g1.token)) == ["Julia web apps"]
+    @test ids(filter(gs; token = string(g2.token))) == ["Databases"]
+    @test ids(filter(gs; nick = "mixed")) == ["Julia web apps"]
+
+    # ranges
+    @test ids(filter(gs; ages__contains = 20)) == ["Julia web apps"]
+    @test isempty(filter(gs; ages__contains = 31))
+    @test ids(filter(gs; ages__overlap = ValueRange(29, 40))) == ["Julia web apps"]
+    @test isempty(filter(gs; ages__overlap = ValueRange(31, 40)))
+    @test ids(filter(gs; ages__contained_by = ValueRange(0, 100))) == ["Julia web apps"]
+    @test ids(filter(gs; ages__contains = ValueRange(20, 25))) == ["Julia web apps"]
+    @test ids(filter(gs; window__contains = DateTime(2024, 1, 1, 11))) == ["Julia web apps"]
+
+    # full-text search: the lookup works everywhere, expressions need PostgreSQL
+    @test ids(filter(gs; title__search = "julia web")) == ["Julia web apps"]
+    @test ids(filter(gs; body__search = "postgres sqlite")) == ["Databases"]
+    sv = annotate(gs; search = SearchVector(:title, :body))
+    if IS_POSTGRES
+        @test ids(filter(sv; search = SearchQuery("dispatch"))) == ["Julia web apps"]
+        @test ids(filter(sv; search = SearchQuery("\"multiple dispatch\""; search_type = :websearch))) == ["Julia web apps"]
+        ranked = order_by(annotate(gs; rank = SearchRank(SearchVector(:title; weight = "A") + SearchVector(:body), SearchQuery("julia"))), "-rank")
+        @test first(ranked).title == "Julia web apps"
+        @test !isempty(Juango.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'gadget_data_gin'"))
+    else
+        @test_throws ArgumentError collect(filter(sv; search = SearchQuery("dispatch")))
+    end
+
+    # forms
+    f = ModelForm(Gadget; fields = [:data, :tags, :ages, :token],
+                  data = Dict("data" => "{\"k\": [1, 2]}", "tags" => "x, y", "ages" => "1, 5", "token" => string(g1.token)))
+    @test is_valid(f)
+    @test f.cleaned_data[:data] == Dict("k" => [1, 2]) && f.cleaned_data[:tags] == ["x", "y"]
+    @test f.cleaned_data[:ages] == ValueRange(1, 5) && f.cleaned_data[:token] == g1.token
+    bad = ModelForm(Gadget; fields = [:data, :token], data = Dict("data" => "{nope", "token" => "zzz"))
+    @test !is_valid(bad) && haskey(bad.errors, :data) && haskey(bad.errors, :token)
+    @test occursin("&quot;owner&quot;", string(as_p(ModelForm(Gadget; fields = [:data], instance = g1))))
+
+    # UUID primary keys
+    t = create(Ticket; name = "t1")
+    @test t.id isa UUID && get(Ticket; id = t.id).name == "t1" && get(Ticket; id = string(t.id)).name == "t1"
+    st = create(Stub; ticket = t)
+    @test get(Stub; id = st.id).ticket.name == "t1" && get(Stub; id = st.id).ticket_id == t.id
+    @test count(filter(Stub; ticket__name = "t1")) == 1
+    @test [x.ticket.name for x in select_related(objects(Stub), :ticket)] == ["t1"]
+    c = Client()
+    force_login!(c, get(User; username = "root"))
+    Admin.register!(Ticket)
+    @test get(c, "/admin/ticket/$(t.id)/change/").status == 200
+    @test get(c, "/admin/ticket/not-a-uuid/change/").status == 404
+    @test occursin("t1", text(get(c, "/admin/ticket/")))
+    Admin.unregister!(Ticket)
+    delete!(t)
+    @test !exists(filter(Stub; id = st.id))
+
+    # migration snapshots know the new column kinds
+    st_ = Juango.models_state()
+    @test Juango.Migrations.column_code(only(filter(c -> c.name == "tags", st_["gadget"].columns))) ==
+          "Column(\"tags\", :array; max_length = 20, of = :string)"
+    @test st_["ticket"].pk === :uuid && only(filter(c -> c.name == "ticket_id", st_["stub"].columns)).of === :uuid
+    @test only(st_["gadget"].indexes).method === :gin
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : B.SQLiteBackend)
@@ -1251,6 +1623,7 @@ end
     end
 end
 
+# (inheritance migration tests are defined before "database backends")
 @testset "startproject" begin
     dir = mktempdir()
     root = redirect_stdout(devnull) do

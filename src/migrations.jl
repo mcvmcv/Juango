@@ -18,13 +18,13 @@ module Migrations
 
 using Dates
 import ..Juango
-using ..Juango: Column, Table, SchemaState, copy_state, getcolumn, hascolumn, with_column, same_definition,
+using ..Juango: Column, Table, Index, SchemaState, copy_state, getcolumn, hascolumn, with_column, same_definition,
     backend, execute, atomic, settings, table_exists, table_columns, models_state, sync_models!, modelmeta,
     all_models, create_table_sql, drop_table_sql, rename_table_sql, add_column_sql, drop_column_sql,
     rename_column_sql, alter_column_sql, backfill_value, quote_name, VERSION_STRING
 
 export Migration, CreateModel, DeleteModel, RenameModel, AddField, RemoveField, AlterField, RenameField,
-       AlterUniqueTogether, RunSQL, RunJulia, Column
+       AlterUniqueTogether, AddIndex, RemoveIndex, RunSQL, RunJulia, Column, Index
 
 # --- operations ---------------------------------------------------------------------------------
 
@@ -36,9 +36,28 @@ struct CreateModel <: Operation
     model::String
     columns::Vector{Column}
     unique_together::Vector{Vector{String}}
+    parent::Union{Nothing,String}     # multi-table inheritance parent table
+    pk::Symbol                        # :auto or :uuid
+    indexes::Vector{Index}
 end
-CreateModel(table; model = table, columns = Column[], unique_together = []) =
-    CreateModel(string(table), string(model), collect(Column, columns), Juango.normalize_unique(unique_together))
+CreateModel(table; model = table, columns = Column[], unique_together = [], parent = nothing, pk = :auto, indexes = Index[]) =
+    CreateModel(string(table), string(model), collect(Column, columns), Juango.normalize_unique(unique_together),
+                parent === nothing ? nothing : string(parent), Symbol(pk), collect(Index, indexes))
+to_table(op::CreateModel, app) = Table(op.table, app, op.model, copy(op.columns), [copy(u) for u in op.unique_together];
+                                       parent = op.parent, pk = op.pk, indexes = copy(op.indexes))
+
+"Add a named index (`Index(...)` with a name) to a table."
+struct AddIndex <: Operation
+    table::String
+    index::Index
+end
+AddIndex(table, ix::Index) = AddIndex(string(table), ix)
+
+"Drop a named index."
+struct RemoveIndex <: Operation
+    table::String
+    name::String
+end
 
 "Set the multi-column unique constraints of a table (column names)."
 struct AlterUniqueTogether <: Operation
@@ -153,8 +172,9 @@ function table!(st::SchemaState, name)
     t
 end
 
-state_forwards!(op::CreateModel, st, app) =
-    (st[op.table] = Table(op.table, app, op.model, copy(op.columns), [copy(u) for u in op.unique_together]); st)
+state_forwards!(op::CreateModel, st, app) = (st[op.table] = to_table(op, app); st)
+state_forwards!(op::AddIndex, st, app) = (push!(table!(st, op.table).indexes, op.index); st)
+state_forwards!(op::RemoveIndex, st, app) = (filter!(i -> i.name != op.name, table!(st, op.table).indexes); st)
 state_forwards!(op::AlterUniqueTogether, st, app) = (table!(st, op.table).unique_together = [copy(u) for u in op.unique_together]; st)
 state_forwards!(op::DeleteModel, st, app) = (table!(st, op.table); delete!(st, op.table); st)
 function state_forwards!(op::RenameModel, st, app)
@@ -209,6 +229,13 @@ backwards(op::CreateModel, b, from, to, deferred) = drop_table_sql(b, to[op.tabl
 forwards(op::DeleteModel, b, from, to, deferred) = drop_table_sql(b, from[op.table])
 backwards(op::DeleteModel, b, from, to, deferred) = forwards(CreateModel(op.table), b, to, from, deferred)
 
+forwards(op::AddIndex, b, from, to, deferred) = Juango.index_spec_sql(b, op.table, op.index)
+backwards(op::AddIndex, b, from, to, deferred) = Juango.drop_index_spec_sql(b, op.index)
+forwards(op::RemoveIndex, b, from, to, deferred) =
+    Juango.drop_index_spec_sql(b, only(filter(i -> i.name == op.name, from[op.table].indexes)))
+backwards(op::RemoveIndex, b, from, to, deferred) =
+    Juango.index_spec_sql(b, op.table, only(filter(i -> i.name == op.name, from[op.table].indexes)))
+
 forwards(op::RenameModel, b, from, to, deferred) = rename_table_sql(b, from[op.old], to[op.new])
 backwards(op::RenameModel, b, from, to, deferred) = rename_table_sql(b, to[op.new], from[op.old])
 
@@ -248,6 +275,8 @@ describe(op::RemoveField) = "Remove field $(op.name) from $(op.table)"
 describe(op::AlterField) = "Alter field $(op.column.name) on $(op.table)"
 describe(op::RenameField) = "Rename field $(op.old) on $(op.table) to $(op.new)"
 describe(op::AlterUniqueTogether) = "Alter unique_together for $(op.table)"
+describe(op::AddIndex) = "Create index $(op.index.name) on $(op.table)"
+describe(op::RemoveIndex) = "Remove index $(op.name) from $(op.table)"
 describe(op::RunSQL) = "Raw SQL operation"
 describe(op::RunJulia) = "Raw Julia operation"
 
@@ -517,6 +546,7 @@ function migrate(; app = nothing, target = nothing, fake = false, sync = false, 
         log("Synchronizing apps without migrations:")
         sync_models!(unmigrated; verbose = verbose) || log("  No changes.")
     end
+    Juango.update_contenttypes!()
     if verbose && target === nothing
         for a in migrated_apps()
             isempty(detect_changes(g, a; questioner = _ -> false)) && continue
@@ -600,7 +630,8 @@ function detect_changes(g::Graph, app; questioner = ask)
     work = copy_state(from)
     for t in copy(added)
         for r in removed
-            same = sort(old[r].columns; by = c -> c.name) == sort(new[t].columns; by = c -> c.name)
+            same = sort(old[r].columns; by = c -> c.name) == sort(new[t].columns; by = c -> c.name) &&
+                   old[r].parent == new[t].parent && old[r].pk == new[t].pk
             if same && questioner("Was the table $(r) renamed to $(t) (model $(new[t].model))?")
                 op = RenameModel(r, t; model = new[t].model)
                 push!(ops, op)
@@ -615,12 +646,15 @@ function detect_changes(g::Graph, app; questioner = ask)
 
     # new tables, created so that referenced tables come first
     for t in creation_order(Table[new[t] for t in added])
-        push!(ops, CreateModel(t.name; model = t.model, columns = t.columns, unique_together = t.unique_together))
+        push!(ops, CreateModel(t.name; model = t.model, columns = t.columns, unique_together = t.unique_together,
+                               parent = t.parent, pk = t.pk, indexes = t.indexes))
     end
 
     # columns of tables that exist in both
     for name in sort(collect(intersect(keys(old), keys(new))))
         o, n = old[name], new[name]
+        (o.parent != n.parent || o.pk != n.pk) &&
+            throw(MigrationError("changing the parent model or primary key type of table '$name' isn't supported; create a new model and move the data"))
         ocols = Dict(c.name => c for c in o.columns)
         ncols = Dict(c.name => c for c in n.columns)
         gone = sort(setdiff(collect(keys(ocols)), keys(ncols)))
@@ -645,6 +679,14 @@ function detect_changes(g::Graph, app; questioner = ask)
         renamed = Dict(op.old => op.new for op in ops if op isa RenameField && op.table == name)
         ou = Juango.normalize_unique([[get(renamed, x, x) for x in u] for u in o.unique_together])
         ou == n.unique_together || push!(ops, AlterUniqueTogether(name, n.unique_together))
+        oix = Dict(i.name => i for i in o.indexes)
+        nix = Dict(i.name => i for i in n.indexes)
+        for (k, i) in sort(collect(oix); by = first)
+            get(nix, k, nothing) == i || push!(ops, RemoveIndex(name, k))
+        end
+        for (k, i) in sort(collect(nix); by = first)
+            get(oix, k, nothing) == i || push!(ops, AddIndex(name, i))
+        end
         for r in gone
             push!(ops, RemoveField(name, r))
         end
@@ -666,8 +708,7 @@ function creation_order(tables::Vector{Table})
     visit(t, path) = begin
         t.name in seen && return
         push!(path, t.name)
-        for c in t.columns
-            r = c.references
+        for r in vcat([c.references for c in t.columns], [t.parent])
             (r !== nothing && r in names && !(r in path)) && visit(byname[r], path)
         end
         pop!(path)
@@ -692,12 +733,20 @@ function column_code(c::Column)
     c.index && push!(kw, "index = true")
     c.max_length === nothing || push!(kw, "max_length = $(c.max_length)")
     c.references === nothing || push!(kw, "references = " * jl(c.references))
+    c.of === nothing || push!(kw, "of = :$(c.of)")
     "Column($(jl(c.name)), :$(c.kind)" * (isempty(kw) ? ")" : "; " * join(kw, ", ") * ")")
 end
 
+index_code(i::Index) = "Index($(jl(i.columns)); name = $(jl(i.name))" * (i.unique ? ", unique = true" : "") *
+                       (i.method === :btree ? ")" : ", method = :$(i.method))")
 op_code(op::CreateModel) = "CreateModel($(jl(op.table)); model = $(jl(op.model)), columns = [\n" *
     join(["            " * column_code(c) * ",\n" for c in op.columns]) * "        ]" *
-    (isempty(op.unique_together) ? ")" : ", unique_together = $(jl(op.unique_together)))")
+    (isempty(op.unique_together) ? "" : ", unique_together = $(jl(op.unique_together))") *
+    (op.parent === nothing ? "" : ", parent = $(jl(op.parent))") *
+    (op.pk === :auto ? "" : ", pk = :$(op.pk)") *
+    (isempty(op.indexes) ? "" : ", indexes = [" * join(index_code.(op.indexes), ", ") * "]") * ")"
+op_code(op::AddIndex) = "AddIndex($(jl(op.table)), $(index_code(op.index)))"
+op_code(op::RemoveIndex) = "RemoveIndex($(jl(op.table)), $(jl(op.name)))"
 op_code(op::AlterUniqueTogether) = "AlterUniqueTogether($(jl(op.table)), $(jl(op.unique_together)))"
 op_code(op::DeleteModel) = "DeleteModel($(jl(op.table)))"
 op_code(op::RenameModel) = "RenameModel($(jl(op.old)), $(jl(op.new))" * (op.model === nothing ? ")" : "; model = $(jl(op.model)))")
@@ -737,6 +786,8 @@ function suggest_name(ops, initial)
     part(op::AlterField) = "alter_" * op.table * "_" * op.column.name
     part(op::RenameField) = "rename_" * op.table * "_" * op.old * "_" * op.new
     part(op::AlterUniqueTogether) = "alter_" * op.table * "_unique_together"
+    part(op::AddIndex) = op.table * "_" * op.index.name
+    part(op::RemoveIndex) = "remove_" * op.name
     part(op) = "custom"
     name = join(part.(ops), "_")
     all(op -> op isa AddField, ops) && length(ops) == 1 && (name = "add_" * name)

@@ -18,7 +18,8 @@ Juango.pg_close(conn) = close(conn)
 function parse_numeric(s::AbstractString)
     occursin(r"^-?\d+$", s) ? something(tryparse(Int, s), parse(BigInt, s)) : parse(Float64, s)
 end
-const TYPE_MAP = Dict{Symbol,Type}(:numeric => String)
+const TYPE_MAP = Dict{Symbol,Type}(:numeric => String, :jsonb => String, :json => String, :uuid => String,
+                                   :int8range => String, :daterange => String, :tsrange => String)
 
 # Row count for INSERT/UPDATE/DELETE; 0 for commands without one (BEGIN, CREATE, SET...).
 affected_rows(res) = try

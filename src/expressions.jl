@@ -171,6 +171,7 @@ function resolve_path(c::SQLCompiler, alias, T::Type, path::AbstractString)
         end
         f = findfield(modelmeta(T), Symbol(s))
         if f !== nothing
+            alias = field_alias!(c, alias, T, f)
             if last_ || f.kind !== :fk
                 last_ || throw(LookupError("'$s' is not a relation in '$path'"))
                 return qcol(alias, column(f)), f
@@ -183,6 +184,17 @@ function resolve_path(c::SQLCompiler, alias, T::Type, path::AbstractString)
         if mm !== nothing
             s1, s2 = m2m_path(mm[2], mm[3])
             return resolve_path(c, alias, T, join(vcat([string(s1), string(s2)], segs[i+1:end], last_ ? ["id"] : String[]), "__"))
+        end
+        g = find_generic(generic_relations(T), s)
+        if g !== nothing
+            M = related_model(g)
+            ctf, fkf = g.through
+            ctcol, ctid = column(getfield_meta(M, ctf)), get_for_model(T).id::Integer
+            alias = join!(c, alias, (alias, g.name, :expr), modelmeta(M).table, column(getfield_meta(M, fkf)), "id";
+                          left = true, extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
+            T = M
+            last_ && return qcol(alias, "id"), nothing
+            continue
         end
         rel = find_reverse(T, s)
         rel === nothing && throw(lookup_error(T, s))
@@ -345,7 +357,7 @@ The results as `Dict{Symbol,Any}` rows instead of objects. Fields may follow rel
 `values(objects(Post), :status) |> annotate(n = Count(:id))`.
 """
 function Base.values(qs::QuerySet{T}, fields::Union{Symbol,AbstractString}...) where {T}
-    fs = isempty(fields) ? vcat(["id"], [column(f) for f in modelmeta(T).fields]) : String[string(f) for f in fields]
+    fs = isempty(fields) ? vcat(["id"], [column(f) for f in all_fields(T)]) : String[string(f) for f in fields]
     chain(qs; values_fields = fs, group_by_object = any(p -> contains_aggregate(p.second), qs.annotations))
 end
 Base.values(::Type{T}, fields::Union{Symbol,AbstractString}...) where {T<:Model} = values(objects(T), fields...)

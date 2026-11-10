@@ -172,6 +172,87 @@ objects(Post) |> published |> order_by("-created")
 - **`base_objects`** is the unfiltered table. Foreign-key access, cascading deletes and uniqueness checks always use it, like Django's base manager.
 - **Admin:** `Admin.register!(Post; queryset = req -> ...)` sets what the admin lists and edits.
 
+#### Model inheritance
+
+```julia
+@abstract_model struct TimeStamped            # no table; fields and Meta are inherited
+    created = DateTimeField(auto_now_add = true)
+    Meta(ordering = ["-created"])
+end
+@model struct Post <: TimeStamped
+    title = CharField(max_length = 200)
+end
+
+@model struct Place                           # multi-table: each subclass adds a table
+    name = CharField(max_length = 50)
+end
+@model struct Restaurant <: Place             # id is also a foreign key to place.id
+    serves_pizza = BooleanField()
+end
+filter(Restaurant; name = "Napoli")           # parent fields work everywhere (JOIN)
+place.restaurant; restaurant.place_ptr        # the other part of the same row, or nothing
+
+@model struct BigPlace <: Place               # proxy: same table, own type, manager and admin
+    Meta(proxy = true, ordering = ["-name"])
+end
+
+@model struct Profile
+    user = OneToOneField(User)                # user.profile is an object (or nothing)
+end
+```
+
+- **Abstract models** can extend each other.
+- **Multi-table children:** saving writes every table in one transaction, deleting a child removes its parent row too, and `update!` splits across the tables. Reverse relations and lookups of the parent work from the child.
+- **Migrations** create child tables with `parent = "place"`.
+
+#### Generic relations
+
+```julia
+@model struct Comment
+    content_type   = ForeignKey(ContentType)
+    object_id      = IntegerField()
+    content_object = GenericForeignKey()      # points at any model
+    text           = TextField()
+end
+@model struct Post
+    title    = CharField(max_length = 100)
+    comments = GenericRelation(:Comment)      # post.comments, filter(Post; comments__text = "x")
+end
+create(Comment; content_object = post, text = "Nice")
+get_for_model(Post), model_class(ct)          # ContentType <-> model
+```
+
+- **Content types:** `migrate` fills the `ContentType` table, whose migration ships with Juango.
+- **`GenericRelation`** supports lookups (the join also matches the content type), `Count(:comments)`, `prefetch_related(:comments)`, and deleting the object deletes its comments. `prefetch_related(:content_object)` loads mixed targets with one query per model.
+
+#### JSON, arrays, UUIDs, ranges and full-text search
+
+```julia
+@model struct Event
+    data   = JSONField(default = Dict)                  # jsonb on Postgres, JSON text on SQLite
+    tags   = ArrayField(CharField(max_length = 20); default = Vector{String})
+    token  = UUIDField(default = uuid4)
+    email  = CICharField(max_length = 200)              # case-insensitive (citext / NOCASE)
+    ages   = IntegerRangeField(null = true)             # also DateRangeField, DateTimeRangeField
+    Meta(indexes = [GinIndex(:data), Index(:email; name = "event_email", unique = true)])
+end
+
+filter(Event; data__owner__name = "Ann", data__score__gt = 5)   # JSON key paths (numbers compare as numbers)
+filter(Event; data__contains = Dict("active" => true), data__has_key = "owner")
+filter(Event; tags__contains = ["julia"], tags__overlap = ["a", "b"], tags__len__gte = 2, tags__0 = "x")
+filter(Event; ages__contains = 30, ages__overlap = ValueRange(20, 40))
+filter(Post; body__search = "julia web")                        # full-text lookup
+annotate(qs; s = SearchVector(:title; weight = "A") + SearchVector(:body)) |> filter(s = SearchQuery("julia"))
+order_by(annotate(qs; rank = SearchRank(SearchVector(:title, :body), SearchQuery("julia"))), "-rank")
+```
+
+- **Both databases:** these fields and lookups work on Postgres and SQLite. SQLite stores them as JSON text and answers the lookups with its JSON functions. Two limits there: JSON `contains` takes a `Dict` of plain values, and JSON `contained_by` needs Postgres.
+- **Full-text search:** `SearchVector`, `SearchQuery` (`search_type = :plain | :phrase | :websearch | :raw`) and `SearchRank` need Postgres. On SQLite the `__search` lookup falls back to matching every word.
+- **Ranges:** values are `ValueRange(lower, upper; bounds = "[)")`. Integer and date ranges are stored in canonical `[)` form, as Postgres does.
+- **UUID primary keys:** `Meta(pk = :uuid)` makes `id` a UUID created by Juango. Foreign keys to such a model use UUID columns, and the admin accepts UUIDs in URLs.
+- **Indexes:** `Meta(indexes = [...])` adds named indexes, and migrations track them with `AddIndex`/`RemoveIndex`. GIN indexes apply on Postgres only.
+- **Postgres extension:** `CICharField` creates the `citext` extension the first time a table needs it.
+
 Computed attributes for templates (and `obj.name` in Julia) use `tattr`:
 
 ```julia
@@ -377,7 +458,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 
 - **Migrations can't be squashed yet.** Migration files describe tables and columns, and there are no historical model classes as in Django, so data migrations use raw SQL or today's models.
 - **SQLite and PostgreSQL only.** MySQL is [#11](https://github.com/mcvmcv/Juango/issues/11). Postgres uses a single connection behind a lock; a connection pool is [#30](https://github.com/mcvmcv/Juango/issues/30).
-- **ORM features not yet built:** model inheritance, generic relations, symmetrical self-referential many-to-many, and filtering on window functions.
+- **ORM features not yet built:** symmetrical self-referential many-to-many, filtering on window functions, and `select_related` into a model that inherits from another table (use `prefetch_related`).
 - No `INSTALLED_APPS`/app registry. A project is a set of Julia files you `include`, as in the `startproject` layout.
 - File uploads: multipart fields are parsed, and uploaded files are exposed raw in `req.meta[:FILES]`. There is no `FileField`.
 - No i18n, caching framework, signals, or permission groups.

@@ -43,6 +43,7 @@ mutable struct Field
     db_index::Bool
     model::Any
     through::Any        # ManyToManyField: the intermediate model (generated when not given)
+    one_to_one::Bool    # OneToOneField: a unique FK whose reverse side is a single object
 end
 
 normchoices(::Nothing) = nothing
@@ -52,7 +53,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                max_length = nothing, choices = nothing, related = nothing, on_delete = :CASCADE,
                related_name = nothing, auto_now = false, auto_now_add = false, verbose_name = "",
                help_text = "", validators = Any[], widget = nothing, editable = true,
-               db_index = false, required = nothing, label = nothing, through = nothing)
+               db_index = false, required = nothing, label = nothing, through = nothing, one_to_one = false)
     required === nothing || (blank = !required)
     label === nothing || (verbose_name = string(label))
     if auto_now || auto_now_add
@@ -62,7 +63,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
     Field(kind, :_, null, blank, default, unique, max_length, normchoices(choices), related,
           Symbol(uppercase(string(on_delete))), related_name === nothing ? nothing : Symbol(related_name),
           auto_now, auto_now_add, string(verbose_name), string(help_text), collect(Any, validators),
-          widget === nothing ? nothing : Symbol(widget), editable, db_index, nothing, through)
+          widget === nothing ? nothing : Symbol(widget), editable, db_index, nothing, through, one_to_one)
 end
 
 CharField(; max_length = 255, kw...) = Field(:char; max_length = max_length, kw...)
@@ -82,6 +83,16 @@ DateField(; kw...) = Field(:date; kw...)
 `on_delete` is one of `:CASCADE`, `:SET_NULL`, `:PROTECT`, `:DO_NOTHING`.
 """
 ForeignKey(to; on_delete = :CASCADE, kw...) = Field(:fk; related = to, on_delete = on_delete, db_index = true, kw...)
+
+"""
+    OneToOneField(Model; on_delete=:CASCADE, related_name=nothing, kw...)
+
+A foreign key with a unique constraint. The reverse side is a single object (or
+`nothing`): `user.profile` instead of a queryset. Its default name is the lower-case
+model name.
+"""
+OneToOneField(to; on_delete = :CASCADE, kw...) =
+    Field(:fk; related = to, on_delete = on_delete, unique = true, one_to_one = true, kw...)
 
 """
     ManyToManyField(Model; related_name=nothing, through=nothing, blank=false, kw...)
@@ -111,6 +122,9 @@ mutable struct ModelMeta
     app::String
     m2m::Vector{Field}
     unique_together::Vector{Vector{Symbol}}
+    parent::Any          # multi-table parent or proxy target (a concrete model), else nothing
+    proxy::Bool
+    extra::Dict{Symbol,Any}   # other Meta options (e.g. indexes)
 end
 
 const MODEL_REGISTRY = Dict{Any,ModelMeta}()
@@ -129,6 +143,72 @@ function unregister_model!(T::Type)
     nothing
 end
 
+const ABSTRACT_MODELS = Dict{Any,Tuple{Vector{Pair{Symbol,Any}},NamedTuple}}()
+
+"""
+    model_supertype(S)
+
+The Julia supertype for `@model struct X <: S`: `S` itself when it is an abstract model,
+otherwise `Model` (a concrete parent becomes a multi-table parent or proxy target).
+"""
+model_supertype(S::Type) = isabstracttype(S) ? (S <: Model ? S : error("$S is not a Juango abstract model")) : Model
+
+"""
+    @abstract_model struct TimeStamped
+        created = DateTimeField(auto_now_add = true)
+        Meta(ordering = ["-created"])
+    end
+
+An abstract base model: no table, just fields and `Meta` options that models declared
+with `@model struct Post <: TimeStamped` inherit. Abstract models can extend each other.
+"""
+macro abstract_model(expr)
+    (expr isa Expr && expr.head === :struct) || error("@abstract_model expects a struct definition")
+    name, super = expr.args[2], nothing
+    if name isa Expr && name.head === :(<:)
+        name, super = name.args
+    end
+    fieldpairs, metaexpr = parse_model_body(expr.args[3])
+    M = GlobalRef(@__MODULE__, :Model)
+    sup = super === nothing ? M : esc(super)
+    quote
+        abstract type $(esc(name)) <: $sup end
+        $(GlobalRef(@__MODULE__, :ABSTRACT_MODELS))[$(esc(name))] = (Pair{Symbol,Any}[$(fieldpairs...)], $metaexpr)
+        $(esc(name))
+    end
+end
+
+function parse_model_body(body)
+    fieldpairs = Expr[]
+    metaexpr = :(NamedTuple())
+    for line in body.args
+        line isa LineNumberNode && continue
+        if line isa Expr && line.head === :(=)
+            lhs = line.args[1]
+            fname = lhs isa Symbol ? lhs : (lhs isa Expr && lhs.head === :(::)) ? lhs.args[1] :
+                    error("@model: cannot parse field '$lhs'")
+            push!(fieldpairs, :($(QuoteNode(fname)) => $(esc(line.args[2]))))
+        elseif line isa Expr && line.head === :call && line.args[1] === :Meta
+            kws = [a.head === :kw ? a : error("Meta(...) takes keyword arguments") for a in line.args[2:end]]
+            metaexpr = esc(Expr(:tuple, Expr(:parameters, kws...)))
+        else
+            error("@model: unsupported line in model body: $line")
+        end
+    end
+    fieldpairs, metaexpr
+end
+
+"Abstract models above `T`, outermost first."
+function abstract_bases(T::Type)
+    out = Any[]
+    S = supertype(T)
+    while S !== Any
+        haskey(ABSTRACT_MODELS, S) && pushfirst!(out, S)
+        S = supertype(S)
+    end
+    out
+end
+
 "Metadata for a model type."
 function modelmeta(T::Type)
     m = get(MODEL_REGISTRY, T, nothing)
@@ -142,8 +222,38 @@ function findfield(meta::ModelMeta, name::Symbol)
     for f in meta.fields
         (f.name === name || attname(f) === name) && return f
     end
-    nothing
+    (meta.parent === nothing || meta.proxy) && return nothing
+    findfield(modelmeta(meta.parent), name)      # multi-table inheritance: the parent's fields too
 end
+
+"The model that owns `T`'s table (a proxy's concrete model, else `T`)."
+concrete_model(T::Type) = (m = modelmeta(T); m.proxy ? concrete_model(m.parent) : T)
+"Multi-table parent of `T` (not for proxies), or `nothing`."
+table_parent(T::Type) = (m = modelmeta(concrete_model(T)); m.parent)
+"Multi-table ancestors of `T`, nearest first."
+function ancestors(T::Type)
+    out = Any[]
+    P = table_parent(T)
+    while P !== nothing
+        push!(out, P)
+        P = table_parent(P)
+    end
+    out
+end
+"`T`, its proxy target and its multi-table ancestors: every model whose rows `T`'s rows also are."
+lineage(T::Type) = unique(vcat([T, concrete_model(T)], ancestors(T)))
+"Multi-table children of `T` (models whose table extends `T`'s)."
+child_models(T::Type) = [C for C in MODEL_LIST if (m = modelmeta(C); !m.proxy && m.parent === concrete_model(T))]
+"All fields of `T` including inherited multi-table fields, ancestors' first."
+function all_fields(T::Type)
+    C = concrete_model(T)
+    P = table_parent(C)
+    P === nothing ? modelmeta(C).fields : vcat(all_fields(P), modelmeta(C).fields)
+end
+"Name of the accessor from a parent instance to its multi-table child (`place.restaurant`)."
+child_accessor(C::Type) = Symbol(lowercase(modelmeta(C).name))
+"Name of the accessor from a child to its parent instance (`restaurant.place_ptr`)."
+parent_accessor(T::Type) = Symbol(lowercase(modelmeta(table_parent(T)).name), :_ptr)
 function getfield_meta(T::Type, name::Symbol)
     f = findfield(modelmeta(T), name)
     f === nothing && throw(LookupError("$T has no field named '$name'"))
@@ -161,15 +271,36 @@ function related_model(f::Field)
 end
 
 function register_model!(T::Type, fields::Vector, meta::NamedTuple = NamedTuple())
+    # inherited from abstract models: their fields come first, their Meta options are defaults
+    inherited = Pair{Symbol,Any}[]
+    for S in abstract_bases(T)
+        fsS, metaS = ABSTRACT_MODELS[S]
+        filter!(p -> !any(q -> q.first === p.first, fsS), inherited)
+        append!(inherited, fsS)
+        meta = merge(Base.structdiff(metaS, NamedTuple{(:table, :name, :verbose_name, :verbose_name_plural)}), meta)
+    end
+    fields = vcat(filter(p -> !any(q -> q.first === p.first, fields), inherited), fields)
+    parent = get(meta, :_parent, nothing)
+    parent = parent === nothing || isabstracttype(parent) ? nothing : parent
+    proxy = get(meta, :proxy, false)
+    proxy && parent === nothing && error("$T: Meta(proxy=true) needs a concrete parent model (struct $T <: Parent)")
+    proxy && !isempty(fields) && error("$T: a proxy model can't add fields")
+    if parent !== nothing
+        pm = modelmeta(parent)
+        haskey(meta, :ordering) || (meta = merge(meta, (ordering = pm.ordering,)))
+        proxy && (meta = merge(meta, (table = pm.table,)))
+        haskey(meta, :app_label) || (meta = merge(meta, (app_label = pm.app,)))
+    end
     fs = Field[]
     m2m = Field[]
+    gfks, grels = Field[], Field[]
     for (name, f) in fields
         f isa Field || error("$T.$name must be a field (CharField(...), ForeignKey(...), ...)")
         f = deepcopy(f)
         f.name = name
         f.model = T
         name in (:id, :pk) && error("$T: '$name' is reserved for the automatic primary key")
-        push!(f.kind === :m2m ? m2m : fs, f)
+        push!(f.kind === :m2m ? m2m : f.kind === :gfk ? gfks : f.kind === :grel ? grels : fs, f)
     end
     name = string(get(meta, :name, nameof(T)))
     vname = get(meta, :verbose_name, lowercase(replace(name, r"(?<=[a-z])(?=[A-Z])" => " ")))
@@ -177,7 +308,14 @@ function register_model!(T::Type, fields::Vector, meta::NamedTuple = NamedTuple(
                   String[string(o) for o in get(meta, :ordering, String[])],
                   string(vname), string(get(meta, :verbose_name_plural, vname * "s")),
                   string(get(meta, :app_label, default_app_label(T))), m2m,
-                  [Symbol.(collect(u)) for u in get(meta, :unique_together, [])])
+                  [Symbol.(collect(u)) for u in get(meta, :unique_together, [])],
+                  parent, proxy,
+                  Dict{Symbol,Any}(k => v for (k, v) in pairs(meta)
+                                   if !(k in (:table, :name, :verbose_name, :verbose_name_plural, :ordering, :app_label,
+                                              :unique_together, :_parent, :proxy))))
+    isempty(gfks) || (m.extra[:generic_fks] = gfks)
+    isempty(grels) || (m.extra[:generic_relations] = grels)
+    proxy && (m.fields = modelmeta(parent).fields; m.m2m = modelmeta(parent).m2m)
     MODEL_REGISTRY[T] = m
     filter!(x -> !(x === T || modelmeta_or_nothing(x) === nothing ||
                    modelmeta(x).name == name && parentmodule(x) == parentmodule(T)), MODEL_LIST)
@@ -245,7 +383,8 @@ function through_fks(f::Field)
 end
 
 "Name of a foreign key's reverse relation (`post_set` or its `related_name`)."
-reverse_name(fk::Field) = fk.related_name === nothing ? Symbol(lowercase(modelmeta(fk.model).name), :_set) : fk.related_name
+reverse_name(fk::Field) = fk.related_name !== nothing ? fk.related_name :
+    fk.one_to_one ? Symbol(lowercase(modelmeta(fk.model).name)) : Symbol(lowercase(modelmeta(fk.model).name), :_set)
 
 "Many-to-many relations reachable from `T`: (name, field, forward::Bool)."
 function m2m_relations(T::Type)
@@ -289,28 +428,17 @@ available as `obj.post_set` (or the `related_name`).
 """
 macro model(expr)
     (expr isa Expr && expr.head === :struct) || error("@model expects a struct definition")
-    name = expr.args[2]
-    name isa Expr && name.head === :(<:) && (name = name.args[1])
-    name isa Symbol || error("@model: unsupported struct name $(name)")
-    fieldpairs = Expr[]
-    metaexpr = :(NamedTuple())
-    for line in expr.args[3].args
-        line isa LineNumberNode && continue
-        if line isa Expr && line.head === :(=)
-            lhs = line.args[1]
-            fname = lhs isa Symbol ? lhs : (lhs isa Expr && lhs.head === :(::)) ? lhs.args[1] :
-                    error("@model: cannot parse field '$lhs'")
-            push!(fieldpairs, :($(QuoteNode(fname)) => $(esc(line.args[2]))))
-        elseif line isa Expr && line.head === :call && line.args[1] === :Meta
-            kws = [a.head === :kw ? a : error("Meta(...) takes keyword arguments") for a in line.args[2:end]]
-            metaexpr = esc(Expr(:tuple, Expr(:parameters, kws...)))
-        else
-            error("@model: unsupported line in model body: $line")
-        end
+    name, super = expr.args[2], nothing
+    if name isa Expr && name.head === :(<:)
+        name, super = name.args
     end
+    name isa Symbol || error("@model: unsupported struct name $(name)")
+    fieldpairs, metaexpr = parse_model_body(expr.args[3])
     M = GlobalRef(@__MODULE__, :Model)
-    structdef = Expr(:struct, true, Expr(:(<:), name, M),
+    sup = super === nothing ? M : :($(GlobalRef(@__MODULE__, :model_supertype))($super))
+    structdef = Expr(:struct, true, Expr(:(<:), name, sup),
                      Expr(:block, :(_data::Dict{Symbol,Any}), :(_cache::Dict{Symbol,Any})))
+    metaexpr = super === nothing ? metaexpr : :(merge((_parent = $(esc(super)),), $metaexpr))
     quote
         $(esc(structdef))
         $(esc(name))(; kwargs...) = $(GlobalRef(@__MODULE__, :construct))($(esc(name)); kwargs...)
@@ -321,7 +449,7 @@ end
 
 function default_value(f::Field)
     d = f.default
-    d isa NoDefault || return d isa Function ? d() : d
+    d isa NoDefault || return d isa Function || d isa Type ? d() : d
     f.null && return nothing
     f.kind in STRING_KINDS && return ""
     f.kind === :bool && return false
@@ -335,7 +463,7 @@ function construct(::Type{T}; kwargs...) where {T<:Model}
     kw = Dict{Symbol,Any}(kwargs)
     haskey(kw, :pk) && (kw[:id] = pop!(kw, :pk))
     haskey(kw, :id) && (data[:id] = pop!(kw, :id))
-    for f in meta.fields
+    for f in all_fields(T)
         if haskey(kw, f.name)
             setproperty!(obj, f.name, pop!(kw, f.name))
         elseif f.kind === :fk && haskey(kw, attname(f))
@@ -344,6 +472,9 @@ function construct(::Type{T}; kwargs...) where {T<:Model}
             data[attname(f)] = default_value(f)
         end
     end
+    for g in generic_fks(T)
+        haskey(kw, g.name) && set_generic!(obj, g, pop!(kw, g.name))
+    end
     isempty(kw) || throw(ArgumentError("$T got unexpected field(s): $(join(keys(kw), ", "))"))
     obj
 end
@@ -351,10 +482,12 @@ end
 "Reverse FK relations pointing at model `T`: Vector of (name, Model, Field)."
 function reverse_relations(T::Type)
     out = Tuple{Symbol,Any,Field}[]
+    lin = lineage(T)
     for M in MODEL_LIST
+        modelmeta(M).proxy && continue
         for f in modelmeta(M).fields
             f.kind === :fk || continue
-            related_model(f) === T || continue
+            related_model(f) in lin || continue
             push!(out, (reverse_name(f), M, f))
         end
     end
@@ -381,6 +514,13 @@ function Base.getproperty(m::Model, s::Symbol)
     end
     cache = getfield(m, :_cache)
     pre = get(cache, s, NOTFOUND)
+    g = find_generic(generic_fks(T), s)
+    g === nothing || return get_generic(m, g)
+    g = find_generic(generic_relations(T), s)
+    if g !== nothing
+        qs = generic_queryset(m, g)
+        return pre isa PrefetchedList ? chain(qs; cache = pre.items) : qs
+    end
     mm = find_m2m(T, string(s))
     if mm !== nothing
         qs = m2m_queryset(m, mm[2], mm[3])
@@ -390,8 +530,18 @@ function Base.getproperty(m::Model, s::Symbol)
     for (rn, M, rf) in reverse_relations(T)
         rn === s || continue
         qs = filter(objects(M), Q(attname(rf) => data[:id]))
+        if rf.one_to_one
+            pre isa PrefetchedList && return isempty(pre.items) ? nothing : pre.items[1]
+            return first(qs)
+        end
         pre isa PrefetchedList && return chain(qs; cache = pre.items)
         return qs
+    end
+    for C in child_models(T)
+        child_accessor(C) === s && return first(filter(base_objects(C); id = data[:id]))
+    end
+    if table_parent(T) !== nothing && s === parent_accessor(T)
+        return get(base_objects(table_parent(T)); id = data[:id])
     end
     pre === NOTFOUND || return pre isa PrefetchedList ? pre.items : pre    # Prefetch(...; to_attr)
     r = tattr(m, Val(s))
@@ -402,6 +552,8 @@ end
 function Base.setproperty!(m::Model, s::Symbol, v)
     data = getfield(m, :_data)
     s === :pk && (s = :id)
+    g = find_generic(generic_fks(typeof(m)), s)
+    g === nothing || return set_generic!(m, g, v)
     f = findfield(modelmeta(typeof(m)), s)
     if f !== nothing && f.kind === :fk && s === f.name
         if v === nothing
@@ -423,14 +575,16 @@ coerce_value(f::Field, v) = v
 coerce_value(f::Field, v::SafeString) = v.s
 
 function Base.propertynames(m::Model, private::Bool = false)
-    meta = modelmeta(typeof(m))
     names = Symbol[:id, :pk]
-    for f in meta.fields
+    for f in all_fields(typeof(m))
         push!(names, attname(f))
         f.kind === :fk && push!(names, f.name)
     end
     append!(names, [r[1] for r in reverse_relations(typeof(m)) if !startswith(string(r[1]), "+")])
     append!(names, first.(m2m_relations(typeof(m))))
+    append!(names, child_accessor.(child_models(typeof(m))))
+    append!(names, [g.name for g in vcat(generic_fks(typeof(m)), generic_relations(typeof(m)))])
+    table_parent(typeof(m)) === nothing || push!(names, parent_accessor(typeof(m)))
     Tuple(names)
 end
 
@@ -460,7 +614,10 @@ tattr(m::Model, ::Val{:verbose_name}) = modelmeta(typeof(m)).verbose_name
 
 from_db(f::Field, ::Nothing) = nothing
 function from_db(f::Field, v)
+    r = from_db_extra(f, v)
+    r === NOTFOUND || return r
     k = f.kind
+    k === :fk && pk_kind(related_model(f)) === :uuid && return v isa UUID ? v : UUID(string(v))
     k === :bool && return v isa Bool ? v : v != 0
     k === :int && return v isa Integer ? Int(v) : parse(Int, string(v))
     k === :fk && return Int(v)
@@ -470,14 +627,33 @@ function from_db(f::Field, v)
     v isa AbstractString ? String(v) : v
 end
 
-to_db(f::Field, v::Model) = v.id
-to_db(f::Field, v) = dbparam(v)
+to_db(f::Field, v::Model) = v.id      # (other values: see fields_extra.jl)
+
+"Primary key kind of a model's table: `:auto` (integer identity) or `:uuid` (`Meta(pk = :uuid)`)."
+function pk_kind(T::Type)
+    A = concrete_model(T)
+    while (P = table_parent(A)) !== nothing
+        A = P
+    end
+    get(modelmeta(A).extra, :pk, :auto)
+end
+pk_value(T::Type, v) = (v === nothing || pk_kind(T) !== :uuid || v isa UUID) ? v : UUID(string(v))
+
+"Parse a primary key from text (URLs, form values); `nothing` if it isn't one."
+function parse_pk(T::Type, s)
+    s isa Integer && return pk_kind(T) === :auto ? s : nothing
+    s isa UUID && return s
+    pk_kind(T) === :uuid ? tryparse(UUID, string(s)) : tryparse(Int, string(s))
+end
 
 function from_row(::Type{T}, row::Dict{Symbol,Any}) where {T<:Model}
-    obj = T(Dict{Symbol,Any}(:id => row[:id]), Dict{Symbol,Any}())
+    obj = T(Dict{Symbol,Any}(:id => pk_value(T, row[:id])), Dict{Symbol,Any}())
     data = getfield(obj, :_data)
-    for f in modelmeta(T).fields
-        data[attname(f)] = from_db(f, get(row, attname(f), nothing))
+    mytable = modelmeta(T).table
+    for f in all_fields(T)
+        t = modelmeta(f.model).table
+        key = t == mytable ? attname(f) : Symbol("__", t, "__", column(f))   # inherited: labelled per table
+        data[attname(f)] = from_db(f, get(row, key, nothing))
     end
     obj
 end
@@ -508,7 +684,8 @@ Base.:~(a::Q) = !a
 
 const LOOKUPS = Set(["exact", "iexact", "contains", "icontains", "startswith", "istartswith",
                      "endswith", "iendswith", "gt", "gte", "lt", "lte", "in", "isnull", "range",
-                     "year", "month", "day", "ne"])
+                     "year", "month", "day", "ne", "contained_by", "overlap", "has_key", "has_keys",
+                     "has_any_keys", "search"])
 
 
 struct LookupError <: Exception
@@ -557,13 +734,30 @@ new_alias!(c::SQLCompiler) = (c.counter[] += 1; "j$(c.counter[])")
 qcol(alias, col) = qname(alias) * "." * qname(col)
 
 "Join `table` (as a new alias) to `parent` on child.`childcol` = parent.`parentcol`; reuse an existing join for `key`."
-function join!(c::SQLCompiler, parent, key, table, childcol, parentcol; left::Bool)
+function join!(c::SQLCompiler, parent, key, table, childcol, parentcol; left::Bool, extra_on = nothing)
     haskey(c.aliases, key) && return c.aliases[key]
     a = new_alias!(c)
     left = left || parent in c.leftjoined
     left && push!(c.leftjoined, a)
-    push!(c.joins, " $(left ? "LEFT OUTER" : "INNER") JOIN $(qname(table)) $(qname(a)) ON $(qcol(a, childcol)) = $(qcol(parent, parentcol))")
+    on = "$(qcol(a, childcol)) = $(qcol(parent, parentcol))" * (extra_on === nothing ? "" : " AND " * extra_on(a))
+    push!(c.joins, " $(left ? "LEFT OUTER" : "INNER") JOIN $(qname(table)) $(qname(a)) ON $on")
     c.aliases[key] = a
+end
+
+"""
+Alias of the table holding field `f` when querying `T` at `alias`: `alias` itself, or a
+join up the multi-table inheritance chain.
+"""
+function field_alias!(c::SQLCompiler, alias, T::Type, f::Field)
+    target = modelmeta(f.model).table
+    A = concrete_model(T)
+    while modelmeta(A).table != target
+        P = table_parent(A)
+        P === nothing && error("field $(f.name) does not belong to $T")
+        alias = join!(c, alias, (alias, :__parent), modelmeta(P).table, "id", "id"; left = alias in c.leftjoined)
+        A = P
+    end
+    alias
 end
 
 function find_reverse(T::Type, name)
@@ -607,6 +801,54 @@ function compile_lookup(c::SQLCompiler, alias, T::Type, key, value, negated::Boo
             end
             return compile_lookup(c, alias, T, join(vcat([string(step1), string(step2)], rest, [lookup]), "__"), value, negated)
         end
+        if f === nothing && (C = findfirst(C -> string(child_accessor(C)) == fname, child_models(T))) !== nothing
+            # place -> restaurant (multi-table child): one-to-one join on id
+            Cm = child_models(T)[C]
+            ct = qname(modelmeta(Cm).table)
+            if isempty(rest) && lookup == "isnull"
+                a = new_alias!(c)
+                ex = "EXISTS (SELECT 1 FROM $ct $(qname(a)) WHERE $(qcol(a, "id")) = $(qcol(alias, "id")))"
+                return (truthy(value) ? "NOT " * ex : ex, Any[])
+            end
+            subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
+            if negated
+                a = new_alias!(c)
+                sql, ps = compile_lookup(c, a, Cm, subkey, value, negated)
+                return ("EXISTS (SELECT 1 FROM $ct $(qname(a)) WHERE $(qcol(a, "id")) = $(qcol(alias, "id")) AND $sql)", ps)
+            end
+            a = join!(c, alias, (alias, child_accessor(Cm)), modelmeta(Cm).table, "id", "id"; left = true)
+            return compile_lookup(c, a, Cm, subkey, value, negated)
+        end
+        if f === nothing && (g = find_generic(generic_relations(T), fname)) !== nothing
+            # post.comments (GenericRelation): join on object id AND content type
+            M = related_model(g)
+            ctf, fkf = g.through
+            ctcol, fkcol = column(getfield_meta(M, ctf)), column(getfield_meta(M, fkf))
+            ctid = get_for_model(T).id::Integer
+            mt = qname(modelmeta(M).table)
+            cond(a) = "$(qcol(a, fkcol)) = $(qcol(alias, "id")) AND $(qcol(a, ctcol)) = $ctid"
+            if isempty(rest) && lookup == "isnull"
+                a = new_alias!(c)
+                ex = "EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(cond(a)))"
+                return (truthy(value) ? "NOT " * ex : ex, Any[])
+            end
+            subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
+            if negated
+                a = new_alias!(c)
+                sql, ps = compile_lookup(c, a, M, subkey, value, negated)
+                return ("EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(cond(a)) AND $sql)", ps)
+            end
+            a = join!(c, alias, (alias, g.name, c.scope), modelmeta(M).table, fkcol, "id"; left = true,
+                      extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
+            c.distinct = true
+            return compile_lookup(c, a, M, subkey, value, negated)
+        end
+        if f !== nothing && modelmeta(f.model).table != modelmeta(T).table
+            # a field inherited from a multi-table parent: look it up on the parent's table
+            P = table_parent(T)
+            a = join!(c, alias, (alias, :__parent), modelmeta(P).table, "id", "id"; left = alias in c.leftjoined)
+            return compile_lookup(c, a, P, key, value, negated)
+        end
         if f === nothing
             rel = find_reverse(T, fname)
             rel === nothing && throw(lookup_error(T, fname))
@@ -627,7 +869,14 @@ function compile_lookup(c::SQLCompiler, alias, T::Type, key, value, negated::Boo
             c.distinct = true
             return compile_lookup(c, a, M, subkey, value, negated)
         end
-        if !isempty(rest)
+        if !isempty(rest) && f.kind in (:json, :array)
+            # data__owner__name (JSON key path), tags__len, tags__0
+            tr = transform_column(f, qcol(alias, column(f)), rest, lookup, value)
+            tr === nothing && throw(LookupError("unsupported lookup '$(join(rest, "__"))' on $(f.kind) field '$fname'"))
+            col, colps = tr
+            lookup == "isnull" && f.kind === :json && return truthy(value) ? (col, colps) : ("NOT " * col, colps)
+            f = nothing
+        elseif !isempty(rest)
             f.kind === :fk || throw(LookupError("'$fname' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
             if rest in (["id"], ["pk"])
                 col = qcol(alias, column(f))     # author__id is just author_id: no join
@@ -647,11 +896,19 @@ function compile_lookup(c::SQLCompiler, alias, T::Type, key, value, negated::Boo
         end
     end
     conv(v) = v isa Model ? v.id : (f === nothing || f.kind === :fk ? dbparam(v) : to_db(f, v))
+    if f !== nothing || lookup == "search"
+        sl = special_lookup(c, something(f, Field(:text)), col, lookup, value)
+        sl === nothing || return sl[1], vcat(colps, sl[2])
+    end
     sql, ps = lookup_condition(c, col, lookup, value, conv)
     sql, isempty(colps) ? ps : vcat(colps, ps)
 end
 
 function lookup_condition(c::SQLCompiler, col, lookup, value, conv)
+    if value isa SearchQuery && lookup == "exact"
+        q, qps = compile_expr(c, value)
+        return "$col @@ $q", qps
+    end
     if value isa Expression && lookup in ("exact", "ne", "gt", "gte", "lt", "lte", "iexact")
         vsql, vps = compile_expr(c, value)
         op = Dict("exact" => "=", "ne" => "!=", "gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=")
@@ -897,6 +1154,7 @@ function order_clause(c::SQLCompiler, order::Vector{String})
         for s in segs[1:end-1]     # follow forward FKs: order_by("author__name")
             f = findfield(modelmeta(M), Symbol(s))
             (f !== nothing && f.kind === :fk) || throw(LookupError("cannot order $T by '$o': '$s' is not a foreign key of $M"))
+            alias = field_alias!(c, alias, M, f)
             alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, "id", column(f); left = true)
             M = related_model(f)
         end
@@ -906,6 +1164,7 @@ function order_clause(c::SQLCompiler, order::Vector{String})
         else
             f = findfield(modelmeta(M), Symbol(name))
             f === nothing && throw(LookupError("cannot order $T by unknown field '$o'"))
+            alias = field_alias!(c, alias, M, f)
             qcol(alias, column(f))
         end
         if alias != c.base && c.distinct
@@ -938,8 +1197,10 @@ function related_columns!(c::SQLCompiler, paths)
         alias, M = c.base, c.T
         for (i, s) in enumerate(path)
             f = findfield(modelmeta(M), s)
+            alias = field_alias!(c, alias, M, f)
             alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, "id", column(f); left = f.null)
             M = related_model(f)
+            isempty(ancestors(M)) || throw(LookupError("select_related can't load $M, which inherits from another table; use prefetch_related"))
             sub = path[1:i]
             any(x -> x[1] == sub, out) && continue
             push!(out, (sub, M, alias))
@@ -985,6 +1246,16 @@ function build_select(qs::QuerySet{T}; columns = nothing, ordered = true, outer 
         qs.group_by_object && pushfirst!(group, qcol(c.base, "id"))
     else
         push!(sel, qname(c.base) * ".*")
+        let alias = c.base, A = concrete_model(T)
+            while (P = table_parent(A)) !== nothing        # multi-table parents' columns
+                alias = join!(c, alias, (alias, :__parent), modelmeta(P).table, "id", "id"; left = false)
+                pt = modelmeta(P).table
+                for g in modelmeta(P).fields
+                    push!(sel, "$(qcol(alias, column(g))) AS $(qname("__" * pt * "__" * column(g)))")
+                end
+                A = P
+            end
+        end
         related, rcols = related_columns!(c, qs.related)
         append!(sel, rcols)
         push!(group, qcol(c.base, "id"))
@@ -1041,7 +1312,7 @@ end
 function from_prefixed_row(::Type{T}, row, prefix) where {T<:Model}
     id = get(row, Symbol(prefix, "id"), nothing)
     id === nothing && return nothing
-    obj = T(Dict{Symbol,Any}(:id => id), Dict{Symbol,Any}())
+    obj = T(Dict{Symbol,Any}(:id => pk_value(T, id)), Dict{Symbol,Any}())
     data = getfield(obj, :_data)
     for f in modelmeta(T).fields
         data[attname(f)] = from_db(f, get(row, Symbol(prefix, column(f)), nothing))
@@ -1139,6 +1410,10 @@ function prefetch_level!(objs::Vector, name::Symbol, qs, to_attr)
     end
     mm = find_m2m(T, string(name))
     mm === nothing || return prefetch_m2m!(objs, mm[1], mm[2], mm[3], qs, to_attr)
+    g = find_generic(generic_fks(T), name)
+    g === nothing || return prefetch_generic_fk!(objs, g)
+    g = find_generic(generic_relations(T), name)
+    g === nothing || return prefetch_generic_relation!(objs, g, qs, to_attr)
     rel = find_reverse(T, string(name))
     rel === nothing && throw(LookupError("prefetch_related: '$name' is not a relation of $T"))
     rn, M, rf = rel
@@ -1253,6 +1528,18 @@ function update!(qs::QuerySet{T}; kw...) where {T}
     qs.isnone && return 0
     meta = modelmeta(T)
     sets, ps = String[], Any[]
+    mytable = modelmeta(T).table
+    if any(k -> modelmeta(getfield_meta(T, k).model).table != mytable, keys(kw))
+        # fields live in several tables (multi-table inheritance): one UPDATE per table, same ids
+        ids = values_list(qs, :id; flat = true)
+        n = 0
+        for M in vcat([concrete_model(T)], ancestors(T))
+            mine = [k => v for (k, v) in kw if modelmeta(getfield_meta(T, k).model).table == modelmeta(M).table]
+            isempty(mine) && continue
+            n = max(n, update!(filter(base_objects(M); id__in = ids); mine...))
+        end
+        return n
+    end
     c = SQLCompiler(T)
     for (k, v) in kw
         f = getfield_meta(T, k)
@@ -1278,6 +1565,16 @@ Base.showerror(io::IO, e::ProtectedError) = print(io, "ProtectedError: ", e.msg)
 
 function delete_ids!(T::Type, ids::Vector)
     isempty(ids) && return 0
+    T = concrete_model(T)
+    for g in generic_relations(T)    # objects pointing here through a GenericForeignKey
+        M = related_model(g)
+        ctf, fkf = g.through
+        rel = filter(base_objects(M), Q(Symbol(ctf, :_id) => get_for_model(T).id), Q(Symbol(fkf, "__in") => ids))
+        delete_ids!(M, values_list(rel, :id; flat = true))
+    end
+    for C in child_models(T)        # rows of subclasses that extend these rows
+        delete_ids!(C, values_list(filter(base_objects(C); id__in = ids), :id; flat = true))
+    end
     for (_, M, f) in reverse_relations(T)
         rel = filter(base_objects(M), Q(Symbol(attname(f), "__in") => ids))
         if f.on_delete === :CASCADE
@@ -1293,6 +1590,8 @@ function delete_ids!(T::Type, ids::Vector)
         n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE $(qname("id")) IN (" *
                              join(fill("?", length(chunk)), ",") * ")", collect(chunk))
     end
+    P = table_parent(T)
+    P === nothing || delete_ids!(P, ids)     # the parent rows these rows extend
     n
 end
 
@@ -1319,29 +1618,47 @@ INSERT (when `obj.id === nothing`) or UPDATE the object. Sets `auto_now` /
 `auto_now_add` timestamps.
 """
 function save!(obj::T) where {T<:Model}
-    meta = modelmeta(T)
     data = getfield(obj, :_data)
     ts = now()
-    for f in meta.fields
+    for f in all_fields(T)
         a = attname(f)
         if f.auto_now || (f.auto_now_add && (data[:id] === nothing || data[a] === nothing))
             data[a] = f.kind === :date ? Date(ts) : ts
         end
     end
+    chain_ = reverse(vcat([concrete_model(T)], ancestors(T)))     # root table first
+    fresh = false
+    if data[:id] === nothing && pk_kind(T) === :uuid
+        data[:id] = uuid4()           # UUID keys are made here, so the row is inserted directly
+        fresh = true
+    end
+    length(chain_) == 1 ? save_table!(chain_[1], data, true, fresh) :
+        atomic(() -> foreach(M -> save_table!(M, data, M === chain_[1], fresh), chain_))
+    obj
+end
+
+"Write the columns of one table (`M`'s own fields) for an object's data."
+function save_table!(M::Type, data, root::Bool, fresh::Bool = false)
+    meta = modelmeta(M)
     cols = [qname(column(f)) for f in meta.fields]
     vals = Any[to_db(f, data[attname(f)]) for f in meta.fields]
     tbl = qname(meta.table)
+    if fresh
+        execute(insert_sql(backend(), tbl, vcat(qname("id"), cols)) |> s -> replace(s, r" RETURNING .*$" => ""),
+                vcat(data[:id], vals))
+        return
+    end
     if data[:id] !== nothing
         n = isempty(cols) ? length(execute("SELECT 1 FROM $tbl WHERE $(qname("id")) = ?", [data[:id]])) :
             execute_changes("UPDATE $tbl SET " * join(["$c = ?" for c in cols], ", ") * " WHERE $(qname("id")) = ?",
                             vcat(vals, data[:id]))
-        n > 0 && return obj
+        n > 0 && return
         execute_insert(insert_sql(backend(), tbl, vcat(qname("id"), cols)), vcat(data[:id], vals))
-        sync_sequence(backend(), meta.table)
-        return obj
+        root && sync_sequence(backend(), meta.table)
+        return
     end
+    root || error("internal: child table saved before its parent")
     data[:id] = execute_insert(insert_sql(backend(), tbl, cols), vals)
-    obj
 end
 
 "Delete the object (and cascade to related objects)."
@@ -1355,7 +1672,7 @@ end
 
 "Reload field values from the database."
 function refresh!(obj::T) where {T<:Model}
-    fresh = get(objects(T); id = obj.id)
+    fresh = get(base_objects(T); id = obj.id)
     merge!(getfield(obj, :_data), getfield(fresh, :_data))
     empty!(getfield(obj, :_cache))
     obj
@@ -1427,12 +1744,12 @@ choices, email/slug/url format, custom validators, uniqueness). Empty dict = val
 """
 function full_clean(obj::T; exclude = Symbol[]) where {T<:Model}
     errors = Dict{Symbol,Vector{String}}()
-    for f in modelmeta(T).fields
+    for f in all_fields(T)
         (f.name in exclude || !f.editable) && continue
         v = getproperty(obj, attname(f))
         errs = validate_field(f, v)
         if isempty(errs) && f.unique && v !== nothing
-            q = filter(base_objects(T), Q(attname(f) => v))
+            q = filter(base_objects(f.model), Q(attname(f) => v))
             obj.id === nothing || (q = filter(q, !Q(id = obj.id)))
             exists(q) && push!(errs, "$(uppercasefirst(modelmeta(T).verbose_name)) with this $(label(f)) already exists.")
         end

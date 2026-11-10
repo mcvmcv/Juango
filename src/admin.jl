@@ -173,7 +173,7 @@ function changelist(req::Request; model)
     T = ma.model
     meta = modelmeta(T)
     if req.method == "POST" && get(req.POST, "action", "") == "delete_selected"
-        ids = [parse(Int, i) for i in Juango.getlist(req.POST, "_selected_action") if tryparse(Int, i) !== nothing]
+        ids = filter(!isnothing, [Juango.parse_pk(T, i) for i in Juango.getlist(req.POST, "_selected_action")])
         if isempty(ids)
             message!(req, :warning, "Items must be selected in order to perform actions on them. No items have been changed.")
         else
@@ -198,7 +198,7 @@ function changelist(req::Request; model)
         v = get(req.GET, string(attname(f)), nothing)
         (v === nothing || isempty(v)) && continue
         qs = f.kind === :bool ? filter(qs, Q(f.name => v == "1")) :
-             f.kind === :fk ? filter(qs, Q(attname(f) => something(tryparse(Int, v), 0))) :
+             f.kind === :fk ? filter(qs, Q(attname(f) => Juango.parse_pk(related_model(f), v))) :
              filter(qs, Q(f.name => v))
     end
     isempty(ma.ordering) || (qs = order_by(qs, ma.ordering...))
@@ -224,7 +224,7 @@ function changelist(req::Request; model)
 end
 
 admin_fields(ma::ModelAdmin) = ma.fields !== nothing ? ma.fields :
-    [f.name for f in vcat(modelmeta(ma.model).fields, modelmeta(ma.model).m2m)
+    [f.name for f in vcat(Juango.all_fields(ma.model), modelmeta(ma.model).m2m)
      if f.editable && !(f.name in ma.exclude) && !(f.name in ma.password_fields)]
 
 function change_form(req::Request, ma::ModelAdmin, obj)
@@ -257,7 +257,7 @@ function change_form(req::Request, ma::ModelAdmin, obj)
     end
     readonly = adding ? Any[] :
         [Dict{String,Any}("label" => label(f), "value" => format_value(getproperty(obj, attname(f))))
-         for f in meta.fields if !f.editable]
+         for f in Juango.all_fields(T) if !f.editable]
     ctx = base_context(req, (adding ? "Add " : "Change ") * meta.verbose_name)
     merge!(ctx, Dict{String,Any}(
         "opts" => opts(ma), "form" => form, "object" => obj, "adding" => adding, "readonly" => readonly,
@@ -267,13 +267,19 @@ function change_form(req::Request, ma::ModelAdmin, obj)
 end
 
 add_view(req::Request; model) = change_form(req, get_admin(model), nothing)
-change_view(req::Request; model, id) =
-    (ma = get_admin(model); change_form(req, ma, Juango.get_object_or_404(admin_queryset(ma, req); id = id)))
+"The object with this primary key (from the URL), or a 404."
+function admin_object(ma::ModelAdmin, req, id)
+    pk = Juango.parse_pk(ma.model, id)
+    pk === nothing && throw(Http404("No $(modelmeta(ma.model).verbose_name) with id '$id'"))
+    Juango.get_object_or_404(admin_queryset(ma, req); id = pk)
+end
+
+change_view(req::Request; model, id) = (ma = get_admin(model); change_form(req, ma, admin_object(ma, req, id)))
 
 function delete_view(req::Request; model, id)
     ma = get_admin(model)
     meta = modelmeta(ma.model)
-    obj = Juango.get_object_or_404(admin_queryset(ma, req); id = id)
+    obj = admin_object(ma, req, id)
     if req.method == "POST"
         name = string(obj)
         try
@@ -312,8 +318,8 @@ function urls()
         path("logout/", admin_logout; name = "logout"),
         path("<slug:model>/", s(changelist); name = "changelist"),
         path("<slug:model>/add/", s(add_view); name = "add"),
-        path("<slug:model>/<int:id>/change/", s(change_view); name = "change"),
-        path("<slug:model>/<int:id>/delete/", s(delete_view); name = "delete"),
+        path("<slug:model>/<str:id>/change/", s(change_view); name = "change"),
+        path("<slug:model>/<str:id>/delete/", s(delete_view); name = "delete"),
     ]; namespace = "admin")
 end
 

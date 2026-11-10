@@ -65,6 +65,7 @@ adapt_param(::SQLiteBackend, x::Date) = string(x)
 function column_type(::SQLiteBackend, kind::Symbol, max_length)
     kind in (:int, :bool, :fk) && return "INTEGER"
     kind === :float && return "REAL"
+    kind === :citext && return "TEXT COLLATE NOCASE"
     "TEXT"
 end
 
@@ -93,6 +94,8 @@ end
 
 extract_sql(::SQLiteBackend, part::Symbol, expr) =
     "CAST(strftime('$(Dict(:year => "%Y", :month => "%m", :day => "%d")[part])', $expr) AS INTEGER)"
+
+supports_index_method(::SQLiteBackend, m::Symbol) = m === :btree
 
 table_exists(::SQLiteBackend, table) =
     !isempty(execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", [table]))

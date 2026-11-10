@@ -22,11 +22,12 @@ struct Column
     index::Bool
     max_length::Union{Nothing,Int}
     references::Union{Nothing,String}
+    of::Union{Nothing,Symbol}        # arrays: element kind; foreign keys: :uuid when the target's pk is a UUID
 end
 Column(name, kind::Symbol; null = false, default = nothing, unique = false, index = false,
-       max_length = nothing, references = nothing) =
+       max_length = nothing, references = nothing, of = nothing) =
     Column(string(name), kind, null, default, unique, index && !unique, max_length,
-           references === nothing ? nothing : string(references))
+           references === nothing ? nothing : string(references), of === nothing ? nothing : Symbol(of))
 
 Base.:(==)(a::Column, b::Column) = all(isequal(getfield(a, f), getfield(b, f)) for f in fieldnames(Column))
 Base.hash(c::Column, h::UInt) = hash(c.name, hash(c.kind, h))
@@ -35,9 +36,29 @@ same_definition(a::Column, b::Column) = all(isequal(getfield(a, f), getfield(b, 
 "A copy of `c` with some attributes changed: `with_column(c; name=\"new\")`."
 function with_column(c::Column; name = c.name, kw...)
     attrs = merge((null = c.null, default = c.default, unique = c.unique, index = c.index,
-                   max_length = c.max_length, references = c.references), NamedTuple(kw))
+                   max_length = c.max_length, references = c.references, of = c.of), NamedTuple(kw))
     Column(name, c.kind; attrs...)
 end
+
+"""
+    Index(fields...; name=nothing, unique=false, method=:btree)
+    GinIndex(fields...; name=nothing)
+
+An index for `Meta(indexes=[...])`. `method=:gin` (`GinIndex`) is a PostgreSQL GIN index,
+for JSON, array and full-text columns; other databases skip it.
+"""
+struct Index
+    columns::Vector{String}
+    name::Union{Nothing,String}
+    unique::Bool
+    method::Symbol
+end
+Index(cols...; name = nothing, unique = false, method = :btree) =
+    Index(String[string(c) for c in (length(cols) == 1 && cols[1] isa AbstractVector ? cols[1] : cols)],
+          name === nothing ? nothing : string(name), unique, Symbol(method))
+GinIndex(cols...; name = nothing) = Index(cols...; name = name, method = :gin)
+Base.:(==)(a::Index, b::Index) = a.columns == b.columns && a.name == b.name && a.unique == b.unique && a.method == b.method
+Base.hash(i::Index, h::UInt) = hash(i.name, h)
 
 "A table in a migration snapshot."
 mutable struct Table
@@ -46,9 +67,14 @@ mutable struct Table
     model::String
     columns::Vector{Column}
     unique_together::Vector{Vector{String}}     # column names; each set gets a unique index
+    parent::Union{Nothing,String}               # multi-table inheritance: `id` references this table
+    pk::Symbol                                  # :auto (integer identity) or :uuid
+    indexes::Vector{Index}                      # Meta(indexes=...), with names filled in
 end
-Table(name, app, model, columns) = Table(name, app, model, columns, Vector{String}[])
-Base.copy(t::Table) = Table(t.name, t.app, t.model, copy(t.columns), [copy(u) for u in t.unique_together])
+Table(name, app, model, columns, unique_together = Vector{String}[]; parent = nothing, pk = :auto, indexes = Index[]) =
+    Table(name, app, model, columns, unique_together, parent === nothing ? nothing : string(parent), Symbol(pk), collect(Index, indexes))
+Base.copy(t::Table) = Table(t.name, t.app, t.model, copy(t.columns), [copy(u) for u in t.unique_together],
+                            t.parent, t.pk, copy(t.indexes))
 normalize_unique(sets) = sort([collect(String, string.(u)) for u in sets])
 function getcolumn(t::Table, name)
     i = findfirst(c -> c.name == name, t.columns)
@@ -65,23 +91,35 @@ schema_kind(kind::Symbol) = kind in STRING_KINDS ? :string : kind
 
 "The snapshot `Column` for a model field."
 function column_state(f::Field)
-    d = f.default isa NoDefault || f.default isa Function ? nothing : f.default
+    d = f.default isa NoDefault || f.default isa Function || f.default isa Type ? nothing : f.default
+    d !== nothing && f.kind in (:json, :array, :intrange, :daterange, :datetimerange, :uuid) && (d = nothing)  # set by Julia, not the DB
     ref = f.kind === :fk ? modelmeta(related_model(f)).table : nothing
+    of = f.kind === :array ? f.related : f.kind === :fk && pk_kind(related_model(f)) === :uuid ? :uuid : nothing
     Column(column(f), schema_kind(f.kind); null = f.null, default = d, unique = f.unique,
-           index = f.db_index, max_length = schema_kind(f.kind) === :string ? f.max_length : nothing,
-           references = ref)
+           index = f.db_index, max_length = schema_kind(f.kind) in (:string, :citext) || (f.kind === :array && f.related === :string) ? f.max_length : nothing,
+           references = ref, of = of)
 end
 
 "The snapshot `Table` for a model."
 function table_state(T::Type)
     m = modelmeta(T)
-    col(n) = (f = findfield(m, n); f === nothing ? error("$(m.name): unique_together names unknown field '$n'") : column(f))
+    col(n) = (f = findfield(m, Symbol(n)); f === nothing ? error("$(m.name): Meta names unknown field '$n'") : column(f))
+    P = table_parent(T)
+    root = isempty(ancestors(T)) ? T : last(ancestors(T))
+    idx = Index[]
+    for ix in get(m.extra, :indexes, Index[])
+        cols = [col(c) for c in ix.columns]
+        push!(idx, Index(cols, something(ix.name, constraint_name(m.table, cols..., ix.method === :gin ? "gin" : "idx")),
+                         ix.unique, ix.method))
+    end
     Table(m.table, m.app, m.name, [column_state(f) for f in m.fields],
-          normalize_unique([[col(n) for n in u] for u in m.unique_together]))
+          normalize_unique([[col(n) for n in u] for u in m.unique_together]);
+          parent = P === nothing ? nothing : modelmeta(P).table, pk = get(modelmeta(root).extra, :pk, :auto),
+          indexes = sort(idx; by = i -> i.name))
 end
 
 "The schema the given models describe."
-models_state(models = all_models()) = SchemaState(modelmeta(T).table => table_state(T) for T in models)
+models_state(models = all_models()) = SchemaState(modelmeta(T).table => table_state(T) for T in models if !modelmeta(T).proxy)
 
 # --- DDL --------------------------------------------------------------------------------------
 
@@ -95,8 +133,15 @@ function backfill_value(c::Column)
     c.kind === :datetime ? DateTime(1970) : c.kind === :date ? Date(1970) : nothing
 end
 
+"The SQL type of a snapshot column."
+function column_type_for(b::DatabaseBackend, c::Column)
+    c.kind === :array && return array_column_type(b, c.of, c.max_length)
+    c.kind === :fk && c.of === :uuid && return column_type(b, :uuid, nothing)
+    column_type(b, c.kind === :string ? :char : c.kind, c.max_length)
+end
+
 function column_sql(b::DatabaseBackend, c::Column; adding = false, inline_fk = inline_foreign_keys(b))
-    s = quote_name(b, c.name) * " " * column_type(b, c.kind === :string ? :char : c.kind, c.max_length)
+    s = quote_name(b, c.name) * " " * column_type_for(b, c)
     c.null || (s *= " NOT NULL")
     d = c.default
     (d === nothing && adding && !c.null) && (d = backfill_value(c))
@@ -140,16 +185,41 @@ returned on their own so they can run once every table exists.
 """
 function create_table_sql(b::DatabaseBackend, t::Table; if_not_exists = false)
     ine = if_not_exists ? "IF NOT EXISTS " : ""
-    stmts = ["CREATE TABLE $ine$(quote_name(b, t.name)) ($(autoincrement_pk(b))" *
-             join(", " .* [column_sql(b, c) for c in t.columns]) * ")"]
+    stmts = unique(String[s for c in t.columns for s in column_prereqs(b, c.kind)])
+    push!(stmts, "CREATE TABLE $ine$(quote_name(b, t.name)) ($(pk_column_sql(b, t))" *
+                 join(", " .* [column_sql(b, c) for c in t.columns]) * ")")
     for c in t.columns
         append!(stmts, index_sql(b, t.name, c; if_not_exists = if_not_exists))
     end
     for u in t.unique_together
         push!(stmts, unique_together_sql(b, t.name, u; if_not_exists = if_not_exists))
     end
-    stmts, String[s for c in t.columns for s in fk_sql(b, t.name, c)]
+    for ix in t.indexes
+        append!(stmts, index_spec_sql(b, t.name, ix; if_not_exists = if_not_exists))
+    end
+    fks = String[s for c in t.columns for s in fk_sql(b, t.name, c)]
+    (t.parent !== nothing && !inline_foreign_keys(b)) && push!(fks, foreign_key_sql(b, t.name, "id", t.parent))
+    stmts, fks
 end
+
+"The `id` column: an identity, a UUID, or (multi-table child) a copy of the parent's id."
+function pk_column_sql(b::DatabaseBackend, t::Table)
+    t.parent === nothing && t.pk === :auto && return autoincrement_pk(b)
+    s = quote_name(b, "id") * " " * column_type(b, t.pk === :uuid ? :uuid : :int, nothing) * " NOT NULL PRIMARY KEY"
+    (t.parent !== nothing && inline_foreign_keys(b)) && (s *= " REFERENCES $(quote_name(b, t.parent)) ($(quote_name(b, "id")))")
+    s
+end
+
+"CREATE INDEX for a `Meta(indexes=...)` entry (nothing where the method isn't supported)."
+function index_spec_sql(b::DatabaseBackend, table, ix::Index; if_not_exists = false)
+    supports_index_method(b, ix.method) || return String[]
+    using_ = ix.method === :btree ? "" : " USING $(ix.method)"
+    ["CREATE $(ix.unique ? "UNIQUE " : "")INDEX $(if_not_exists ? "IF NOT EXISTS " : "")$(quote_name(b, ix.name)) ON " *
+     "$(quote_name(b, table))$using_ (" * join([quote_name(b, c) for c in ix.columns], ", ") * ")"]
+end
+drop_index_spec_sql(b::DatabaseBackend, ix::Index) =
+    supports_index_method(b, ix.method) ? ["DROP INDEX IF EXISTS " * quote_name(b, ix.name)] : String[]
+
 
 drop_table_sql(b::DatabaseBackend, t::Table) = ["DROP TABLE $(quote_name(b, t.name))"]
 
@@ -168,7 +238,7 @@ function rename_table_sql(b::DatabaseBackend, old::Table, new::Table)
 end
 
 function add_column_sql(b::DatabaseBackend, t::Table, c::Column, deferred::Vector{String})
-    stmts = ["ALTER TABLE $(quote_name(b, t.name)) ADD COLUMN " * column_sql(b, c; adding = true)]
+    stmts = vcat(column_prereqs(b, c.kind), ["ALTER TABLE $(quote_name(b, t.name)) ADD COLUMN " * column_sql(b, c; adding = true)])
     # The backfill default only exists for the existing rows; drop it where the database allows.
     if can_alter_table(b) && c.default === nothing && !c.null && backfill_value(c) !== nothing
         push!(stmts, "ALTER TABLE $(quote_name(b, t.name)) ALTER COLUMN $(quote_name(b, c.name)) DROP DEFAULT")
@@ -206,8 +276,7 @@ function alter_column_sql(b::DatabaseBackend, old::Table, new::Table, name, defe
         end
     end
     (c0.unique, c0.index) != (c1.unique, c1.index) && append!(stmts, drop_index_sql(b, old.name, c0))
-    ty0 = column_type(b, c0.kind === :string ? :char : c0.kind, c0.max_length)
-    ty1 = column_type(b, c1.kind === :string ? :char : c1.kind, c1.max_length)
+    ty0, ty1 = column_type_for(b, c0), column_type_for(b, c1)
     ty0 != ty1 && push!(stmts, alter_column_type_sql(b, new.name, name, ty1))
     if !isequal(c0.default, c1.default)
         push!(stmts, "ALTER TABLE $t ALTER COLUMN $col " * (c1.default === nothing ? "DROP DEFAULT" : "SET DEFAULT " * lit(b, c1.default)))
@@ -230,7 +299,7 @@ drop the old table and rename. Used where `ALTER TABLE` can't make the change (S
 Columns are matched by name; new columns get their default or backfill value.
 """
 function remake_table_sql(b::DatabaseBackend, old::Table, new::Table)
-    tmp = Table("new__" * new.name, new.app, new.model, new.columns)   # unique sets are added after the rename
+    tmp = Table("new__" * new.name, new.app, new.model, new.columns; parent = new.parent, pk = new.pk)   # indexes come after the rename
     q(s) = quote_name(b, s)
     cols, exprs = [q("id")], [q("id")]
     for c in new.columns
@@ -242,7 +311,7 @@ function remake_table_sql(b::DatabaseBackend, old::Table, new::Table)
             push!(exprs, lit(b, c.null ? c.default : backfill_value(c)))
         end
     end
-    create = first(create_table_sql(b, Table(tmp.name, tmp.app, tmp.model, tmp.columns)))[1]
+    create = only(filter(x -> startswith(x, "CREATE TABLE"), first(create_table_sql(b, tmp))))
     stmts = [create,
              "INSERT INTO $(q(tmp.name)) ($(join(cols, ", "))) SELECT $(join(exprs, ", ")) FROM $(q(old.name))",
              "DROP TABLE $(q(old.name))",
@@ -252,6 +321,9 @@ function remake_table_sql(b::DatabaseBackend, old::Table, new::Table)
     end
     for u in new.unique_together
         push!(stmts, unique_together_sql(b, new.name, u))
+    end
+    for ix in new.indexes
+        append!(stmts, index_spec_sql(b, new.name, ix))
     end
     stmts
 end
@@ -271,6 +343,7 @@ function sync_models!(models; verbose = true)
     atomic() do
         fks = String[]
         for T in models
+            modelmeta(T).proxy && continue
             t = table_state(T)
             if !table_exists(b, t.name)
                 stmts, f = create_table_sql(b, t; if_not_exists = true)
@@ -308,6 +381,7 @@ function schema_sql(models = all_models())
     b = backend()
     out, fks = String[], String[]
     for T in models
+        modelmeta(T).proxy && continue
         stmts, f = create_table_sql(b, table_state(T); if_not_exists = true)
         append!(out, stmts)
         append!(fks, f)
