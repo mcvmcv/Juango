@@ -5,6 +5,29 @@ import Juango: Template, render
 
 # ---------------------------------------------------------------------------------------------
 # Test project: models, forms, views, urls, templates
+# A SQLite backend that uses numbered placeholders (?1, ?2, ...), so the whole ORM runs
+# through `rewrite_placeholders`, as it will on Postgres ($1, $2, ...).
+struct NumberedSQLite <: Juango.DatabaseBackend
+    path::String
+end
+const _SQ = Juango.SQLiteBackend
+_sq(b::NumberedSQLite) = _SQ(b.path)
+Juango.placeholder(::NumberedSQLite, i::Int) = "?$i"
+struct GenericSQL <: Juango.DatabaseBackend end   # inherits only the standard-SQL defaults
+for f in (:open_connection, :close_connection, :driver_rows, :driver_rowcount, :driver_insert_id,
+          :translate_error, :autoincrement_pk, :limit_offset_sql, :date_part_sql,
+          :table_exists, :table_columns)
+    @eval Juango.$f(b::NumberedSQLite, args...) = Juango.$f(_sq(b), args...)
+end
+for T in (Bool, DateTime, Date)
+    @eval Juango.adapt_param(b::NumberedSQLite, x::$T) = Juango.adapt_param(_sq(b), x)
+end
+Juango.sql_literal(b::NumberedSQLite, x::Bool) = Juango.sql_literal(_sq(b), x)
+Juango.column_type(b::NumberedSQLite, kind::Symbol, ml) = Juango.column_type(_sq(b), kind, ml)
+for L in (:contains, :startswith, :endswith)
+    @eval Juango.lookup_sql(b::NumberedSQLite, v::Val{$(QuoteNode(L))}, col, x) = Juango.lookup_sql(_sq(b), v, col, x)
+end
+
 # ---------------------------------------------------------------------------------------------
 
 @model struct Author
@@ -111,7 +134,7 @@ const urlpatterns = [
     path("files/<path:rest>", (req; rest) -> HttpResponse(rest); name = "files"),
 ]
 
-configure!(DATABASE = ":memory:", ROOT_URLCONF = urlpatterns, TEMPLATE_DIRS = [TPL],
+configure!(DATABASE = get(ENV, "JUANGO_TEST_DATABASE", ":memory:"), ROOT_URLCONF = urlpatterns, TEMPLATE_DIRS = [TPL],
            PASSWORD_ITERATIONS = 1000, DEBUG = true)
 migrate(verbose = false)
 
@@ -516,6 +539,77 @@ end
     finally
         close(server)
     end
+end
+
+@testset "database backends" begin
+    B = Juango
+    @test B.backend() isa B.SQLiteBackend
+    @test B.backend_from_setting("site.db") == B.SQLiteBackend("site.db")
+    @test B.backend_from_setting("sqlite:///:memory:") == B.SQLiteBackend(":memory:")
+    @test B.backend_from_setting("sqlite:////var/db/x.db") == B.SQLiteBackend("/var/db/x.db")
+    @test_throws B.ImproperlyConfigured B.backend_from_setting("postgresql://u@h/db")
+    err = try B.backend_from_setting("postgresql://u@h/db") catch e e end
+    @test occursin("issues/2", sprint(showerror, err))
+    @test_throws B.ImproperlyConfigured B.backend_from_setting("nosuch://x")
+    @test_throws B.ImproperlyConfigured B.backend_from_setting(42)
+
+    nb = NumberedSQLite(":memory:")
+    rw(s) = B.rewrite_placeholders(nb, s)
+    @test rw("SELECT * FROM t WHERE a = ? AND b IN (?, ?)") == "SELECT * FROM t WHERE a = ?1 AND b IN (?2, ?3)"
+    @test rw("SELECT '?', \"q?\", 'it''s ?' FROM t WHERE x = ?") == "SELECT '?', \"q?\", 'it''s ?' FROM t WHERE x = ?1"
+    @test rw("SELECT 1 -- what?\nWHERE y = ? /* and? */ AND z = ?") == "SELECT 1 -- what?\nWHERE y = ?1 /* and? */ AND z = ?2"
+    @test B.rewrite_placeholders(B.SQLiteBackend(":memory:"), "a = ?") == "a = ?"
+
+    # constraint violations become IntegrityError
+    create(Author; name = "Unique Ursula")
+    @test_throws IntegrityError create(Author; name = "Unique Ursula")
+
+    # generic SQL defaults (what a new backend inherits)
+    g = GenericSQL()
+    @test B.column_type(g, :bool, nothing) == "BOOLEAN" && B.column_type(g, :char, 20) == "VARCHAR(20)"
+    @test B.limit_offset_sql(g, 10, 0) == " LIMIT 10" && B.limit_offset_sql(g, nothing, 5) == " OFFSET 5"
+    @test B.lookup_sql(g, Val(:year), "c", 2024) == ("EXTRACT(YEAR FROM c) = ?", Any[2024])
+    @test B.lookup_sql(g, Val(:startswith), "c", "a_b") == ("c LIKE ? ESCAPE '\\'", Any["a\\_b%"])
+    @test B.insert_sql(g, "t", String[]) == "INSERT INTO t DEFAULT VALUES"
+    @test B.sql_literal(g, true) == "TRUE" && B.sql_literal(g, "it's") == "'it''s'"
+    @test B.limit_offset_sql(B.SQLiteBackend(""), nothing, 5) == " LIMIT -1 OFFSET 5"
+    @test B.column_type(B.SQLiteBackend(""), :bool, nothing) == "INTEGER"
+
+    # the ORM end-to-end through numbered placeholders
+    old = settings.DATABASE
+    try
+        configure!(DATABASE = nb)
+        @test B.backend() === nb
+        migrate(verbose = false)
+        a = create(Author; name = "Num", email = "n@x.io")
+        for i in 1:5
+            create(Article; title = "Post $i", body = i == 3 ? "50% off_now" : "body", author = a,
+                   published = isodd(i))
+        end
+        @test count(filter(Article; author__name = "Num")) == 5
+        @test count(filter(Article; published = true)) == 3
+        @test count(filter(Article; body__contains = "50% off_")) == 1
+        @test count(filter(Article; body__icontains = "OFF_NOW")) == 1
+        @test count(filter(Article; body__contains = "x%")) == 0
+        @test count(filter(Article; title__startswith = "Post")) == 5
+        @test count(filter(Article; title__endswith = "4")) == 1
+        @test count(filter(Article; created__year = year(now()))) == 5 && count(filter(Article; created__day = 40)) == 0
+        @test count(filter(Article; id__in = Int[])) == 0
+        @test count(none(objects(Article))) == 0
+        @test [x.title for x in order_by(Article, "id")[2:3]] == ["Post 2", "Post 3"]
+        @test aggregate(objects(Article), :max, :views) == 0
+        @test update!(filter(Article; published = false); views = 7) == 2
+        @test count(filter(Article; views = 7)) == 2
+        @test_throws ErrorException atomic() do
+            create(Author; name = "Rolled back")
+            error("boom")
+        end
+        @test !exists(filter(Author; name = "Rolled back"))
+        @test delete!(a) isa Author && count(objects(Article)) == 0
+    finally
+        configure!(DATABASE = old)
+    end
+    @test B.backend() isa B.SQLiteBackend
 end
 
 @testset "startproject" begin

@@ -374,7 +374,6 @@ const LOOKUPS = Set(["exact", "iexact", "contains", "icontains", "startswith", "
                      "endswith", "iendswith", "gt", "gte", "lt", "lte", "in", "isnull", "range",
                      "year", "month", "day", "ne"])
 
-escape_like(s) = replace(string(s), "\\" => "\\\\", "%" => "\\%", "_" => "\\_")
 
 struct LookupError <: Exception
     msg::String
@@ -394,7 +393,7 @@ function compile_lookup(T::Type, key::Symbol, value)
 
     if fname == "id"
         f = nothing
-        col = "$tbl.\"id\""
+        col = "$tbl.$(qname("id"))"
     else
         f = findfield(meta, Symbol(fname))
         if f === nothing
@@ -403,7 +402,7 @@ function compile_lookup(T::Type, key::Symbol, value)
                 if string(rn) == fname || lowercase(string(nameof(M))) == fname
                     subkey = Symbol(join(isempty(rest) ? ["id", lookup] : vcat(rest, lookup), "__"))
                     sql, ps = compile_lookup(M, subkey, value)
-                    return ("$tbl.\"id\" IN (SELECT $(qname(column(rf))) FROM $(qname(modelmeta(M).table)) WHERE $sql)", ps)
+                    return ("$tbl.$(qname("id")) IN (SELECT $(qname(column(rf))) FROM $(qname(modelmeta(M).table)) WHERE $sql)", ps)
                 end
             end
             names = join(vcat(["id"], [string(x.name) for x in meta.fields]), ", ")
@@ -413,7 +412,7 @@ function compile_lookup(T::Type, key::Symbol, value)
             f.kind === :fk || throw(LookupError("'$fname' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
             R = related_model(f)
             sql, ps = compile_lookup(R, Symbol(join(vcat(rest, lookup), "__")), value)
-            return ("$tbl.$(qname(column(f))) IN (SELECT \"id\" FROM $(qname(modelmeta(R).table)) WHERE $sql)", ps)
+            return ("$tbl.$(qname(column(f))) IN (SELECT $(qname("id")) FROM $(qname(modelmeta(R).table)) WHERE $sql)", ps)
         end
         col = "$tbl.$(qname(column(f)))"
     end
@@ -425,31 +424,18 @@ function compile_lookup(T::Type, key::Symbol, value)
     elseif lookup == "ne"
         value === nothing && return ("$col IS NOT NULL", Any[])
         return ("($col != ? OR $col IS NULL)", Any[conv(value)])
-    elseif lookup == "iexact"
-        return ("LOWER($col) = LOWER(?)", Any[conv(value)])
-    elseif lookup == "contains"
-        return ("instr($col, ?) > 0", Any[string(value)])
-    elseif lookup == "icontains"
-        return ("LOWER($col) LIKE ? ESCAPE '\\'", Any["%" * escape_like(lowercase(string(value))) * "%"])
-    elseif lookup == "startswith"
-        return ("substr($col, 1, ?) = ?", Any[length(string(value)), string(value)])
-    elseif lookup == "istartswith"
-        return ("LOWER($col) LIKE ? ESCAPE '\\'", Any[escape_like(lowercase(string(value))) * "%"])
-    elseif lookup == "endswith"
-        s = string(value)
-        return (isempty(s) ? "1" : "substr($col, -?) = ?", isempty(s) ? Any[] : Any[length(s), s])
-    elseif lookup == "iendswith"
-        return ("LOWER($col) LIKE ? ESCAPE '\\'", Any["%" * escape_like(lowercase(string(value)))])
+    elseif lookup in ("iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith")
+        return lookup_sql(backend(), Val(Symbol(lookup)), col, value)
     elseif lookup in ("gt", "gte", "lt", "lte")
         op = Dict("gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=")[lookup]
         return ("$col $op ?", Any[conv(value)])
     elseif lookup == "in"
         if value isa QuerySet
-            sql, ps = select_sql(value; columns = "$(qname(modelmeta(model_of(value)).table)).\"id\"")
+            sql, ps = select_sql(value; columns = "$(qname(modelmeta(model_of(value)).table)).$(qname("id"))")
             return ("$col IN ($sql)", ps)
         end
         vals = collect(value)
-        isempty(vals) && return ("0", Any[])
+        isempty(vals) && return (sql_false(backend()), Any[])
         return ("$col IN (" * join(fill("?", length(vals)), ", ") * ")", Any[conv(v) for v in vals])
     elseif lookup == "isnull"
         return (truthy(value) ? "$col IS NULL" : "$col IS NOT NULL", Any[])
@@ -457,8 +443,7 @@ function compile_lookup(T::Type, key::Symbol, value)
         lo, hi = value
         return ("$col BETWEEN ? AND ?", Any[conv(lo), conv(hi)])
     elseif lookup in ("year", "month", "day")
-        fmt = Dict("year" => "%Y", "month" => "%m", "day" => "%d")[lookup]
-        return ("CAST(strftime('$fmt', $col) AS INTEGER) = ?", Any[Int(value)])
+        return lookup_sql(backend(), Val(Symbol(lookup)), col, value)
     end
     throw(LookupError("unsupported lookup '$lookup'"))
 end
@@ -550,11 +535,11 @@ function order_clause(T::Type, order::Vector{String})
     tbl = qname(modelmeta(T).table)
     parts = String[]
     for o in order
-        o == "?" && (push!(parts, "RANDOM()"); continue)
+        o == "?" && (push!(parts, random_function(backend())); continue)
         desc = startswith(o, "-")
         name = lstrip(o, '-')
         col = if name in ("id", "pk")
-            "\"id\""
+            qname("id")
         else
             f = findfield(modelmeta(T), Symbol(name))
             f === nothing && throw(LookupError("cannot order $T by unknown field '$name'"))
@@ -566,7 +551,7 @@ function order_clause(T::Type, order::Vector{String})
 end
 
 function where_clause(qs::QuerySet{T}) where {T}
-    qs.isnone && return " WHERE 0", Any[]
+    qs.isnone && return " WHERE " * sql_false(backend()), Any[]
     isempty(qs.where) && return "", Any[]
     sql, ps = compile_q(T, Q(:AND, Any[qs.where...], false))
     " WHERE " * sql, ps
@@ -576,9 +561,7 @@ function select_sql(qs::QuerySet{T}; columns = "$(qname(modelmeta(T).table)).*",
     w, ps = where_clause(qs)
     sql = "SELECT $columns FROM $(qname(modelmeta(T).table))$w"
     ordered && (sql *= order_clause(T, qs.order))
-    if qs.limit !== nothing || qs.offset > 0
-        sql *= " LIMIT $(something(qs.limit, -1)) OFFSET $(qs.offset)"
-    end
+    sql *= limit_offset_sql(backend(), qs.limit, qs.offset)
     sql, ps
 end
 
@@ -606,7 +589,7 @@ end
 function Base.count(qs::QuerySet{T}) where {T}
     qs.isnone && return 0
     sql, ps = select_sql(qs; columns = "1", ordered = false)
-    execute("SELECT COUNT(*) AS n FROM ($sql)", ps)[1][:n]
+    execute("SELECT COUNT(*) AS n FROM ($sql) AS juango_sub", ps)[1][:n]
 end
 Base.count(::Type{T}) where {T<:Model} = count(objects(T))
 Base.length(qs::QuerySet) = count(qs)
@@ -702,9 +685,9 @@ SQL aggregate over a column: `func` is `:count`, `:sum`, `:avg`, `:min` or `:max
 """
 function aggregate(qs::QuerySet{T}, func::Symbol, field::Symbol) where {T}
     func in (:count, :sum, :avg, :min, :max) || throw(ArgumentError("unknown aggregate $func"))
-    col = field in (:id, :pk) ? "\"id\"" : qname(column(getfield_meta(T, field)))
+    col = field in (:id, :pk) ? qname("id") : qname(column(getfield_meta(T, field)))
     sql, ps = select_sql(qs; columns = "$col AS v", ordered = false)
-    execute("SELECT $(uppercase(string(func)))(v) AS r FROM ($sql)", ps)[1][:r]
+    execute("SELECT $(uppercase(string(func)))(v) AS r FROM ($sql) AS juango_sub", ps)[1][:r]
 end
 
 """
@@ -723,8 +706,8 @@ function update!(qs::QuerySet{T}; kw...) where {T}
         push!(ps, to_db(f, v))
     end
     isempty(sets) && return 0
-    sub, sps = select_sql(qs; columns = "$(qname(meta.table)).\"id\"", ordered = false)
-    execute_changes("UPDATE $(qname(meta.table)) SET $(join(sets, ", ")) WHERE \"id\" IN ($sub)", vcat(ps, sps))
+    sub, sps = select_sql(qs; columns = "$(qname(meta.table)).$(qname("id"))", ordered = false)
+    execute_changes("UPDATE $(qname(meta.table)) SET $(join(sets, ", ")) WHERE $(qname("id")) IN ($sub)", vcat(ps, sps))
 end
 
 struct ProtectedError <: Exception
@@ -746,7 +729,7 @@ function delete_ids!(T::Type, ids::Vector)
     end
     n = 0
     for chunk in Iterators.partition(ids, 500)
-        n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE \"id\" IN (" *
+        n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE $(qname("id")) IN (" *
                              join(fill("?", length(chunk)), ",") * ")", collect(chunk))
     end
     n
@@ -788,16 +771,14 @@ function save!(obj::T) where {T<:Model}
     vals = Any[to_db(f, data[attname(f)]) for f in meta.fields]
     tbl = qname(meta.table)
     if data[:id] !== nothing
-        n = isempty(cols) ? length(execute("SELECT 1 FROM $tbl WHERE \"id\" = ?", [data[:id]])) :
-            execute_changes("UPDATE $tbl SET " * join(["$c = ?" for c in cols], ", ") * " WHERE \"id\" = ?",
+        n = isempty(cols) ? length(execute("SELECT 1 FROM $tbl WHERE $(qname("id")) = ?", [data[:id]])) :
+            execute_changes("UPDATE $tbl SET " * join(["$c = ?" for c in cols], ", ") * " WHERE $(qname("id")) = ?",
                             vcat(vals, data[:id]))
         n > 0 && return obj
-        execute_insert("INSERT INTO $tbl (\"id\"" * join(", " .* cols) * ") VALUES (?" * ", ?"^length(cols) * ")",
-                       vcat(data[:id], vals))
+        execute_insert(insert_sql(backend(), tbl, vcat(qname("id"), cols)), vcat(data[:id], vals))
         return obj
     end
-    data[:id] = isempty(cols) ? execute_insert("INSERT INTO $tbl DEFAULT VALUES") :
-                execute_insert("INSERT INTO $tbl (" * join(cols, ", ") * ") VALUES (" * join(fill("?", length(cols)), ", ") * ")", vals)
+    data[:id] = execute_insert(insert_sql(backend(), tbl, cols), vals)
     obj
 end
 
@@ -900,13 +881,9 @@ end
 
 # --- schema / migrations ----------------------------------------------------------------
 
-sqltype(f::Field) = f.kind in (:int, :bool, :fk) ? "INTEGER" : f.kind === :float ? "REAL" : "TEXT"
+sqltype(f::Field) = column_type(backend(), f.kind, f.max_length)
 
-function sql_literal(f::Field, v)
-    v === nothing && return "NULL"
-    p = to_db(f, v)
-    p isa Number ? string(p) : "'" * replace(string(p), "'" => "''") * "'"
-end
+sql_literal(f::Field, v) = v === nothing ? "NULL" : sql_literal(backend(), to_db(f, v))
 
 function column_def(f::Field; adding = false)
     s = qname(column(f)) * " " * sqltype(f)
@@ -919,7 +896,7 @@ function column_def(f::Field; adding = false)
     d === nothing || (s *= " DEFAULT " * sql_literal(f, d))
     if f.kind === :fk
         R = related_model(f)
-        s *= " REFERENCES $(qname(modelmeta(R).table)) (\"id\")"
+        s *= " REFERENCES $(qname(modelmeta(R).table)) ($(qname("id")))"
     end
     s
 end
@@ -938,7 +915,7 @@ function index_statements(T::Type)
 end
 
 "SQL that creates the table for `T`."
-create_table_sql(T::Type) = "CREATE TABLE IF NOT EXISTS $(qname(modelmeta(T).table)) (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT" *
+create_table_sql(T::Type) = "CREATE TABLE IF NOT EXISTS $(qname(modelmeta(T).table)) ($(autoincrement_pk(backend()))" *
                             join(", " .* [column_def(f) for f in modelmeta(T).fields]) * ")"
 
 """
@@ -956,13 +933,13 @@ function migrate(; verbose = true, models = all_models())
     atomic() do
         for T in models
             meta = modelmeta(T)
-            exists_ = !isempty(execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", [meta.table]))
+            exists_ = table_exists(backend(), meta.table)
             if !exists_
                 execute(create_table_sql(T))
                 log("  Creating table $(meta.table)... OK")
                 changed = true
             else
-                cols = Set(String(r[:name]) for r in execute("PRAGMA table_info($(qname(meta.table)))"))
+                cols = Set(table_columns(backend(), meta.table))
                 for f in meta.fields
                     column(f) in cols && continue
                     execute("ALTER TABLE $(qname(meta.table)) ADD COLUMN " * column_def(f; adding = true))

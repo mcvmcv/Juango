@@ -96,6 +96,23 @@ Computed attributes for templates (and `obj.name` in Julia) use `tattr`:
 Juango.tattr(p::Post, ::Val{:summary}) = first(p.body, 100)
 ```
 
+### Database backends
+
+The ORM talks to the database through a `DatabaseBackend`. Each backend supplies the driver calls, its SQL dialect (quoting, column types, lookups, `LIMIT`, inserts that return ids) and the introspection that `migrate()` needs. SQL is written by hand, with no query builder in between.
+
+```julia
+configure!(DATABASE = "db.sqlite3")             # SQLite file (the default backend)
+configure!(DATABASE = ":memory:")               # in-memory SQLite
+configure!(DATABASE = "sqlite:///db.sqlite3")   # the same, as a URL
+configure!(DATABASE = MyBackend(...))           # any DatabaseBackend instance
+```
+
+Write raw SQL with `?` placeholders: `Juango.execute("SELECT * FROM post WHERE id = ?", [1])`. Each backend rewrites `?` into its own placeholder style. Constraint violations raise `IntegrityError` on every backend.
+
+To add a backend, subtype `Juango.DatabaseBackend`, implement the driver methods, override any dialect methods that differ from standard SQL, and call `register_backend!("scheme", url -> MyBackend(url))`. The interface is documented at the top of `src/db.jl`, and `src/backends/sqlite.jl` is the reference implementation. PostgreSQL ([#2](https://github.com/mcvmcv/Juango/issues/2)) is next.
+
+Run the test suite against a different database with `JUANGO_TEST_DATABASE=<setting> julia --project -e 'using Pkg; Pkg.test()'`.
+
 ### URLs and views
 
 Views are plain functions `req -> response`. URL captures arrive as keyword arguments. A view may also return a `String` (HTML) or a `Dict`/`Vector`, which becomes JSON.
@@ -201,12 +218,12 @@ The client keeps cookies, skips CSRF unless you pass `Client(enforce_csrf=true)`
 
 ## Settings
 
-Set them with `configure!(...)` and read them with `settings.NAME`. The main ones: `DEBUG`, `SECRET_KEY`, `DATABASE` (path or `":memory:"`), `ROOT_URLCONF`, `TEMPLATE_DIRS`, `STATIC_URL`, `STATIC_DIRS`, `ALLOWED_HOSTS`, `MIDDLEWARE`, `CONTEXT_PROCESSORS`, `LOGIN_URL`, `LOGIN_REDIRECT_URL`, `APPEND_SLASH`, `SESSION_COOKIE_AGE`, `PASSWORD_ITERATIONS`, `SQL_DEBUG`. Any extra keyword becomes a custom setting.
+Set them with `configure!(...)` and read them with `settings.NAME`. The main ones: `DEBUG`, `SECRET_KEY`, `DATABASE` (a SQLite path, `":memory:"`, a `scheme://` URL, or a backend instance), `ROOT_URLCONF`, `TEMPLATE_DIRS`, `STATIC_URL`, `STATIC_DIRS`, `ALLOWED_HOSTS`, `MIDDLEWARE`, `CONTEXT_PROCESSORS`, `LOGIN_URL`, `LOGIN_REDIRECT_URL`, `APPEND_SLASH`, `SESSION_COOKIE_AGE`, `PASSWORD_ITERATIONS`, `SQL_DEBUG`. Any extra keyword becomes a custom setting.
 
 ## Differences from Django (current limitations)
 
 - **Migrations sync the schema; they are not versioned.** `migrate` creates missing tables, columns and indexes, and reports columns that are no longer used. It never renames or drops anything. Write SQL by hand for those changes (`Juango.execute(sql, params)`).
-- **SQLite only.** The SQL layer lives in `db.jl`/`orm.jl` and is small, so a Postgres backend is a feasible addition.
+- **SQLite only, for now.** The backend interface exists. PostgreSQL via LibPQ.jl is [#2](https://github.com/mcvmcv/Juango/issues/2).
 - No many-to-many fields, `select_related`, annotations or `F()` expressions yet. Aggregates go through `aggregate(qs, :sum, :field)`.
 - No `INSTALLED_APPS`/app registry. A project is a set of Julia files you `include`, as in the `startproject` layout.
 - File uploads: multipart fields are parsed, and uploaded files are exposed raw in `req.meta[:FILES]`. There is no `FileField`.
@@ -222,7 +239,8 @@ src/
   http.jl        Request/HttpResponse    sessions.jl  DB-backed sessions
   urls.jl        path/resolve/reverse    auth.jl      User, hashing, login views
   template.jl    template language       middleware.jl  middleware, CSRF
-  db.jl          SQLite connection       views.jl     shortcuts, generic views
+  db.jl          backend interface       views.jl     shortcuts, generic views
+  backends/      sqlite.jl
   handler.jl     request pipeline        admin.jl     the admin
   server.jl      HTTP server             management.jl  CLI, startproject
   testclient.jl  test Client             templates/   built-in admin templates

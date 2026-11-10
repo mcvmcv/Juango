@@ -4,7 +4,7 @@
 A Django-inspired web framework for Julia.
 
 Batteries included: URL routing, a Django-compatible template language, an ORM on
-SQLite, forms, sessions, authentication, CSRF protection, middleware, messages,
+pluggable database backends (SQLite built in), forms, sessions, authentication, CSRF protection, middleware, messages,
 generic views, an automatic admin, a test client and a management CLI.
 """
 module Juango
@@ -27,6 +27,7 @@ include("http.jl")
 include("urls.jl")
 include("template.jl")
 include("db.jl")
+include("backends/sqlite.jl")
 include("orm.jl")
 include("forms.jl")
 include("sessions.jl")
@@ -58,7 +59,7 @@ export Template, render_to_string, get_template, mark_safe, SafeString, register
 export Model, @model, Field, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
        FloatField, BooleanField, DateTimeField, DateField, ForeignKey, Q, QuerySet, objects,
        exclude, order_by, exists, values_list, update!, create, get_or_create, update_or_create,
-       save!, refresh!, full_clean, aggregate, none, migrate, atomic, DoesNotExist,
+       save!, refresh!, full_clean, aggregate, none, migrate, atomic, IntegrityError, DoesNotExist,
        MultipleObjectsReturned, ProtectedError, get_absolute_url
 # forms
 export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data
