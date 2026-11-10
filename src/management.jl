@@ -123,6 +123,48 @@ function cmd_check(args)
     issues
 end
 
+# migrate [app] [target] [--fake] [--sync]
+function cmd_migrate(args)
+    pos, flags = parse_flags(args)
+    app, target = nothing, nothing
+    if length(pos) >= 2
+        app, target = pos[1], pos[2]
+    elseif length(pos) == 1
+        if pos[1] in Migrations.known_apps()
+            app, target = pos[1], nothing
+        else
+            app, target = "project", pos[1]
+        end
+    end
+    if app !== nothing && target === nothing
+        # "migrate juango": everything pending for that app (and what it depends on)
+        g = Migrations.build_graph()
+        ks = [k for k in Migrations.topo_order(g) if k[1] == app]
+        isempty(ks) && return println("App '$app' has no migrations.")
+        target = last(ks)[2]
+    end
+    migrate(; app = app, target = target, fake = haskey(flags, "fake"), sync = haskey(flags, "sync"))
+end
+
+# makemigrations [--app NAME] [--name NAME] [--empty] [--merge] [--dry-run] [--check] [--noinput]
+function cmd_makemigrations(args)
+    _, flags = parse_flags(args)
+    q = haskey(flags, "noinput") || haskey(flags, "no-input") ? (_ -> false) : Migrations.ask
+    paths = makemigrations(; app = get(flags, "app", "project"), name = get(flags, "name", nothing),
+                           empty = haskey(flags, "empty"), merge = haskey(flags, "merge"),
+                           dry_run = haskey(flags, "dry-run"), check = haskey(flags, "check"), questioner = q)
+    haskey(flags, "check") && !isempty(paths) && exit(1)
+    paths
+end
+
+# sqlmigrate [app] name [--backwards]
+function cmd_sqlmigrate(args)
+    pos, flags = parse_flags(args)
+    isempty(pos) && error("usage: sqlmigrate [app] <migration> [--backwards]")
+    app, name = length(pos) >= 2 ? (pos[1], pos[2]) : ("project", pos[1])
+    println(sqlmigrate(app, name; backwards = haskey(flags, "backwards")))
+end
+
 function cmd_help(args)
     println("Usage: julia --project manage.jl <command> [options]\n\nAvailable commands:")
     for k in sort(collect(keys(COMMANDS)))
@@ -138,7 +180,10 @@ end
 
 for (n, h, f) in (
     ("runserver", "Start the development server: runserver [host:]port", cmd_runserver),
-    ("migrate", "Create/update database tables for all models", _ -> migrate()),
+    ("migrate", "Apply migrations: migrate [app] [target|zero] [--fake] [--sync]", cmd_migrate),
+    ("makemigrations", "Write migrations for model changes (--name, --empty, --merge, --dry-run, --check, --noinput, --app)", cmd_makemigrations),
+    ("showmigrations", "List migrations and whether they are applied", _ -> showmigrations()),
+    ("sqlmigrate", "Print the SQL for a migration: sqlmigrate [app] <name> [--backwards]", cmd_sqlmigrate),
     ("createsuperuser", "Create an admin user (--username, --email, --password, --noinput)", cmd_createsuperuser),
     ("showurls", "List all URL patterns", cmd_showurls),
     ("sqlschema", "Print the SQL schema for all models", _ -> println(schema_sql())),
@@ -220,6 +265,7 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
             # For PostgreSQL: Pkg.add("LibPQ"), add `using LibPQ` to project.jl, then
             # DATABASE = "postgresql://user:password@localhost:5432/$name",
             DATABASE = joinpath(BASE_DIR, "db.sqlite3"),
+            MIGRATIONS_DIR = joinpath(BASE_DIR, "migrations"),
             ROOT_URLCONF = urlpatterns,
             TEMPLATE_DIRS = [joinpath(BASE_DIR, "templates")],
             STATIC_DIRS = [joinpath(BASE_DIR, "static")],
@@ -227,7 +273,9 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
         )
         """,
         "models.jl" => """
-        # Define your models here, then run: julia --project manage.jl migrate
+        # Define your models here, then run:
+        #     julia --project manage.jl makemigrations
+        #     julia --project manage.jl migrate
 
         @model struct Note
             title = CharField(max_length = 200)
@@ -304,6 +352,7 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
 
     Next steps:
       cd $root
+      julia --project manage.jl makemigrations
       julia --project manage.jl migrate
       julia --project manage.jl createsuperuser
       julia --project manage.jl runserver

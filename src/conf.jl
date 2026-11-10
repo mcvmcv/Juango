@@ -42,6 +42,8 @@ function default_settings()
         :CSRF_TRUSTED_ORIGINS => String[],
         :PASSWORD_ITERATIONS => 260_000,
         :SQL_DEBUG => false,
+        :MIGRATIONS_DIR => "migrations",
+        :MIGRATION_MODULES => Dict{String,String}(),
         :SITE_NAME => "Juango",
     )
 end

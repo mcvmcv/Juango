@@ -57,6 +57,17 @@ for (L, pre, post) in ((:icontains, "%", "%"), (:istartswith, "", "%"), (:iendsw
         ("$col ILIKE ? ESCAPE '\\'", Any[$pre * escape_like(string(v)) * $post])
 end
 
+alter_column_type_sql(b::PostgresBackend, table, col, ty) =
+    "ALTER TABLE $(quote_name(b, table)) ALTER COLUMN $(quote_name(b, col)) TYPE $ty USING $(quote_name(b, col))::$ty"
+
+foreign_key_names(::PostgresBackend, table, col) =
+    [String(r[:conname]) for r in execute("""
+        SELECT con.conname FROM pg_constraint con
+        JOIN pg_class rel ON rel.oid = con.conrelid
+        JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+        JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = ANY(con.conkey)
+        WHERE con.contype = 'f' AND ns.nspname = current_schema() AND rel.relname = ? AND att.attname = ?""", [table, col])]
+
 table_exists(::PostgresBackend, table) =
     !isempty(execute("SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?", [table]))
 table_columns(::PostgresBackend, table) =

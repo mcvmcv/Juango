@@ -158,6 +158,19 @@ function constraint_name(parts...)
     first(s, 54) * "_" * h
 end
 
+"""
+Whether `ALTER TABLE` can drop and alter columns. When `false` (SQLite), migrations rebuild
+the table instead (create a copy, move the rows, swap).
+"""
+can_alter_table(::DatabaseBackend) = true
+
+"Change a column's type."
+alter_column_type_sql(b::DatabaseBackend, table, col, ty) =
+    "ALTER TABLE $(quote_name(b, table)) ALTER COLUMN $(quote_name(b, col)) TYPE $ty"
+
+"Names of the foreign key constraints on a column (needed to drop them)."
+foreign_key_names(::DatabaseBackend, table, col) = String[]
+
 "LIMIT/OFFSET clause (with leading space), or an empty string."
 function limit_offset_sql(::DatabaseBackend, limit, offset)
     s = limit === nothing ? "" : " LIMIT $limit"

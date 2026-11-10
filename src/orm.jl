@@ -97,10 +97,24 @@ mutable struct ModelMeta
     ordering::Vector{String}
     verbose_name::String
     verbose_name_plural::String
+    app::String
 end
 
 const MODEL_REGISTRY = Dict{Any,ModelMeta}()
 const MODEL_LIST = Any[]
+
+"""
+App a model belongs to for migrations: `Meta(app_label=...)`, else `\"juango\"` for Juango's
+built-in models and `\"project\"` for everything else.
+"""
+default_app_label(T) = parentmodule(T) === (@__MODULE__) ? "juango" : "project"
+
+"Remove a model from the registry (mostly for tests that redefine models)."
+function unregister_model!(T::Type)
+    delete!(MODEL_REGISTRY, T)
+    filter!(x -> x !== T, MODEL_LIST)
+    nothing
+end
 
 "Metadata for a model type."
 function modelmeta(T::Type)
@@ -147,7 +161,8 @@ function register_model!(T::Type, fields::Vector, meta::NamedTuple = NamedTuple(
     vname = get(meta, :verbose_name, lowercase(replace(name, r"(?<=[a-z])(?=[A-Z])" => " ")))
     m = ModelMeta(T, name, string(get(meta, :table, lowercase(name))), fs,
                   String[string(o) for o in get(meta, :ordering, String[])],
-                  string(vname), string(get(meta, :verbose_name_plural, vname * "s")))
+                  string(vname), string(get(meta, :verbose_name_plural, vname * "s")),
+                  string(get(meta, :app_label, default_app_label(T))))
     MODEL_REGISTRY[T] = m
     filter!(x -> !(x === T || string(nameof(x)) == name && parentmodule(x) == parentmodule(T)), MODEL_LIST)
     push!(MODEL_LIST, T)
@@ -879,100 +894,3 @@ function full_clean(obj::T; exclude = Symbol[]) where {T<:Model}
     end
     errors
 end
-
-# --- schema / migrations ----------------------------------------------------------------
-
-sqltype(f::Field) = column_type(backend(), f.kind, f.max_length)
-
-sql_literal(f::Field, v) = v === nothing ? "NULL" : sql_literal(backend(), to_db(f, v))
-
-function column_def(f::Field; adding = false, inline_fk = inline_foreign_keys(backend()))
-    s = qname(column(f)) * " " * sqltype(f)
-    f.null || (s *= " NOT NULL")
-    d = f.default isa NoDefault || f.default isa Function ? nothing : f.default
-    if d === nothing && adding && !f.null
-        d = f.kind in STRING_KINDS ? "" : f.kind in (:int, :float, :bool, :fk) ? 0 :
-            f.kind === :datetime ? DateTime(1970) : f.kind === :date ? Date(1970) : nothing
-    end
-    d === nothing || (s *= " DEFAULT " * sql_literal(f, d))
-    if f.kind === :fk && inline_fk
-        R = related_model(f)
-        s *= " REFERENCES $(qname(modelmeta(R).table)) ($(qname("id")))"
-    end
-    s
-end
-
-"ALTER TABLE statements for foreign keys, on backends that don't declare them inline."
-function foreign_key_statements(T::Type, fields = modelmeta(T).fields)
-    inline_foreign_keys(backend()) && return String[]
-    t = modelmeta(T).table
-    [foreign_key_sql(backend(), t, column(f), modelmeta(related_model(f)).table) for f in fields if f.kind === :fk]
-end
-
-function index_statements(T::Type)
-    meta = modelmeta(T)
-    out = String[]
-    for f in meta.fields
-        if f.unique
-            push!(out, "CREATE UNIQUE INDEX IF NOT EXISTS $(qname(constraint_name(meta.table, column(f), "uniq"))) ON $(qname(meta.table)) ($(qname(column(f))))")
-        elseif f.db_index
-            push!(out, "CREATE INDEX IF NOT EXISTS $(qname(constraint_name(meta.table, column(f), "idx"))) ON $(qname(meta.table)) ($(qname(column(f))))")
-        end
-    end
-    out
-end
-
-"SQL that creates the table for `T`."
-create_table_sql(T::Type) = "CREATE TABLE IF NOT EXISTS $(qname(modelmeta(T).table)) ($(autoincrement_pk(backend()))" *
-                            join(", " .* [column_def(f) for f in modelmeta(T).fields]) * ")"
-
-"""
-    migrate(; verbose=true, models=all_models())
-
-Synchronise the database schema with the registered models: creates missing
-tables, adds missing columns and indexes. Columns are never dropped; columns that
-exist in the database but not in the model are reported.
-"""
-function migrate(; verbose = true, models = all_models())
-    log(msg) = verbose && println(msg)
-    log("Operations to perform:\n  Synchronize models: " * join(string.(nameof.(models)), ", "))
-    log("Running migrations:")
-    changed = false
-    atomic() do
-        fks = String[]      # added once all tables exist, so tables can reference each other in any order
-        for T in models
-            meta = modelmeta(T)
-            exists_ = table_exists(backend(), meta.table)
-            if !exists_
-                execute(create_table_sql(T))
-                append!(fks, foreign_key_statements(T))
-                log("  Creating table $(meta.table)... OK")
-                changed = true
-            else
-                cols = Set(table_columns(backend(), meta.table))
-                for f in meta.fields
-                    column(f) in cols && continue
-                    execute("ALTER TABLE $(qname(meta.table)) ADD COLUMN " * column_def(f; adding = true))
-                    append!(fks, foreign_key_statements(T, [f]))
-                    log("  Adding column $(meta.table).$(column(f))... OK")
-                    changed = true
-                end
-                known = Set(vcat(["id"], column.(meta.fields)))
-                for c in setdiff(cols, known)
-                    log("  Note: column $(meta.table).$c is no longer used by $(meta.name) (not dropped)")
-                end
-            end
-            for s in index_statements(T)
-                execute(s)
-            end
-        end
-        foreach(execute, fks)
-    end
-    changed || log("  No migrations to apply.")
-    nothing
-end
-
-"The full schema SQL for all registered models (like `sqlmigrate`)."
-schema_sql(models = all_models()) =
-    join(vcat([[create_table_sql(T) * ";"; index_statements(T) .* ";"] for T in models]...,
-              [s * ";" for T in models for s in foreign_key_statements(T)]), "\n")

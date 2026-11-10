@@ -16,7 +16,8 @@ Juango gives Julia the "batteries included" workflow from Django. If you know Dj
 | sessions, auth, `@login_required`, CSRF, messages | sessions, auth, `login_required(view)`, CSRF, messages |
 | `ListView`, `DetailView`, `CreateView`... | same names |
 | `django.contrib.admin` | `Admin.register!(Post; list_display=..., search_fields=...)` |
-| `manage.py runserver / migrate / createsuperuser` | `manage.jl runserver / migrate / createsuperuser` |
+| `manage.py makemigrations / migrate / showmigrations / sqlmigrate` | `manage.jl makemigrations / migrate / showmigrations / sqlmigrate` |
+| `manage.py runserver / createsuperuser` | `manage.jl runserver / createsuperuser` |
 | `django.test.Client` | `Client()` |
 
 ## Quick start
@@ -28,6 +29,7 @@ julia> startproject("mysite")
 
 ```sh
 cd mysite
+julia --project manage.jl makemigrations
 julia --project manage.jl migrate
 julia --project manage.jl createsuperuser
 julia --project manage.jl runserver        # http://127.0.0.1:8000/  and  /admin/
@@ -69,7 +71,7 @@ end
 Base.show(io::IO, p::Post) = print(io, p.title)               # like __str__
 Juango.get_absolute_url(p::Post) = reverse_url("post"; slug=p.slug)
 
-migrate()                                                     # create/alter tables
+# julia --project manage.jl makemigrations && julia --project manage.jl migrate
 
 ann  = create(Author; name="Ann")
 post = create(Post; title="Hello", slug="hello", body="...", author=ann)
@@ -95,6 +97,45 @@ Computed attributes for templates (and `obj.name` in Julia) use `tattr`:
 ```julia
 Juango.tattr(p::Post, ::Val{:summary}) = first(p.body, 100)
 ```
+
+### Migrations
+
+Migrations are versioned, reviewable files that move the database schema forwards and backwards:
+
+```sh
+julia --project manage.jl makemigrations          # writes migrations/0002_add_post_status.jl
+julia --project manage.jl sqlmigrate 0002         # the SQL it will run (--backwards for the reverse)
+julia --project manage.jl migrate                 # apply everything pending
+julia --project manage.jl migrate 0001            # go back to 0001, unapplying 0002 and later
+julia --project manage.jl migrate zero            # unapply all of the project's migrations
+julia --project manage.jl showmigrations          # [X] applied, [ ] pending
+```
+
+`makemigrations` compares your models with the state the existing migration files describe and writes the difference as operations. These are `CreateModel`, `DeleteModel`, `RenameModel`, `AddField`, `RemoveField`, `AlterField` and `RenameField`. When a column (or table) disappears and an identical one appears under a new name, it asks whether you renamed it. With `--noinput` the answer is no. A generated file looks like this:
+
+```julia
+using Juango.Migrations
+
+Migration(
+    dependencies = [("project", "0001_initial")],
+    operations = [
+        RenameField("post", "title", "headline"),
+        AddField("post", Column("status", :string; default = "d", max_length = 1)),
+    ],
+)
+```
+
+- **Data migrations.** `makemigrations --empty --name backfill` writes a file to fill in with `RunSQL(forward, backward)` or `RunJulia(forward_fn, backward_fn)`. Prefer raw SQL (`Juango.execute`) inside `RunJulia`. The ORM uses today's model definitions, which may not match the schema at that point in history.
+- **Transactions.** Each migration runs in a transaction. If it fails, nothing is applied.
+- **SQLite.** SQLite can't alter or drop columns in place, so those changes rebuild the table: create a copy, move the rows, then swap. On Postgres they are ordinary `ALTER TABLE` statements.
+- **Backfill.** Adding a NOT NULL column without a default fills existing rows with `""`, `0`, `false` or 1970-01-01, and `makemigrations` says so.
+- **Conflicts.** Two branches that both added a migration conflict. `migrate` refuses to run, and `makemigrations --merge` writes a merge migration.
+- **Checking in CI.** `makemigrations --check` exits with status 1 if models have changes without a migration.
+- **What's tracked.** Only schema attributes are tracked: column type, `null`, database default, `unique`, `db_index` and the foreign key target. Changing `choices`, `help_text` or validators never creates a migration.
+
+**Apps.** Juango's built-in tables (`auth_user`, `juango_session`) are the `juango` app, and their migrations ship with Juango. Your models are the `project` app, stored in `settings.MIGRATIONS_DIR` (`startproject` sets it to `<project>/migrations`). A model can opt into another app with `Meta(app_label = "billing")` plus `MIGRATION_MODULES = Dict("billing" => "path/to/dir")`. Full reusable apps are [#29](https://github.com/mcvmcv/Juango/issues/29).
+
+**No migration files yet?** An app without migration files is synchronised: missing tables and columns are created and nothing is altered, which is how Juango worked before migrations existed. `migrate --sync` does that for every app. When you switch an existing database over, run `makemigrations`, then `migrate`. Initial migrations whose tables already exist are marked as applied ("FAKED") instead of run. `migrate --fake` records migrations without running them, as in Django.
 
 ### Database backends
 
@@ -239,7 +280,7 @@ The client keeps cookies, skips CSRF unless you pass `Client(enforce_csrf=true)`
 
 ### Management commands
 
-`runserver [host:]port`, `migrate`, `createsuperuser`, `changepassword`, `showurls`, `sqlschema`, `check`, `clearsessions`, `help`. Add your own with `Juango.register_command!("name", "help", args -> ...)`.
+`runserver [host:]port`, `makemigrations`, `migrate`, `showmigrations`, `sqlmigrate`, `createsuperuser`, `changepassword`, `showurls`, `sqlschema`, `check`, `clearsessions`, `help`. Add your own with `Juango.register_command!("name", "help", args -> ...)`.
 
 ## Settings
 
@@ -247,7 +288,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 
 ## Differences from Django (current limitations)
 
-- **Migrations sync the schema; they are not versioned.** `migrate` creates missing tables, columns and indexes, and reports columns that are no longer used. It never renames or drops anything. Write SQL by hand for those changes (`Juango.execute(sql, params)`).
+- **Migrations can't be squashed yet.** Migration files describe tables and columns, and there are no historical model classes as in Django, so data migrations use raw SQL or today's models.
 - **SQLite and PostgreSQL only.** MySQL is [#11](https://github.com/mcvmcv/Juango/issues/11). Postgres uses a single connection behind a lock; a connection pool is [#30](https://github.com/mcvmcv/Juango/issues/30).
 - No many-to-many fields, `select_related`, annotations or `F()` expressions yet. Aggregates go through `aggregate(qs, :sum, :field)`.
 - No `INSTALLED_APPS`/app registry. A project is a set of Julia files you `include`, as in the `startproject` layout.
@@ -259,7 +300,9 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 
 ```
 src/
-  Juango.jl      module & exports        orm.jl       models, QuerySet, Q, migrate
+  Juango.jl      module & exports        orm.jl       models, QuerySet, Q
+  schema.jl      schema snapshots, DDL   migrations.jl  makemigrations, migrate
+  migrations/    built-in app's migrations
   conf.jl        settings                forms.jl     Form, ModelForm, widgets
   http.jl        Request/HttpResponse    sessions.jl  DB-backed sessions
   urls.jl        path/resolve/reverse    auth.jl      User, hashing, login views

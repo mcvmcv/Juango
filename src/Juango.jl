@@ -30,6 +30,8 @@ include("db.jl")
 include("backends/sqlite.jl")
 include("backends/postgres.jl")
 include("orm.jl")
+include("schema.jl")
+include("migrations.jl")
 include("forms.jl")
 include("sessions.jl")
 include("auth.jl")
@@ -60,7 +62,8 @@ export Template, render_to_string, get_template, mark_safe, SafeString, register
 export Model, @model, Field, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
        FloatField, BooleanField, DateTimeField, DateField, ForeignKey, Q, QuerySet, objects,
        exclude, order_by, exists, values_list, update!, create, get_or_create, update_or_create,
-       save!, refresh!, full_clean, aggregate, none, migrate, atomic, IntegrityError, DoesNotExist,
+       save!, refresh!, full_clean, aggregate, none, migrate, makemigrations, showmigrations, sqlmigrate,
+       atomic, IntegrityError, DoesNotExist,
        MultipleObjectsReturned, ProtectedError, get_absolute_url
 # forms
 export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data

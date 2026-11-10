@@ -657,6 +657,202 @@ end
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : B.SQLiteBackend)
 end
 
+@testset "migrations" begin
+    M = Juango.Migrations
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("migtest" => dir))
+    function capture(f)
+        path, io = mktemp()
+        r = redirect_stdout(f, io)
+        close(io)
+        r, read(path, String)
+    end
+    quiet(f) = first(capture(f))
+    no = _ -> false
+    b() = Juango.backend()
+    cols(t) = Set(Juango.table_columns(b(), t))
+    hastable(t) = Juango.table_exists(b(), t)
+    writemig(name, code) = write(joinpath(dir, name * ".jl"), "using Juango.Migrations\n" * code)
+    try
+        # --- 0001: initial ---------------------------------------------------------------
+        @eval @model struct MigAuthor
+            name = CharField(max_length = 50)
+            Meta(table = "mig_author", app_label = "migtest")
+        end
+        @eval @model struct MigPostV1
+            title = CharField(max_length = 100)
+            body = TextField(blank = true)
+            obsolete = IntegerField(default = 0)
+            author = ForeignKey(:MigAuthor, on_delete = :CASCADE)
+            Meta(table = "mig_post", app_label = "migtest")
+        end
+        paths = quiet(() -> makemigrations(app = "migtest", questioner = no))
+        @test length(paths) == 1 && basename(paths[1]) == "0001_initial.jl"
+        src = read(paths[1], String)
+        @test occursin("initial = true", src) && occursin("dependencies = []", src)
+        @test findfirst("CreateModel(\"mig_author\"", src)[1] < findfirst("CreateModel(\"mig_post\"", src)[1]
+        @test occursin("Column(\"author_id\", :fk; index = true, references = \"mig_author\")", src)
+        @test quiet(() -> makemigrations(app = "migtest", questioner = no)) == String[]
+        @test occursin("CREATE TABLE \"mig_post\"", sqlmigrate("migtest", "0001"))
+        @test occursin("DROP TABLE", sqlmigrate("migtest", "0001"; backwards = true))
+
+        _, out = capture(() -> migrate())
+        @test occursin("Applying migtest.0001_initial... OK", out)
+        @test cols("mig_post") == Set(["id", "title", "body", "obsolete", "author_id"])
+        rows = M.showmigrations(io = devnull)
+        @test ("migtest", "0001_initial", true) in rows && ("juango", "0001_initial", true) in rows
+        a = create(MigAuthor; name = "Ann")
+        create(MigPostV1; title = "Hello", body = "b", author = a)
+
+        # --- 0002: rename, add, alter, remove, create -------------------------------------
+        Juango.unregister_model!(MigPostV1)
+        @eval @model struct MigPostV2
+            headline = CharField(max_length = 100)
+            body = CharField(max_length = 500, null = true, blank = true)
+            status = CharField(max_length = 1, default = "d")
+            author = ForeignKey(:MigAuthor, on_delete = :CASCADE)
+            Meta(table = "mig_post", app_label = "migtest")
+        end
+        @eval @model struct MigTag
+            label = CharField(max_length = 20, unique = true)
+            post = ForeignKey(:MigPostV2, null = true, on_delete = :SET_NULL)
+            Meta(table = "mig_tag", app_label = "migtest")
+        end
+        _, out = capture(() -> migrate())
+        @test occursin("have changes that are not yet reflected in a migration", out)
+
+        ops = M.detect_changes(M.build_graph(), "migtest"; questioner = no)   # no rename: add + remove
+        @test any(op -> op isa M.AddField && op.column.name == "headline", ops)
+        @test any(op -> op isa M.RemoveField && op.name == "title", ops)
+
+        asked = String[]
+        paths = quiet(() -> makemigrations(app = "migtest", questioner = q -> (push!(asked, q); true)))
+        @test startswith(basename(paths[1]), "0002_")
+        @test any(q -> occursin("mig_post.title renamed to mig_post.headline", q), asked)
+        src = read(paths[1], String)
+        @test occursin("(\"migtest\", \"0001_initial\")", src) && !occursin("initial = true", src)
+        @test occursin("RenameField(\"mig_post\", \"title\", \"headline\")", src)
+        @test occursin("AddField(\"mig_post\", Column(\"status\", :string; default = \"d\", max_length = 1))", src)
+        @test occursin("AlterField(\"mig_post\", Column(\"body\", :string; null = true, max_length = 500))", src)
+        @test occursin("RemoveField(\"mig_post\", \"obsolete\")", src)
+        @test occursin("CreateModel(\"mig_tag\"", src)
+
+        quiet(() -> migrate())
+        @test cols("mig_post") == Set(["id", "headline", "body", "status", "author_id"])
+        r = only(Juango.execute("SELECT \"headline\", \"body\", \"status\" FROM \"mig_post\""))
+        @test r[:headline] == "Hello" && r[:body] == "b" && r[:status] == "d"
+        create(MigTag; label = "x", post = get(MigPostV2; headline = "Hello"))
+        @test_throws IntegrityError create(MigTag; label = "x")
+        @test get(MigPostV2; headline = "Hello").author.name == "Ann"
+
+        # --- backwards and forwards ---------------------------------------------------------
+        create(MigPostV2; headline = "No body", body = nothing, author = a)   # NULL, then body becomes NOT NULL again
+        _, out = capture(() -> migrate(app = "migtest", target = "0001"))
+        @test occursin("Unapplying migtest.0002", out)
+        @test cols("mig_post") == Set(["id", "title", "body", "obsolete", "author_id"]) && !hastable("mig_tag")
+        rs = Juango.execute("SELECT \"title\", \"body\", \"obsolete\" FROM \"mig_post\" ORDER BY \"id\"")
+        @test [r[:title] for r in rs] == ["Hello", "No body"] && [r[:body] for r in rs] == ["b", ""]
+        @test all(r -> r[:obsolete] == 0, rs)
+        quiet(() -> migrate())
+        @test "headline" in cols("mig_post") && hastable("mig_tag")
+        create(MigTag; label = "x", post = get(MigPostV2; headline = "Hello"))   # the table was recreated empty
+
+        # --- renaming a table ---------------------------------------------------------------
+        Juango.unregister_model!(MigTag)
+        @eval @model struct MigLabel
+            label = CharField(max_length = 20, unique = true)
+            post = ForeignKey(:MigPostV2, null = true, on_delete = :SET_NULL)
+            Meta(table = "mig_label", app_label = "migtest")
+        end
+        paths = quiet(() -> makemigrations(app = "migtest", questioner = _ -> true, name = "label"))
+        @test basename(paths[1]) == "0003_label.jl"
+        @test occursin("RenameModel(\"mig_tag\", \"mig_label\"; model = \"MigLabel\")", read(paths[1], String))
+        quiet(() -> migrate())
+        @test hastable("mig_label") && !hastable("mig_tag") && get(MigLabel; label = "x").post.headline == "Hello"
+
+        # --- hand-written data migration ----------------------------------------------------
+        global MIG_FLAG = 0
+        writemig("0004_data", """
+        Migration(
+            dependencies = [("migtest", "0003_label")],
+            operations = [
+                RunSQL("INSERT INTO \\"mig_author\\" (\\"name\\") VALUES ('From SQL')",
+                       "DELETE FROM \\"mig_author\\" WHERE \\"name\\" = 'From SQL'"),
+                RunJulia(() -> (Main.MIG_FLAG += 1), () -> (Main.MIG_FLAG -= 10)),
+            ],
+        )
+        """)
+        quiet(() -> migrate())
+        @test exists(filter(MigAuthor; name = "From SQL")) && MIG_FLAG == 1
+        quiet(() -> migrate(app = "migtest", target = "0003"))
+        @test !exists(filter(MigAuthor; name = "From SQL")) && MIG_FLAG == -9
+        quiet(() -> migrate())
+
+        # irreversible: the failed unapply rolls back and stays recorded
+        writemig("0005_oneway", """
+        Migration(dependencies = [("migtest", "0004_data")],
+                  operations = [RunSQL("UPDATE \\"mig_author\\" SET \\"name\\" = \\"name\\"")])
+        """)
+        quiet(() -> migrate())
+        @test_throws M.IrreversibleError quiet(() -> migrate(app = "migtest", target = "0004"))
+        @test ("migtest", "0005_oneway") in M.applied_migrations()
+        quiet(() -> migrate(app = "migtest", target = "0004", fake = true))
+        @test !(("migtest", "0005_oneway") in M.applied_migrations())
+        quiet(() -> migrate(fake = true))
+
+        # --- conflicts and merging ----------------------------------------------------------
+        writemig("0006_a", "Migration(dependencies = [(\"migtest\", \"0005_oneway\")])")
+        writemig("0006_b", "Migration(dependencies = [(\"migtest\", \"0005_oneway\")])")
+        @test_throws M.MigrationError quiet(() -> migrate())
+        @test_throws M.MigrationError quiet(() -> makemigrations(app = "migtest", questioner = no))
+        paths = quiet(() -> makemigrations(app = "migtest", merge = true))
+        @test basename(paths[1]) == "0007_merge_0006_0006.jl"
+        quiet(() -> migrate())
+        @test ("migtest", "0007_merge_0006_0006") in M.applied_migrations()
+
+        # empty migration template
+        paths = quiet(() -> makemigrations(app = "migtest", empty = true, name = "custom"))
+        @test basename(paths[1]) == "0008_custom.jl" && occursin("# RunSQL(", read(paths[1], String))
+        @test M.load_migration(paths[1], "migtest").dependencies == [("migtest", "0007_merge_0006_0006")]
+        quiet(() -> migrate())
+
+        # check / dry run write nothing
+        @eval @model struct MigExtra
+            n = IntegerField(default = 1)
+            Meta(table = "mig_extra", app_label = "migtest")
+        end
+        n_files = length(readdir(dir))
+        @test length(quiet(() -> makemigrations(app = "migtest", check = true, questioner = no))) == 1
+        @test length(readdir(dir)) == n_files
+        Juango.unregister_model!(MigExtra)
+
+        # --- all the way down ---------------------------------------------------------------
+        @test_throws M.IrreversibleError quiet(() -> migrate(app = "migtest", target = "zero"))
+        quiet(() -> migrate(app = "migtest", target = "0004", fake = true))   # step over the one-way migration
+        quiet(() -> migrate(app = "migtest", target = "zero"))
+        @test !hastable("mig_post") && !hastable("mig_author") && !hastable("mig_label")
+        @test !any(k -> k[1] == "migtest", M.applied_migrations())
+
+        # --- existing tables: the initial migration is faked ---------------------------------
+        fakedir = mktempdir()
+        configure!(MIGRATION_MODULES = Dict("migtest" => dir, "migfake" => fakedir))
+        @eval @model struct MigOld
+            note = CharField(max_length = 10)
+            Meta(table = "mig_old", app_label = "migfake")
+        end
+        quiet(() -> Juango.sync_models!([MigOld]))
+        quiet(() -> makemigrations(app = "migfake", questioner = no))
+        _, out = capture(() -> migrate())
+        @test occursin("Applying migfake.0001_initial... FAKED (tables already exist)", out)
+        quiet(() -> migrate(app = "migfake", target = "zero"))
+        @test !hastable("mig_old")
+        Juango.unregister_model!(MigOld)
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app in ("migtest", "migfake"), Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end
+
 @testset "startproject" begin
     dir = mktempdir()
     root = redirect_stdout(devnull) do

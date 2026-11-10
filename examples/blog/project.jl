@@ -14,6 +14,7 @@ configure!(
     DEBUG = get(ENV, "JUANGO_DEBUG", "true") == "true",
     SECRET_KEY = get(ENV, "JUANGO_SECRET_KEY", "dev-only-not-secret"),
     DATABASE = get(ENV, "BLOG_DB", joinpath(BASE_DIR, "db.sqlite3")),
+    MIGRATIONS_DIR = joinpath(BASE_DIR, "migrations"),
     ROOT_URLCONF = urlpatterns,
     TEMPLATE_DIRS = [joinpath(BASE_DIR, "templates")],
     STATIC_DIRS = [joinpath(BASE_DIR, "static")],
