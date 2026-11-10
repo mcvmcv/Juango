@@ -27,7 +27,11 @@ mutable struct ModelAdmin
     exclude::Vector{Symbol}
     list_per_page::Int
     password_fields::Vector{Symbol}
+    queryset::Any        # nothing, or req -> QuerySet (what the admin lists and edits)
 end
+
+"The objects this admin shows: `objects(Model)` or the `queryset` option."
+admin_queryset(ma::ModelAdmin, req) = ma.queryset === nothing ? objects(ma.model) : ma.queryset(req)
 
 const REGISTRY = Dict{String,ModelAdmin}()
 const ORDER = String[]
@@ -39,15 +43,17 @@ const ORDER = String[]
 Expose a model in the admin. `list_display` entries are field names, `:__str__`,
 or `"Header" => obj -> value` pairs. `password_fields` are rendered as password
 inputs and hashed with `make_password` on save (left unchanged when blank).
+`queryset = req -> filter(...)` limits what the admin lists and edits (by default
+`objects(Model)`, i.e. the model's `default_queryset`).
 """
 function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol[], list_filter = Symbol[],
                    ordering = String[], fields = nothing, exclude = Symbol[], list_per_page = 25,
-                   password_fields = Symbol[])
+                   password_fields = Symbol[], queryset = nothing)
     modelmeta(T)  # validates T is a model
     slug = model_name(T)
     REGISTRY[slug] = ModelAdmin(T, slug, collect(Any, list_display), Symbol.(search_fields), Symbol.(list_filter),
                                 String.(string.(ordering)), fields === nothing ? nothing : Symbol.(fields),
-                                Symbol.(exclude), list_per_page, Symbol.(password_fields))
+                                Symbol.(exclude), list_per_page, Symbol.(password_fields), queryset)
     filter!(!=(slug), ORDER)
     push!(ORDER, slug)
     T
@@ -152,7 +158,7 @@ function filter_specs(req::Request, ma::ModelAdmin)
         elseif f.kind === :fk
             append!(opts_, [(string(o), string(o.id)) for o in objects(related_model(f))[1:100]])
         else
-            vals = unique(values_list(order_by(objects(ma.model), string(name)), name; flat = true))
+            vals = unique(values_list(order_by(admin_queryset(ma, req), string(name)), name; flat = true))
             append!(opts_, [(string(v), string(v)) for v in first(vals, 50) if v !== nothing])
         end
         choices = [Dict{String,Any}("label" => l, "url" => query_with(req, key => v),
@@ -172,7 +178,7 @@ function changelist(req::Request; model)
             message!(req, :warning, "Items must be selected in order to perform actions on them. No items have been changed.")
         else
             try
-                n = delete!(filter(objects(T); id__in = ids))
+                n = delete!(filter(admin_queryset(ma, req); id__in = ids))
                 message!(req, :success, "Successfully deleted $n $(n == 1 ? meta.verbose_name : meta.verbose_name_plural).")
             catch e
                 e isa ProtectedError || rethrow()
@@ -181,7 +187,7 @@ function changelist(req::Request; model)
         end
         return Juango.HttpResponseRedirect(req.path * (isempty(req.query_string) ? "" : "?" * req.query_string))
     end
-    qs = objects(T)
+    qs = admin_queryset(ma, req)
     q = strip(get(req.GET, "q", ""))
     if !isempty(q) && !isempty(ma.search_fields)
         qs = filter(qs, reduce(|, [Q(Symbol(f, "__icontains") => q) for f in ma.search_fields]))
@@ -211,14 +217,15 @@ function changelist(req::Request; model)
     merge!(ctx, Dict{String,Any}(
         "opts" => opts(ma), "headers" => [header_label(ma, c) for c in ma.list_display], "rows" => rows,
         "page_obj" => pg, "paginator" => p, "q" => q, "has_search" => !isempty(ma.search_fields),
-        "filters" => filter_specs(req, ma), "total" => count(T), "result_count" => p.count,
+        "filters" => filter_specs(req, ma), "total" => count(admin_queryset(ma, req)), "result_count" => p.count,
         "prev_url" => pg.has_previous ? query_with(req, "page" => pg.previous_page_number) : nothing,
         "next_url" => pg.has_next ? query_with(req, "page" => pg.next_page_number) : nothing))
     render(req, "admin/change_list.html", ctx)
 end
 
 admin_fields(ma::ModelAdmin) = ma.fields !== nothing ? ma.fields :
-    [f.name for f in modelmeta(ma.model).fields if f.editable && !(f.name in ma.exclude) && !(f.name in ma.password_fields)]
+    [f.name for f in vcat(modelmeta(ma.model).fields, modelmeta(ma.model).m2m)
+     if f.editable && !(f.name in ma.exclude) && !(f.name in ma.password_fields)]
 
 function change_form(req::Request, ma::ModelAdmin, obj)
     T = ma.model
@@ -236,6 +243,7 @@ function change_form(req::Request, ma::ModelAdmin, obj)
             end
         end
         save!(o)
+        Juango.save_m2m!(form)
         verb = adding ? "added" : "changed"
         if haskey(req.POST, "_continue")
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may edit it again below.")
@@ -260,12 +268,12 @@ end
 
 add_view(req::Request; model) = change_form(req, get_admin(model), nothing)
 change_view(req::Request; model, id) =
-    (ma = get_admin(model); change_form(req, ma, Juango.get_object_or_404(ma.model; id = id)))
+    (ma = get_admin(model); change_form(req, ma, Juango.get_object_or_404(admin_queryset(ma, req); id = id)))
 
 function delete_view(req::Request; model, id)
     ma = get_admin(model)
     meta = modelmeta(ma.model)
-    obj = Juango.get_object_or_404(ma.model; id = id)
+    obj = Juango.get_object_or_404(admin_queryset(ma, req); id = id)
     if req.method == "POST"
         name = string(obj)
         try

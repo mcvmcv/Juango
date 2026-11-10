@@ -114,6 +114,64 @@ prefetch_related(objects(Author), Prefetch(:posts; queryset=filter(Post; publish
 
 `select_related` follows forward foreign keys (`:author__profile` works too). `prefetch_related` handles reverse relations and forward foreign keys. A prefetched relation answers iteration, `count`, `first` and `exists` from memory. Filtering it further queries the database again.
 
+#### Many-to-many
+
+```julia
+@model struct Post
+    title = CharField(max_length=200)
+    tags  = ManyToManyField(Tag; related_name=:posts, blank=true)
+end
+
+add!(post.tags, julia, web)      # objects or ids; existing links are skipped
+remove!(post.tags, web)
+set!(post.tags, [julia, db])
+clear!(post.tags)
+post.tags                        # QuerySet{Tag};   tag.posts is QuerySet{Post}
+filter(Post; tags__name="julia")                  # lookups in both directions
+prefetch_related(objects(Post), :tags)            # 2 extra queries for any number of posts
+```
+
+- **Join table.** Juango creates a join table (`post_tags`, unique per pair) that migrations manage like any other table. Deleting either side removes its links.
+- **Custom intermediate model.** Use `through=:Membership` for one with extra fields, and fill those fields with `add!(club.members, ann; through_defaults=Dict(:role => "chair"))`.
+- **Self-referential relations.** `ManyToManyField(:self)` works but isn't symmetrical: adding Bob to Ann's friends doesn't add Ann to Bob's.
+- **Forms and admin.** `ModelForm` renders a multiple select and `save!(form)` saves the relation. After `save!(form; commit=false)`, call `save_m2m!(form)` once the object is saved. The admin does this for you.
+- **`unique_together`.** `Meta(unique_together=[(:code, :batch)])` adds a multi-column unique constraint, and migrations track it (`AlterUniqueTogether`).
+
+#### Expressions, annotations and aggregation
+
+```julia
+update!(filter(Post; id=1); views = F(:views) + 1)              # atomic increment, no race
+filter(Post; updated__gt = F(:created))                         # compare columns
+annotate(objects(Author); n = Count(:posts)) |> filter(n__gt = 2) |> order_by("-n")   # GROUP BY / HAVING
+annotate(objects(Author); published = Count(:posts; filter = Q(posts__published = true)))
+values(objects(Post), :status) |> annotate(n = Count())        # rows like Dict(:status => "p", :n => 12)
+aggregate(objects(Post); total = Sum(:views), avg = Avg(:views))   # Dict(:total => ..., :avg => ...)
+values_list(objects(Post), :title, :author__name)               # tuples; flat=true for one field
+```
+
+- **Aggregates:** `Count`, `Sum`, `Avg`, `Min`, `Max`, with `distinct=` and `filter=`.
+- **Functions:** `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Cast(x, :float)`, `Now()`, and `ExtractYear`/`ExtractMonth`/`ExtractDay`.
+- **Conditionals:** `Case(When(; views__gte=100, then="hot"); default="cold")`.
+- **Arguments:** strings and symbols inside functions are field names, and they can follow relations (`:author__name`). Wrap literals in `Value("...")`.
+- **Subqueries:**
+  - `annotate(objects(Author); latest = Subquery(values(order_by(filter(Post; author=OuterRef(:id)), "-created"), :title)[1:1]))`
+  - `filter(objects(Author), Exists(filter(Post; author=OuterRef(:id))))`, negated with `!Exists(...)`
+- **Window functions:** `annotate(qs; rank = Window(RowNumber(); partition_by=[:author], order_by=["-views"]))`, also with `Rank`, `DenseRank`, `Lag`, `Lead` and aggregates over a window. You can order by them but not filter on them.
+- **`values()` is lazy.** It returns a queryset whose rows are `Dict`s. Aggregates in `annotate` after `values(:field)` group by that field. As in Django, combining aggregates over two different reverse relations multiplies rows, so use `distinct=true`.
+
+#### Managers
+
+```julia
+Juango.default_queryset(::Type{Post}) = filter(base_objects(Post); deleted = false)   # hide soft-deleted rows
+Juango.manager(::Type{Post}, ::Val{:published}) = filter(Post; status = "p")          # objects(Post, :published)
+published(qs::QuerySet{Post}) = filter(qs; status = "p")                              # chainable method:
+objects(Post) |> published |> order_by("-created")
+```
+
+- **`default_queryset`** is what `objects`, `filter(Model; ...)`, reverse relations and the admin see. Build it on `base_objects(Model)`, never on `objects(Model)`, which would recurse.
+- **`base_objects`** is the unfiltered table. Foreign-key access, cascading deletes and uniqueness checks always use it, like Django's base manager.
+- **Admin:** `Admin.register!(Post; queryset = req -> ...)` sets what the admin lists and edits.
+
 Computed attributes for templates (and `obj.name` in Julia) use `tattr`:
 
 ```julia
@@ -319,7 +377,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 
 - **Migrations can't be squashed yet.** Migration files describe tables and columns, and there are no historical model classes as in Django, so data migrations use raw SQL or today's models.
 - **SQLite and PostgreSQL only.** MySQL is [#11](https://github.com/mcvmcv/Juango/issues/11). Postgres uses a single connection behind a lock; a connection pool is [#30](https://github.com/mcvmcv/Juango/issues/30).
-- No many-to-many fields, annotations or `F()` expressions yet. Aggregates go through `aggregate(qs, :sum, :field)`.
+- **ORM features not yet built:** model inheritance, generic relations, symmetrical self-referential many-to-many, and filtering on window functions.
 - No `INSTALLED_APPS`/app registry. A project is a set of Julia files you `include`, as in the `startproject` layout.
 - File uploads: multipart fields are parsed, and uploaded files are exposed raw in `req.meta[:FILES]`. There is no `FileField`.
 - No i18n, caching framework, signals, or permission groups.

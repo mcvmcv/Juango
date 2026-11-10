@@ -93,11 +93,13 @@ function ModelForm(::Type{T}; data = nothing, instance = nothing, fields = nothi
                    labels = Dict{Symbol,String}(), help_texts = Dict{Symbol,String}(),
                    widgets = Dict{Symbol,Symbol}()) where {T<:Model}
     meta = modelmeta(T)
-    chosen = fields === nothing ? [f.name for f in meta.fields if f.editable] : Symbol.(collect(fields))
+    chosen = fields === nothing ? vcat([f.name for f in meta.fields if f.editable], [f.name for f in meta.m2m if f.editable]) :
+             Symbol.(collect(fields))
     fs = Pair{Symbol,Any}[]
     for n in chosen
         n in exclude && continue
-        f = deepcopy(getfield_meta(T, n))
+        i = findfirst(x -> x.name === n, meta.m2m)
+        f = deepcopy(i === nothing ? getfield_meta(T, n) : meta.m2m[i])
         haskey(labels, n) && (f.verbose_name = labels[n])
         haskey(help_texts, n) && (f.help_text = help_texts[n])
         haskey(widgets, n) && (f.widget = widgets[n])
@@ -106,7 +108,9 @@ function ModelForm(::Type{T}; data = nothing, instance = nothing, fields = nothi
     init = Dict{Symbol,Any}()
     if instance !== nothing
         for (n, f) in fs
-            init[n] = f.kind === :fk ? getproperty(instance, attname(f)) : getproperty(instance, n)
+            init[n] = f.kind === :fk ? getproperty(instance, attname(f)) :
+                      f.kind === :m2m ? (instance.id === nothing ? Any[] : [o.id for o in getproperty(instance, n)]) :
+                      getproperty(instance, n)
         end
     end
     merge!(init, Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(initial)))
@@ -122,12 +126,32 @@ html_id(f::Form, fld::Field) = "id_" * html_name(f, fld)
 
 function raw_value(f::Form, fld::Field)
     f.data === nothing && return nothing
+    fld.kind === :m2m && return raw_list(f.data, html_name(f, fld))
     get(f.data, html_name(f, fld), nothing)
+end
+"All submitted values for a multi-valued field."
+raw_list(d::QueryDict, k) = getlist(d, k)
+function raw_list(d::AbstractDict, k)
+    v = get(d, k, String[])
+    v isa AbstractVector ? collect(v) : [v]
 end
 
 "Convert submitted text into a typed value. Returns `(value, error_or_nothing)`."
 function to_julia(fld::Field, raw)
     k = fld.kind
+    if k === :m2m
+        ids = Int[]
+        for r in (raw === nothing ? [] : raw)
+            sr = strip(string(r))
+            isempty(sr) && continue
+            id = tryparse(Int, sr)
+            id === nothing && return nothing, "Enter a list of values."
+            push!(ids, id)
+        end
+        objs = isempty(ids) ? Any[] : collect(filter(objects(related_model(fld)); id__in = unique(ids)))
+        length(objs) == length(unique(ids)) || return nothing, "Select a valid choice. One of the selected values is not one of the available choices."
+        return objs, nothing
+    end
     if k === :bool
         return (raw !== nothing && lowercase(string(raw)) in ("on", "true", "1", "yes")), nothing
     end
@@ -175,7 +199,8 @@ function is_valid(f::Form)
             add_error!(f, fld.name, err)
             continue
         end
-        errs = validate_field(fld, v isa Model ? v.id : v)
+        errs = fld.kind === :m2m ? (isempty(v) && !fld.blank ? ["This field is required."] : String[]) :
+               validate_field(fld, v isa Model ? v.id : v)
         if isempty(errs) && f.model !== nothing && fld.unique && v !== nothing && v != ""
             q = filter(objects(f.model), Q(attname(fld) => v))
             (f.instance !== nothing && f.instance.id !== nothing) && (q = filter(q, !Q(id = f.instance.id)))
@@ -216,7 +241,26 @@ function save!(f::Form; commit = true)
         setproperty!(obj, k, v)
     end
     f.instance = obj
-    commit && save!(obj)
+    if commit
+        save!(obj)
+        save_m2m!(f)
+    end
+    obj
+end
+
+"""
+    save_m2m!(form)
+
+Save a ModelForm's many-to-many fields. `save!(form)` does this itself; call it after
+`save!(form; commit=false)` once the instance has been saved.
+"""
+function save_m2m!(f::Form)
+    obj = f.instance
+    (obj === nothing || obj.id === nothing) && error("save the instance before its many-to-many fields")
+    for fld in f.fields
+        (fld.kind === :m2m && haskey(f.cleaned_data, fld.name)) || continue
+        set!(getproperty(obj, fld.name), f.cleaned_data[fld.name])
+    end
     obj
 end
 
@@ -243,6 +287,7 @@ function display_value(bf::BoundField)
     end
     v = get(f.initial, fld.name, nothing)
     v === nothing && (v = fld.default isa NoDefault ? nothing : (fld.default isa Function ? fld.default() : fld.default))
+    fld.kind === :m2m && return v === nothing ? Any[] : collect(v)
     v isa Model && return v.id
     v isa DateTime && return Dates.format(v, "yyyy-mm-ddTHH:MM")
     v
@@ -265,6 +310,16 @@ function widget_html(bf::BoundField)
     if fld.kind === :bool
         checked = f.data !== nothing ? (val !== nothing && lowercase(string(val)) in ("on", "true", "1", "yes")) : truthy(val)
         return "<input type=\"checkbox\"$attrs$(checked ? " checked" : "")>"
+    elseif fld.kind === :m2m
+        chosen = Set(string(x isa Model ? x.id : x) for x in (val isa AbstractVector ? val : Any[]))
+        io = IOBuffer()
+        print(io, "<select$attrs multiple size=\"8\">")
+        for o in objects(related_model(fld))
+            sel = string(o.id) in chosen ? " selected" : ""
+            print(io, "<option value=\"", o.id, "\"", sel, ">", escape_html(string(o)), "</option>")
+        end
+        print(io, "</select>")
+        return String(take!(io))
     elseif fld.kind === :fk || fld.choices !== nothing
         opts = fld.kind === :fk ? Pair{Any,String}[o.id => string(o) for o in objects(related_model(fld))] : fld.choices
         io = IOBuffer()

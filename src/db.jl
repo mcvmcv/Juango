@@ -178,6 +178,9 @@ function limit_offset_sql(::DatabaseBackend, limit, offset)
     s
 end
 
+"Integer year/month/day of a date expression."
+extract_sql(::DatabaseBackend, part::Symbol, expr) = "EXTRACT($(uppercase(string(part))) FROM $expr)"
+
 "Expression for random ordering."
 random_function(::DatabaseBackend) = "RANDOM()"
 

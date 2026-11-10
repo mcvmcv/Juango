@@ -24,7 +24,7 @@ using ..Juango: Column, Table, SchemaState, copy_state, getcolumn, hascolumn, wi
     rename_column_sql, alter_column_sql, backfill_value, quote_name, VERSION_STRING
 
 export Migration, CreateModel, DeleteModel, RenameModel, AddField, RemoveField, AlterField, RenameField,
-       RunSQL, RunJulia, Column
+       AlterUniqueTogether, RunSQL, RunJulia, Column
 
 # --- operations ---------------------------------------------------------------------------------
 
@@ -35,8 +35,17 @@ struct CreateModel <: Operation
     table::String
     model::String
     columns::Vector{Column}
+    unique_together::Vector{Vector{String}}
 end
-CreateModel(table; model = table, columns = Column[]) = CreateModel(string(table), string(model), collect(Column, columns))
+CreateModel(table; model = table, columns = Column[], unique_together = []) =
+    CreateModel(string(table), string(model), collect(Column, columns), Juango.normalize_unique(unique_together))
+
+"Set the multi-column unique constraints of a table (column names)."
+struct AlterUniqueTogether <: Operation
+    table::String
+    unique_together::Vector{Vector{String}}
+    AlterUniqueTogether(table, sets) = new(string(table), Juango.normalize_unique(sets))
+end
 
 "Drop a table."
 struct DeleteModel <: Operation
@@ -144,7 +153,9 @@ function table!(st::SchemaState, name)
     t
 end
 
-state_forwards!(op::CreateModel, st, app) = (st[op.table] = Table(op.table, app, op.model, copy(op.columns)); st)
+state_forwards!(op::CreateModel, st, app) =
+    (st[op.table] = Table(op.table, app, op.model, copy(op.columns), [copy(u) for u in op.unique_together]); st)
+state_forwards!(op::AlterUniqueTogether, st, app) = (table!(st, op.table).unique_together = [copy(u) for u in op.unique_together]; st)
 state_forwards!(op::DeleteModel, st, app) = (table!(st, op.table); delete!(st, op.table); st)
 function state_forwards!(op::RenameModel, st, app)
     t = table!(st, op.old)
@@ -179,6 +190,7 @@ function state_forwards!(op::RenameField, st, app)
     t = table!(st, op.table)
     getcolumn(t, op.old)
     t.columns = [c.name == op.old ? with_column(c; name = op.new) : c for c in t.columns]
+    t.unique_together = Juango.normalize_unique([[x == op.old ? op.new : x for x in u] for u in t.unique_together])
     st
 end
 state_forwards!(::Union{RunSQL,RunJulia}, st, app) = st
@@ -212,6 +224,11 @@ backwards(op::AlterField, b, from, to, deferred) = alter_column_sql(b, to[op.tab
 forwards(op::RenameField, b, from, to, deferred) = rename_column_sql(b, from[op.table], to[op.table], op.old, op.new)
 backwards(op::RenameField, b, from, to, deferred) = rename_column_sql(b, to[op.table], from[op.table], op.new, op.old)
 
+forwards(op::AlterUniqueTogether, b, from, to, deferred) =
+    Juango.alter_unique_together_sql(b, op.table, from[op.table].unique_together, to[op.table].unique_together)
+backwards(op::AlterUniqueTogether, b, from, to, deferred) =
+    Juango.alter_unique_together_sql(b, op.table, to[op.table].unique_together, from[op.table].unique_together)
+
 forwards(op::RunSQL, b, from, to, deferred) = op.forward
 function backwards(op::RunSQL, b, from, to, deferred)
     op.backward === nothing && throw(IrreversibleError("RunSQL has no reverse SQL"))
@@ -230,6 +247,7 @@ describe(op::AddField) = "Add field $(op.column.name) to $(op.table)"
 describe(op::RemoveField) = "Remove field $(op.name) from $(op.table)"
 describe(op::AlterField) = "Alter field $(op.column.name) on $(op.table)"
 describe(op::RenameField) = "Rename field $(op.old) on $(op.table) to $(op.new)"
+describe(op::AlterUniqueTogether) = "Alter unique_together for $(op.table)"
 describe(op::RunSQL) = "Raw SQL operation"
 describe(op::RunJulia) = "Raw Julia operation"
 
@@ -597,7 +615,7 @@ function detect_changes(g::Graph, app; questioner = ask)
 
     # new tables, created so that referenced tables come first
     for t in creation_order(Table[new[t] for t in added])
-        push!(ops, CreateModel(t.name; model = t.model, columns = t.columns))
+        push!(ops, CreateModel(t.name; model = t.model, columns = t.columns, unique_together = t.unique_together))
     end
 
     # columns of tables that exist in both
@@ -623,6 +641,10 @@ function detect_changes(g::Graph, app; questioner = ask)
         for c in n.columns
             haskey(ocols, c.name) && ocols[c.name] != c && push!(ops, AlterField(name, c))
         end
+        # unique sets after renames; changed before columns are removed
+        renamed = Dict(op.old => op.new for op in ops if op isa RenameField && op.table == name)
+        ou = Juango.normalize_unique([[get(renamed, x, x) for x in u] for u in o.unique_together])
+        ou == n.unique_together || push!(ops, AlterUniqueTogether(name, n.unique_together))
         for r in gone
             push!(ops, RemoveField(name, r))
         end
@@ -674,7 +696,9 @@ function column_code(c::Column)
 end
 
 op_code(op::CreateModel) = "CreateModel($(jl(op.table)); model = $(jl(op.model)), columns = [\n" *
-    join(["            " * column_code(c) * ",\n" for c in op.columns]) * "        ])"
+    join(["            " * column_code(c) * ",\n" for c in op.columns]) * "        ]" *
+    (isempty(op.unique_together) ? ")" : ", unique_together = $(jl(op.unique_together)))")
+op_code(op::AlterUniqueTogether) = "AlterUniqueTogether($(jl(op.table)), $(jl(op.unique_together)))"
 op_code(op::DeleteModel) = "DeleteModel($(jl(op.table)))"
 op_code(op::RenameModel) = "RenameModel($(jl(op.old)), $(jl(op.new))" * (op.model === nothing ? ")" : "; model = $(jl(op.model)))")
 op_code(op::AddField) = "AddField($(jl(op.table)), $(column_code(op.column)))"
@@ -712,6 +736,7 @@ function suggest_name(ops, initial)
     part(op::RemoveField) = "remove_" * op.table * "_" * op.name
     part(op::AlterField) = "alter_" * op.table * "_" * op.column.name
     part(op::RenameField) = "rename_" * op.table * "_" * op.old * "_" * op.new
+    part(op::AlterUniqueTogether) = "alter_" * op.table * "_unique_together"
     part(op) = "custom"
     name = join(part.(ops), "_")
     all(op -> op isa AddField, ops) && length(ops) == 1 && (name = "add_" * name)

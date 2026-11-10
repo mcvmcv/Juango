@@ -82,6 +82,36 @@ Juango.tattr(a::Article, ::Val{:shout}) = uppercase(a.title)
     article = ForeignKey(Article, on_delete = :SET_NULL, null = true, blank = true)
 end
 
+@model struct Topic
+    name = CharField(max_length = 30)
+end
+Base.show(io::IO, t::Topic) = print(io, t.name)
+
+@model struct Essay
+    title = CharField(max_length = 50)
+    topics = ManyToManyField(Topic; related_name = :essays, blank = true)
+    deleted = BooleanField(default = false)
+end
+Juango.default_queryset(::Type{Essay}) = filter(base_objects(Essay); deleted = false)
+Juango.manager(::Type{Essay}, ::Val{:with_topics}) = filter(Essay; topics__isnull = false)
+untitled(qs::QuerySet{Essay}) = filter(qs; title = "")
+
+@model struct Person
+    name = CharField(max_length = 30)
+    friends = ManyToManyField(:self; blank = true)
+end
+
+@model struct Club
+    name = CharField(max_length = 30)
+    members = ManyToManyField(:Person; through = :Membership, related_name = :clubs)
+end
+
+@model struct Membership
+    person = ForeignKey(:Person)
+    club = ForeignKey(:Club)
+    role = CharField(max_length = 20, default = "member")
+end
+
 @model struct Locked
     article = ForeignKey(:Article, on_delete = :PROTECT)
 end
@@ -283,7 +313,7 @@ end
     @test length(order_by(Article, "views")[1:2]) == 2
     @test order_by(Article, "views")[2] == a2
     @test [a.title for a in order_by(Article, "views")[2:3]] == ["Django in Julia", "Julia rocks"]
-    @test values(filter(Article; id = a1.id), :title, :views) == [Dict(:title => "Julia rocks", :views => 10)]
+    @test collect(values(filter(Article; id = a1.id), :title, :views)) == [Dict(:title => "Julia rocks", :views => 10)]
     @test count(filter(Article; created__year = year(now()))) == 3
 
     # FK access & reverse relations
@@ -662,6 +692,224 @@ end
     @test n2 == n1
 end
 
+@testset "many-to-many" begin
+    nq(f) = last(count_queries(f))
+    b = Juango.backend()
+    @test Juango.table_exists(b, "essay_topics")
+    @test Set(Juango.table_columns(b, "essay_topics")) == Set(["id", "essay_id", "topic_id"])
+    st = Juango.models_state()["essay_topics"]
+    @test st.unique_together == [["essay_id", "topic_id"]] && st.app == "project"
+
+    julia, web, db = create(Topic; name = "julia"), create(Topic; name = "web"), create(Topic; name = "db")
+    e1 = create(Essay; title = "Fast web apps")
+    e2 = create(Essay; title = "Databases")
+    @test count(e1.topics) == 0
+    add!(e1.topics, julia, web)
+    add!(e1.topics, julia)                              # already there: skipped
+    add!(e2.topics, db.id, julia)                       # ids work too
+    @test sort([t.name for t in e1.topics]) == ["julia", "web"]
+    @test count(julia.essays) == 2 && count(db.essays) == 1
+    @test_throws IntegrityError Juango.execute("INSERT INTO \"essay_topics\" (\"essay_id\", \"topic_id\") VALUES (?, ?)", [e1.id, julia.id])
+    @test_throws ArgumentError add!(filter(Topic; name = "x"), julia)
+    @test_throws ArgumentError add!(Essay(title = "unsaved").topics, julia)
+
+    # lookups in both directions
+    @test sort([e.title for e in filter(Essay; topics__name = "julia")]) == ["Databases", "Fast web apps"]
+    @test [e.title for e in filter(Essay; topics = web)] == ["Fast web apps"]
+    @test [t.name for t in order_by(filter(Topic; essays__title = "Databases"), "name")] == ["db", "julia"]
+    @test count(filter(Essay; topics__name__in = ["web", "db"])) == 2
+    @test [e.title for e in exclude(Essay; topics__name = "web")] == ["Databases"]
+    @test isempty(filter(Essay; topics__name = "web", topics__name__startswith = "j"))     # one join, same row
+    @test count(filter(filter(Essay; topics__name = "web"); topics__name = "julia")) == 1  # two joins
+    e3 = create(Essay; title = "")
+    @test [e.title for e in filter(Essay; topics__isnull = true)] == [""]
+    @test sort([t.name for t in filter(Topic; essays__isnull = false)]) == ["db", "julia", "web"]
+
+    # changing the relation
+    remove!(e1.topics, web)
+    @test [t.name for t in e1.topics] == ["julia"]
+    set!(e1.topics, [web, db])
+    @test sort([t.name for t in e1.topics]) == ["db", "web"]
+    clear!(e1.topics)
+    @test count(e1.topics) == 0 && count(julia.essays) == 1
+    set!(e1.topics, [julia, web])
+
+    # deleting either side removes its rows in the join table
+    tmp = create(Topic; name = "tmp")
+    add!(e1.topics, tmp)
+    delete!(tmp)
+    @test sort([t.name for t in e1.topics]) == ["julia", "web"]
+    gone = create(Essay; title = "gone")
+    add!(gone.topics, julia)
+    delete!(gone)
+    @test count(julia.essays) == 2
+
+    # prefetching
+    essays, n = count_queries(() -> collect(order_by(prefetch_related(filter(Essay; title__in = ["Fast web apps", "Databases"]), :topics), "title")))
+    @test n == 3      # essays, join rows, topics
+    @test nq(() -> [sort([t.name for t in e.topics]) for e in essays]) == 0
+    @test [sort([t.name for t in e.topics]) for e in essays] == [["db", "julia"], ["julia", "web"]]
+    @test count(filter(essays[1].topics; name = "db")) == 1
+    add!(essays[1].topics, web)                      # prefetched querysets keep their add!/remove! context
+    @test count(filter(Essay; title = "Databases", topics = web)) == 1
+    topics = collect(order_by(prefetch_related(filter(Topic; name__in = ["julia", "db"]), :essays), "name"))
+    @test nq(() -> [count(t.essays) for t in topics]) == 0
+    @test [count(t.essays) for t in topics] == [1, 2]
+
+    # self-referential, not symmetrical
+    ann, bob = create(Person; name = "Ann"), create(Person; name = "Bob")
+    add!(ann.friends, bob)
+    @test [p.name for p in ann.friends] == ["Bob"] && count(bob.friends) == 0
+    @test [p.name for p in bob.person_set] == ["Ann"]
+    @test [p.name for p in filter(Person; friends__name = "Bob")] == ["Ann"]
+    @test Set(Juango.table_columns(b, "person_friends")) == Set(["id", "from_person_id", "to_person_id"])
+
+    # custom intermediate model
+    chess = create(Club; name = "Chess")
+    add!(chess.members, ann; through_defaults = Dict(:role => "chair"))
+    add!(chess.members, bob)
+    @test sort([p.name for p in chess.members]) == ["Ann", "Bob"]
+    @test get(Membership; person = ann).role == "chair" && get(Membership; person = bob).role == "member"
+    @test [c.name for c in ann.clubs] == ["Chess"]
+    @test [c.name for c in filter(Club; members__name = "Bob")] == ["Chess"]
+
+    # ModelForm with a many-to-many field
+    f = ModelForm(Essay; data = Dict("title" => "Formed", "topics" => [string(julia.id), string(db.id)]))
+    @test is_valid(f)
+    e = save!(f)
+    @test sort([t.name for t in e.topics]) == ["db", "julia"]
+    html = string(f[:topics].form |> as_p)
+    @test occursin("multiple", html) && occursin("value=\"$(julia.id)\" selected", html)
+    f = ModelForm(Essay; data = Dict("title" => "Formed", "topics" => [string(julia.id)]), instance = e)
+    @test is_valid(f) && [t.name for t in save!(f).topics] == ["julia"]
+    @test !is_valid(ModelForm(Essay; data = Dict("title" => "x", "topics" => ["999999"])))
+    f2 = ModelForm(Essay; instance = e)
+    @test occursin("value=\"$(julia.id)\" selected", string(as_p(f2)))
+    f3 = ModelForm(Club; data = Dict("name" => "Empty"))
+    @test !is_valid(f3) && haskey(f3.errors, :members)      # not blank: at least one required
+
+    # admin add form saves the relation
+    Admin.register!(Essay; list_display = [:title])
+    c = Client()
+    force_login!(c, get(User; username = "root"))
+    r = get(c, "/admin/essay/add/")
+    @test r.status == 200 && occursin("name=\"topics\"", text(r)) && occursin("multiple", text(r))
+    r = post(c, "/admin/essay/add/", Dict("title" => "From admin", "topics" => [string(web.id)]))
+    @test r.status == 302 && [t.name for t in get(Essay; title = "From admin").topics] == ["web"]
+    Admin.unregister!(Essay)
+end
+
+@testset "managers" begin
+    hidden = create(Essay; title = "Hidden", deleted = true)
+    @test !exists(filter(Essay; title = "Hidden"))
+    @test exists(filter(base_objects(Essay); title = "Hidden"))
+    @test_throws DoesNotExist get(Essay; id = hidden.id)
+    @test get(base_objects(Essay); id = hidden.id).title == "Hidden"
+    add!(hidden.topics, create(Topic; name = "secret"))
+    @test count(get(Topic; name = "secret").essays) == 0         # reverse relations use the default queryset
+    @test all(e -> !isempty(e.topics), objects(Essay, :with_topics))
+    @test count(objects(Essay, :with_topics)) < count(Essay)
+    @test_throws ArgumentError objects(Essay, :nope)
+    @test [e.title for e in objects(Essay) |> untitled] == [""]
+    # the admin lists the default queryset, or its own `queryset`
+    c = Client()
+    force_login!(c, get(User; username = "root"))
+    Admin.register!(Essay; list_display = [:title])
+    @test !occursin("Hidden", text(get(c, "/admin/essay/")))
+    @test get(c, "/admin/essay/$(hidden.id)/change/").status == 404
+    Admin.register!(Essay; list_display = [:title], queryset = req -> filter(base_objects(Essay); title__startswith = "H"))
+    r = get(c, "/admin/essay/")
+    @test occursin("Hidden", text(r)) && !occursin("Databases", text(r))
+    @test get(c, "/admin/essay/$(hidden.id)/change/").status == 200
+    Admin.unregister!(Essay)
+    delete!(filter(base_objects(Essay); title = "Hidden"))
+    @test !exists(filter(base_objects(Essay); title = "Hidden"))
+end
+
+@testset "expressions and aggregation" begin
+    sel(qs) = Juango.select_sql(qs)[1]
+    A, B, C = create(Author; name = "Ex A"), create(Author; name = "Ex B"), create(Author; name = "Ex C")
+    create(Article; title = "ex-1", author = A, views = 10, published = true, rating = 4.0)
+    create(Article; title = "ex-2", author = A, views = 30, published = false, rating = 2.0)
+    create(Article; title = "ex-3", author = B, views = 5, published = true)
+    exa = filter(Article; title__startswith = "ex-")
+    exau = filter(Author; name__startswith = "Ex ")
+    titles(qs) = [x.title for x in order_by(qs, "title")]
+
+    # --- annotate with aggregates (GROUP BY, HAVING) --------------------------------------------
+    rows = collect(order_by(annotate(exau; n = Count(:articles)), "name"))
+    @test [r.n for r in rows] == [2, 1, 0]
+    @test occursin("GROUP BY", sel(annotate(exau; n = Count(:articles))))
+    q = filter(annotate(exau; n = Count(:articles)); n__gte = 1)
+    @test occursin("HAVING", sel(q)) && sort([a.name for a in q]) == ["Ex A", "Ex B"]
+    @test count(q) == 2
+    # NULL sorts differently per database (last on SQLite, first on Postgres), so coalesce
+    @test [a.name for a in order_by(annotate(exau; total = Coalesce(Sum(:articles__views), Value(0))), "-total")] == ["Ex A", "Ex B", "Ex C"]
+    rows = collect(order_by(annotate(exau; pub = Count(:articles; filter = Q(articles__published = true))), "name"))
+    @test [r.pub for r in rows] == [1, 1, 0]
+    rows = collect(order_by(annotate(exau; n = Count(:articles), mx = Max(:articles__views)), "name"))
+    @test [(r.n, r.mx) for r in rows] == [(2, 30), (1, 5), (0, nothing)]
+    @test [a.name for a in annotate(exau; n = Count(:articles)) |> filter(n = 0)] == ["Ex C"]
+
+    # --- values(): dict rows, relation paths, GROUP BY ------------------------------------------
+    @test collect(values(order_by(exa, "title"), :title, :author__name)) ==
+          [Dict(:title => "ex-1", :author__name => "Ex A"), Dict(:title => "ex-2", :author__name => "Ex A"),
+           Dict(:title => "ex-3", :author__name => "Ex B")]
+    g = order_by(annotate(values(exa, :published); n = Count(:id), v = Sum(:views)), "published")
+    @test collect(g) == [Dict(:published => false, :n => 1, :v => 30), Dict(:published => true, :n => 2, :v => 15)]
+    @test count(g) == 2
+    @test collect(values(objects(Article), :author__name) |> annotate(n = Count()) |> filter(author__name__startswith = "Ex ") |>
+                  order_by("author__name")) == [Dict(:author__name => "Ex A", :n => 2), Dict(:author__name => "Ex B", :n => 1)]
+    @test values_list(order_by(exa, "title"), :title; flat = true) == ["ex-1", "ex-2", "ex-3"]
+    @test values_list(order_by(exa, "title"), :title, :author__name)[3] == ("ex-3", "Ex B")
+    @test values_list(order_by(annotate(exau; n = Count(:articles)), "name"), :n; flat = true) == [2, 1, 0]
+    @test first(values(exa, :id))[:id] isa Integer
+
+    # --- aggregate() -----------------------------------------------------------------------------
+    agg = aggregate(exa; total = Sum(:views), n = Count(), mx = Max(:views), avg = Avg(:rating))
+    @test agg == Dict(:total => 45, :n => 3, :mx => 30, :avg => 3.0)
+    @test aggregate(exau; n = Count(:articles))[:n] == 3
+    @test aggregate(exa, :sum, :views) == 45
+    @test aggregate(exa; pub = Count(; filter = Q(published = true)))[:pub] == 2
+
+    # --- functions, Case/When --------------------------------------------------------------------
+    rows = collect(order_by(annotate(exa; up = Upper(:title), len = Length(:title), both = Concat(:title, Value("/"), :author__name),
+                                     r = Coalesce(:rating, Value(0.0)), v = Cast(:views, :float), lo = Lower(Value("ABC"))), "title"))
+    @test [r.up for r in rows] == ["EX-1", "EX-2", "EX-3"] && all(r -> r.len == 4, rows)
+    @test rows[1].both == "ex-1/Ex A" && rows[3].r == 0.0 && rows[1].v === 10.0 && rows[1].lo == "abc"
+    @test titles(filter(annotate(exa; up = Upper(:title)); up = "EX-2")) == ["ex-2"]
+    @test all(a -> a.y == year(now()), annotate(exa; y = ExtractYear(:created)))
+    @test count(filter(exa; created__lte = Now())) == 3
+    kinds = annotate(exa; kind = Case(When(; views__gte = 20, then = "big"), When(Q(published = true); then = "pub"); default = "other"))
+    @test [a.kind for a in order_by(kinds, "title")] == ["pub", "big", "pub"]
+    @test [a.v for a in order_by(annotate(exa; v = F(:views) * 2 + 1), "title")] == [21, 61, 11]
+    @test [a.aname for a in order_by(annotate(exa; aname = F(:author__name)), "title")] == ["Ex A", "Ex A", "Ex B"]
+
+    # --- subqueries --------------------------------------------------------------------------------
+    top = values(order_by(filter(Article; author = OuterRef(:id)), "-views"), :title)[1:1]
+    @test [a.top for a in order_by(annotate(exau; top = Subquery(top)), "name")] == ["ex-2", "ex-3", nothing]
+    @test [a.name for a in filter(exau, Exists(filter(Article; author = OuterRef(:id), published = false)))] == ["Ex A"]
+    @test [a.name for a in filter(exau, !Exists(filter(Article; author = OuterRef(:id))))] == ["Ex C"]
+    @test count(filter(exa; author__in = filter(Author; name = "Ex A"))) == 2
+    @test count(filter(exa; author__in = Subquery(values(filter(Author; name = "Ex B"), :id)))) == 1
+
+    # --- window functions --------------------------------------------------------------------------
+    w = annotate(exa; rn = Window(RowNumber(); partition_by = [:author], order_by = ["-views"]),
+                 tot = Window(Sum(:views); partition_by = [:author]))
+    @test [(a.title, a.rn, a.tot) for a in order_by(w, "title")] == [("ex-1", 2, 40), ("ex-2", 1, 40), ("ex-3", 1, 5)]
+    @test [a.prev for a in order_by(annotate(exa; prev = Window(Lag(:views); order_by = ["title"])), "title")] == [nothing, 10, 30]
+
+    # --- F() in filters and updates ------------------------------------------------------------------
+    @test titles(filter(exa; views__gt = F(:rating) * 5)) == ["ex-2"]
+    @test titles(filter(exa; views = F(:views))) == ["ex-1", "ex-2", "ex-3"]
+    @test update!(filter(exa; title = "ex-1"); views = F(:views) + 1) == 1
+    @test get(Article; title = "ex-1").views == 11
+    update!(exa; views = F(:views) * 2)
+    @test values_list(order_by(exa, "title"), :views; flat = true) == [22, 60, 10]
+    @test_throws ArgumentError update!(exa; views = F(:author__id))
+    @test_throws ArgumentError annotate(exa; title = Upper(:title))
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : B.SQLiteBackend)
@@ -946,6 +1194,59 @@ end
         Juango.unregister_model!(MigOld)
     finally
         foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app in ("migtest", "migfake"), Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end
+
+@testset "migrations: many-to-many and unique_together" begin
+    M = Juango.Migrations
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("migm2m" => dir))
+    quiet(f) = redirect_stdout(f, devnull)
+    hastable(t) = Juango.table_exists(Juango.backend(), t)
+    try
+        @eval @model struct MmLabel
+            name = CharField(max_length = 20)
+            Meta(table = "mm_label", app_label = "migm2m")
+        end
+        @eval @model struct MmItem
+            code = CharField(max_length = 10)
+            batch = IntegerField(default = 0)
+            labels = ManyToManyField(:MmLabel; blank = true)
+            Meta(table = "mm_item", app_label = "migm2m")
+        end
+        p1 = only(quiet(() -> makemigrations(app = "migm2m", questioner = _ -> false)))
+        src = read(p1, String)
+        @test occursin("CreateModel(\"mm_item_labels\"", src)
+        @test occursin("unique_together = [[\"mmitem_id\", \"mmlabel_id\"]]", src)
+        quiet(() -> migrate())
+        @test hastable("mm_item_labels")
+        it, lb = create(MmItem; code = "a"), create(MmLabel; name = "x")
+        add!(it.labels, lb)
+        @test_throws IntegrityError Juango.execute("INSERT INTO \"mm_item_labels\" (\"mmitem_id\", \"mmlabel_id\") VALUES (?, ?)", [it.id, lb.id])
+
+        # add a unique_together to a model: AlterUniqueTogether
+        Juango.unregister_model!(MmItem)
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).table == "mm_item_labels", Juango.all_models()))
+        @eval @model struct MmItem2
+            code = CharField(max_length = 10)
+            batch = IntegerField(default = 0)
+            labels = ManyToManyField(:MmLabel; blank = true)
+            Meta(table = "mm_item", name = "MmItem", app_label = "migm2m", unique_together = [(:code, :batch)])
+        end
+        p2 = only(quiet(() -> makemigrations(app = "migm2m", questioner = _ -> false)))
+        @test occursin("AlterUniqueTogether(\"mm_item\", [[\"code\", \"batch\"]])", read(p2, String))
+        quiet(() -> migrate())
+        create(MmItem2; code = "b", batch = 1)
+        @test_throws IntegrityError create(MmItem2; code = "b", batch = 1)
+        @test count(get(MmItem2; code = "a").labels) == 1
+        quiet(() -> migrate(app = "migm2m", target = "0001"))
+        create(MmItem2; code = "c", batch = 1)
+        create(MmItem2; code = "c", batch = 1)          # constraint gone again
+        quiet(() -> migrate(app = "migm2m", target = "zero"))
+        @test !hastable("mm_item_labels") && !hastable("mm_item")
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "migm2m", Juango.all_models()))
         configure!(MIGRATION_MODULES = Dict{String,String}())
     end
 end

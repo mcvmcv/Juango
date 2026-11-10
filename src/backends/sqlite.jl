@@ -91,6 +91,9 @@ function date_part_sql(::SQLiteBackend, part, col, v)
     ("CAST(strftime('$fmt', $col) AS INTEGER) = ?", Any[Int(v)])
 end
 
+extract_sql(::SQLiteBackend, part::Symbol, expr) =
+    "CAST(strftime('$(Dict(:year => "%Y", :month => "%m", :day => "%d")[part])', $expr) AS INTEGER)"
+
 table_exists(::SQLiteBackend, table) =
     !isempty(execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", [table]))
 table_columns(b::SQLiteBackend, table) =

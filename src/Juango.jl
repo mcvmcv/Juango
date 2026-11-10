@@ -30,6 +30,7 @@ include("db.jl")
 include("backends/sqlite.jl")
 include("backends/postgres.jl")
 include("orm.jl")
+include("expressions.jl")
 include("schema.jl")
 include("migrations.jl")
 include("forms.jl")
@@ -59,14 +60,17 @@ export path, re_path, include_urls, reverse_url, resolve
 export Template, render_to_string, get_template, mark_safe, SafeString, register_filter!,
        register_tag!, tattr, escape_html
 # orm
-export Model, @model, Field, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
+export Model, @model, Field, ManyToManyField, add!, remove!, set!, clear!, base_objects, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
        FloatField, BooleanField, DateTimeField, DateField, ForeignKey, Q, QuerySet, objects,
        exclude, order_by, exists, values_list, update!, create, get_or_create, update_or_create,
        save!, refresh!, full_clean, aggregate, none, migrate, makemigrations, showmigrations, sqlmigrate,
        atomic, IntegrityError, select_related, prefetch_related, Prefetch, count_queries, DoesNotExist,
+       annotate, F, Value, Count, Sum, Avg, Min, Max, Lower, Upper, Length, Coalesce, Concat, Cast, Now,
+       ExtractYear, ExtractMonth, ExtractDay, When, Case, OuterRef, Subquery, Exists, Window, RowNumber,
+       Rank, DenseRank, Lag, Lead,
        MultipleObjectsReturned, ProtectedError, get_absolute_url
 # forms
-export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data
+export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data, save_m2m!
 # auth & sessions
 export User, AnonymousUser, authenticate, login!, logout!, create_user, create_superuser,
        set_password!, check_password, make_password, login_required, staff_member_required,

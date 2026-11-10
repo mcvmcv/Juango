@@ -45,8 +45,11 @@ mutable struct Table
     app::String
     model::String
     columns::Vector{Column}
+    unique_together::Vector{Vector{String}}     # column names; each set gets a unique index
 end
-Base.copy(t::Table) = Table(t.name, t.app, t.model, copy(t.columns))
+Table(name, app, model, columns) = Table(name, app, model, columns, Vector{String}[])
+Base.copy(t::Table) = Table(t.name, t.app, t.model, copy(t.columns), [copy(u) for u in t.unique_together])
+normalize_unique(sets) = sort([collect(String, string.(u)) for u in sets])
 function getcolumn(t::Table, name)
     i = findfirst(c -> c.name == name, t.columns)
     i === nothing && error("table '$(t.name)' has no column '$name' in the migration state")
@@ -70,7 +73,12 @@ function column_state(f::Field)
 end
 
 "The snapshot `Table` for a model."
-table_state(T::Type) = (m = modelmeta(T); Table(m.table, m.app, m.name, [column_state(f) for f in m.fields]))
+function table_state(T::Type)
+    m = modelmeta(T)
+    col(n) = (f = findfield(m, n); f === nothing ? error("$(m.name): unique_together names unknown field '$n'") : column(f))
+    Table(m.table, m.app, m.name, [column_state(f) for f in m.fields],
+          normalize_unique([[col(n) for n in u] for u in m.unique_together]))
+end
 
 "The schema the given models describe."
 models_state(models = all_models()) = SchemaState(modelmeta(T).table => table_state(T) for T in models)
@@ -105,6 +113,19 @@ function index_sql(b::DatabaseBackend, table, c::Column; if_not_exists = true)
     ["CREATE $(c.unique ? "UNIQUE " : "")INDEX $ine$(quote_name(b, index_name(table, c))) ON $(quote_name(b, table)) ($(quote_name(b, c.name)))"]
 end
 
+unique_together_name(table, cols) = constraint_name(table, cols..., "uniq")
+unique_together_sql(b::DatabaseBackend, table, cols; if_not_exists = false) =
+    "CREATE UNIQUE INDEX $(if_not_exists ? "IF NOT EXISTS " : "")$(quote_name(b, unique_together_name(table, cols))) ON " *
+    "$(quote_name(b, table)) (" * join([quote_name(b, c) for c in cols], ", ") * ")"
+drop_unique_together_sql(b::DatabaseBackend, table, cols) = "DROP INDEX IF EXISTS " * quote_name(b, unique_together_name(table, cols))
+
+"Statements that change a table's unique-together indexes from `old` to `new` sets."
+function alter_unique_together_sql(b::DatabaseBackend, table, old, new)
+    stmts = [drop_unique_together_sql(b, table, u) for u in old if !(u in new)]
+    append!(stmts, [unique_together_sql(b, table, u) for u in new if !(u in old)])
+    stmts
+end
+
 drop_index_sql(b::DatabaseBackend, table, c::Column) =
     ["DROP INDEX IF EXISTS " * quote_name(b, constraint_name(table, c.name, s)) for s in ("uniq", "idx")]
 
@@ -124,6 +145,9 @@ function create_table_sql(b::DatabaseBackend, t::Table; if_not_exists = false)
     for c in t.columns
         append!(stmts, index_sql(b, t.name, c; if_not_exists = if_not_exists))
     end
+    for u in t.unique_together
+        push!(stmts, unique_together_sql(b, t.name, u; if_not_exists = if_not_exists))
+    end
     stmts, String[s for c in t.columns for s in fk_sql(b, t.name, c)]
 end
 
@@ -135,6 +159,10 @@ function rename_table_sql(b::DatabaseBackend, old::Table, new::Table)
         (c.unique || c.index) || continue
         append!(stmts, drop_index_sql(b, old.name, c))
         append!(stmts, index_sql(b, new.name, c))
+    end
+    for u in old.unique_together
+        push!(stmts, drop_unique_together_sql(b, old.name, u))
+        push!(stmts, unique_together_sql(b, new.name, u))
     end
     stmts
 end
@@ -163,6 +191,7 @@ function rename_column_sql(b::DatabaseBackend, old::Table, new::Table, oldname, 
         append!(stmts, drop_index_sql(b, old.name, c0))
         append!(stmts, index_sql(b, new.name, c1))
     end
+    append!(stmts, alter_unique_together_sql(b, new.name, old.unique_together, new.unique_together))
     stmts
 end
 
@@ -201,7 +230,7 @@ drop the old table and rename. Used where `ALTER TABLE` can't make the change (S
 Columns are matched by name; new columns get their default or backfill value.
 """
 function remake_table_sql(b::DatabaseBackend, old::Table, new::Table)
-    tmp = Table("new__" * new.name, new.app, new.model, new.columns)
+    tmp = Table("new__" * new.name, new.app, new.model, new.columns)   # unique sets are added after the rename
     q(s) = quote_name(b, s)
     cols, exprs = [q("id")], [q("id")]
     for c in new.columns
@@ -220,6 +249,9 @@ function remake_table_sql(b::DatabaseBackend, old::Table, new::Table)
              "ALTER TABLE $(q(tmp.name)) RENAME TO $(q(new.name))"]
     for c in new.columns
         append!(stmts, index_sql(b, new.name, c; if_not_exists = false))
+    end
+    for u in new.unique_together
+        push!(stmts, unique_together_sql(b, new.name, u))
     end
     stmts
 end
@@ -260,6 +292,9 @@ function sync_models!(models; verbose = true)
                 end
                 for c in t.columns
                     foreach(execute, index_sql(b, t.name, c))
+                end
+                for u in t.unique_together
+                    execute(unique_together_sql(b, t.name, u; if_not_exists = true))
                 end
             end
         end

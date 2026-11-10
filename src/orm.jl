@@ -42,6 +42,7 @@ mutable struct Field
     editable::Bool
     db_index::Bool
     model::Any
+    through::Any        # ManyToManyField: the intermediate model (generated when not given)
 end
 
 normchoices(::Nothing) = nothing
@@ -51,7 +52,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                max_length = nothing, choices = nothing, related = nothing, on_delete = :CASCADE,
                related_name = nothing, auto_now = false, auto_now_add = false, verbose_name = "",
                help_text = "", validators = Any[], widget = nothing, editable = true,
-               db_index = false, required = nothing, label = nothing)
+               db_index = false, required = nothing, label = nothing, through = nothing)
     required === nothing || (blank = !required)
     label === nothing || (verbose_name = string(label))
     if auto_now || auto_now_add
@@ -61,7 +62,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
     Field(kind, :_, null, blank, default, unique, max_length, normchoices(choices), related,
           Symbol(uppercase(string(on_delete))), related_name === nothing ? nothing : Symbol(related_name),
           auto_now, auto_now_add, string(verbose_name), string(help_text), collect(Any, validators),
-          widget === nothing ? nothing : Symbol(widget), editable, db_index, nothing)
+          widget === nothing ? nothing : Symbol(widget), editable, db_index, nothing, through)
 end
 
 CharField(; max_length = 255, kw...) = Field(:char; max_length = max_length, kw...)
@@ -82,6 +83,16 @@ DateField(; kw...) = Field(:date; kw...)
 """
 ForeignKey(to; on_delete = :CASCADE, kw...) = Field(:fk; related = to, on_delete = on_delete, db_index = true, kw...)
 
+"""
+    ManyToManyField(Model; related_name=nothing, through=nothing, blank=false, kw...)
+
+A many-to-many relation. Juango creates the join table (`<table>_<field>`, with a unique
+pair) unless `through` names your own intermediate model with two foreign keys. Access it
+as `post.tags` (a queryset) and change it with `add!`, `remove!`, `set!` and `clear!`.
+The other side gets `tag.post_set` (or `related_name`).
+"""
+ManyToManyField(to; kw...) = Field(:m2m; related = to, kw...)
+
 const STRING_KINDS = (:char, :text, :email, :slug, :url)
 
 "Attribute name under which the raw value is stored (`author_id` for a FK)."
@@ -98,6 +109,8 @@ mutable struct ModelMeta
     verbose_name::String
     verbose_name_plural::String
     app::String
+    m2m::Vector{Field}
+    unique_together::Vector{Vector{Symbol}}
 end
 
 const MODEL_REGISTRY = Dict{Any,ModelMeta}()
@@ -149,24 +162,117 @@ end
 
 function register_model!(T::Type, fields::Vector, meta::NamedTuple = NamedTuple())
     fs = Field[]
+    m2m = Field[]
     for (name, f) in fields
         f isa Field || error("$T.$name must be a field (CharField(...), ForeignKey(...), ...)")
         f = deepcopy(f)
         f.name = name
         f.model = T
         name in (:id, :pk) && error("$T: '$name' is reserved for the automatic primary key")
-        push!(fs, f)
+        push!(f.kind === :m2m ? m2m : fs, f)
     end
-    name = string(nameof(T))
+    name = string(get(meta, :name, nameof(T)))
     vname = get(meta, :verbose_name, lowercase(replace(name, r"(?<=[a-z])(?=[A-Z])" => " ")))
     m = ModelMeta(T, name, string(get(meta, :table, lowercase(name))), fs,
                   String[string(o) for o in get(meta, :ordering, String[])],
                   string(vname), string(get(meta, :verbose_name_plural, vname * "s")),
-                  string(get(meta, :app_label, default_app_label(T))))
+                  string(get(meta, :app_label, default_app_label(T))), m2m,
+                  [Symbol.(collect(u)) for u in get(meta, :unique_together, [])])
     MODEL_REGISTRY[T] = m
-    filter!(x -> !(x === T || string(nameof(x)) == name && parentmodule(x) == parentmodule(T)), MODEL_LIST)
+    filter!(x -> !(x === T || modelmeta_or_nothing(x) === nothing ||
+                   modelmeta(x).name == name && parentmodule(x) == parentmodule(T)), MODEL_LIST)
     push!(MODEL_LIST, T)
+    for f in m2m
+        f.through === nothing && (f.through = make_through_model(T, m, f))
+    end
     T
+end
+modelmeta_or_nothing(T) = get(MODEL_REGISTRY, T, nothing)
+
+"""
+Join model generated for a `ManyToManyField` without `through=`. Each join table is its
+own type, `AutoThrough{:post_tags}`, so it is a normal model to the ORM and migrations.
+"""
+mutable struct AutoThrough{N} <: Model
+    _data::Dict{Symbol,Any}
+    _cache::Dict{Symbol,Any}
+end
+(::Type{AutoThrough{N}})(; kwargs...) where {N} = construct(AutoThrough{N}; kwargs...)
+
+target_name(f::Field, owner) = f.related === :self ? string(nameof(owner)) :
+                               f.related isa Type ? string(nameof(f.related)) : string(f.related)
+
+function make_through_model(T::Type, m::ModelMeta, f::Field)
+    table = m.table * "_" * string(f.name)
+    tname = target_name(f, T)
+    src, dst = lowercase(m.name), lowercase(tname)
+    if src == dst
+        src, dst = "from_" * src, "to_" * dst
+    end
+    # Reverse names starting with '+' are hidden (not listed in propertynames).
+    srcf = ForeignKey(T; on_delete = :CASCADE, related_name = Symbol("+", table, "_src"))
+    dstf = ForeignKey(f.related === :self ? T : f.related; on_delete = :CASCADE, related_name = Symbol("+", table, "_dst"))
+    Th = AutoThrough{Symbol(m.app, ".", table)}
+    register_model!(Th, Pair{Symbol,Any}[Symbol(src) => srcf, Symbol(dst) => dstf],
+                    (table = table, name = m.name * "_" * string(f.name), app_label = m.app,
+                     unique_together = [(Symbol(src), Symbol(dst))],
+                     verbose_name = m.name * "-" * tname * " relationship"))
+    Th
+end
+
+"A many-to-many's intermediate model (`through` may name a model defined later)."
+function through_model(f::Field)
+    t = f.through
+    t isa Type && return t
+    for T in MODEL_LIST
+        modelmeta(T).name == string(t) && return (f.through = T)
+    end
+    error("ManyToManyField $(f.name): through model '$t' is not a registered model")
+end
+
+"The two foreign keys of a many-to-many's intermediate model: (to the owner, to the target)."
+function through_fks(f::Field)
+    Th, owner, target = through_model(f), f.model, related_model(f)
+    fks = [g for g in modelmeta(Th).fields if g.kind === :fk]
+    if owner === target
+        length(fks) >= 2 || error("$(nameof(Th)) needs two foreign keys to $(nameof(owner))")
+        return fks[1], fks[2]
+    end
+    src = findfirst(g -> related_model(g) === owner, fks)
+    dst = findfirst(g -> related_model(g) === target, fks)
+    (src === nothing || dst === nothing) && error("$(nameof(Th)) needs foreign keys to both $(nameof(owner)) and $(nameof(target))")
+    fks[src], fks[dst]
+end
+
+"Name of a foreign key's reverse relation (`post_set` or its `related_name`)."
+reverse_name(fk::Field) = fk.related_name === nothing ? Symbol(lowercase(modelmeta(fk.model).name), :_set) : fk.related_name
+
+"Many-to-many relations reachable from `T`: (name, field, forward::Bool)."
+function m2m_relations(T::Type)
+    out = Tuple{Symbol,Field,Bool}[]
+    for f in modelmeta(T).m2m
+        push!(out, (f.name, f, true))
+    end
+    for M in MODEL_LIST, f in modelmeta(M).m2m
+        related_model(f) === T || continue
+        push!(out, (f.related_name === nothing ? Symbol(lowercase(modelmeta(M).name), :_set) : f.related_name, f, false))
+    end
+    out
+end
+function find_m2m(T::Type, name)
+    for r in m2m_relations(T)
+        string(r[1]) == name && return r
+    end
+    nothing
+end
+
+"""
+The lookup path that reaches the other side of a many-to-many through its join model:
+`tags` on Post becomes `+post_tags_src__tag`.
+"""
+function m2m_path(f::Field, forward::Bool)
+    src, dst = through_fks(f)
+    forward ? (reverse_name(src), dst.name) : (reverse_name(dst), src.name)
 end
 
 """
@@ -249,8 +355,7 @@ function reverse_relations(T::Type)
         for f in modelmeta(M).fields
             f.kind === :fk || continue
             related_model(f) === T || continue
-            rn = f.related_name === nothing ? Symbol(lowercase(string(nameof(M))), :_set) : f.related_name
-            push!(out, (rn, M, f))
+            push!(out, (reverse_name(f), M, f))
         end
     end
     out
@@ -270,16 +375,22 @@ function Base.getproperty(m::Model, s::Symbol)
         cache = getfield(m, :_cache)
         c = get(cache, s, nothing)
         (c !== nothing && getfield(c, :_data)[:id] == id) && return c
-        obj = get(objects(related_model(f)); id = id)
+        obj = get(base_objects(related_model(f)); id = id)
         cache[s] = obj
         return obj
     end
     cache = getfield(m, :_cache)
     pre = get(cache, s, NOTFOUND)
+    mm = find_m2m(T, string(s))
+    if mm !== nothing
+        qs = m2m_queryset(m, mm[2], mm[3])
+        pre isa PrefetchedList && return chain(qs; cache = pre.items, owner = qs.owner)
+        return qs
+    end
     for (rn, M, rf) in reverse_relations(T)
         rn === s || continue
         qs = filter(objects(M), Q(attname(rf) => data[:id]))
-        pre isa PrefetchedList && return QuerySet{M}(qs.where, qs.order, nothing, 0, false, Vector{Symbol}[], Prefetch[], pre.items)
+        pre isa PrefetchedList && return chain(qs; cache = pre.items)
         return qs
     end
     pre === NOTFOUND || return pre isa PrefetchedList ? pre.items : pre    # Prefetch(...; to_attr)
@@ -318,7 +429,8 @@ function Base.propertynames(m::Model, private::Bool = false)
         push!(names, attname(f))
         f.kind === :fk && push!(names, f.name)
     end
-    append!(names, first.(reverse_relations(typeof(m))))
+    append!(names, [r[1] for r in reverse_relations(typeof(m)) if !startswith(string(r[1]), "+")])
+    append!(names, first.(m2m_relations(typeof(m))))
     Tuple(names)
 end
 
@@ -372,6 +484,9 @@ end
 
 # --- Q objects & lookups -------------------------------------------------------------------
 
+"Supertype of query expressions (`F`, `Value`, aggregates, functions...). See expressions.jl."
+abstract type Expression end
+
 """
     Q(; lookups...)
 
@@ -417,15 +532,26 @@ Base.showerror(io::IO, e::LookupError) = print(io, "FieldError: ", e.msg)
 
 mutable struct SQLCompiler
     T::Type
-    base::String                # unquoted table name; base columns are "table"."col"
+    table::String               # the base table
+    base::String                # its alias (the table name itself at top level)
     joins::Vector{String}
     aliases::Dict{Any,String}   # (parent alias, relation, scope) => alias
     leftjoined::Set{String}
     counter::Base.RefValue{Int}
     distinct::Bool
-    scope::Int
+    scope::Any                  # filter() call index; :expr inside aggregates and Case conditions
+    annotations::Dict{Symbol,Any}
+    uses_aggregate::Bool        # set when a condition refers to an aggregate annotation (-> HAVING)
+    outer::Union{Nothing,SQLCompiler}   # the enclosing query, for OuterRef
 end
-SQLCompiler(T::Type) = SQLCompiler(T, modelmeta(T).table, String[], Dict{Any,String}(), Set{String}(), Ref(0), false, 0)
+function SQLCompiler(T::Type; outer = nothing)
+    table = modelmeta(T).table
+    counter = outer === nothing ? Ref(0) : outer.counter
+    c = SQLCompiler(T, table, table, String[], Dict{Any,String}(), Set{String}(), counter, false, 0,
+                    Dict{Symbol,Any}(), false, outer)
+    outer === nothing || (c.base = new_alias!(c))   # subqueries alias their table: no clash with the outer one
+    c
+end
 
 new_alias!(c::SQLCompiler) = (c.counter[] += 1; "j$(c.counter[])")
 qcol(alias, col) = qname(alias) * "." * qname(col)
@@ -442,7 +568,7 @@ end
 
 function find_reverse(T::Type, name)
     for (rn, M, rf) in reverse_relations(T)
-        (string(rn) == name || lowercase(string(nameof(M))) == name) && return (rn, M, rf)
+        (string(rn) == name || !startswith(string(rn), "+") && lowercase(modelmeta(M).name) == name) && return (rn, M, rf)
     end
     nothing
 end
@@ -462,11 +588,25 @@ function compile_lookup(c::SQLCompiler, alias, T::Type, key, value, negated::Boo
     fname = parts[1] == "pk" ? "id" : String(parts[1])
     rest = String.(parts[2:end])
     f = nothing
-    if fname == "id"
+    colps = Any[]
+    if alias == c.base && isempty(rest) && haskey(c.annotations, Symbol(fname))
+        a = c.annotations[Symbol(fname)]
+        contains_aggregate(a) && (c.uses_aggregate = true)
+        sql, colps = compile_expr(c, a)
+        col = "($sql)"
+    elseif fname == "id"
         isempty(rest) || throw(LookupError("'id' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
         col = qcol(alias, "id")
     else
         f = findfield(meta, Symbol(fname))
+        if f === nothing && (mm = find_m2m(T, fname)) !== nothing
+            # tags__name on Post -> through the join model: +post_tags_src__tag__name
+            step1, step2 = m2m_path(mm[2], mm[3])
+            if isempty(rest) && lookup == "isnull"
+                return compile_lookup(c, alias, T, string(step1, "__isnull"), value, negated)
+            end
+            return compile_lookup(c, alias, T, join(vcat([string(step1), string(step2)], rest, [lookup]), "__"), value, negated)
+        end
         if f === nothing
             rel = find_reverse(T, fname)
             rel === nothing && throw(lookup_error(T, fname))
@@ -507,7 +647,17 @@ function compile_lookup(c::SQLCompiler, alias, T::Type, key, value, negated::Boo
         end
     end
     conv(v) = v isa Model ? v.id : (f === nothing || f.kind === :fk ? dbparam(v) : to_db(f, v))
+    sql, ps = lookup_condition(c, col, lookup, value, conv)
+    sql, isempty(colps) ? ps : vcat(colps, ps)
+end
 
+function lookup_condition(c::SQLCompiler, col, lookup, value, conv)
+    if value isa Expression && lookup in ("exact", "ne", "gt", "gte", "lt", "lte", "iexact")
+        vsql, vps = compile_expr(c, value)
+        op = Dict("exact" => "=", "ne" => "!=", "gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=")
+        lookup == "iexact" && return ("LOWER($col) = LOWER($vsql)", vps)
+        return ("$col $(op[lookup]) ($vsql)", vps)
+    end
     if lookup == "exact"
         value === nothing && return ("$col IS NULL", Any[])
         return ("$col = ?", Any[conv(value)])
@@ -521,8 +671,12 @@ function compile_lookup(c::SQLCompiler, alias, T::Type, key, value, negated::Boo
         return ("$col $op ?", Any[conv(value)])
     elseif lookup == "in"
         if value isa QuerySet
-            sql, ps = select_sql(value; columns = qcol(modelmeta(model_of(value)).table, "id"))
+            sql, ps = value.values_fields === nothing ? subquery_sql(c, value; columns = nothing, idonly = true) :
+                      subquery_sql(c, value)
             return ("$col IN ($sql)", ps)
+        elseif value isa Subquery
+            sql, ps = compile_expr(c, value)
+            return ("$col IN $sql", ps)
         end
         vals = collect(value)
         isempty(vals) && return (sql_false(backend()), Any[])
@@ -543,7 +697,9 @@ function compile_q(c::SQLCompiler, alias, T::Type, q::Q, negated::Bool)
     parts = String[]
     params = Any[]
     for ch in q.children
-        sql, ps = ch isa Q ? compile_q(c, alias, T, ch, neg) : compile_lookup(c, alias, T, Symbol(ch.first), ch.second, neg)
+        sql, ps = ch isa Q ? compile_q(c, alias, T, ch, neg) :
+                  ch isa Expression ? compile_expr(c, ch) :
+                  compile_lookup(c, alias, T, Symbol(ch.first), ch.second, neg)
         push!(parts, sql)
         append!(params, ps)
     end
@@ -585,23 +741,64 @@ struct QuerySet{T<:Model}
     isnone::Bool
     related::Vector{Vector{Symbol}}     # select_related paths
     prefetch::Vector{Prefetch}          # prefetch_related lookups
-    cache::Union{Nothing,Vector}        # results already known (prefetched reverse relations)
+    cache::Union{Nothing,Vector}        # results already known (prefetched relations)
+    owner::Any                          # many-to-many context for add!/remove!/set!/clear!
+    annotations::Vector{Pair{Symbol,Any}}
+    values_fields::Union{Nothing,Vector{String}}   # values() mode: rows are Dicts
+    group_by_object::Bool                          # values() after an aggregate annotate: still one row per object
 end
 QuerySet{T}(where, order, limit, offset, isnone) where {T} =
-    QuerySet{T}(where, order, limit, offset, isnone, Vector{Symbol}[], Prefetch[], nothing)
+    QuerySet{T}(where, order, limit, offset, isnone, Vector{Symbol}[], Prefetch[], nothing, nothing,
+                Pair{Symbol,Any}[], nothing, false)
 
 model_of(::QuerySet{T}) where {T} = T
 
-"All objects of model `T` as a `QuerySet`."
-objects(::Type{T}) where {T<:Model} = QuerySet{T}(Q[], String[], nothing, 0, false)
+"""
+    objects(Model) -> QuerySet
+
+All objects of a model through its default queryset, `default_queryset(Model)`.
+`objects(Model, :name)` returns a named queryset defined with `Juango.manager`.
+"""
+objects(::Type{T}) where {T<:Model} = default_queryset(T)
+
+"""
+    base_objects(Model) -> QuerySet
+
+Every row of the table, ignoring `default_queryset`. Foreign-key access, cascading
+deletes and uniqueness checks use this, like Django's base manager.
+"""
+base_objects(::Type{T}) where {T<:Model} = QuerySet{T}(Q[], String[], nothing, 0, false)
+
+"""
+    default_queryset(::Type{Model})
+
+Override to change what `objects(Model)`, `filter(Model; ...)`, the admin and reverse
+relations see, for example to hide soft-deleted rows. Build on `base_objects`:
+
+    Juango.default_queryset(::Type{Post}) = filter(base_objects(Post); deleted = false)
+"""
+default_queryset(::Type{T}) where {T<:Model} = base_objects(T)
+
+"""
+    manager(::Type{Model}, ::Val{name})
+
+Define a named queryset, available as `objects(Model, :name)`:
+
+    Juango.manager(::Type{Post}, ::Val{:published}) = filter(Post; status = "p")
+"""
+manager(::Type{T}, ::Val{N}) where {T,N} = throw(ArgumentError("$T has no manager named :$N (define Juango.manager(::Type{$T}, ::Val{:$N}))"))
+objects(::Type{T}, name::Symbol) where {T<:Model} = manager(T, Val(name))
 "An empty queryset."
 none(::Type{T}) where {T<:Model} = QuerySet{T}(Q[], String[], nothing, 0, true)
 none(qs::QuerySet{T}) where {T} = none(T)
 
-"A new queryset with some parts replaced. Cached results never carry over."
-function chain(qs::QuerySet{T}; where = qs.where, order = qs.order, limit = qs.limit, offset = qs.offset,
-               related = qs.related, prefetch = qs.prefetch) where {T}
-    QuerySet{T}(where, order, limit, offset, qs.isnone, related, prefetch, nothing)
+"""
+A new queryset with some parts replaced. Cached results and the many-to-many context
+never carry over (unless passed explicitly).
+"""
+function chain(qs::QuerySet{T}; kw...) where {T}
+    vals = [haskey(kw, f) ? kw[f] : f in (:cache, :owner) ? nothing : getfield(qs, f) for f in fieldnames(QuerySet{T})]
+    QuerySet{T}(vals...)
 end
 
 """
@@ -652,17 +849,18 @@ Keep rows matching all lookups (`field`, `field__lookup`, `fk__field__lookup`).
 Lookups: exact iexact contains icontains startswith istartswith endswith
 iendswith gt gte lt lte in isnull range year month day ne.
 """
-function Base.filter(qs::QuerySet{T}, qargs::Q...; kw...) where {T}
+function Base.filter(qs::QuerySet{T}, qargs::Union{Q,Expression}...; kw...) where {T}
     assert_unsliced(qs, "filter")
     (isempty(qargs) && isempty(kw)) && return chain(qs)
     w = copy(qs.where)
     push!(w, Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], false))
     chain(qs; where = w)
 end
-Base.filter(::Type{T}, qargs::Q...; kw...) where {T<:Model} = filter(objects(T), qargs...; kw...)
+Base.filter(::Type{T}, qargs::Union{Q,Expression}...; kw...) where {T<:Model} = filter(objects(T), qargs...; kw...)
+Base.filter(qargs::Union{Q,Expression}...; kw...) = qs -> filter(qs, qargs...; kw...)
 
 "Exclude rows matching the lookups."
-function exclude(qs::QuerySet{T}, qargs::Q...; kw...) where {T}
+function exclude(qs::QuerySet{T}, qargs::Union{Q,Expression}...; kw...) where {T}
     assert_unsliced(qs, "exclude")
     (isempty(qargs) && isempty(kw)) && return chain(qs)
     w = copy(qs.where)
@@ -690,6 +888,10 @@ function order_clause(c::SQLCompiler, order::Vector{String})
     for o in order
         o == "?" && (push!(parts, random_function(backend())); continue)
         desc = startswith(o, "-")
+        if haskey(c.annotations, Symbol(lstrip(o, '-')))
+            push!(parts, qname(lstrip(o, '-')) * (desc ? " DESC" : " ASC"))
+            continue
+        end
         segs = split(lstrip(o, '-'), "__")
         alias, M = c.base, T
         for s in segs[1:end-1]     # follow forward FKs: order_by("author__name")
@@ -751,21 +953,84 @@ function related_columns!(c::SQLCompiler, paths)
 end
 
 """
-    build_select(qs; columns=nothing, ordered=true) -> (sql, params, compiler, related)
+    build_select(qs; columns=nothing, ordered=true, outer=nothing) -> (sql, params, compiler, related)
 
-The SELECT for a queryset. `columns` replaces the default `table.*` (plus `select_related`
-columns).
+The SELECT for a queryset. `columns` replaces the default select list (`table.*`, plus
+`select_related` columns and annotations). `outer` is the enclosing query's compiler when
+this is a subquery (for `OuterRef`).
 """
-function build_select(qs::QuerySet{T}; columns = nothing, ordered = true) where {T}
-    c = SQLCompiler(T)
-    w, ps = where_clause(c, qs)
-    related, rcols = columns === nothing ? related_columns!(c, qs.related) : (Tuple{Vector{Symbol},Any,String}[], String[])
+function build_select(qs::QuerySet{T}; columns = nothing, ordered = true, outer = nothing, idonly = false) where {T}
+    c = SQLCompiler(T; outer = outer)
+    for (k, v) in qs.annotations
+        c.annotations[k] = v
+    end
+    grouped = any(p -> contains_aggregate(p.second), qs.annotations)
+    # select list first: it may add joins, and its parameters come first in the SQL
+    sel, sel_ps = String[], Any[]
+    related = Tuple{Vector{Symbol},Any,String}[]
+    group = String[]
+    if idonly
+        push!(sel, qcol(c.base, "id"))
+    elseif columns !== nothing
+        push!(sel, columns)
+    elseif qs.values_fields !== nothing
+        for f in qs.values_fields
+            if haskey(c.annotations, Symbol(f))
+                continue
+            end
+            col, _ = resolve_path(c, c.base, T, f)
+            push!(sel, "$col AS $(qname(f))")
+            push!(group, col)
+        end
+        qs.group_by_object && pushfirst!(group, qcol(c.base, "id"))
+    else
+        push!(sel, qname(c.base) * ".*")
+        related, rcols = related_columns!(c, qs.related)
+        append!(sel, rcols)
+        push!(group, qcol(c.base, "id"))
+        append!(group, [qcol(a, "id") for (_, _, a) in related])
+    end
+    if columns === nothing && !idonly
+        for (k, v) in qs.annotations
+            sql, p = compile_expr(c, v)
+            push!(sel, "$sql AS $(qname(string(k)))")
+            append!(sel_ps, p)
+        end
+    end
+    # WHERE, or HAVING for conditions on aggregate annotations
+    wparts, wps, hparts, hps = String[], Any[], String[], Any[]
+    if qs.isnone
+        push!(wparts, sql_false(backend()))
+    else
+        for (i, q) in enumerate(qs.where)
+            c.scope = i
+            c.uses_aggregate = false
+            sql, p = compile_q(c, c.base, T, q, false)
+            if c.uses_aggregate
+                push!(hparts, sql); append!(hps, p)
+            else
+                push!(wparts, sql); append!(wps, p)
+            end
+        end
+        c.scope = 0
+    end
+    if grouped && columns !== nothing && !idonly && qs.values_fields === nothing
+        group = [qcol(c.base, "id")]
+    end
     o, extra = ordered ? order_clause(c, qs.order) : ("", String[])
-    sel = join(vcat([something(columns, qname(c.base) * ".*")], rcols, extra), ", ")
-    sql = "SELECT $(c.distinct ? "DISTINCT " : "")$sel FROM $(qname(c.base))$(join(c.joins))$w$o" *
-          limit_offset_sql(backend(), qs.limit, qs.offset)
-    sql, ps, c, related
+    (columns === nothing && !idonly && !grouped) && append!(sel, extra)
+    distinct = c.distinct && !grouped
+    sql = "SELECT $(distinct ? "DISTINCT " : "")$(join(sel, ", ")) FROM $(qname(c.table))" *
+          (c.base == c.table ? "" : " " * qname(c.base)) * join(c.joins) *
+          (isempty(wparts) ? "" : " WHERE " * join(wparts, " AND ")) *
+          (grouped && !isempty(group) ? " GROUP BY " * join(unique(group), ", ") : "") *
+          (isempty(hparts) ? "" : " HAVING " * join(hparts, " AND ")) *
+          o * limit_offset_sql(backend(), qs.limit, qs.offset)
+    sql, vcat(sel_ps, wps, hps), c, related
 end
+
+"Is the queryset grouped (aggregate annotations) or in values mode? Then counting wraps the full query."
+needs_wrapping(qs::QuerySet) = qs.values_fields !== nothing || any(p -> contains_aggregate(p.second), qs.annotations)
 
 function select_sql(qs::QuerySet; columns = nothing, ordered = true)
     sql, ps, _, _ = build_select(qs; columns = columns, ordered = ordered)
@@ -787,10 +1052,14 @@ end
 "Execute the query and return a `Vector` of model instances."
 function fetch(qs::QuerySet{T}) where {T}
     qs.cache === nothing || return Vector{T}(qs.cache)
+    qs.values_fields === nothing || return fetch_values(qs)
     qs.isnone && return T[]
     sql, ps, _, related = build_select(qs)
     rows = execute(sql, ps)
     objs = T[from_row(T, r) for r in rows]
+    for (k, _) in qs.annotations, (o, r) in zip(objs, rows)
+        getfield(o, :_data)[k] = get(r, k, nothing)
+    end
     if !isempty(related)
         for (obj, row) in zip(objs, rows)
             for (path, M, alias) in related
@@ -811,6 +1080,32 @@ function fetch(qs::QuerySet{T}) where {T}
     objs
 end
 
+"Rows of a `values()` queryset, with column values converted like model fields."
+function fetch_values(qs::QuerySet{T}) where {T}
+    qs.isnone && return Dict{Symbol,Any}[]
+    sql, ps, c, _ = build_select(qs)
+    convs = Dict{Symbol,Any}()
+    for f in qs.values_fields
+        haskey(c.annotations, Symbol(f)) && continue
+        _, fld = resolve_path(SQLCompiler(T), modelmeta(T).table, T, f)
+        fld === nothing || (convs[Symbol(f)] = fld)
+    end
+    out = Dict{Symbol,Any}[]
+    for r in execute(sql, ps)
+        d = Dict{Symbol,Any}()
+        for f in qs.values_fields
+            k = Symbol(f)
+            v = get(r, k, nothing)
+            d[k] = haskey(convs, k) ? from_db(convs[k], v) : v
+        end
+        for (k, _) in qs.annotations
+            d[k] = get(r, k, nothing)
+        end
+        push!(out, d)
+    end
+    out
+end
+
 function do_prefetch!(objs::Vector, p::Prefetch)
     segs = Symbol.(split(p.path, "__"))
     level = objs
@@ -829,7 +1124,7 @@ function prefetch_level!(objs::Vector, name::Symbol, qs, to_attr)
     if f !== nothing && f.kind === :fk && f.name === name
         R = related_model(f)
         ids = unique([getfield(o, :_data)[attname(f)] for o in objs if getfield(o, :_data)[attname(f)] !== nothing])
-        rel = isempty(ids) ? R[] : fetch(filter(something(qs, objects(R)); id__in = ids))
+        rel = isempty(ids) ? R[] : fetch(filter(something(qs, base_objects(R)); id__in = ids))
         byid = Dict(r.id => r for r in rel)
         for o in objs
             id = getfield(o, :_data)[attname(f)]
@@ -842,6 +1137,8 @@ function prefetch_level!(objs::Vector, name::Symbol, qs, to_attr)
         end
         return rel
     end
+    mm = find_m2m(T, string(name))
+    mm === nothing || return prefetch_m2m!(objs, mm[1], mm[2], mm[3], qs, to_attr)
     rel = find_reverse(T, string(name))
     rel === nothing && throw(LookupError("prefetch_related: '$name' is not a relation of $T"))
     rn, M, rf = rel
@@ -874,7 +1171,7 @@ end
 function Base.count(qs::QuerySet{T}) where {T}
     qs.cache === nothing || return length(qs.cache)
     qs.isnone && return 0
-    sql, ps = select_sql(qs; columns = qcol(modelmeta(T).table, "id"), ordered = false)
+    sql, ps = needs_wrapping(qs) ? select_sql(qs; ordered = false) : select_sql(qs; columns = qcol(modelmeta(T).table, "id"), ordered = false)
     execute("SELECT COUNT(*) AS n FROM ($sql) AS juango_sub", ps)[1][:n]
 end
 Base.count(::Type{T}) where {T<:Model} = count(objects(T))
@@ -947,40 +1244,6 @@ end
 Base.get(::Type{T}, qargs::Q...; kw...) where {T<:Model} = get(objects(T), qargs...; kw...)
 
 """
-    values(qs, fields...) -> Vector{Dict{Symbol,Any}}
-
-Rows as dicts (all concrete columns if no fields given).
-"""
-function Base.values(qs::QuerySet{T}, fields::Symbol...) where {T}
-    objs = fetch(qs)
-    names = isempty(fields) ? vcat([:id], [attname(f) for f in modelmeta(T).fields]) : collect(fields)
-    [Dict{Symbol,Any}(n => getproperty(o, n) for n in names) for o in objs]
-end
-
-"`values_list(qs, :field; flat=true)` → `Vector` of values; otherwise vector of tuples."
-function values_list(qs::QuerySet, fields::Symbol...; flat = false)
-    objs = fetch(qs)
-    if flat
-        length(fields) == 1 || throw(ArgumentError("flat=true requires exactly one field"))
-        return [getproperty(o, fields[1]) for o in objs]
-    end
-    [Tuple(getproperty(o, f) for f in fields) for o in objs]
-end
-
-"""
-    aggregate(qs, func, field)
-
-SQL aggregate over a column: `func` is `:count`, `:sum`, `:avg`, `:min` or `:max`.
-"""
-function aggregate(qs::QuerySet{T}, func::Symbol, field::Symbol) where {T}
-    func in (:count, :sum, :avg, :min, :max) || throw(ArgumentError("unknown aggregate $func"))
-    tbl = modelmeta(T).table
-    col = qcol(tbl, field in (:id, :pk) ? "id" : column(getfield_meta(T, field)))
-    sql, ps = select_sql(qs; columns = qcol(tbl, "id"), ordered = false)
-    execute("SELECT $(uppercase(string(func)))($col) AS r FROM $(qname(tbl)) WHERE $(qcol(tbl, "id")) IN ($sql)", ps)[1][:r]
-end
-
-"""
     update!(qs; field=value, ...) -> Int
 
 Bulk SQL UPDATE of all matching rows; returns the number of rows changed.
@@ -990,10 +1253,18 @@ function update!(qs::QuerySet{T}; kw...) where {T}
     qs.isnone && return 0
     meta = modelmeta(T)
     sets, ps = String[], Any[]
+    c = SQLCompiler(T)
     for (k, v) in kw
         f = getfield_meta(T, k)
-        push!(sets, qname(column(f)) * " = ?")
-        push!(ps, to_db(f, v))
+        if v isa Expression
+            sql, p = compile_expr(c, v)
+            isempty(c.joins) || throw(ArgumentError("update!: expressions can only use the model's own fields"))
+            push!(sets, qname(column(f)) * " = " * sql)
+            append!(ps, p)
+        else
+            push!(sets, qname(column(f)) * " = ?")
+            push!(ps, to_db(f, v))
+        end
     end
     isempty(sets) && return 0
     sub, sps = select_sql(qs; columns = qcol(meta.table, "id"), ordered = false)
@@ -1008,7 +1279,7 @@ Base.showerror(io::IO, e::ProtectedError) = print(io, "ProtectedError: ", e.msg)
 function delete_ids!(T::Type, ids::Vector)
     isempty(ids) && return 0
     for (_, M, f) in reverse_relations(T)
-        rel = filter(objects(M), Q(Symbol(attname(f), "__in") => ids))
+        rel = filter(base_objects(M), Q(Symbol(attname(f), "__in") => ids))
         if f.on_delete === :CASCADE
             delete_ids!(M, values_list(rel, :id; flat = true))
         elseif f.on_delete === :SET_NULL
@@ -1161,11 +1432,111 @@ function full_clean(obj::T; exclude = Symbol[]) where {T<:Model}
         v = getproperty(obj, attname(f))
         errs = validate_field(f, v)
         if isempty(errs) && f.unique && v !== nothing
-            q = filter(objects(T), Q(attname(f) => v))
+            q = filter(base_objects(T), Q(attname(f) => v))
             obj.id === nothing || (q = filter(q, !Q(id = obj.id)))
             exists(q) && push!(errs, "$(uppercasefirst(modelmeta(T).verbose_name)) with this $(label(f)) already exists.")
         end
         isempty(errs) || (errors[f.name] = errs)
     end
     errors
+end
+
+
+# --- many-to-many ----------------------------------------------------------------------------
+
+"Context carried by a many-to-many queryset: the join model and which FK points at `id`."
+struct M2MOwner
+    through::Type
+    mine::Field      # FK in the join model pointing at the instance
+    other::Field     # FK pointing at the related objects
+    id::Any
+end
+
+function m2m_queryset(m::Model, f::Field, forward::Bool)
+    src, dst = through_fks(f)
+    mine, other = forward ? (src, dst) : (dst, src)
+    Other = related_model(other)
+    id = getfield(m, :_data)[:id]
+    step1, step2 = m2m_path(f, !forward)      # from the other model back to this instance
+    qs = filter(objects(Other), Q(Symbol(step1, "__", step2) => id))
+    chain(qs; owner = M2MOwner(through_model(f), mine, other, id))
+end
+
+function m2m_owner(qs::QuerySet)
+    qs.owner isa M2MOwner || throw(ArgumentError("add!/remove!/set!/clear! need a many-to-many relation such as post.tags"))
+    qs.owner.id === nothing && throw(ArgumentError("save the object before changing its many-to-many relations"))
+    qs.owner
+end
+objid(x::Model) = (x.id === nothing && throw(ArgumentError("cannot relate an unsaved $(typeof(x))")); x.id)
+objid(x) = x
+
+"""
+    add!(post.tags, tag1, tag2; through_defaults=Dict())
+
+Add objects (or ids) to a many-to-many relation. Already related objects are skipped.
+`through_defaults` fills extra fields of a custom `through` model.
+"""
+function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}())
+    o = m2m_owner(qs)
+    ids = unique(objid.(collect(objs)))
+    isempty(ids) && return qs
+    atomic() do
+        have = Set(values_list(filter(base_objects(o.through), Q(attname(o.mine) => o.id), Q(Symbol(attname(o.other), "__in") => ids)),
+                               attname(o.other); flat = true))
+        for id in ids
+            id in have && continue
+            save!(o.through(; attname(o.mine) => o.id, attname(o.other) => id,
+                            (Symbol(k) => v for (k, v) in pairs(through_defaults))...))
+        end
+    end
+    qs
+end
+
+"Remove objects (or ids) from a many-to-many relation."
+function remove!(qs::QuerySet, objs...)
+    o = m2m_owner(qs)
+    ids = objid.(collect(objs))
+    isempty(ids) || delete!(filter(base_objects(o.through), Q(attname(o.mine) => o.id), Q(Symbol(attname(o.other), "__in") => ids)))
+    qs
+end
+
+"Remove every object from a many-to-many relation."
+function clear!(qs::QuerySet)
+    o = m2m_owner(qs)
+    delete!(filter(base_objects(o.through), Q(attname(o.mine) => o.id)))
+    qs
+end
+
+"Make a many-to-many relation contain exactly `objs`."
+function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}())
+    o = m2m_owner(qs)
+    want = unique(objid.(collect(objs)))
+    atomic() do
+        have = values_list(filter(base_objects(o.through), Q(attname(o.mine) => o.id)), attname(o.other); flat = true)
+        gone = setdiff(have, want)
+        isempty(gone) || remove!(qs, gone...)
+        add!(qs, setdiff(want, have)...; through_defaults = through_defaults)
+    end
+    qs
+end
+
+function prefetch_m2m!(objs::Vector, name, f::Field, forward::Bool, qs, to_attr)
+    src, dst = through_fks(f)
+    mine, other = forward ? (src, dst) : (dst, src)
+    Other = related_model(other)
+    ids = [o.id for o in objs]
+    pairs_ = values_list(filter(base_objects(through_model(f)), Q(Symbol(attname(mine), "__in") => ids)), attname(mine), attname(other))
+    owners_of = Dict{Any,Vector{Any}}()
+    for (mid, oid) in pairs_
+        push!(get!(() -> Any[], owners_of, oid), mid)
+    end
+    targets = isempty(owners_of) ? Other[] : fetch(filter(something(qs, objects(Other)); id__in = collect(keys(owners_of))))
+    groups = Dict{Any,Vector{Other}}()
+    for t in targets, mid in get(owners_of, t.id, Any[])
+        push!(get!(() -> Other[], groups, mid), t)
+    end
+    for o in objs
+        getfield(o, :_cache)[something(to_attr, name)] = PrefetchedList(get(groups, o.id, Other[]))
+    end
+    targets
 end
