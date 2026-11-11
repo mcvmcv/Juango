@@ -443,6 +443,34 @@ is_valid(form) && save!(form)
 
 For cross-field validation, define `Juango.clean_form(f::Form, ::Val{:ContactForm})` and call `add_error!`.
 
+### Formsets
+
+```julia
+LineFormSet = formset_factory(LineForm; extra = 2, can_delete = true, can_order = true,
+                              min_num = 1, validate_min = true, clean = fs -> ...)
+fs = LineFormSet(req.method == "POST" ? req.POST : nothing; initial = [Dict(:name => "a")])
+is_valid(fs) && cleaned_data(fs)            # one Dict per filled-in, non-deleted form
+
+PostFormSet = modelformset_factory(Post; fields = [:title, :published], extra = 1, can_delete = true)
+fs = PostFormSet(req.POST; queryset = filter(Post; author = req.user))
+is_valid(fs) && save!(fs)                   # fs.new_objects, fs.changed_objects, fs.deleted_objects
+
+CommentFormSet = inlineformset_factory(Post, Comment; fields = [:name, :body], extra = 3)
+fs = CommentFormSet(req.POST; instance = post)   # the foreign key to the post is set on save
+```
+
+```
+<form method="post">{% csrf_token %}
+  {{ formset.management_form }}
+  {% for form in formset %}{{ form.as_p }}{% endfor %}
+</form>
+```
+
+- **What's skipped.** Blank extra forms are ignored. Forms marked `DELETE` are skipped, and unchanged objects aren't re-saved.
+- **Model formsets** carry a hidden `id` per form. Ids are matched against the queryset, so a tampered id can't reach other rows.
+- **`formset.empty_form`** renders a form with `__prefix__` in place of the index, for adding rows with JavaScript.
+- **`add_error!(formset, msg)`** adds a formset-wide error from a `clean` function.
+
 ### Auth, sessions, CSRF, messages
 
 - `User` model with PBKDF2-SHA256 password hashes in Django's format, so existing Django hashes verify.

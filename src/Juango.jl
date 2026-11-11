@@ -40,6 +40,7 @@ include("schema.jl")
 include("backends/mysql_extra.jl")
 include("migrations.jl")
 include("forms.jl")
+include("formsets.jl")
 include("sessions.jl")
 include("auth.jl")
 include("contenttypes.jl")
@@ -85,7 +86,9 @@ export Model, @model, @abstract_model, OneToOneField, Index, GinIndex, Field, Ma
        Rank, DenseRank, Lag, Lead,
        MultipleObjectsReturned, ProtectedError, get_absolute_url
 # forms
-export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data, save_m2m!
+export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data, save_m2m!, has_changed,
+       FormSet, formset_factory, modelformset_factory, inlineformset_factory, management_form, empty_form,
+       deleted_forms, ordered_forms
 # auth & sessions
 export User, AnonymousUser, authenticate, login!, logout!, create_user, create_superuser,
        set_password!, check_password, make_password, login_required, staff_member_required,

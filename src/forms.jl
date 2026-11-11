@@ -256,6 +256,38 @@ function add_error!(f::Form, field, msg)
 end
 
 cleaned_data(f::Form) = f.cleaned_data
+
+"The value a field starts with: the form's initial data, else the field's default."
+function initial_for(f::Form, fld::Field)
+    v = get(f.initial, fld.name, nothing)
+    v === nothing && !(fld.default isa NoDefault) && (v = fld.default isa Function || fld.default isa Type ? fld.default() : fld.default)
+    v
+end
+
+normalized(x::Model) = x.id
+normalized(x::AbstractVector) = Set(normalized.(x))
+normalized(x::AbstractString) = isempty(x) ? nothing : String(x)
+normalized(x) = x
+
+"""
+    has_changed(form) -> Bool
+
+Whether submitted data differs from the initial values (used by formsets to skip blank
+extra forms and unchanged objects).
+"""
+function has_changed(f::Form)
+    f.data === nothing && return false
+    for fld in f.fields
+        fld.name in (:DELETE, :ORDER, :id) && continue
+        v, err = to_julia(fld, raw_value(f, fld))
+        err === nothing || return true
+        init = initial_for(f, fld)
+        fld.kind === :bool && (init = truthy(init))
+        fld.kind === :m2m && init === nothing && (init = Any[])
+        isequal(normalized(v), normalized(init)) || return true
+    end
+    false
+end
 non_field_errors(f::Form) = get(f.errors, :__all__, String[])
 
 """

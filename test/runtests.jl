@@ -1481,6 +1481,87 @@ end
     end
 end
 
+@testset "formsets" begin
+    @eval @form LineForm begin
+        name = CharField(max_length = 20)
+        qty = IntegerField()
+    end
+    LineFS = formset_factory(LineForm; extra = 2)
+    fs = LineFS()
+    @test length(fs) == 2 && fs[1].prefix == "form-0"
+    mf = string(management_form(fs))
+    @test occursin("name=\"form-TOTAL_FORMS\" value=\"2\"", mf) && occursin("name=\"form-INITIAL_FORMS\" value=\"0\"", mf)
+    @test occursin("name=\"form-1-qty\"", string(as_p(fs)))
+    @test length(LineFS(; initial = [Dict(:name => "a", :qty => 1)])) == 3
+    @test occursin("form-__prefix__-name", string(as_p(empty_form(fs))))
+    html = tr("{{ fs.management_form }}{% for f in fs %}[{{ f.prefix }}]{% endfor %}", Dict("fs" => fs))
+    @test occursin("TOTAL_FORMS", html) && occursin("[form-0][form-1]", html)
+
+    mg(total, initial = 0) = Dict("form-TOTAL_FORMS" => string(total), "form-INITIAL_FORMS" => string(initial))
+    data = merge(mg(3), Dict("form-0-name" => "x", "form-0-qty" => "2", "form-1-name" => "y", "form-1-qty" => "3",
+                             "form-2-name" => "", "form-2-qty" => ""))
+    fs = LineFS(data)
+    @test is_valid(fs) && cleaned_data(fs) == [Dict(:name => "x", :qty => 2), Dict(:name => "y", :qty => 3)]   # blank extra skipped
+    bad = LineFS(merge(data, Dict("form-1-qty" => "abc")))
+    @test !is_valid(bad) && haskey(Juango.errors(bad)[2], :qty)
+    tampered = LineFS(Dict("form-0-name" => "x"))
+    @test !is_valid(tampered) && occursin("ManagementForm", only(tampered.non_form_errors))
+
+    strict = formset_factory(LineForm; extra = 0, min_num = 2, validate_min = true, max_num = 2, validate_max = true)
+    @test !is_valid(strict(merge(mg(1), Dict("form-0-name" => "a", "form-0-qty" => "1"))))
+    three = merge(mg(3), Dict("form-$i-name" => "n$i" for i in 0:2), Dict("form-$i-qty" => "1" for i in 0:2))
+    f3 = strict(three)
+    @test !is_valid(f3) && occursin("at most 2", only(f3.non_form_errors))
+
+    DelFS = formset_factory(LineForm; extra = 0, can_delete = true, can_order = true)
+    d = merge(mg(3, 3), Dict("form-0-name" => "a", "form-0-qty" => "1", "form-0-ORDER" => "3",
+                             "form-1-name" => "b", "form-1-qty" => "1", "form-1-DELETE" => "on", "form-1-ORDER" => "1",
+                             "form-2-name" => "c", "form-2-qty" => "1", "form-2-ORDER" => "2"))
+    fd = DelFS(d)
+    @test is_valid(fd) && [x[:name] for x in cleaned_data(fd)] == ["c", "a"] && length(deleted_forms(fd)) == 1
+    nodup(fs) = length(unique(x[:name] for x in cleaned_data(fs))) == length(cleaned_data(fs)) || Juango.add_error!(fs, "Names must differ.")
+    DupFS = formset_factory(LineForm; extra = 0, clean = nodup)
+    fdup = DupFS(merge(mg(2), Dict("form-0-name" => "a", "form-0-qty" => "1", "form-1-name" => "a", "form-1-qty" => "2")))
+    @test !is_valid(fdup) && fdup.non_form_errors == ["Names must differ."]
+
+    # model formsets
+    a1, a2 = create(Author; name = "FS One"), create(Author; name = "FS Two")
+    outsider = create(Author; name = "FS Outsider")
+    AuthorFS = modelformset_factory(Author; fields = [:name], extra = 1, can_delete = true)
+    qs = order_by(filter(Author; name__in = ["FS One", "FS Two"]), "name")
+    fs = AuthorFS(; queryset = qs)
+    @test length(fs) == 3 && occursin("name=\"form-0-id\" id=\"id_form-0-id\"", string(as_p(fs)))
+    post_ = merge(mg(3, 2), Dict("form-0-id" => string(a1.id), "form-0-name" => "FS One renamed",
+                                 "form-1-id" => string(a2.id), "form-1-name" => "FS Two", "form-1-DELETE" => "on",
+                                 "form-2-id" => "", "form-2-name" => "FS Three"))
+    fs = AuthorFS(post_; queryset = qs)
+    @test is_valid(fs)
+    saved = save!(fs)
+    @test length(saved) == 2 && length(fs.new_objects) == 1 && length(fs.changed_objects) == 1 && length(fs.deleted_objects) == 1
+    @test get(Author; id = a1.id).name == "FS One renamed" && !exists(filter(Author; id = a2.id)) && exists(filter(Author; name = "FS Three"))
+    # an id outside the queryset never touches that object
+    sneaky = AuthorFS(merge(mg(1, 1), Dict("form-0-id" => string(outsider.id), "form-0-name" => "hacked"));
+                      queryset = filter(Author; name = "FS One renamed"))
+    is_valid(sneaky) && save!(sneaky)
+    @test get(Author; id = outsider.id).name == "FS Outsider"
+
+    # inline formsets
+    ArtFS = inlineformset_factory(Author, Article; fields = [:title], extra = 2)
+    create(Article; title = "existing", author = a1)
+    fs = ArtFS(; instance = a1)
+    @test length(fs) == 3 && fs.prefix == "articles"
+    @test !occursin("articles-0-author", string(as_p(fs)))
+    existing = only(filter(Article; author = a1))
+    p2 = Dict("articles-TOTAL_FORMS" => "3", "articles-INITIAL_FORMS" => "1",
+              "articles-0-id" => string(existing.id), "articles-0-title" => "existing (edited)",
+              "articles-1-title" => "brand new", "articles-2-title" => "")
+    fs = ArtFS(p2; instance = a1)
+    @test is_valid(fs)
+    save!(fs)
+    @test sort([x.title for x in filter(Article; author = a1)]) == ["brand new", "existing (edited)"]
+    @test_throws ArgumentError inlineformset_factory(Topic, Article)
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)
