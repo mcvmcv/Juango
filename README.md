@@ -808,6 +808,18 @@ const home = cache_page(home_view; timeout = 60)   # whole GET responses, keyed 
 - **Templates.** `TEMPLATE_CACHE_CHECK_MTIME = false` reads each template once instead of checking its file on every render. Use it in production.
 - **Sessions.** `SESSION_ENGINE = :cache` keeps sessions in the cache only, and `:cached_db` puts the cache in front of the database. The default is `:db`.
 
+### Sitemaps
+
+```julia
+sitemaps = Dict(
+    "posts" => Sitemap(() -> filter(Post; published = true); lastmod = :updated, changefreq = "weekly", priority = 0.6),
+    "pages" => Sitemap(["blog:list", "about"]; location = name -> reverse_url(name)),
+)
+urlpatterns = [..., sitemap_urls(sitemaps)...]
+```
+
+`/sitemap.xml` is a sitemap index that points at `/sitemap-posts.xml` and `/sitemap-pages.xml`. With a single section, it is that section's urlset. `items` is a collection, a QuerySet or a function returning one. `location`, `lastmod`, `changefreq` and `priority` are each a value, a function of the item, or a field name. Without a `location`, models use `get_absolute_url` and strings are taken as URLs. URLs become absolute with the request's host (set `protocol = "https"` to force a scheme). Sections larger than `limit` (50,000) are split into pages (`?p=2`), and the index lists each page.
+
 ### Middleware
 
 A middleware has Django's shape: a factory `get_response -> (req -> response)`.
@@ -907,6 +919,7 @@ src/
   server.jl      HTTP server             management.jl  CLI, startproject
   streaming.jl   streaming, SSE, WebSockets
   apps.jl        App, INSTALLED_APPS
+  sitemaps.jl    Sitemap, sitemap_urls
   testclient.jl  test Client             templates/   built-in admin templates
 test/runtests.jl                          examples/blog/  complete example app
 ```

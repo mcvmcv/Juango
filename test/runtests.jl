@@ -2856,6 +2856,57 @@ end
     @test !is_installed("shop") && haskey(Juango.all_commands(), "clearsessions")
 end
 
+@testset "sitemaps" begin
+    smauthor = create(Author; name = "Sitemap Author")
+    arts = [create(Article; title = "sm-$i", author = smauthor, published = true) for i in 1:5]
+    posts = Sitemap(() -> order_by(filter(Article; title__startswith = "sm-"), "id");
+                    location = a -> "/articles/$(a.id)/", lastmod = a -> Date(2024, 1, a.id % 28 + 1),
+                    changefreq = "weekly", priority = 0.5)
+    pages = Sitemap(["home", "article_list"]; location = n -> reverse_url(n), changefreq = n -> n == "home" ? "daily" : nothing)
+    small = Sitemap(() -> order_by(filter(Article; title__startswith = "sm-"), "id"); location = a -> "/a/$(a.id)/", limit = 2)
+    old_urls = settings.ROOT_URLCONF
+    try
+        configure!(ROOT_URLCONF = vcat(old_urls, [path("maps/", include_urls(sitemap_urls(Dict("posts" => posts, "pages" => pages)))),
+                                                   path("one/", include_urls(sitemap_urls(Dict("small" => small)))),
+                                                   path("abs/", include_urls(sitemap_urls(Dict("p" => Sitemap(["https://cdn.example/x"]; protocol = "https")))))]))
+        c = Client()
+        r = get(c, "/maps/sitemap.xml")
+        x = text(r)
+        @test r.status == 200 && startswith(getheader(r, "Content-Type"), "application/xml") && getheader(r, "X-Robots-Tag") == "noindex, noodp, noarchive"
+        @test occursin("<sitemapindex", x) && occursin("<loc>http://testserver/maps/sitemap-posts.xml</loc>", x) &&
+              occursin("<loc>http://testserver/maps/sitemap-pages.xml</loc>", x)
+        @test occursin(r"<sitemap><loc>http://testserver/maps/sitemap-posts.xml</loc><lastmod>2024-01-\d\d</lastmod></sitemap>", x)
+        x = text(get(c, "/maps/sitemap-posts.xml"))
+        a1 = arts[1]
+        @test occursin("<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">", x)
+        @test occursin("<url><loc>http://testserver/articles/$(a1.id)/</loc><lastmod>2024-01-$(lpad(a1.id % 28 + 1, 2, '0'))</lastmod><changefreq>weekly</changefreq><priority>0.5</priority></url>", x)
+        @test count("<url>", x) == 5
+        r = get(c, "/maps/sitemap-posts.xml")
+        @test getheader(r, "Last-Modified") !== nothing
+        x = text(get(c, "/maps/sitemap-pages.xml"))
+        @test occursin("<url><loc>http://testserver/</loc><changefreq>daily</changefreq></url>", x) &&
+              occursin("<url><loc>http://testserver/articles/</loc></url>", x)
+        @test get(c, "/maps/sitemap-nope.xml").status == 404
+
+        # one section: sitemap.xml is the urlset, paginated above `limit`
+        x = text(get(c, "/one/sitemap.xml"))
+        @test occursin("<urlset", x) && count("<url>", x) == 2 && occursin("/a/$(arts[1].id)/", x)
+        @test count("<url>", text(get(c, "/one/sitemap.xml?p=3"))) == 1
+        @test get(c, "/one/sitemap.xml?p=4").status == 404 && get(c, "/one/sitemap.xml?p=x").status == 404
+        idx = Juango.sitemap_index_view(Dict("small" => small); section_url = s -> "/one/sitemap-$s.xml")
+        x = text(idx(Request("GET", "/"; headers = Dict("host" => "example.org"))))
+        @test occursin("<loc>http://example.org/one/sitemap-small.xml</loc>", x) && occursin("<loc>http://example.org/one/sitemap-small.xml?p=3</loc>", x)
+        @test occursin("<loc>https://cdn.example/x</loc>", text(get(c, "/abs/sitemap.xml")))
+        # get_absolute_url is the default location
+        @test_throws Juango.ImproperlyConfigured Juango.sitemap_entries(Request("GET", "/"), Sitemap([1]), [1], 1)
+        x = text(Juango.sitemap_view(Dict("a" => Sitemap(() -> [a1])))(Request("GET", "/"; headers = Dict("host" => "h"))))
+        @test occursin("<loc>http://h/articles/$(a1.id)/</loc>", x)
+        @test Juango.w3c_date(DateTime(2024, 2, 3, 4, 5, 6)) == "2024-02-03T04:05:06+00:00"
+    finally
+        configure!(ROOT_URLCONF = old_urls)
+    end
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)
