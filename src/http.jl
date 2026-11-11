@@ -75,7 +75,7 @@ function Request(method::AbstractString, target::AbstractString;
     p, q = occursin('?', target) ? split(target, '?'; limit = 2) : (target, "")
     hdrs = Dict{String,String}(lowercase(string(k)) => string(v) for (k, v) in pairs_of(headers))
     body = body isa AbstractString ? Vector{UInt8}(codeunits(body)) : Vector{UInt8}(body)
-    path = HTTP.URIs.unescapeuri(String(p))
+    path = URIs.unescapeuri(String(p))
     isempty(path) && (path = "/")
     req = Request(uppercase(method), path, String(q), hdrs, body, QueryDict(q), QueryDict(),
                   parse_cookies(get(hdrs, "cookie", "")), nothing, nothing, nothing,
@@ -140,8 +140,7 @@ function parse_multipart_fields(req::Request)
     q = QueryDict()
     files = FileDict()
     try
-        hreq = HTTP.Request(req.method, "/", collect(req.headers), req.body)
-        parts = HTTP.parse_multipart_form(hreq)
+        parts = HTTP.parse_multipart_form(header(req, "content-type"), req.body)
         parts === nothing && return q
         for p in parts
             if p.filename === nothing
@@ -149,7 +148,7 @@ function parse_multipart_fields(req::Request)
             else
                 isempty(p.filename) && continue      # an empty file input
                 push!(get!(files.data, p.name, UploadedFile[]),
-                      UploadedFile(p.filename, read(p.data); content_type = something(p.contenttype, "application/octet-stream")))
+                      UploadedFile(p.filename, read(p.data); content_type = isempty(p.contenttype) ? "application/octet-stream" : p.contenttype))
             end
         end
     catch

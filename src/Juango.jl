@@ -19,6 +19,9 @@ import Sockets
 import Serialization
 import TimeZones
 import HTTP
+import URIs
+import Reseau
+using Reseau: TCP, TLS
 import SQLite
 import DBInterface
 import JSON

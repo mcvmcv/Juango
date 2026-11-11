@@ -34,7 +34,7 @@ function parse_flags(args)
 end
 
 function cmd_runserver(args)
-    pos, _ = parse_flags(args)
+    pos, flags = parse_flags(args)
     host, port = "127.0.0.1", 8000
     if !isempty(pos)
         a = pos[1]
@@ -46,7 +46,7 @@ function cmd_runserver(args)
             port = parse(Int, a)
         end
     end
-    runserver(host, port)
+    runserver(host, port; certfile = get(flags, "cert", nothing), keyfile = get(flags, "key", nothing))
 end
 
 function prompt(msg, default = "")
@@ -187,7 +187,7 @@ function cmd_shell(args)
 end
 
 for (n, h, f) in (
-    ("runserver", "Start the development server: runserver [host:]port", cmd_runserver),
+    ("runserver", "Start the development server: runserver [host:]port [--cert cert.pem --key key.pem]", cmd_runserver),
     ("migrate", "Apply migrations: migrate [app] [target|zero] [--fake] [--sync]", cmd_migrate),
     ("makemigrations", "Write migrations for model changes (--name, --empty, --merge, --dry-run, --check, --noinput, --app)", cmd_makemigrations),
     ("showmigrations", "List migrations and whether they are applied", _ -> showmigrations()),

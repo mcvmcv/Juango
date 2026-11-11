@@ -63,7 +63,7 @@ Base.read(s::FileSystemStorage, name) = read(path(s, name))
 "Delete a stored file (no error if it is already gone)."
 delete_file(s::FileSystemStorage, name) = (p = path(s, name); isfile(p) && rm(p); nothing)
 url(s::FileSystemStorage, name) = rstrip(something(s.base_url, string(settings.MEDIA_URL)), '/') * "/" *
-                                  join(HTTP.URIs.escapeuri.(split(name, '/')), "/")
+                                  join(URIs.escapeuri.(split(name, '/')), "/")
 
 """
     save_file(storage, name, bytes) -> stored name
@@ -227,7 +227,7 @@ function serve_media(req::Request)
     rel = req.path[ncodeunits(settings.MEDIA_URL)+1:end]
     st = FileSystemStorage()
     p = try
-        path(st, HTTP.URIs.unescapeuri(rel))
+        path(st, URIs.unescapeuri(rel))
     catch
         throw(Http404("Media file '$rel' not found"))
     end

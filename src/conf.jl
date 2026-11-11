@@ -29,6 +29,7 @@ function default_settings()
         :EMAIL_HOST_PASSWORD => "",
         :EMAIL_USE_TLS => false,
         :EMAIL_USE_SSL => false,
+        :EMAIL_TIMEOUT => nothing,
         :EMAIL_FILE_PATH => "",
         :EMAIL_SUBJECT_PREFIX => "[Juango] ",
         :DEFAULT_FROM_EMAIL => "webmaster@localhost",

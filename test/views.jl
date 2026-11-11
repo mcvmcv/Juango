@@ -252,12 +252,32 @@ end
     server = runserver("127.0.0.1", port; block = false, quiet = true)
     try
         r = Juango.HTTP.get("http://127.0.0.1:$port/articles/"; status_exception = false)
-        @test r.status == 200
+        @test r.status == 200 && r.proto_major == 1
+        h1_body = String(r.body)
         r = Juango.HTTP.get("http://127.0.0.1:$port/nope/"; status_exception = false)
         @test r.status == 404
+        r = Juango.HTTP.get("http://127.0.0.1:$port/articles/"; protocol = :h2)     # cleartext HTTP/2
+        @test r.status == 200 && r.proto_major == 2 && String(r.body) == h1_body
     finally
         close(server)
     end
+    # HTTPS, where clients negotiate HTTP/2
+    if Sys.which("openssl") !== nothing
+        dir = mktempdir()
+        cert, key = joinpath(dir, "cert.pem"), joinpath(dir, "key.pem")
+        run(pipeline(`openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost -keyout $key -out $cert`;
+                     stderr = devnull))
+        server = runserver("127.0.0.1", port; block = false, quiet = true, certfile = cert, keyfile = key)
+        try
+            r = Juango.HTTP.get("https://127.0.0.1:$port/articles/"; require_ssl_verification = false)
+            @test r.status == 200 && r.proto_major == 2
+            r = Juango.HTTP.get("https://127.0.0.1:$port/articles/"; require_ssl_verification = false, protocol = :h1)
+            @test r.status == 200 && r.proto_major == 1
+        finally
+            close(server)
+        end
+    end
+    @test_throws ArgumentError runserver("127.0.0.1", port; block = false, quiet = true, certfile = "x.pem")
 end
 
 @testset "streaming, server-sent events and websockets" begin
@@ -329,6 +349,10 @@ end
             @test r.body == read(fpath) && H.header(r, "Content-Length") == string(filesize(fpath))
             r = H.get("http://$base/events/")
             @test occursin("event: tick", String(r.body))
+            r = H.get("http://$base/gen/"; protocol = :h2)           # streamed over HTTP/2
+            @test r.proto_major == 2 && String(r.body) == "row 1\nrow 2\nrow 3\n"
+            r = H.get("http://$base/file/"; protocol = :h2)
+            @test r.body == read(fpath)
             # the first chunk arrives before the view has finished
             first_at = Ref(0.0); got = IOBuffer()
             H.open("GET", "http://$base/slow/") do s

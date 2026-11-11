@@ -235,7 +235,7 @@ function render!(io::IO, n::QueryStringNode, ctx::Context)
             k in order || push!(order, k)
         end
     end
-    q = join(["$(HTTP.URIs.escapeuri(k))=$(HTTP.URIs.escapeuri(v))" for k in order if haskey(params, k) for v in params[k]], "&")
+    q = join(["$(URIs.escapeuri(k))=$(URIs.escapeuri(v))" for k in order if haskey(params, k) for v in params[k]], "&")
     out = isempty(q) ? "?" : "?" * q
     n.asvar === nothing ? write(io, ctx.autoescape ? escape_html(out) : out) : (ctx[n.asvar] = out; nothing)
 end

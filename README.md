@@ -523,7 +523,7 @@ urlpatterns = [path("posts.csv", export_csv), path("reports/<str:name>", report)
 
 A WebSocket handshake goes through the middleware like any request, so `login_required` and friends can refuse it. The browser's `Origin` must be the site itself or listed in `CSRF_TRUSTED_ORIGINS`, so other sites can't open sockets with a visitor's cookies. A plain GET to a WebSocket URL gets 426 Upgrade Required. Pass `websocket(handler; subprotocols = ["chat.v1"])` to negotiate a subprotocol.
 
-**Concurrency.** `runserver` handles each connection in its own task, so a slow view, a sleeping event stream or an open WebSocket doesn't hold up other requests. Database queries on PostgreSQL wait cooperatively, so other tasks run meanwhile, and each task gets its own pooled connection (see Database backends). Start Julia with threads (`julia -t auto manage.jl runserver`) and the views also run in parallel on all cores. The shared caches (templates, URL reversing, content types, translations and cache backends) are protected by locks. A view can start its own work with `Threads.@spawn`, and the spawned task takes its own database connection.
+**Concurrency.** `runserver` handles each connection in its own task, so a slow view, a sleeping event stream or an open WebSocket doesn't hold up other requests. Database queries on PostgreSQL wait cooperatively, so other tasks run meanwhile, and each task gets its own pooled connection (see Database backends). Connections are served on Julia's interactive thread pool and views run on the default pool, so start Julia with an interactive thread as well as worker threads (`julia --threads=auto,1 manage.jl runserver`): then views run in parallel on all cores and a busy view never stalls the server. The shared caches (templates, URL reversing, content types, translations and cache backends) are protected by locks. A view can start its own work with `Threads.@spawn`, and the spawned task takes its own database connection.
 
 ### Templates
 
@@ -669,7 +669,7 @@ mail_admins("Disk almost full", details)          # to settings.ADMINS = [("Name
 ```
 
 - **Backends.** `EMAIL_BACKEND` is `:smtp` (the default), `:console`, `:file` (`EMAIL_FILE_PATH`), `:locmem` (messages collect in `Juango.outbox`) or `:dummy`. You can also give it any function that takes a vector of messages.
-- **SMTP** uses `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD` (AUTH PLAIN), and `EMAIL_USE_TLS` (STARTTLS) or `EMAIL_USE_SSL`.
+- **SMTP** uses `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD` (AUTH PLAIN), and `EMAIL_USE_TLS` (STARTTLS) or `EMAIL_USE_SSL`, with the server's certificate verified against the system roots. `EMAIL_TIMEOUT` (seconds) limits the whole conversation.
 - **Tests.** The test `Client` switches `:smtp` to `:locmem`, so tests never send real mail and can inspect `outbox`.
 - **Errors.** With `DEBUG = false`, unhandled errors are mailed to `ADMINS`.
 - **Password reset.** `auth_urls()` now includes password reset: `password_reset/` emails a link that works once, expires after `PASSWORD_RESET_TIMEOUT` (3 days), and leads to a page for choosing a new password. The templates are in `registration/password_reset_*`, and you can override them in your own template directory.
@@ -938,7 +938,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 - **Migrations can't be squashed yet.** Migration files describe tables and columns, and there are no historical model classes as in Django, so data migrations use raw SQL or today's models.
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
 - **ORM features not yet built:** symmetrical self-referential many-to-many, filtering on window functions, and `select_related` into a model that inherits from another table (use `prefetch_related`).
-- `runserver` is HTTP.jl's server. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and set `SESSION_COOKIE_SECURE`/`CSRF_COOKIE_SECURE`.
+- `runserver` is HTTP.jl's server. It speaks HTTP/1.1 and HTTP/2 (cleartext with prior knowledge, or negotiated over TLS), and serves HTTPS with `runserver 8443 --cert cert.pem --key key.pem` (or `runserver(...; certfile, keyfile)`). WebSockets need HTTP/1.1, which browsers use for them anyway. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and set `SESSION_COOKIE_SECURE`/`CSRF_COOKIE_SECURE`.
 
 ## Layout
 

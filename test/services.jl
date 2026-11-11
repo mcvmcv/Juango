@@ -84,6 +84,75 @@
     @test "MAIL FROM:<from@x.io>" in transcript && "RCPT TO:<to@x.io>" in transcript
     @test ("AUTH PLAIN " * Juango.base64encode("\0u\0p")) in transcript && "Subject: SMTP test" in transcript && "QUIT" in transcript
 
+    # STARTTLS and implicit TLS, against a fake server with a self-signed certificate
+    if Sys.which("openssl") !== nothing
+        TCP, TLS = Juango.TCP, Juango.TLS
+        dir = mktempdir()
+        cert, key = joinpath(dir, "cert.pem"), joinpath(dir, "key.pem")
+        run(pipeline(`openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=127.0.0.1
+                      -addext subjectAltName=IP:127.0.0.1 -keyout $key -out $cert`; stderr = devnull))
+        tls_config = TLS.Config(; cert_file = cert, key_file = key)
+        function fake_tls_smtp(implicit)
+            listener = TCP.listen(TCP.loopback_addr(0))
+            lines = String[]
+            task = @async begin
+                conn = TCP.accept(listener)
+                io = implicit ? TLS.server(conn, tls_config) : conn
+                try
+                    write(io, "220 fake ESMTP\r\n")
+                    indata = false
+                    while true
+                        l = readline(io)
+                        push!(lines, l)
+                        if indata
+                            l == "." && (indata = false; write(io, "250 queued\r\n"))
+                        elseif startswith(l, "EHLO")
+                            write(io, io isa TLS.Conn ? "250 fake\r\n" : "250-fake\r\n250 STARTTLS\r\n")
+                        elseif l == "STARTTLS"
+                            write(io, "220 go ahead\r\n")
+                            io = TLS.server(conn, tls_config)
+                        elseif startswith(l, "DATA")
+                            indata = true; write(io, "354 go\r\n")
+                        elseif startswith(l, "QUIT")
+                            write(io, "221 bye\r\n"); break
+                        elseif isempty(l) && eof(io)
+                            break
+                        else
+                            write(io, "250 ok\r\n")
+                        end
+                    end
+                catch
+                finally
+                    close(io); close(listener)
+                end
+            end
+            Int(TCP.addr(listener).port), lines, task
+        end
+        for implicit in (false, true)
+            port, lines, task = fake_tls_smtp(implicit)
+            configure!(EMAIL_BACKEND = :smtp, EMAIL_HOST = "127.0.0.1", EMAIL_PORT = port,
+                       EMAIL_USE_TLS = !implicit, EMAIL_USE_SSL = implicit, EMAIL_TIMEOUT = 10)
+            try
+                # the certificate is only trusted when we say so
+                @test withenv(() -> send_mail("TLS test", "secret", "from@x.io", ["to@x.io"]),
+                              "JULIA_SSL_CA_ROOTS_PATH" => cert) == 1
+                wait(task)
+                @test "Subject: TLS test" in lines && "QUIT" in lines
+                @test implicit || "STARTTLS" in lines
+            finally
+                configure!(EMAIL_BACKEND = :locmem, EMAIL_USE_TLS = false, EMAIL_USE_SSL = false, EMAIL_TIMEOUT = nothing)
+            end
+        end
+        port, lines, task = fake_tls_smtp(true)        # an untrusted certificate is refused
+        configure!(EMAIL_BACKEND = :smtp, EMAIL_HOST = "127.0.0.1", EMAIL_PORT = port, EMAIL_USE_SSL = true, EMAIL_TIMEOUT = 10)
+        try
+            @test_throws Exception send_mail("TLS test", "secret", "from@x.io", ["to@x.io"])
+        finally
+            configure!(EMAIL_BACKEND = :locmem, EMAIL_USE_SSL = false, EMAIL_TIMEOUT = nothing)
+        end
+        @test !("Subject: TLS test" in lines)
+    end
+
     # signing
     t = signing_dumps(Dict("a" => 1, "b" => [1, 2]))
     @test signing_loads(t) == Dict("a" => 1, "b" => [1, 2]) && signing_loads(t; max_age = 60)["a"] == 1

@@ -22,7 +22,7 @@ vendor(::MySQLBackend) = "MySQL"
 function mysql_params(url)
     m = match(r"^(?:mysql|mariadb)://(?:([^:@/]*)(?::([^@/]*))?@)?([^:/?]+)?(?::(\d+))?(?:/([^?]*))?"i, url)
     m === nothing && throw(ImproperlyConfigured("can't parse MySQL URL '$url'"))
-    dec(s) = s === nothing ? nothing : HTTP.URIs.unescapeuri(s)
+    dec(s) = s === nothing ? nothing : URIs.unescapeuri(s)
     (user = something(dec(m[1]), "root"), password = something(dec(m[2]), ""), host = something(m[3], "127.0.0.1"),
      port = m[4] === nothing ? 3306 : parse(Int, m[4]), db = something(dec(m[5]), ""))
 end

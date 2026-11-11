@@ -191,11 +191,14 @@ end
 
 """
 Send with SMTP (`EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`,
-`EMAIL_USE_TLS` for STARTTLS, `EMAIL_USE_SSL` for implicit TLS, `EMAIL_TIMEOUT`).
+`EMAIL_USE_TLS` for STARTTLS, `EMAIL_USE_SSL` for implicit TLS, `EMAIL_TIMEOUT` in seconds
+for the whole conversation).
 """
 function smtp_send(msgs)
     host, port = string(settings.EMAIL_HOST), Int(settings.EMAIL_PORT)
-    tcp = Sockets.connect(host, port)
+    tcp = TCP.connect((occursin(':', host) ? "[$host]" : host) * ":$port")
+    timeout = settings.EMAIL_TIMEOUT
+    timeout === nothing || TCP.set_deadline!(tcp, time_ns() + round(Int64, timeout * 1e9))
     io = settings.EMAIL_USE_SSL ? tls_wrap(tcp, host) : tcp
     sent = 0
     try
@@ -231,10 +234,9 @@ function smtp_send(msgs)
     sent
 end
 
+"Start TLS on an open SMTP connection, verifying the server's certificate for `host`."
 function tls_wrap(tcp, host)
-    S = HTTP.OpenSSL
-    ssl = S.SSLStream(tcp)
-    S.hostname!(ssl, host)
-    S.connect(ssl)
-    ssl
+    conn = TLS.client(tcp, TLS.Config(; server_name = host))
+    TLS.handshake!(conn)
+    conn
 end

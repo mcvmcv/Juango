@@ -76,8 +76,8 @@ function slugify(s)
     String(strip(s, '-'))
 end
 
-urlquote(s) = HTTP.URIs.escapeuri(string(s))
-urlunquote(s) = HTTP.URIs.unescapeuri(replace(string(s), '+' => ' '))
+urlquote(s) = URIs.escapeuri(string(s))
+urlunquote(s) = URIs.unescapeuri(replace(string(s), '+' => ' '))
 
 "Encode a dict / pairs as `application/x-www-form-urlencoded`."
 function urlencode(data)
