@@ -4,8 +4,6 @@ using Test
 using Juango
 using Dates
 const JSON = Juango.JSON
-import LibPQ    # loads the PostgreSQL driver extension
-import MySQL    # loads the MySQL/MariaDB driver extension
 
 # JUANGO_TEST_DATABASE picks the database: unset for in-memory SQLite, a SQLite path or
 # sqlite:/// URL, or a postgresql:// URL. For Postgres a fresh database juango_test_<pid>
@@ -13,6 +11,10 @@ import MySQL    # loads the MySQL/MariaDB driver extension
 const TEST_DB_SETTING = get(ENV, "JUANGO_TEST_DATABASE", ":memory:")
 const IS_POSTGRES = occursin(r"^postgres(ql)?://"i, TEST_DB_SETTING)
 const IS_MYSQL = occursin(r"^(mysql|mariadb)://"i, TEST_DB_SETTING)
+# Load only the driver in use: LibPQ's dependencies invalidate thousands of compiled methods,
+# which costs every test file seconds of recompiling.
+IS_POSTGRES && import LibPQ     # loads the PostgreSQL driver extension
+IS_MYSQL && import MySQL        # loads the MySQL/MariaDB driver extension
 const TEST_DATABASE = if IS_MYSQL
     name = "juango_test_$(getpid())"
     p = Juango.mysql_params(TEST_DB_SETTING)

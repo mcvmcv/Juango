@@ -309,13 +309,19 @@ migration_files(dir) = (dir === nothing || !isdir(dir)) ? String[] :
 
 "Evaluate one migration file."
 function load_migration(path::AbstractString, app::AbstractString)
-    m = Module(:JuangoMigration)
-    for n in names(@__MODULE__)
-        n === nameof(@__MODULE__) && continue
-        Core.eval(m, :(const $n = $(getfield(@__MODULE__, n))))
+    # While Juango itself precompiles (its workload migrates the built-in apps), new modules
+    # can't be evaluated into, so the built-in files are read in this module instead.
+    mig = if ccall(:jl_generating_output, Cint, ()) == 1 && startswith(path, BUILTIN_DIR)
+        Base.include(@__MODULE__, path)
+    else
+        m = Module(:JuangoMigration)
+        for n in names(@__MODULE__)
+            n === nameof(@__MODULE__) && continue
+            Core.eval(m, :(const $n = $(getfield(@__MODULE__, n))))
+        end
+        Core.eval(m, :(const Juango = $Juango))
+        Base.include(m, path)
     end
-    Core.eval(m, :(const Juango = $Juango))
-    mig = Base.include(m, path)
     mig isa Migration || throw(MigrationError("$path must evaluate to a Migration(...), got $(typeof(mig))"))
     mig.app = app
     mig.name = splitext(basename(path))[1]

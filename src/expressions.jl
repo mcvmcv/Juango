@@ -160,7 +160,7 @@ contains_aggregate(::Window) = false
 # --- compilation ----------------------------------------------------------------------------
 
 "Resolve a field path for expressions: returns (SQL column, Field or nothing)."
-function resolve_path(c::SQLCompiler, alias, T::Type, path::AbstractString)
+function resolve_path(c::SQLCompiler, alias, @nospecialize(T::Type), path::AbstractString)
     segs = String.(split(path, "__"))
     for (i, s) in enumerate(segs)
         last_ = i == length(segs)

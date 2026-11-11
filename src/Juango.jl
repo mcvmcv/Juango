@@ -20,6 +20,7 @@ import Serialization
 import TimeZones
 import HTTP
 import URIs
+using PrecompileTools: @setup_workload, @compile_workload
 import Reseau
 using Reseau: TCP, TLS
 import SQLite
@@ -145,6 +146,8 @@ export runserver, handle_request, Client, post, request, force_login!, execute_f
        startproject, startapp, collectstatic
 export App, installed_apps, is_installed, get_app, get_model, model_label, app_models, static_dirs
 export Admin
+
+include("precompile.jl")    # last: the workload needs the exports above
 
 function __init__()
     # Type-keyed registries were filled while precompiling; make sure their hashes are valid.

@@ -724,7 +724,7 @@ mutable struct SQLCompiler
     uses_aggregate::Bool        # set when a condition refers to an aggregate annotation (-> HAVING)
     outer::Union{Nothing,SQLCompiler}   # the enclosing query, for OuterRef
 end
-function SQLCompiler(T::Type; outer = nothing)
+function SQLCompiler(@nospecialize(T::Type); outer = nothing)
     table = modelmeta(T).table
     counter = outer === nothing ? Ref(0) : outer.counter
     c = SQLCompiler(T, table, table, String[], Dict{Any,String}(), Set{String}(), counter, false, 0,
@@ -777,7 +777,7 @@ function lookup_error(T, fname)
 end
 
 "Compile one `field__path__lookup = value` against model `T` whose table is reachable as `alias`."
-function compile_lookup(c::SQLCompiler, alias, T::Type, key, value, negated::Bool)
+function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nospecialize(value), negated::Bool)
     parts = split(string(key), "__")
     lookup = "exact"
     (length(parts) > 1 && parts[end] in LOOKUPS) && (lookup = String(pop!(parts)))
@@ -907,7 +907,7 @@ function compile_lookup(c::SQLCompiler, alias, T::Type, key, value, negated::Boo
     sql, isempty(colps) ? ps : vcat(colps, ps)
 end
 
-function lookup_condition(c::SQLCompiler, col, lookup, value, conv)
+function lookup_condition(c::SQLCompiler, col, lookup, @nospecialize(value), @nospecialize(conv))
     if value isa SearchQuery && lookup == "exact"
         q, qps = compile_expr(c, value)
         return "$col @@ $q", qps
@@ -952,7 +952,7 @@ function lookup_condition(c::SQLCompiler, col, lookup, value, conv)
     throw(LookupError("unsupported lookup '$lookup'"))
 end
 
-function compile_q(c::SQLCompiler, alias, T::Type, q::Q, negated::Bool)
+function compile_q(c::SQLCompiler, alias, @nospecialize(T::Type), q::Q, negated::Bool)
     neg = negated ⊻ q.negated
     parts = String[]
     params = Any[]
@@ -1223,7 +1223,11 @@ The SELECT for a queryset. `columns` replaces the default select list (`table.*`
 `select_related` columns and annotations). `outer` is the enclosing query's compiler when
 this is a subquery (for `OuterRef`).
 """
-function build_select(qs::QuerySet{T}; columns = nothing, ordered = true, outer = nothing, idonly = false) where {T}
+queryset_model(::QuerySet{T}) where {T} = T
+
+# Not specialized on the model: one compiled copy serves every model (and lives in the package image).
+function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = true, outer = nothing, idonly = false)
+    T = queryset_model(qs)
     c = SQLCompiler(T; outer = outer)
     for (k, v) in qs.annotations
         c.annotations[k] = v

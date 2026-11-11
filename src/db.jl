@@ -475,7 +475,7 @@ function count_queries(f)
     r, QUERY_COUNT[] - n0
 end
 
-function run_on(f, b, conn, sql, params)
+function run_on(@nospecialize(f), b, conn, sql, @nospecialize(params))
     Threads.atomic_add!(QUERY_COUNT, 1)
     settings.SQL_DEBUG && @info "SQL" sql params
     ps = Any[adapt_param(b, p) for p in params]
@@ -543,7 +543,7 @@ function atomic(f)
     end
 end
 
-function transaction(f, b, getdepth, setdepth)
+function transaction(@nospecialize(f), b, @nospecialize(getdepth), @nospecialize(setdepth))
     depth = getdepth()
     sp = "juango_sp_$(depth)"
     execute(depth == 0 ? begin_sql(b) : savepoint_sql(b, sp))
