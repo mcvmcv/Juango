@@ -1,12 +1,12 @@
 {% extends "admin/base.html" %}
-{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">Home</a> › <a href="{% url 'admin:changelist' model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › {% if adding %}Add {{ opts.verbose_name }}{% else %}{{ object }}{% endif %}</div>{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a> › <a href="{% url 'admin:changelist' model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › {% if adding %}Add {{ opts.verbose_name }}{% else %}{{ object }}{% endif %}</div>{% endblock %}
 {% block content %}
 <div class="toolbar" style="justify-content:space-between">
   <h1 class="page" style="margin:0">{{ title }}</h1>
-  <span>{% if history_url %}<a class="button secondary" href="{{ history_url }}">History</a>{% endif %}
-  {% if view_on_site %}<a class="button secondary" href="{{ view_on_site }}">View on site ›</a>{% endif %}</span>
+  <span>{% if history_url %}<a class="button secondary" href="{{ history_url }}">{% translate "History" %}</a>{% endif %}
+  {% if view_on_site %}<a class="button secondary" href="{{ view_on_site }}">{% translate "View on site" %} ›</a>{% endif %}</span>
 </div>
-{% if form.errors %}<p class="errorlist" style="color:var(--err);font-weight:600">Please correct the error{{ form.errors|length|pluralize }} below.</p>{% endif %}
+{% if form.errors %}<p class="errorlist" style="color:var(--err);font-weight:600">{% translate "Please correct the errors below." %}</p>{% endif %}
 <form method="post"{% if form.is_multipart %} enctype="multipart/form-data"{% endif %}>
   {% csrf_token %}
   {% for group in groups %}
@@ -59,7 +59,7 @@
     </table>
     {% else %}
     {% for f in inline.forms %}
-    <fieldset class="inline-related"><legend>{% if f.title %}{{ f.title }}{% else %}New{% endif %}</legend>
+    <fieldset class="inline-related"><legend>{% if f.title %}{{ f.title }}{% else %}{% translate "New" %}{% endif %}</legend>
       {{ f.hidden }}
       {% for bf in f.fields %}<div class="form-row">{{ bf.label_tag }}<div>{% if bf.errors %}<ul class="errorlist">{% for e in bf.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}{{ bf }}</div></div>{% endfor %}
     </fieldset>
@@ -68,12 +68,12 @@
   </div>
   {% endfor %}
   <div class="submit-row">
-    {% if can_delete %}<a class="deletelink" href="{% url 'admin:delete' model=opts.slug id=object.id %}">Delete</a>{% endif %}
+    {% if can_delete %}<a class="deletelink" href="{% url 'admin:delete' model=opts.slug id=object.id %}">{% translate "Delete" %}</a>{% endif %}
     {% if editable %}
-    {% if save_as %}<input type="submit" name="_saveasnew" value="Save as new" class="button secondary">{% endif %}
-    {% if can_add %}<input type="submit" name="_addanother" value="Save and add another" class="button secondary">{% endif %}
-    <input type="submit" name="_continue" value="Save and continue editing" class="button secondary">
-    <input type="submit" name="_save" value="Save">
+    {% if save_as %}<input type="submit" name="_saveasnew" value="{% translate "Save as new" %}" class="button secondary">{% endif %}
+    {% if can_add %}<input type="submit" name="_addanother" value="{% translate "Save and add another" %}" class="button secondary">{% endif %}
+    <input type="submit" name="_continue" value="{% translate "Save and continue editing" %}" class="button secondary">
+    <input type="submit" name="_save" value="{% translate "Save" %}">
     {% endif %}
   </div>
 </form>

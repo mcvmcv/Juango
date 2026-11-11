@@ -186,6 +186,17 @@ for (n, h, f) in (
     ("sqlmigrate", "Print the SQL for a migration: sqlmigrate [app] <name> [--backwards]", cmd_sqlmigrate),
     ("createsuperuser", "Create an admin user (--username, --email, --password, --noinput)", cmd_createsuperuser),
     ("showurls", "List all URL patterns", cmd_showurls),
+    ("makemessages", "Collect translatable strings: makemessages -l de [-l fr]", function (args)
+        _, flags = parse_flags(replace(args, "-l" => "--l"))
+        langs = String[]
+        for (i, a) in enumerate(args)
+            a == "-l" && i < length(args) && push!(langs, args[i+1])
+            startswith(a, "--locale=") && push!(langs, split(a, '=')[2])
+        end
+        isempty(langs) && error("usage: makemessages -l <language>")
+        foreach(l -> println("processing locale ", to_locale(l), ": ", makemessages(l)), langs)
+    end),
+    ("compilemessages", "Compile .po translation files into .mo", _ -> foreach(p -> println("compiled ", p), compilemessages())),
     ("createcachetable", "Create the table for database caches (CACHES backend :db)", _ -> foreach(create_cache_table, keys(settings.CACHES))),
     ("sqlschema", "Print the SQL schema for all models", _ -> println(schema_sql())),
     ("check", "Inspect the project for common problems", cmd_check),

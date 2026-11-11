@@ -1,0 +1,529 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: Juango\n"
+"Language: de\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: admin.jl
+msgid "Site administration"
+msgstr "Website-Verwaltung"
+
+#: admin.jl
+msgid "Logged out"
+msgstr "Abgemeldet"
+
+#: admin.jl
+#: admin.jl
+#: admin.jl
+#: templates/admin/action_confirmation.html:4
+#: templates/admin/delete_confirmation.html:4
+msgid "Are you sure?"
+msgstr "Sind Sie sicher?"
+
+#: admin.jl
+msgid "Select %(model)s to change"
+msgstr "%(model)s zur Änderung auswählen"
+
+#: admin.jl
+msgid "Select %(model)s to view"
+msgstr "%(model)s zur Ansicht auswählen"
+
+#: admin.jl
+msgid "The %(model)s “%(object)s” was added successfully."
+msgstr "%(model)s „%(object)s“ wurde erfolgreich hinzugefügt."
+
+#: admin.jl
+msgid "The %(model)s “%(object)s” was changed successfully."
+msgstr "%(model)s „%(object)s“ wurde erfolgreich geändert."
+
+#: admin.jl
+msgid "Add %(model)s"
+msgstr "%(model)s hinzufügen"
+
+#: admin.jl
+msgid "Change %(model)s"
+msgstr "%(model)s ändern"
+
+#: admin.jl
+msgid "View %(model)s"
+msgstr "%(model)s ansehen"
+
+#: admin.jl
+msgid "The %(model)s “%(object)s” was deleted successfully."
+msgstr "%(model)s „%(object)s“ wurde erfolgreich gelöscht."
+
+#: admin.jl
+msgid "Change history: %(object)s"
+msgstr "Änderungsgeschichte: %(object)s"
+
+#: auth.jl
+msgid "Enter a valid username."
+msgstr "Bitte einen gültigen Benutzernamen eingeben."
+
+#: forms.jl
+msgid "Enter a list of values."
+msgstr "Bitte eine Liste mit Werten eingeben."
+
+#: forms.jl
+msgid "Select a valid choice. One of the selected values is not one of the available choices."
+msgstr "Bitte eine gültige Auswahl treffen. Einer der ausgewählten Werte ist keine gültige Auswahl."
+
+#: forms.jl
+msgid "Enter a whole number."
+msgstr "Bitte eine ganze Zahl eingeben."
+
+#: forms.jl
+msgid "Enter a number."
+msgstr "Bitte eine Zahl eingeben."
+
+#: forms.jl
+msgid "Enter a valid date/time."
+msgstr "Bitte ein gültiges Datum und eine gültige Uhrzeit eingeben."
+
+#: forms.jl
+msgid "Enter a valid date."
+msgstr "Bitte ein gültiges Datum eingeben."
+
+#: forms.jl
+msgid "Enter a valid JSON."
+msgstr "Bitte gültiges JSON eingeben."
+
+#: forms.jl
+msgid "Enter a comma-separated list of valid values."
+msgstr "Bitte eine kommagetrennte Liste gültiger Werte eingeben."
+
+#: forms.jl
+msgid "Enter a valid geometry (WKT or GeoJSON)."
+msgstr "Bitte eine gültige Geometrie (WKT oder GeoJSON) eingeben."
+
+#: forms.jl
+msgid "Enter a valid UUID."
+msgstr "Bitte eine gültige UUID eingeben."
+
+#: forms.jl
+msgid "Select a valid choice. That choice is not one of the available choices."
+msgstr "Bitte eine gültige Auswahl treffen. Dies ist keine gültige Auswahl."
+
+#: forms.jl
+#: forms.jl
+#: orm.jl
+msgid "This field is required."
+msgstr "Dieses Feld ist zwingend erforderlich."
+
+#: forms.jl
+#: orm.jl
+msgid "%(model)s with this %(field)s already exists."
+msgstr "%(model)s mit diesem Wert für %(field)s existiert bereits."
+
+#: forms.jl
+msgid "Please either submit a file or check the clear checkbox, not both."
+msgstr "Bitte wählen Sie entweder eine Datei aus oder wählen Sie „Löschen“, nicht beides."
+
+#: forms.jl
+msgid "The submitted file is empty."
+msgstr "Die ausgewählte Datei ist leer."
+
+#: forms.jl
+msgid "Ensure this filename has at most %(max)d characters (it has %(len)d)."
+msgstr "Bitte sicherstellen, dass der Dateiname höchstens %(max)d Zeichen hat (er hat %(len)d)."
+
+#: forms.jl
+msgid "Upload a valid image. The file you uploaded was either not an image or a corrupted image."
+msgstr "Bitte ein gültiges Bild hochladen. Die hochgeladene Datei ist kein Bild oder ist defekt."
+
+#: forms.jl
+#: orm.jl
+msgid "Enter a valid value."
+msgstr "Bitte einen gültigen Wert eingeben."
+
+#: orm.jl
+msgid "Ensure this value has at most %(max)d characters (it has %(len)d)."
+msgstr "Bitte sicherstellen, dass der Text höchstens %(max)d Zeichen hat (er hat %(len)d)."
+
+#: orm.jl
+msgid "Enter a valid email address."
+msgstr "Bitte gültige E-Mail-Adresse eingeben."
+
+#: orm.jl
+msgid "Enter a valid “slug” consisting of letters, numbers, underscores or hyphens."
+msgstr "Bitte ein gültiges Kürzel eingeben, bestehend aus Buchstaben, Ziffern, Unterstrichen und Bindestrichen."
+
+#: orm.jl
+msgid "Enter a valid URL."
+msgstr "Bitte eine gültige Adresse eingeben."
+
+#: orm.jl
+msgid "Select a valid choice. %(value)s is not one of the available choices."
+msgstr "Bitte eine gültige Auswahl treffen. %(value)s ist keine gültige Auswahl."
+
+#: templates/admin/action_confirmation.html:2
+#: templates/admin/base.html:63
+#: templates/admin/change_form.html:2
+#: templates/admin/change_list.html:2
+#: templates/admin/delete_confirmation.html:2
+#: templates/admin/index.html:2
+#: templates/admin/object_history.html:2
+msgid "Home"
+msgstr "Start"
+
+#: templates/admin/action_confirmation.html:16
+#: templates/admin/delete_confirmation.html:12
+msgid "Yes, I’m sure"
+msgstr "Ja, ich bin sicher"
+
+#: templates/admin/action_confirmation.html:17
+#: templates/admin/delete_confirmation.html:13
+msgid "No, take me back"
+msgstr "Nein, bitte abbrechen"
+
+#: templates/admin/base.html:57
+msgid "Welcome,"
+msgstr "Willkommen,"
+
+#: templates/admin/base.html:58
+msgid "View site"
+msgstr "Website anzeigen"
+
+#: templates/admin/base.html:59
+msgid "Log out"
+msgstr "Abmelden"
+
+#: templates/admin/change_form.html:6
+msgid "History"
+msgstr "Geschichte"
+
+#: templates/admin/change_form.html:7
+msgid "View on site"
+msgstr "Auf der Website anzeigen"
+
+#: templates/admin/change_form.html:9
+msgid "Please correct the errors below."
+msgstr "Bitte die unten aufgeführten Fehler korrigieren."
+
+#: templates/admin/change_form.html:62
+msgid "New"
+msgstr "Neu"
+
+#: templates/admin/change_form.html:71
+msgid "Delete"
+msgstr "Löschen"
+
+#: templates/admin/change_form.html:73
+msgid "Save as new"
+msgstr "Als neu sichern"
+
+#: templates/admin/change_form.html:74
+msgid "Save and add another"
+msgstr "Sichern und neu hinzufügen"
+
+#: templates/admin/change_form.html:75
+msgid "Save and continue editing"
+msgstr "Sichern und weiter bearbeiten"
+
+#: templates/admin/change_form.html:76
+#: templates/admin/change_list.html:47
+msgid "Save"
+msgstr "Sichern"
+
+#: templates/admin/change_list.html:12
+#: templates/admin/change_list.html:13
+msgid "Search"
+msgstr "Suchen"
+
+#: templates/admin/change_list.html:28
+msgid "Action:"
+msgstr "Aktion:"
+
+#: templates/admin/change_list.html:29
+msgid "Go"
+msgstr "Ausführen"
+
+#: templates/admin/change_list.html:50
+msgid "previous"
+msgstr "zurück"
+
+#: templates/admin/change_list.html:52
+msgid "next"
+msgstr "weiter"
+
+#: templates/admin/change_list.html:57
+msgid "Filter"
+msgstr "Filter"
+
+#: templates/admin/index.html:6
+msgid "Models"
+msgstr "Modelle"
+
+#: templates/admin/index.html:11
+msgid "Add"
+msgstr "Hinzufügen"
+
+#: templates/admin/index.html:11
+msgid "Change"
+msgstr "Ändern"
+
+#: templates/admin/index.html:11
+msgid "View"
+msgstr "Ansehen"
+
+#: templates/admin/index.html:14
+msgid "You don’t have permission to view or edit anything."
+msgstr "Sie haben keine Berechtigung, etwas anzusehen oder zu ändern."
+
+#: templates/admin/index.html:19
+msgid "Recent actions"
+msgstr "Neueste Aktionen"
+
+#: templates/admin/index.html:26
+msgid "None available"
+msgstr "Keine vorhanden"
+
+#: templates/admin/login.html:3
+#: templates/admin/login.html:6
+#: templates/admin/login.html:16
+msgid "Log in"
+msgstr "Anmelden"
+
+#: templates/admin/object_history.html:7
+msgid "Date/time"
+msgstr "Datum/Zeit"
+
+#: templates/admin/object_history.html:7
+msgid "User"
+msgstr "Benutzer"
+
+#: templates/admin/object_history.html:7
+msgid "Action"
+msgstr "Aktion"
+
+#: templates/admin/object_history.html:12
+msgid "This object doesn’t have a change history. It probably wasn’t added via this admin site."
+msgstr "Dieses Objekt hat keine Änderungsgeschichte. Es wurde möglicherweise nicht über diese Verwaltungsseiten angelegt."
+
+#. dates (format_date)
+msgid "January"
+msgstr "Januar"
+
+#. dates (format_date)
+msgid "February"
+msgstr "Februar"
+
+#. dates (format_date)
+msgid "March"
+msgstr "März"
+
+#. dates (format_date)
+msgid "April"
+msgstr "April"
+
+#. dates (format_date)
+msgid "May"
+msgstr "Mai"
+
+#. dates (format_date)
+msgid "June"
+msgstr "Juni"
+
+#. dates (format_date)
+msgid "July"
+msgstr "Juli"
+
+#. dates (format_date)
+msgid "August"
+msgstr "August"
+
+#. dates (format_date)
+msgid "September"
+msgstr "September"
+
+#. dates (format_date)
+msgid "October"
+msgstr "Oktober"
+
+#. dates (format_date)
+msgid "November"
+msgstr "November"
+
+#. dates (format_date)
+msgid "December"
+msgstr "Dezember"
+
+#. dates (format_date)
+msgid "Monday"
+msgstr "Montag"
+
+#. dates (format_date)
+msgid "Tuesday"
+msgstr "Dienstag"
+
+#. dates (format_date)
+msgid "Wednesday"
+msgstr "Mittwoch"
+
+#. dates (format_date)
+msgid "Thursday"
+msgstr "Donnerstag"
+
+#. dates (format_date)
+msgid "Friday"
+msgstr "Freitag"
+
+#. dates (format_date)
+msgid "Saturday"
+msgstr "Samstag"
+
+#. dates (format_date)
+msgid "Sunday"
+msgstr "Sonntag"
+
+#. dates (format_date)
+msgid "Mon"
+msgstr "Mo"
+
+#. dates (format_date)
+msgid "Tue"
+msgstr "Di"
+
+#. dates (format_date)
+msgid "Wed"
+msgstr "Mi"
+
+#. dates (format_date)
+msgid "Thu"
+msgstr "Do"
+
+#. dates (format_date)
+msgid "Fri"
+msgstr "Fr"
+
+#. dates (format_date)
+msgid "Sat"
+msgstr "Sa"
+
+#. dates (format_date)
+msgid "Sun"
+msgstr "So"
+
+#. dates (format_date)
+msgctxt "abbrev. month"
+msgid "Jan"
+msgstr "Jan"
+
+#. dates (format_date)
+msgctxt "abbrev. month"
+msgid "Feb"
+msgstr "Feb"
+
+#. dates (format_date)
+msgctxt "abbrev. month"
+msgid "Mar"
+msgstr "Mär"
+
+#. dates (format_date)
+msgctxt "abbrev. month"
+msgid "Apr"
+msgstr "Apr"
+
+#. dates (format_date)
+msgctxt "abbrev. month"
+msgid "May"
+msgstr "Mai"
+
+#. dates (format_date)
+msgctxt "abbrev. month"
+msgid "Jun"
+msgstr "Jun"
+
+#. dates (format_date)
+msgctxt "abbrev. month"
+msgid "Jul"
+msgstr "Jul"
+
+#. dates (format_date)
+msgctxt "abbrev. month"
+msgid "Aug"
+msgstr "Aug"
+
+#. dates (format_date)
+msgctxt "abbrev. month"
+msgid "Sep"
+msgstr "Sep"
+
+#. dates (format_date)
+msgctxt "abbrev. month"
+msgid "Oct"
+msgstr "Okt"
+
+#. dates (format_date)
+msgctxt "abbrev. month"
+msgid "Nov"
+msgstr "Nov"
+
+#. dates (format_date)
+msgctxt "abbrev. month"
+msgid "Dec"
+msgstr "Dez"
+
+#. dates (format_date)
+msgctxt "alt. month"
+msgid "Jan."
+msgstr "Jan."
+
+#. dates (format_date)
+msgctxt "alt. month"
+msgid "Feb."
+msgstr "Feb."
+
+#. dates (format_date)
+msgctxt "alt. month"
+msgid "March"
+msgstr "März"
+
+#. dates (format_date)
+msgctxt "alt. month"
+msgid "April"
+msgstr "April"
+
+#. dates (format_date)
+msgctxt "alt. month"
+msgid "May"
+msgstr "Mai"
+
+#. dates (format_date)
+msgctxt "alt. month"
+msgid "June"
+msgstr "Juni"
+
+#. dates (format_date)
+msgctxt "alt. month"
+msgid "July"
+msgstr "Juli"
+
+#. dates (format_date)
+msgctxt "alt. month"
+msgid "Aug."
+msgstr "Aug."
+
+#. dates (format_date)
+msgctxt "alt. month"
+msgid "Sept."
+msgstr "Sept."
+
+#. dates (format_date)
+msgctxt "alt. month"
+msgid "Oct."
+msgstr "Okt."
+
+#. dates (format_date)
+msgctxt "alt. month"
+msgid "Nov."
+msgstr "Nov."
+
+#. dates (format_date)
+msgctxt "alt. month"
+msgid "Dec."
+msgstr "Dez."
+

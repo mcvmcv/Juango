@@ -1,29 +1,29 @@
 {% extends "admin/base.html" %}
-{% block breadcrumbs %}<div class="breadcrumbs">Home</div>{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs">{% translate "Home" %}</div>{% endblock %}
 {% block content %}
 <h1 class="page">Site administration</h1>
 <div class="module">
-  <h2>Models</h2>
+  <h2>{% translate "Models" %}</h2>
   <table>
     {% for m in model_list %}
     <tr>
       <th>{% if m.can_view %}<a href="{% url 'admin:changelist' model=m.slug %}">{{ m.verbose_name_plural|capfirst }}</a> <span class="muted">({{ m.count }})</span>{% else %}{{ m.verbose_name_plural|capfirst }}{% endif %}</th>
-      <td style="text-align:right">{% if m.can_add %}<a href="{% url 'admin:add' model=m.slug %}">+ Add</a>{% endif %} &nbsp; {% if m.can_view %}<a href="{% url 'admin:changelist' model=m.slug %}">{% if m.can_change %}Change{% else %}View{% endif %}</a>{% endif %}</td>
+      <td style="text-align:right">{% if m.can_add %}<a href="{% url 'admin:add' model=m.slug %}">+ {% translate "Add" %}</a>{% endif %} &nbsp; {% if m.can_view %}<a href="{% url 'admin:changelist' model=m.slug %}">{% if m.can_change %}{% translate "Change" %}{% else %}{% translate "View" %}{% endif %}</a>{% endif %}</td>
     </tr>
     {% empty %}
-    <tr><td>You don’t have permission to view or edit anything.</td></tr>
+    <tr><td>{% translate "You don’t have permission to view or edit anything." %}</td></tr>
     {% endfor %}
   </table>
 </div>
 <div class="module">
-  <h2>Recent actions</h2>
+  <h2>{% translate "Recent actions" %}</h2>
   <table>
     {% for r in recent_actions %}
     <tr><td><span class="{% if r.entry.is_addition %}yes{% elif r.entry.is_deletion %}no{% else %}muted{% endif %}">{% if r.entry.is_addition %}+{% elif r.entry.is_deletion %}✘{% else %}✎{% endif %}</span>
       {% if r.url %}<a href="{{ r.url }}">{{ r.entry.object_repr }}</a>{% else %}{{ r.entry.object_repr }}{% endif %}
       <span class="muted">{{ r.type }}</span></td></tr>
     {% empty %}
-    <tr><td class="muted">None available</td></tr>
+    <tr><td class="muted">{% translate "None available" %}</td></tr>
     {% endfor %}
   </table>
 </div>

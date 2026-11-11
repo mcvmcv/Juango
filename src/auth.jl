@@ -3,7 +3,7 @@
 @model struct User
     username = CharField(max_length = 150, unique = true,
                          help_text = "Required. 150 characters or fewer. Letters, digits and @/./+/-/_ only.",
-                         validators = [v -> occursin(r"^[\w.@+-]+$", v) || "Enter a valid username."])
+                         validators = [v -> occursin(r"^[\w.@+-]+$", v) || gettext("Enter a valid username.")])
     password = CharField(max_length = 128)
     email = EmailField(blank = true)
     first_name = CharField(max_length = 150, blank = true)

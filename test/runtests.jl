@@ -2097,6 +2097,166 @@ end
     end
 end
 
+@testset "internationalisation" begin
+    J = Juango
+    # plural rules from Plural-Forms
+    pl = J.plural_function("n==1 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2")   # Polish
+    @test [pl(n) for n in (1, 2, 4, 5, 12, 22, 25)] == [0, 1, 1, 2, 2, 1, 2]
+    @test J.plural_function("(n != 1)")(1) == 0 && J.plural_function("n > 1")(0) == 0
+
+    # .po and .mo round trips
+    po = """
+    msgid ""
+    msgstr ""
+    "Plural-Forms: nplurals=2; plural=(n > 1);\\n"
+
+    #: x.jl
+    msgid "Hello"
+    msgstr "Bonjour"
+
+    msgctxt "verb"
+    msgid "Book"
+    msgstr "Réserver"
+
+    msgid "%(n)d apple"
+    msgid_plural "%(n)d apples"
+    msgstr[0] "%(n)d pomme"
+    msgstr[1] "%(n)d pommes"
+
+    msgid "%(n)s apple"
+    msgid_plural "%(n)s apples"
+    msgstr[0] "%(n)s pomme"
+    msgstr[1] "%(n)s pommes"
+
+    #, fuzzy
+    msgid "Unsure"
+    msgstr "Pas sûr"
+
+    msgid "Multi"
+    "line"
+    msgstr "Multi\\n"
+    "ligne"
+    """
+    es = J.parse_po(po)
+    cat = J.catalog_from_entries(es)
+    @test cat.messages[("", "Hello")] == ["Bonjour"] && cat.messages[("verb", "Book")] == ["Réserver"]
+    @test cat.messages[("", "%(n)d apple")] == ["%(n)d pomme", "%(n)d pommes"] && !haskey(cat.messages, ("", "Unsure"))
+    @test cat.messages[("", "Multiline")] == ["Multi\nligne"] && cat.plural(0) == 0 && cat.plural(2) == 1
+    @test J.catalog_from_entries(J.read_mo(J.write_mo(es))).messages == cat.messages
+    io = IOBuffer(); J.write_po(io, es; header = J.header_of(es))
+    @test J.catalog_from_entries(J.parse_po(String(take!(io)))).messages == cat.messages
+
+    # Juango's own German catalogue
+    with_language("de") do
+        @test gettext("This field is required.") == "Dieses Feld ist zwingend erforderlich."
+        @test pgettext("abbrev. month", "Oct") == "Okt" && J.format_date(Date(2024, 10, 3), "l, j. F Y") == "Donnerstag, 3. Oktober 2024"
+        @test tr("{{ d|date }}", Dict("d" => Date(2024, 3, 5))) == "5. März 2024"
+        f = ModelForm(Author; data = Dict("name" => ""))
+        @test !is_valid(f) && f.errors[:name] == ["Dieses Feld ist zwingend erforderlich."]
+        @test get_language() == "de"
+    end
+    @test get_language() == "en" && gettext("This field is required.") == "This field is required."
+    lazy = gettext_lazy("Save")
+    @test lazy == "Save" && with_language(() -> string(lazy), "de") == "Sichern" && with_language(() -> uppercase(lazy), "de") == "SICHERN"
+    fld = CharField(max_length = 10, verbose_name = gettext_lazy("Search"))
+    fld.name = :q
+    @test with_language(() -> J.label(fld), "de") == "Suchen" && J.label(fld) == "Search"
+    @test interpolate("%(n)d items for %(who)s", Dict("n" => 3, "who" => "Ann")) == "3 items for Ann"
+
+    # project catalogues in LOCALE_PATHS override Juango's own
+    ldir = mktempdir()
+    mkpath(joinpath(ldir, "fr", "LC_MESSAGES")); write(joinpath(ldir, "fr", "LC_MESSAGES", "juango.po"), po)
+    mkpath(joinpath(ldir, "de", "LC_MESSAGES"))
+    write(joinpath(ldir, "de", "LC_MESSAGES", "juango.po"), "msgid \"Save\"\nmsgstr \"Speichern\"\n")
+    configure!(LOCALE_PATHS = [ldir])
+    try
+        with_language("fr") do
+            @test gettext("Hello") == "Bonjour" && pgettext("verb", "Book") == "Réserver" && gettext("Book") == "Book"
+            @test interpolate(ngettext("%(n)d apple", "%(n)d apples", 0), Dict("n" => 0)) == "0 pomme"
+            @test interpolate(ngettext("%(n)d apple", "%(n)d apples", 3), Dict("n" => 3)) == "3 pommes"
+            @test t"Hello" == "Bonjour"
+        end
+        with_language("de") do
+            @test gettext("Save") == "Speichern" && gettext("Delete") == "Löschen"
+        end
+        @test with_language(() -> gettext("Hello"), "fr-ca") == "Bonjour"          # region falls back to the language
+
+        # templates
+        with_language("fr") do
+            @test tr("{% load i18n %}{% translate \"Hello\" %} {% trans 'Book' context 'verb' %}") == "Bonjour Réserver"
+            @test tr("{% translate \"Hello\" as hi %}[{{ hi }}]") == "[Bonjour]"
+            @test tr("{% translate \"Hello\" noop %}") == "Hello"
+            b = "{% blocktranslate count n=items|length %}{{ n }} apple{% plural %}{{ n }} apples{% endblocktranslate %}"
+            @test tr(b, Dict("items" => [1])) == "1 pomme" && tr(b, Dict("items" => [1, 2, 3])) == "3 pommes"
+            @test tr("{% blocktranslate with who=name %}Hi {{ who }}{% endblocktranslate %}", Dict("name" => "<b>")) == "Hi &lt;b&gt;"
+            @test tr("{% get_current_language as L %}{{ L }}") == "fr"
+            @test tr("{% language 'de' %}{% translate 'Save' %}{% endlanguage %} {% translate 'Hello' %}") == "Speichern Bonjour"
+        end
+        @test tr("{% blocktranslate trimmed %}\n  Hello\n{% endblocktranslate %}") == "Hello"
+        @test tr("{{ x|localize }}", Dict("x" => 1234.5)) == "1234.5" && with_language(() -> tr("{{ x|localize }}", Dict("x" => 1234.5)), "de") == "1234,5"
+        @test number_format(1234567.891; decimals = 2, lang = "de", grouping = true) == "1.234.567,89"
+        @test number_format(-1234; lang = "en", grouping = true) == "-1,234"
+
+        # makemessages / compilemessages
+        proj = mktempdir()
+        write(joinpath(proj, "views.jl"), """
+            greet() = gettext("Hello")
+            other() = t"World"
+            cats(n) = ngettext("%(n)d cat", "%(n)d cats", n)
+            book() = pgettext("verb", "Book")
+            # gettext("not this one: a comment")
+            """)
+        mkpath(joinpath(proj, "templates"))
+        write(joinpath(proj, "templates", "page.html"),
+              "{% translate \"Title\" %}{% blocktranslate trimmed count n=k %}\n {{ n }} dog\n{% plural %}{{ n }} dogs{% endblocktranslate %}")
+        out = makemessages("nl"; root = proj, locale_dir = joinpath(proj, "locale"))
+        ids = Dict((e.context, e.msgid) => e for e in J.parse_po(read(out, String)))
+        @test haskey(ids, ("", "Hello")) && haskey(ids, ("", "World")) && haskey(ids, ("verb", "Book")) && haskey(ids, ("", "Title"))
+        @test ids[("", "%(n)d cat")].msgid_plural == "%(n)d cats" && ids[("", "%(n)s dog")].msgid_plural == "%(n)s dogs"
+        @test !any(k -> occursin("comment", k[2]), keys(ids))
+        write(out, replace(read(out, String), "msgid \"Hello\"\nmsgstr \"\"" => "msgid \"Hello\"\nmsgstr \"Hallo\""))
+        makemessages("nl"; root = proj, locale_dir = joinpath(proj, "locale"))           # keeps translations
+        @test occursin("msgstr \"Hallo\"", read(out, String))
+        configure!(LOCALE_PATHS = [joinpath(proj, "locale")])
+        @test only(compilemessages([joinpath(proj, "locale")])) == joinpath(dirname(out), "juango.mo")
+        @test with_language(() -> gettext("Hello"), "nl") == "Hallo"
+    finally
+        configure!(LOCALE_PATHS = String[])
+    end
+
+    # choosing the language for a request
+    hello(req) = HttpResponse(gettext("Save") * " " * reverse_url("i18n_hello") * " " * get_language())
+    old_urls, old_mw = settings.ROOT_URLCONF, settings.MIDDLEWARE
+    try
+        configure!(ROOT_URLCONF = [i18n_patterns(path("hello/", hello; name = "i18n_hello")), path("i18n/", i18n_urls())],
+                   MIDDLEWARE = vcat(old_mw, [LocaleMiddleware]))
+        c = Client()
+        r = get(c, "/de/hello/")
+        @test text(r) == "Sichern /de/hello/ de" && getheader(r, "Content-Language") == "de"
+        @test text(get(c, "/en/hello/")) == "Save /en/hello/ en"
+        r = get(Client(; headers = Dict("Accept-Language" => "fr-CH, fr;q=0.9, de;q=0.8")), "/hello/")
+        @test r.status == 302 && getheader(r, "Location") == "/fr/hello/"
+        @test J.parse_accept_language("de;q=0.5, en-GB, *") == ["en-GB", "de"]
+        r = post(c, "/i18n/setlang/", Dict("language" => "de", "next" => "/en/hello/"))
+        @test r.status == 302 && getheader(r, "Location") == "/de/hello/" && c.cookies["juango_language"] == "de"
+        @test getheader(get(c, "/hello/"), "Location") == "/de/hello/"                # the cookie wins now
+        @test get(c, "/xx/hello/").status == 404
+        configure!(ROOT_URLCONF = [i18n_patterns(path("hello/", hello; name = "i18n_hello"); prefix_default_language = false)])
+        @test text(get(Client(), "/hello/")) == "Save /hello/ en" && text(get(Client(), "/de/hello/")) == "Sichern /de/hello/ de"
+        @test get(Client(), "/en/hello/").status == 404
+
+        # the admin in German
+        configure!(ROOT_URLCONF = old_urls)
+        ac = Client(; headers = Dict("Accept-Language" => "de"))
+        force_login!(ac, get(User; username = "root"))
+        r = get(ac, "/admin/")
+        @test occursin("Website-Verwaltung", text(r)) && occursin("Neueste Aktionen", text(r)) && occursin("lang=\"de\"", text(r))
+        @test occursin("Sichern und weiter bearbeiten", text(get(ac, "/admin/author/add/")))
+    finally
+        configure!(ROOT_URLCONF = old_urls, MIDDLEWARE = old_mw)
+    end
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)

@@ -29,6 +29,7 @@ include("utils.jl")
 include("http.jl")
 include("urls.jl")
 include("template.jl")
+include("i18n.jl")
 include("signals.jl")
 include("db.jl")
 include("backends/sqlite.jl")
@@ -84,6 +85,9 @@ export FileField, ImageField, UploadedFile, FieldFile, FileSystemStorage, FileEx
        save_file, delete_file, image_size, default_storage
 export JSONField, ArrayField, UUIDField, CICharField, IntegerRangeField, DateRangeField, DateTimeRangeField,
        ValueRange, SearchVector, SearchQuery, SearchRank, uuid4, UUID
+export gettext, ngettext, pgettext, npgettext, gettext_lazy, ngettext_lazy, pgettext_lazy, @t_str, get_language,
+       activate!, deactivate!, with_language, LocaleMiddleware, i18n_patterns, set_language, i18n_urls, number_format,
+       localize, interpolate, language_name, makemessages, compilemessages
 export Signal, connect!, disconnect!, receiver, send, send_robust, has_receivers, pre_save, post_save, pre_delete,
        post_delete, m2m_changed, request_started, request_finished, user_logged_in, user_logged_out, user_login_failed
 export cache, cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, get_or_set, cache_get_many,

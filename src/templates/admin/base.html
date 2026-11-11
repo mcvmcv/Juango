@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="{% get_current_language as LANG %}{{ LANG }}"{% get_current_language_bidi as BIDI %}{% if BIDI %} dir="rtl"{% endif %}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -54,13 +54,13 @@ ul.errorlist{color:var(--err);margin:0 0 6px;padding:0;list-style:none;font-weig
   <h1><a href="{% url 'admin:index' %}">{{ site_header }}</a></h1>
   {% if user.is_authenticated and user.is_staff %}
   <div id="user-tools">
-    Welcome, <strong>{% firstof user.first_name user.username %}</strong>.
-    <a href="/">View site</a> /
-    <form method="post" action="{% url 'admin:logout' %}">{% csrf_token %}<button type="submit">Log out</button></form>
+    {% translate "Welcome," %} <strong>{% firstof user.first_name user.username %}</strong>.
+    <a href="/">{% translate "View site" %}</a> /
+    <form method="post" action="{% url 'admin:logout' %}">{% csrf_token %}<button type="submit">{% translate "Log out" %}</button></form>
   </div>
   {% endif %}
 </div>
-{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">Home</a>{% if title %} › {{ title }}{% endif %}</div>{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a>{% if title %} › {{ title }}{% endif %}</div>{% endblock %}
 {% if messages %}<ul class="messagelist">{% for message in messages %}<li class="{{ message.tags }}">{{ message }}</li>{% endfor %}</ul>{% endif %}
 <div id="content">
 {% block content %}{% endblock %}

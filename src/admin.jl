@@ -189,7 +189,7 @@ admin_url_for(e::LogEntry) = (e.content_type === nothing || e.object_id === noth
      reverse_url("admin:change"; model = model_name(T), id = e.object_id))
 
 function index(req::Request)
-    ctx = base_context(req, "Site administration")
+    ctx = base_context(req, gettext("Site administration"))
     ctx["model_list"] = [merge(opts(REGISTRY[s]), Dict{String,Any}(
                              "count" => can_view(req, REGISTRY[s]) ? count(admin_queryset(REGISTRY[s], req)) : nothing,
                              "can_add" => can(req, REGISTRY[s], :add), "can_view" => can_view(req, REGISTRY[s]),
@@ -207,7 +207,7 @@ admin_login(req::Request) =
 function admin_logout(req::Request)
     req.method == "POST" || return Juango.HttpResponseNotAllowed(["POST"])
     Juango.logout!(req)
-    render(req, "admin/logged_out.html", base_context(req, "Logged out"))
+    render(req, "admin/logged_out.html", base_context(req, gettext("Logged out")))
 end
 
 function header_label(ma::ModelAdmin, col)
@@ -308,7 +308,7 @@ function delete_selected(ma::ModelAdmin, req::Request, qs)
     meta = modelmeta(ma.model)
     objs = collect(qs)
     if get(req.POST, "post", "") != "yes"
-        ctx = base_context(req, "Are you sure?")
+        ctx = base_context(req, gettext("Are you sure?"))
         merge!(ctx, Dict{String,Any}("opts" => opts(ma), "objects" => objs, "action" => "delete_selected",
                                      "ids" => [string(o.id) for o in objs], "deleting" => true))
         return render(req, "admin/action_confirmation.html", ctx)
@@ -363,7 +363,7 @@ function run_action(req, ma::ModelAdmin)
     end
     qs = filter(admin_queryset(ma, req); id__in = ids)
     if a.confirm && get(req.POST, "post", "") != "yes"
-        ctx = base_context(req, "Are you sure?")
+        ctx = base_context(req, gettext("Are you sure?"))
         merge!(ctx, Dict{String,Any}("opts" => opts(ma), "objects" => collect(qs), "action" => a.name,
                                      "description" => a.description, "ids" => [string(x) for x in ids], "deleting" => false))
         return render(req, "admin/action_confirmation.html", ctx)
@@ -447,7 +447,8 @@ function changelist(req::Request; model)
         push!(rows, Dict{String,Any}("id" => o.id, "cells" => cells, "hidden" => SafeString(hidden),
                                      "url" => reverse_url("admin:change"; model = ma.slug, id = o.id)))
     end
-    ctx = base_context(req, "Select $(meta.verbose_name) to $(can(req, ma, :change) ? "change" : "view")")
+    ctx = base_context(req, interpolate(can(req, ma, :change) ? gettext("Select %(model)s to change") : gettext("Select %(model)s to view"),
+                                        Dict("model" => meta.verbose_name)))
     merge!(ctx, Dict{String,Any}(
         "opts" => opts(ma), "headers" => [header_label(ma, c) for c in ma.list_display], "rows" => rows,
         "page_obj" => pg, "paginator" => p, "q" => q, "has_search" => !isempty(ma.search_fields),
@@ -580,13 +581,16 @@ function change_form(req::Request, ma::ModelAdmin, obj)
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may add another $(meta.verbose_name) below.")
             return Juango.HttpResponseRedirect(reverse_url("admin:add"; model = ma.slug))
         end
-        message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully.")
+        message!(req, :success, interpolate(adding ? gettext("The %(model)s “%(object)s” was added successfully.") :
+                                                     gettext("The %(model)s “%(object)s” was changed successfully."),
+                                            Dict("model" => meta.verbose_name, "object" => o)))
         return Juango.HttpResponseRedirect(reverse_url("admin:changelist"; model = ma.slug))
     end
     auto_readonly = adding ? Any[] :
         [Dict{String,Any}("label" => label(f), "value" => format_value(getproperty(obj, attname(f))))
          for f in Juango.all_fields(T) if !f.editable && !(f.name in ma.readonly_fields)]
-    ctx = base_context(req, (adding ? "Add " : editable ? "Change " : "View ") * meta.verbose_name)
+    ctx = base_context(req, interpolate(adding ? gettext("Add %(model)s") : editable ? gettext("Change %(model)s") : gettext("View %(model)s"),
+                                        Dict("model" => meta.verbose_name)))
     prepop = adding ? [Dict("target" => "id_" * string(k), "sources" => ["id_" * string(s) for s in v])
                        for (k, v) in ma.prepopulated_fields] : Any[]
     merge!(ctx, Dict{String,Any}(
@@ -623,7 +627,8 @@ function delete_view(req::Request; model, id)
                 log_action!(req.user, obj, DELETION)
                 delete!(obj)
             end
-            message!(req, :success, "The $(meta.verbose_name) “$(name)” was deleted successfully.")
+            message!(req, :success, interpolate(gettext("The %(model)s “%(object)s” was deleted successfully."),
+                                                Dict("model" => meta.verbose_name, "object" => name)))
             return Juango.HttpResponseRedirect(reverse_url("admin:changelist"; model = ma.slug))
         catch e
             e isa ProtectedError || rethrow()
@@ -640,7 +645,7 @@ function delete_view(req::Request; model, id)
                                                              f.on_delete === :SET_NULL ? "unlinked" :
                                                              f.on_delete === :PROTECT ? "protected (blocks deletion)" : "left untouched"))
     end
-    ctx = base_context(req, "Are you sure?")
+    ctx = base_context(req, gettext("Are you sure?"))
     merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "related" => related))
     render(req, "admin/delete_confirmation.html", ctx)
 end
@@ -652,7 +657,7 @@ function history_view(req::Request; model, id)
     obj = admin_object(ma, req, id)
     entries = collect(select_related(order_by(filter(LogEntry; content_type = get_for_model(ma.model), object_id = string(obj.id)),
                                               "action_time", "id"), :user))
-    ctx = base_context(req, "Change history: $(obj)")
+    ctx = base_context(req, interpolate(gettext("Change history: %(object)s"), Dict("object" => obj)))
     merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "entries" => entries))
     render(req, "admin/object_history.html", ctx)
 end

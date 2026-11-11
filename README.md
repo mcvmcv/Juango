@@ -555,6 +555,37 @@ const edit_post = permission_required("project.change_post")(edit_post_view)   #
 - **Groups in the admin.** Groups are registered in the admin, and a user's groups and permissions can be edited on their page.
 - **Not yet supported.** Object-level permissions (`has_perm(user, perm; obj)`) return `false` except for superusers.
 
+### Translations and formats
+
+```julia
+gettext("Welcome"); t"Welcome"                       # into the active language
+ngettext("%(n)d comment", "%(n)d comments", n) |> s -> interpolate(s, Dict("n" => n))
+pgettext("month name", "May")
+title = CharField(max_length = 100, verbose_name = gettext_lazy("Title"))   # translated when shown
+with_language("de") do ... end
+
+configure!(MIDDLEWARE = [..., SessionMiddleware, LocaleMiddleware, ...],
+           LANGUAGE_CODE = "en", LANGUAGES = [("en", "English"), ("de", "Deutsch")],
+           LOCALE_PATHS = [joinpath(BASE_DIR, "locale")])
+urlpatterns = [i18n_patterns(path("about/", about; name = "about")),   # /en/about/, /de/about/
+               path("i18n/", i18n_urls())]                            # POST setlang/ to switch language
+```
+
+```
+{% load i18n %}
+{% translate "Welcome" %}  {% translate "May" context "month name" as m %}
+{% blocktranslate count n=comments|length %}{{ n }} comment{% plural %}{{ n }} comments{% endblocktranslate %}
+{% get_current_language as LANGUAGE_CODE %}  {% language "de" %}...{% endlanguage %}  {{ price|localize }}
+```
+
+- **Catalogues** are standard gettext files at `locale/<lang>/LC_MESSAGES/juango.po`, editable in Poedit, Weblate and similar tools.
+  - `manage.jl makemessages -l de` collects strings from `.jl` files and templates and keeps existing translations.
+  - `manage.jl compilemessages` builds the `.mo` files.
+  - Juango reads `.po` files directly too, so compiling is optional.
+- **Language selection.** `LocaleMiddleware` picks the language from the URL prefix, then the `juango_language` cookie, then `Accept-Language`, then `LANGUAGE_CODE`. It also sets `Content-Language`. Under `i18n_patterns`, a URL without a prefix redirects to the right language, and `reverse_url` adds the active prefix (`prefix_default_language = false` leaves the default language unprefixed).
+- **Formats.** Dates use translated month and day names, and the `date` filter's default format follows the language. `localize` and `number_format` use the language's decimal separator, and thousands separators too with `USE_THOUSAND_SEPARATOR`.
+- **Built-in German.** The admin's interface and validation messages are translatable, and Juango ships a German translation (`src/locale/de`). Other languages fall back to English until someone adds a catalogue.
+
 ### Signals
 
 ```julia

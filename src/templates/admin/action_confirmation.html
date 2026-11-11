@@ -1,7 +1,7 @@
 {% extends "admin/base.html" %}
-{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">Home</a> › <a href="{% url 'admin:changelist' model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › {% if deleting %}Delete multiple objects{% else %}{{ description }}{% endif %}</div>{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a> › <a href="{% url 'admin:changelist' model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › {% if deleting %}Delete multiple objects{% else %}{{ description }}{% endif %}</div>{% endblock %}
 {% block content %}
-<h1 class="page">Are you sure?</h1>
+<h1 class="page">{% translate "Are you sure?" %}</h1>
 {% if deleting %}
 <p>Are you sure you want to delete the selected {{ opts.verbose_name_plural }}? All of the following objects and their related items will be deleted:</p>
 {% else %}
@@ -13,7 +13,7 @@
   {% for id in ids %}<input type="hidden" name="_selected_action" value="{{ id }}">{% endfor %}
   <input type="hidden" name="action" value="{{ action }}">
   <input type="hidden" name="post" value="yes">
-  <input type="submit" class="button{% if deleting %} danger{% endif %}" value="Yes, I’m sure">
-  <a class="button secondary" href="{% url 'admin:changelist' model=opts.slug %}">No, take me back</a>
+  <input type="submit" class="button{% if deleting %} danger{% endif %}" value="{% translate "Yes, I’m sure" %}">
+  <a class="button secondary" href="{% url 'admin:changelist' model=opts.slug %}">{% translate "No, take me back" %}</a>
 </form>
 {% endblock %}

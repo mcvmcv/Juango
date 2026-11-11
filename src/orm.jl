@@ -35,8 +35,8 @@ mutable struct Field
     related_name::Union{Nothing,Symbol}
     auto_now::Bool
     auto_now_add::Bool
-    verbose_name::String
-    help_text::String
+    verbose_name::AbstractString      # may be gettext_lazy(...)
+    help_text::AbstractString
     validators::Vector{Any}
     widget::Union{Nothing,Symbol}
     editable::Bool
@@ -62,7 +62,8 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
     end
     Field(kind, :_, null, blank, default, unique, max_length, normchoices(choices), related,
           Symbol(uppercase(string(on_delete))), related_name === nothing ? nothing : Symbol(related_name),
-          auto_now, auto_now_add, string(verbose_name), string(help_text), collect(Any, validators),
+          auto_now, auto_now_add, verbose_name isa AbstractString ? verbose_name : string(verbose_name),
+          help_text isa AbstractString ? help_text : string(help_text), collect(Any, validators),
           widget === nothing ? nothing : Symbol(widget), editable, db_index, nothing, through, one_to_one)
 end
 
@@ -109,7 +110,7 @@ const STRING_KINDS = (:char, :text, :email, :slug, :url)
 "Attribute name under which the raw value is stored (`author_id` for a FK)."
 attname(f::Field) = f.kind === :fk ? Symbol(f.name, :_id) : f.name
 column(f::Field) = string(attname(f))
-label(f::Field) = isempty(f.verbose_name) ? uppercasefirst(replace(string(f.name), '_' => ' ')) : f.verbose_name
+label(f::Field) = isempty(f.verbose_name) ? gettext(uppercasefirst(replace(string(f.name), '_' => ' '))) : String(f.verbose_name)
 
 mutable struct ModelMeta
     model::Type
@@ -117,8 +118,8 @@ mutable struct ModelMeta
     table::String
     fields::Vector{Field}
     ordering::Vector{String}
-    verbose_name::String
-    verbose_name_plural::String
+    verbose_name::AbstractString
+    verbose_name_plural::AbstractString
     app::String
     m2m::Vector{Field}
     unique_together::Vector{Vector{Symbol}}
@@ -306,7 +307,8 @@ function register_model!(T::Type, fields::Vector, meta::NamedTuple = NamedTuple(
     vname = get(meta, :verbose_name, lowercase(replace(name, r"(?<=[a-z])(?=[A-Z])" => " ")))
     m = ModelMeta(T, name, string(get(meta, :table, lowercase(name))), fs,
                   String[string(o) for o in get(meta, :ordering, String[])],
-                  string(vname), string(get(meta, :verbose_name_plural, vname * "s")),
+                  vname isa AbstractString ? vname : string(vname),
+                  (vp = get(meta, :verbose_name_plural, nothing); vp === nothing ? string(vname) * "s" : vp isa AbstractString ? vp : string(vp)),
                   string(get(meta, :app_label, default_app_label(T))), m2m,
                   [Symbol.(collect(u)) for u in get(meta, :unique_together, [])],
                   parent, proxy,
@@ -1725,22 +1727,22 @@ function validate_field(f::Field, v)
     errs = String[]
     isempty_val = v === nothing || (v isa AbstractString && isempty(v))
     if isempty_val
-        (!f.blank && f.kind !== :bool) && push!(errs, "This field is required.")
+        (!f.blank && f.kind !== :bool) && push!(errs, gettext("This field is required."))
         return errs
     end
     if f.max_length !== nothing && v isa AbstractString && length(v) > f.max_length
-        push!(errs, "Ensure this value has at most $(f.max_length) characters (it has $(length(v))).")
+        push!(errs, interpolate(gettext("Ensure this value has at most %(max)d characters (it has %(len)d)."), Dict("max" => f.max_length, "len" => length(v))))
     end
-    f.kind === :email && !occursin(EMAIL_RE, string(v)) && push!(errs, "Enter a valid email address.")
-    f.kind === :slug && !occursin(SLUG_RE, string(v)) && push!(errs, "Enter a valid “slug” consisting of letters, numbers, underscores or hyphens.")
-    f.kind === :url && !occursin(URL_RE, string(v)) && push!(errs, "Enter a valid URL.")
+    f.kind === :email && !occursin(EMAIL_RE, string(v)) && push!(errs, gettext("Enter a valid email address."))
+    f.kind === :slug && !occursin(SLUG_RE, string(v)) && push!(errs, gettext("Enter a valid “slug” consisting of letters, numbers, underscores or hyphens."))
+    f.kind === :url && !occursin(URL_RE, string(v)) && push!(errs, gettext("Enter a valid URL."))
     if f.choices !== nothing && !any(c -> value_eq(c.first, v) || string(c.first) == string(v), f.choices)
-        push!(errs, "Select a valid choice. $(v) is not one of the available choices.")
+        push!(errs, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v)))
     end
     for val in f.validators
         r = val(v)
         r isa AbstractString && push!(errs, r)
-        r === false && push!(errs, "Enter a valid value.")
+        r === false && push!(errs, gettext("Enter a valid value."))
     end
     errs
 end
@@ -1760,7 +1762,7 @@ function full_clean(obj::T; exclude = Symbol[]) where {T<:Model}
         if isempty(errs) && f.unique && v !== nothing
             q = filter(base_objects(f.model), Q(attname(f) => v))
             obj.id === nothing || (q = filter(q, !Q(id = obj.id)))
-            exists(q) && push!(errs, "$(uppercasefirst(modelmeta(T).verbose_name)) with this $(label(f)) already exists.")
+            exists(q) && push!(errs, interpolate(gettext("%(model)s with this %(field)s already exists."), Dict("model" => uppercasefirst(string(modelmeta(T).verbose_name)), "field" => label(f))))
         end
         isempty(errs) || (errors[f.name] = errs)
     end

@@ -119,7 +119,27 @@ struct ResolverMatch
     url_name::Union{Nothing,String}
     namespace::Union{Nothing,String}
     route::String
+    language::Union{Nothing,String}      # the language prefix matched by i18n_patterns
 end
+ResolverMatch(view, kwargs, name, ns, route) = ResolverMatch(view, kwargs, name, ns, route, nothing)
+
+"""
+    i18n_patterns(patterns...; prefix_default_language=true)
+
+URL patterns under a language prefix (`/de/about/`). `LocaleMiddleware` activates that
+language, and `reverse_url` adds the active language's prefix. With
+`prefix_default_language=false`, the default language (`LANGUAGE_CODE`) has no prefix.
+"""
+struct LocalePrefix
+    patterns::Vector{Any}
+    prefix_default::Bool
+end
+i18n_patterns(patterns...; prefix_default_language = true) =
+    LocalePrefix(collect(Any, length(patterns) == 1 && patterns[1] isa AbstractVector ? patterns[1] : patterns), prefix_default_language)
+const LANG_ALWAYS, LANG_OPTIONAL = "\0lang1\0", "\0lang0\0"
+"Whether the root URLconf uses `i18n_patterns`."
+uses_i18n_patterns(patterns = settings.ROOT_URLCONF) = any(p -> p isa LocalePrefix || p isa AbstractVector && uses_i18n_patterns(p), patterns)
+default_language() = something(supported_language(settings.LANGUAGE_CODE), lowercase(string(settings.LANGUAGE_CODE)))
 
 function Base.getproperty(m::ResolverMatch, s::Symbol)
     s === :view_name || return getfield(m, s)
@@ -156,6 +176,15 @@ function _resolve(patterns, p::AbstractString, kwargs, ns, prefix)
         elseif pat isa AbstractVector
             r = _resolve(pat, p, kwargs, ns, prefix)
             r === nothing || return r
+        elseif pat isa LocalePrefix
+            m = match(r"^([A-Za-z]{2}(?:-[A-Za-z0-9]+)?)/", p)
+            if m !== nothing && lowercase(m[1]) in supported_codes() && (pat.prefix_default || lowercase(m[1]) != default_language())
+                r = _resolve(pat.patterns, p[ncodeunits(m.match)+1:end], kwargs, ns, prefix * m.match)
+                r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, lowercase(m[1]))
+            elseif !pat.prefix_default
+                r = _resolve(pat.patterns, p, kwargs, ns, prefix)
+                r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, default_language())
+            end
         end
     end
     nothing
@@ -177,6 +206,8 @@ function all_routes(patterns = settings.ROOT_URLCONF, prefix = "", ns = nothing)
             append!(out, all_routes(pat.patterns, prefix * pat.route, joinns(ns, pat.namespace)))
         elseif pat isa AbstractVector
             append!(out, all_routes(pat, prefix, ns))
+        elseif pat isa LocalePrefix
+            append!(out, all_routes(pat.patterns, prefix * "<language>/", ns))
         end
     end
     out
@@ -202,6 +233,8 @@ function build_reverse_index!(idx, patterns, prefix, ns)
             build_reverse_index!(idx, pat.patterns, prefix * pat.route, joinns(ns, pat.namespace))
         elseif pat isa AbstractVector
             build_reverse_index!(idx, pat, prefix, ns)
+        elseif pat isa LocalePrefix
+            build_reverse_index!(idx, pat.patterns, prefix * (pat.prefix_default ? LANG_ALWAYS : LANG_OPTIONAL), ns)
         end
     end
     idx
@@ -247,6 +280,10 @@ function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLC
             url = replace(url, Regex("<(?:" * conv * ":)?" * string(pn) * ">") => s; count = 1)
         end
         ok || continue
+        if occursin("\0lang", url)
+            lang = something(supported_language(get_language()), default_language())
+            url = replace(url, LANG_ALWAYS => lang * "/", LANG_OPTIONAL => lang == default_language() ? "" : lang * "/")
+        end
         url = "/" * url
         query === nothing || (url *= "?" * urlencode(query))
         return url

@@ -146,11 +146,11 @@ function to_julia(fld::Field, raw)
             sr = strip(string(r))
             isempty(sr) && continue
             id = parse_pk(related_model(fld), sr)
-            id === nothing && return nothing, "Enter a list of values."
+            id === nothing && return nothing, gettext("Enter a list of values.")
             push!(ids, id)
         end
         objs = isempty(ids) ? Any[] : collect(filter(objects(related_model(fld)); id__in = unique(ids)))
-        length(objs) == length(unique(ids)) || return nothing, "Select a valid choice. One of the selected values is not one of the available choices."
+        length(objs) == length(unique(ids)) || return nothing, gettext("Select a valid choice. One of the selected values is not one of the available choices.")
         return objs, nothing
     end
     if k === :bool
@@ -162,42 +162,42 @@ function to_julia(fld::Field, raw)
         return String(s), nothing
     elseif k === :int
         v = tryparse(Int, s)
-        return v, v === nothing ? "Enter a whole number." : nothing
+        return v, v === nothing ? gettext("Enter a whole number.") : nothing
     elseif k === :float
         v = tryparse(Float64, s)
-        return v, v === nothing ? "Enter a number." : nothing
+        return v, v === nothing ? gettext("Enter a number.") : nothing
     elseif k === :datetime
         for fmt in (dateformat"yyyy-mm-ddTHH:MM:SS", dateformat"yyyy-mm-ddTHH:MM", dateformat"yyyy-mm-dd HH:MM:SS",
                     dateformat"yyyy-mm-dd HH:MM", dateformat"yyyy-mm-ddTHH:MM:SS.s", dateformat"yyyy-mm-dd")
             v = tryparse(DateTime, s, fmt)
             v === nothing || return v, nothing
         end
-        return nothing, "Enter a valid date/time."
+        return nothing, gettext("Enter a valid date/time.")
     elseif k === :date
         v = tryparse(Date, s, dateformat"yyyy-mm-dd")
-        return v, v === nothing ? "Enter a valid date." : nothing
+        return v, v === nothing ? gettext("Enter a valid date.") : nothing
     elseif k === :json
         v = try
             plainjson(JSON.parse(s))
         catch
-            return nothing, "Enter a valid JSON."
+            return nothing, gettext("Enter a valid JSON.")
         end
         return v, nothing
     elseif k === :array
         try
             return Any[convert_elem(fld.related, strip(x)) for x in split(s, ',') if !isempty(strip(x))], nothing
         catch
-            return nothing, "Enter a comma-separated list of valid values."
+            return nothing, gettext("Enter a comma-separated list of valid values.")
         end
     elseif k === :geometry
         try
             return parse_geometry_input(fld, s), nothing
         catch e
-            return nothing, e isa ArgumentError && startswith(e.msg, "Expected") ? e.msg : "Enter a valid geometry (WKT or GeoJSON)."
+            return nothing, e isa ArgumentError && startswith(e.msg, "Expected") ? e.msg : gettext("Enter a valid geometry (WKT or GeoJSON).")
         end
     elseif k === :uuid
         v = tryparse(UUID, s)
-        return v, v === nothing ? "Enter a valid UUID." : nothing
+        return v, v === nothing ? gettext("Enter a valid UUID.") : nothing
     elseif k in RANGE_KINDS
         parts = strip.(split(s, ','))
         length(parts) == 2 || return nothing, "Enter the lower and upper bounds, separated by a comma."
@@ -211,7 +211,7 @@ function to_julia(fld::Field, raw)
     elseif k === :fk
         id = parse_pk(related_model(fld), s)
         obj = id === nothing ? nothing : first(filter(objects(related_model(fld)); id = id))
-        return obj, obj === nothing ? "Select a valid choice. That choice is not one of the available choices." : nothing
+        return obj, obj === nothing ? gettext("Select a valid choice. That choice is not one of the available choices.") : nothing
     end
     String(s), nothing
 end
@@ -238,12 +238,12 @@ function is_valid(f::Form)
             add_error!(f, fld.name, err)
             continue
         end
-        errs = fld.kind === :m2m ? (isempty(v) && !fld.blank ? ["This field is required."] : String[]) :
+        errs = fld.kind === :m2m ? (isempty(v) && !fld.blank ? [gettext("This field is required.")] : String[]) :
                validate_field(fld, v isa Model ? v.id : v)
         if isempty(errs) && f.model !== nothing && fld.unique && v !== nothing && v != ""
             q = filter(objects(f.model), Q(attname(fld) => v))
             (f.instance !== nothing && f.instance.id !== nothing) && (q = filter(q, !Q(id = f.instance.id)))
-            exists(q) && push!(errs, "$(uppercasefirst(modelmeta(f.model).verbose_name)) with this $(label(fld)) already exists.")
+            exists(q) && push!(errs, interpolate(gettext("%(model)s with this %(field)s already exists."), Dict("model" => uppercasefirst(string(modelmeta(f.model).verbose_name)), "field" => label(fld))))
         end
         foreach(e -> add_error!(f, fld.name, e), errs)
         isempty(errs) && (f.cleaned_data[fld.name] = v)
@@ -300,19 +300,19 @@ function clean_file_field(f::Form, fld::Field)
     v = up !== nothing ? up : file_cleared(f, fld) ? nothing : current
     errs = String[]
     if up !== nothing && file_cleared(f, fld)
-        push!(errs, "Please either submit a file or check the clear checkbox, not both.")
+        push!(errs, gettext("Please either submit a file or check the clear checkbox, not both."))
     elseif v === nothing
-        fld.blank || push!(errs, "This field is required.")
+        fld.blank || push!(errs, gettext("This field is required."))
     elseif up !== nothing
-        isempty(up.data) && push!(errs, "The submitted file is empty.")
+        isempty(up.data) && push!(errs, gettext("The submitted file is empty."))
         fld.max_length !== nothing && length(up.name) > fld.max_length &&
-            push!(errs, "Ensure this filename has at most $(fld.max_length) characters (it has $(length(up.name))).")
+            push!(errs, interpolate(gettext("Ensure this filename has at most %(max)d characters (it has %(len)d)."), Dict("max" => fld.max_length, "len" => length(up.name))))
         fld.kind === :image && image_size(up.data) === nothing &&
-            push!(errs, "Upload a valid image. The file you uploaded was either not an image or a corrupted image.")
+            push!(errs, gettext("Upload a valid image. The file you uploaded was either not an image or a corrupted image."))
         for val in fld.validators
             r = val(up)
             r isa AbstractString && push!(errs, r)
-            r === false && push!(errs, "Enter a valid value.")
+            r === false && push!(errs, gettext("Enter a valid value."))
         end
     end
     v, errs

@@ -80,6 +80,8 @@ function handle_request_inner(req::Request)
         end
         host_allowed(req) || throw(BadRequest("Invalid HTTP_HOST header: '$(get_host(req))'. You may need to add it to ALLOWED_HOSTS."))
         req.resolver_match = resolve(req.path)
+        req.resolver_match === nothing || req.resolver_match.language === nothing ||
+            (req.meta[:language_prefix] = req.resolver_match.language)
         resp = build_handler()(req)
         req.method == "HEAD" && (resp.body = UInt8[])
         resp
