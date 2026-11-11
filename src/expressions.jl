@@ -391,8 +391,8 @@ function aggregate(qs::QuerySet{T}; kw...) where {T}
         push!(sel, "$sql AS $(qname(string(k)))")
         append!(ps, p)
     end
-    sub, sps = select_sql(qs; columns = qcol(c.table, "id"), ordered = false)
-    row = execute("SELECT $(join(sel, ", ")) FROM $(qname(c.table))$(join(c.joins)) WHERE $(qcol(c.base, "id")) IN ($(in_subquery(backend(), sub)))",
+    sub, sps = select_sql(qs; columns = pk_select(c.table, T), ordered = false)
+    row = execute("SELECT $(join(sel, ", ")) FROM $(qname(c.table))$(join(c.joins)) WHERE $(pk_ref(c.base, T)) IN ($(in_subquery(backend(), sub)))",
                   vcat(ps, sps))[1]
     Dict{Symbol,Any}(k => row[k] for k in keys(kw))
 end

@@ -19,13 +19,14 @@ module Migrations
 
 using Dates
 import ..Juango
-using ..Juango: Column, Table, Index, SchemaState, copy_state, getcolumn, hascolumn, with_column, same_definition,
+using ..Juango: Column, Table, Index, ConstraintSpec, Q, F, Value, CombinedExpression, Func, SchemaState, copy_state, getcolumn, hascolumn, with_column, same_definition,
     backend, execute, atomic, settings, table_exists, table_columns, models_state, sync_models!, modelmeta,
     all_models, create_table_sql, drop_table_sql, rename_table_sql, add_column_sql, drop_column_sql,
     rename_column_sql, alter_column_sql, backfill_value, quote_name, VERSION_STRING
 
 export Migration, CreateModel, DeleteModel, RenameModel, AddField, RemoveField, AlterField, RenameField,
-       AlterUniqueTogether, AddIndex, RemoveIndex, RunSQL, RunJulia, Column, Index
+       AlterUniqueTogether, AddIndex, RemoveIndex, AddConstraint, RemoveConstraint, RunSQL, RunJulia, Column, Index,
+       ConstraintSpec, Q, F, Value, CombinedExpression, Func
 
 # --- operations ---------------------------------------------------------------------------------
 
@@ -40,12 +41,30 @@ struct CreateModel <: Operation
     parent::Union{Nothing,String}     # multi-table inheritance parent table
     pk::Symbol                        # :auto or :uuid
     indexes::Vector{Index}
+    constraints::Vector{ConstraintSpec}
+    pk_columns::Vector{String}        # pk = :composite
 end
-CreateModel(table; model = table, columns = Column[], unique_together = [], parent = nothing, pk = :auto, indexes = Index[]) =
+CreateModel(table; model = table, columns = Column[], unique_together = [], parent = nothing, pk = :auto, indexes = Index[],
+            constraints = ConstraintSpec[], pk_columns = String[]) =
     CreateModel(string(table), string(model), collect(Column, columns), Juango.normalize_unique(unique_together),
-                parent === nothing ? nothing : string(parent), Symbol(pk), collect(Index, indexes))
+                parent === nothing ? nothing : string(parent), Symbol(pk), collect(Index, indexes), collect(ConstraintSpec, constraints),
+                collect(String, pk_columns))
 to_table(op::CreateModel, app) = Table(op.table, app, op.model, copy(op.columns), [copy(u) for u in op.unique_together];
-                                       parent = op.parent, pk = op.pk, indexes = copy(op.indexes))
+                                       parent = op.parent, pk = op.pk, indexes = copy(op.indexes), constraints = copy(op.constraints),
+                                       pk_columns = copy(op.pk_columns))
+
+"Add a constraint (`ConstraintSpec`, from the model's `Meta(constraints = ...)`) to a table."
+struct AddConstraint <: Operation
+    table::String
+    constraint::ConstraintSpec
+end
+AddConstraint(table, c::ConstraintSpec) = AddConstraint(string(table), c)
+
+"Drop a constraint by name."
+struct RemoveConstraint <: Operation
+    table::String
+    name::String
+end
 
 "Add a named index (`Index(...)` with a name) to a table."
 struct AddIndex <: Operation
@@ -176,6 +195,12 @@ end
 state_forwards!(op::CreateModel, st, app) = (st[op.table] = to_table(op, app); st)
 state_forwards!(op::AddIndex, st, app) = (push!(table!(st, op.table).indexes, op.index); st)
 state_forwards!(op::RemoveIndex, st, app) = (filter!(i -> i.name != op.name, table!(st, op.table).indexes); st)
+function state_forwards!(op::AddConstraint, st, app)
+    t = table!(st, op.table)
+    t.constraints = sort(vcat(filter(c -> c.name != op.constraint.name, t.constraints), [op.constraint]); by = c -> c.name)
+    st
+end
+state_forwards!(op::RemoveConstraint, st, app) = (filter!(c -> c.name != op.name, table!(st, op.table).constraints); st)
 state_forwards!(op::AlterUniqueTogether, st, app) = (table!(st, op.table).unique_together = [copy(u) for u in op.unique_together]; st)
 state_forwards!(op::DeleteModel, st, app) = (table!(st, op.table); delete!(st, op.table); st)
 function state_forwards!(op::RenameModel, st, app)
@@ -234,6 +259,12 @@ forwards(op::AddIndex, b, from, to, deferred) = Juango.index_spec_sql(b, op.tabl
 backwards(op::AddIndex, b, from, to, deferred) = Juango.drop_index_spec_sql(b, op.table, op.index)
 forwards(op::RemoveIndex, b, from, to, deferred) =
     Juango.drop_index_spec_sql(b, op.table, only(filter(i -> i.name == op.name, from[op.table].indexes)))
+forwards(op::AddConstraint, b, from, to, deferred) = Juango.add_constraint_sql(b, from[op.table], to[op.table], op.constraint)
+backwards(op::AddConstraint, b, from, to, deferred) = Juango.remove_constraint_sql(b, to[op.table], from[op.table], op.constraint)
+forwards(op::RemoveConstraint, b, from, to, deferred) =
+    Juango.remove_constraint_sql(b, from[op.table], to[op.table], only(filter(c -> c.name == op.name, from[op.table].constraints)))
+backwards(op::RemoveConstraint, b, from, to, deferred) =
+    Juango.add_constraint_sql(b, to[op.table], from[op.table], only(filter(c -> c.name == op.name, from[op.table].constraints)))
 backwards(op::RemoveIndex, b, from, to, deferred) =
     Juango.index_spec_sql(b, op.table, only(filter(i -> i.name == op.name, from[op.table].indexes)))
 
@@ -278,6 +309,8 @@ describe(op::RenameField) = "Rename field $(op.old) on $(op.table) to $(op.new)"
 describe(op::AlterUniqueTogether) = "Alter unique_together for $(op.table)"
 describe(op::AddIndex) = "Create index $(op.index.name) on $(op.table)"
 describe(op::RemoveIndex) = "Remove index $(op.name) from $(op.table)"
+describe(op::AddConstraint) = "Create constraint $(op.constraint.name) on $(op.table)"
+describe(op::RemoveConstraint) = "Remove constraint $(op.name) from $(op.table)"
 describe(op::RunSQL) = "Raw SQL operation"
 describe(op::RunJulia) = "Raw Julia operation"
 
@@ -659,13 +692,14 @@ function detect_changes(g::Graph, app; questioner = ask)
     # new tables, created so that referenced tables come first
     for t in creation_order(Table[new[t] for t in added])
         push!(ops, CreateModel(t.name; model = t.model, columns = t.columns, unique_together = t.unique_together,
-                               parent = t.parent, pk = t.pk, indexes = t.indexes))
+                               parent = t.parent, pk = t.pk, indexes = t.indexes, constraints = t.constraints,
+                               pk_columns = t.pk_columns))
     end
 
     # columns of tables that exist in both
     for name in sort(collect(intersect(keys(old), keys(new))))
         o, n = old[name], new[name]
-        (o.parent != n.parent || o.pk != n.pk) &&
+        (o.parent != n.parent || o.pk != n.pk || o.pk_columns != n.pk_columns) &&
             throw(MigrationError("changing the parent model or primary key type of table '$name' isn't supported; create a new model and move the data"))
         ocols = Dict(c.name => c for c in o.columns)
         ncols = Dict(c.name => c for c in n.columns)
@@ -698,6 +732,14 @@ function detect_changes(g::Graph, app; questioner = ask)
         end
         for (k, i) in sort(collect(nix); by = first)
             get(oix, k, nothing) == i || push!(ops, AddIndex(name, i))
+        end
+        ocs = Dict(c.name => c for c in o.constraints)
+        ncs = Dict(c.name => c for c in n.constraints)
+        for (k, c) in sort(collect(ocs); by = first)
+            get(ncs, k, nothing) == c || push!(ops, RemoveConstraint(name, k))
+        end
+        for (k, c) in sort(collect(ncs); by = first)
+            get(ocs, k, nothing) == c || push!(ops, AddConstraint(name, c))
         end
         for r in gone
             push!(ops, RemoveField(name, r))
@@ -746,6 +788,7 @@ function column_code(c::Column)
     c.max_length === nothing || push!(kw, "max_length = $(c.max_length)")
     c.references === nothing || push!(kw, "references = " * jl(c.references))
     c.of === nothing || push!(kw, "of = :$(c.of)")
+    c.generated === nothing || push!(kw, "generated = (" * Juango.expr_code(c.generated.expression) * ", $(c.generated.persisted))")
     "Column($(jl(c.name)), :$(c.kind)" * (isempty(kw) ? ")" : "; " * join(kw, ", ") * ")")
 end
 
@@ -756,8 +799,12 @@ op_code(op::CreateModel) = "CreateModel($(jl(op.table)); model = $(jl(op.model))
     (isempty(op.unique_together) ? "" : ", unique_together = $(jl(op.unique_together))") *
     (op.parent === nothing ? "" : ", parent = $(jl(op.parent))") *
     (op.pk === :auto ? "" : ", pk = :$(op.pk)") *
-    (isempty(op.indexes) ? "" : ", indexes = [" * join(index_code.(op.indexes), ", ") * "]") * ")"
+    (isempty(op.pk_columns) ? "" : ", pk_columns = $(jl(op.pk_columns))") *
+    (isempty(op.indexes) ? "" : ", indexes = [" * join(index_code.(op.indexes), ", ") * "]") *
+    (isempty(op.constraints) ? "" : ", constraints = [\n" * join(["            " * Juango.constraint_code(c) * ",\n" for c in op.constraints]) * "        ]") * ")"
 op_code(op::AddIndex) = "AddIndex($(jl(op.table)), $(index_code(op.index)))"
+op_code(op::AddConstraint) = "AddConstraint($(jl(op.table)), $(Juango.constraint_code(op.constraint)))"
+op_code(op::RemoveConstraint) = "RemoveConstraint($(jl(op.table)), $(jl(op.name)))"
 op_code(op::RemoveIndex) = "RemoveIndex($(jl(op.table)), $(jl(op.name)))"
 op_code(op::AlterUniqueTogether) = "AlterUniqueTogether($(jl(op.table)), $(jl(op.unique_together)))"
 op_code(op::DeleteModel) = "DeleteModel($(jl(op.table)))"
@@ -800,6 +847,8 @@ function suggest_name(ops, initial)
     part(op::AlterUniqueTogether) = "alter_" * op.table * "_unique_together"
     part(op::AddIndex) = op.table * "_" * op.index.name
     part(op::RemoveIndex) = "remove_" * op.name
+    part(op::AddConstraint) = op.table * "_" * op.constraint.name
+    part(op::RemoveConstraint) = "remove_" * op.name
     part(op) = "custom"
     name = join(part.(ops), "_")
     all(op -> op isa AddField, ops) && length(ops) == 1 && (name = "add_" * name)

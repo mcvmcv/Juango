@@ -50,6 +50,7 @@ include("gis.jl")
 include("files.jl")
 include("backends/sqlite_extra.jl")
 include("schema.jl")
+include("constraints.jl")
 include("backends/mysql_extra.jl")
 include("migrations.jl")
 include("forms.jl")
@@ -112,6 +113,7 @@ export EmailMessage, EmailMultiAlternatives, send!, send_mail, mail_admins, atta
 export LogEntry, log_action!, ADDITION, CHANGE, DELETION
 export Permission, Group, has_perm, has_perms, has_module_perms, get_all_permissions, permission_required, perm_name
 export ContentType, GenericForeignKey, GenericRelation, get_for_model, model_class
+export CheckConstraint, UniqueConstraint, GeneratedField, DB_DEFAULT, CompositePrimaryKey
 export Model, @model, @abstract_model, OneToOneField, Index, GinIndex, Field, ManyToManyField, add!, remove!, set!, clear!, base_objects, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
        FloatField, BooleanField, DateTimeField, DateField, ForeignKey, Q, QuerySet, objects,
        exclude, order_by, exists, values_list, update!, create, get_or_create, update_or_create,

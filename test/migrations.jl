@@ -398,3 +398,241 @@ end
     end
     @test isfile(joinpath(root, "manage.jl")) && isfile(joinpath(root, "templates", "home.html"))
 end
+
+@testset "constraints: CheckConstraint and UniqueConstraint" begin
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("migcons" => dir))
+    quiet(f) = redirect_stdout(f, devnull)
+    partial = Juango.supports_partial_indexes(Juango.backend())
+    functional = Juango.supports_expression_indexes(Juango.backend())
+    try
+        @eval @model struct CnBooking
+            room = CharField(max_length = 10)
+            start = DateField()
+            stop = DateField()
+            cancelled = BooleanField(default = false)
+            code = CharField(max_length = 10, default = "")
+            Meta(table = "cn_booking", app_label = "migcons", constraints = [
+                CheckConstraint(condition = Q(stop__gte = F(:start)), name = "cn_stop_after_start"),
+                CheckConstraint(condition = Q(room__ne = "") & !Q(room__startswith = "x"), name = "cn_room",
+                                violation_error_message = "Bad room."),
+                UniqueConstraint(fields = [:room, :start], condition = Q(cancelled = false), name = "cn_one_per_day"),
+                UniqueConstraint(Lower(:code); name = "cn_code_ci", condition = Q(code__ne = "")),
+            ])
+        end
+        p1 = only(quiet(() -> makemigrations(app = "migcons", questioner = _ -> false)))
+        src = read(p1, String)
+        @test occursin("ConstraintSpec(:check, \"cn_stop_after_start\"; condition = Q(:AND, Any[:stop__gte => F(\"start\")], false))", src)
+        @test occursin("ConstraintSpec(:unique, \"cn_one_per_day\"; columns = [\"room\", \"start\"], condition = Q(:AND, Any[:cancelled => false], false))", src)
+        @test occursin("expressions = [(\"LOWER\", \"code\")]", src)
+        @test quiet(() -> makemigrations(app = "migcons", questioner = _ -> false)) == String[]   # no changes
+        quiet(() -> migrate())
+
+        d(x) = Date(2024, 5, x)
+        b1 = create(CnBooking; room = "A", start = d(1), stop = d(3), code = "Ab1")
+        # the database enforces them
+        @test_throws IntegrityError create(CnBooking; room = "B", start = d(5), stop = d(4))
+        @test_throws IntegrityError create(CnBooking; room = "", start = d(5), stop = d(6))
+        @test_throws IntegrityError create(CnBooking; room = "x1", start = d(5), stop = d(6))
+        create(CnBooking; room = "A", start = d(1), stop = d(2), cancelled = true)        # cancelled ones don't count
+        create(CnBooking; room = "C", start = d(1), stop = d(2))
+        partial && @test_throws IntegrityError create(CnBooking; room = "A", start = d(1), stop = d(2))
+        functional && @test_throws IntegrityError create(CnBooking; room = "D", start = d(1), stop = d(2), code = "AB1")
+
+        # full_clean reports them before saving
+        allerrs(o) = get(full_clean(o), :__all__, String[])
+        @test isempty(allerrs(CnBooking(; room = "E", start = d(1), stop = d(1))))
+        @test allerrs(CnBooking(; room = "E", start = d(2), stop = d(1))) == ["Constraint “cn_stop_after_start” is violated."]
+        @test allerrs(CnBooking(; room = "x2", start = d(1), stop = d(1))) == ["Bad room."]
+        @test allerrs(CnBooking(; room = "A", start = d(1), stop = d(9))) == ["Constraint “cn_one_per_day” is violated."]
+        @test isempty(allerrs(CnBooking(; room = "A", start = d(1), stop = d(9), cancelled = true)))
+        @test isempty(allerrs(b1))                                                   # itself doesn't clash
+        @test allerrs(CnBooking(; room = "F", start = d(1), stop = d(2), code = "aB1")) == ["Constraint “cn_code_ci” is violated."]
+        @test isempty(allerrs(CnBooking(; room = "F", start = d(1), stop = d(2))))   # code "" is outside the condition
+        @test !haskey(full_clean(CnBooking(; room = "E", start = d(2), stop = d(1)); exclude = [:stop]), :__all__)
+
+        # model forms too
+        mf = ModelForm(CnBooking; data = Dict("room" => "A", "start" => "2024-05-01", "stop" => "2024-05-04", "code" => "q1"))
+        @test !is_valid(mf) && Juango.non_field_errors(mf) == ["Constraint “cn_one_per_day” is violated."]
+        mf = ModelForm(CnBooking; data = Dict("room" => "G", "start" => "2024-05-03", "stop" => "2024-05-01", "code" => "q2"))
+        @test !is_valid(mf) && Juango.non_field_errors(mf) == ["Constraint “cn_stop_after_start” is violated."]
+        mf = ModelForm(CnBooking; data = Dict("room" => "A", "start" => "2024-05-01", "stop" => "2024-05-05", "code" => "zz"),
+                       instance = b1)
+        @test is_valid(mf)
+
+        # changing the constraints makes a migration that drops and adds them
+        Juango.unregister_model!(CnBooking)
+        @eval @model struct CnBooking2
+            room = CharField(max_length = 10)
+            start = DateField()
+            stop = DateField()
+            cancelled = BooleanField(default = false)
+            code = CharField(max_length = 10, default = "")
+            Meta(table = "cn_booking", name = "CnBooking", app_label = "migcons", constraints = [
+                CheckConstraint(condition = Q(stop__gt = F(:start)) | Q(cancelled = true), name = "cn_stop_after_start"),
+                UniqueConstraint(fields = [:room, :start], condition = Q(cancelled = false), name = "cn_one_per_day"),
+            ])
+        end
+        # rows that break the stricter check would stop the migration; cancel them first
+        update!(filter(CnBooking2; stop = d(1)); cancelled = true)
+        update!(filter(base_objects(CnBooking2); start = d(1), stop = d(2), cancelled = false); stop = d(3))
+        p2 = only(quiet(() -> makemigrations(app = "migcons", questioner = _ -> false)))
+        src = read(p2, String)
+        @test occursin("RemoveConstraint(\"cn_booking\", \"cn_stop_after_start\")", src) && occursin("RemoveConstraint(\"cn_booking\", \"cn_room\")", src)
+        @test occursin("AddConstraint(\"cn_booking\", ConstraintSpec(:check, \"cn_stop_after_start\"; condition = Q(:OR, Any[Q(:AND, Any[:stop__gt => F(\"start\")], false), Q(:AND, Any[:cancelled => true], false)], false)))", src)
+        quiet(() -> migrate())
+        @test count(objects(CnBooking2)) == 3
+        @test_throws IntegrityError create(CnBooking2; room = "H", start = d(5), stop = d(5))
+        create(CnBooking2; room = "H", start = d(5), stop = d(5), cancelled = true)
+        create(CnBooking2; room = "", start = d(6), stop = d(7))                 # cn_room is gone
+        functional && create(CnBooking2; room = "I", start = d(6), stop = d(7), code = "AB1")
+        # and back
+        Juango.execute("DELETE FROM " * Juango.qname("cn_booking") * " WHERE " * Juango.qname("room") * " IN ('', 'H', 'I')")
+        quiet(() -> migrate(app = "migcons", target = "0001"))
+        @test_throws IntegrityError create(CnBooking2; room = "", start = d(6), stop = d(7))
+        quiet(() -> migrate(app = "migcons", target = "zero"))
+        @test !Juango.table_exists(Juango.backend(), "cn_booking")
+
+        # bad definitions
+        @test_throws ArgumentError UniqueConstraint(name = "none")
+        @test_throws ArgumentError UniqueConstraint(Juango.Length(:code); name = "len")
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "migcons", Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end
+
+@testset "db_default and GeneratedField" begin
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("miggen" => dir))
+    quiet(f) = redirect_stdout(f, devnull)
+    persist = IS_POSTGRES          # PostgreSQL only has stored generated columns; elsewhere try virtual ones
+    try
+        @eval @model struct GfItem
+            price = FloatField()
+            qty = IntegerField(default = 1)
+            label = CharField(max_length = 20, db_default = "none")
+            stamp = DateTimeField(db_default = Now())
+            total = GeneratedField(expression = F(:price) * F(:qty), output_field = FloatField())
+            shout = GeneratedField(expression = Upper(:label), output_field = CharField(max_length = 20), db_persist = $persist)
+            Meta(table = "gf_item", app_label = "miggen")
+        end
+        p1 = only(quiet(() -> makemigrations(app = "miggen", questioner = _ -> false)))
+        src = read(p1, String)
+        @test occursin("Column(\"total\", :float; null = true, generated = (CombinedExpression(\"*\", F(\"price\"), F(\"qty\")), true))", src)
+        @test occursin("default = \"none\"", src) && occursin("default = Juango.SQLDefault(\"CURRENT_TIMESTAMP\")", src)
+        @test quiet(() -> makemigrations(app = "miggen", questioner = _ -> false)) == String[]
+        quiet(() -> migrate())
+
+        o = GfItem(; price = 2.5, qty = 4)
+        @test o.label === DB_DEFAULT && o.total === nothing
+        @test !haskey(full_clean(o), :label)
+        save!(o)
+        @test o.total == 10.0 && o.label == "none" && o.shout == "NONE" && o.stamp !== nothing
+        o.qty = 2; o.label = "big"; save!(o)
+        @test o.total == 5.0 && o.shout == "BIG"
+        update!(filter(GfItem; id = o.id); qty = 3)
+        @test refresh!(o).total == 7.5
+        @test get(GfItem; id = o.id).total == 7.5
+        @test !(:total in [f.name for f in ModelForm(GfItem).fields]) && :label in [f.name for f in ModelForm(GfItem).fields]
+        o2 = create(GfItem; price = 1.0, label = "given")
+        @test o2.label == "given" && o2.total == 1.0
+        if !occursin("SQLite", Juango.vendor(Juango.backend()))
+            items = bulk_create([GfItem(; price = 3.0), GfItem(; price = 4.0, label = "set")])
+            @test sort(values_list(filter(GfItem; price__gte = 3), :label; flat = true)) == ["none", "set"]
+        end
+        @test_throws ArgumentError bulk_update([o], [:total])
+
+        # changing the expression changes the column
+        Juango.unregister_model!(GfItem)
+        @eval @model struct GfItem2
+            price = FloatField()
+            qty = IntegerField(default = 1)
+            label = CharField(max_length = 20, db_default = "none")
+            stamp = DateTimeField(db_default = Now())
+            total = GeneratedField(expression = F(:price) * F(:qty) + 1, output_field = FloatField())
+            shout = GeneratedField(expression = Upper(:label), output_field = CharField(max_length = 20), db_persist = $persist)
+            Meta(table = "gf_item", name = "GfItem", app_label = "miggen")
+        end
+        p2 = only(quiet(() -> makemigrations(app = "miggen", questioner = _ -> false)))
+        @test occursin("AlterField(\"gf_item\", Column(\"total\"", read(p2, String))
+        quiet(() -> migrate())
+        @test get(GfItem2; id = o.id).total == 8.5
+        quiet(() -> migrate(app = "miggen", target = "0001"))
+        @test get(GfItem2; id = o.id).total == 7.5
+        quiet(() -> migrate(app = "miggen", target = "zero"))
+        @test !Juango.table_exists(Juango.backend(), "gf_item")
+        @test_throws ArgumentError Juango.column_state(Juango.Field(:int; db_default = Lower(:x)))
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "miggen", Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end
+
+@testset "composite primary keys" begin
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("migcomp" => dir))
+    quiet(f) = redirect_stdout(f, devnull)
+    try
+        @eval @model struct CpLine
+            order = IntegerField()
+            product = CharField(max_length = 10)
+            qty = IntegerField(default = 1)
+            author = ForeignKey(Author, on_delete = :CASCADE, null = true)
+            Meta(table = "cp_line", app_label = "migcomp", pk = CompositePrimaryKey(:order, :product))
+        end
+        p1 = only(quiet(() -> makemigrations(app = "migcomp", questioner = _ -> false)))
+        src = read(p1, String)
+        @test occursin("pk = :composite, pk_columns = [\"order\", \"product\"]", src)
+        quiet(() -> migrate())
+        @test !("id" in Juango.table_columns(Juango.backend(), "cp_line"))
+
+        au = create(Author; name = "Composite Author")
+        a = create(CpLine; order = 1, product = "apple", qty = 3, author = au)
+        @test a.pk == (1, "apple") && a.id == (1, "apple")
+        create(CpLine; order = 1, product = "pear", qty = 2)
+        create(CpLine; order = 2, product = "apple", qty = 7)
+        @test_throws IntegrityError create(CpLine; order = 1, product = "apple")
+        @test get(CpLine; pk = (1, "apple")).qty == 3 && get(CpLine; pk = (2, "apple")).qty == 7
+        @test_throws DoesNotExist get(CpLine; pk = (9, "x"))
+        @test count(filter(CpLine; pk__in = [(1, "pear"), (2, "apple"), (5, "none")])) == 2
+        @test count(filter(CpLine; pk__in = Tuple[])) == 0
+        @test count(exclude(objects(CpLine), Q(pk = (1, "apple")))) == 2
+        @test first(objects(CpLine)).pk == (1, "apple") && last(objects(CpLine)).pk == (2, "apple")
+        @test [o.product for o in order_by(objects(CpLine), "-pk")] == ["apple", "pear", "apple"]
+        @test get(CpLine; pk = (1, "apple")).author.name == "Composite Author"
+        @test count(objects(CpLine)) == 3 && aggregate(objects(CpLine); t = Sum(:qty))[:t] == 12
+        # save updates the row; a changed key saves a new row
+        a.qty = 5; save!(a)
+        @test get(CpLine; pk = (1, "apple")).qty == 5 && count(objects(CpLine)) == 3
+        a.product = "plum"; save!(a)
+        @test a.pk == (1, "plum") && count(objects(CpLine)) == 4 && exists(filter(CpLine; pk = (1, "apple")))
+        @test refresh!(a).qty == 5
+        # bulk operations
+        @test update!(filter(CpLine; order = 1); qty = 9) == 3
+        @test values_list(order_by(filter(CpLine; order = 1), "product"), :qty; flat = true) == [9, 9, 9]
+        made = bulk_create([CpLine(; order = 3, product = "fig"), CpLine(; order = 3, product = "kiwi")])
+        @test [o.pk for o in made] == [(3, "fig"), (3, "kiwi")]
+        # delete
+        delete!(get(CpLine; pk = (1, "plum")))
+        @test !exists(filter(CpLine; pk = (1, "plum")))
+        @test delete!(filter(CpLine; order = 3)) == 2 && count(objects(CpLine)) == 3
+        # deleting the author cascades to its lines
+        delete!(au)
+        @test !exists(filter(CpLine; pk = (1, "apple")))
+        # what isn't supported says so
+        @test_throws ArgumentError Admin.register!(CpLine)
+        @test_throws Juango.LookupError collect(filter(CpLine; pk__gt = (1, "a")))
+        @eval @model struct CpNote
+            line = ForeignKey(CpLine, on_delete = :CASCADE)
+            Meta(table = "cp_note", app_label = "migcomp")
+        end
+        @test_throws ArgumentError quiet(() -> makemigrations(app = "migcomp", questioner = _ -> false))
+        Juango.unregister_model!(CpNote)
+        quiet(() -> migrate(app = "migcomp", target = "zero"))
+        @test !Juango.table_exists(Juango.backend(), "cp_line")
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "migcomp", Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end

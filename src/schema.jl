@@ -6,6 +6,51 @@
 # backend. Only schema-relevant attributes are tracked (type, NULL, DB default, unique,
 # index, foreign key target). Choices, help text and validators never cause migrations.
 
+"A column default that is SQL rather than a value (`db_default = Now()` → `CURRENT_TIMESTAMP`)."
+struct SQLDefault
+    sql::String
+end
+Base.show(io::IO, d::SQLDefault) = print(io, "Juango.SQLDefault(", repr(d.sql), ")")
+sql_literal(::DatabaseBackend, d::SQLDefault) = d.sql
+
+"How a generated column is computed: an expression over column names, stored or virtual."
+struct GeneratedSpec
+    expression::Any
+    persisted::Bool
+end
+Base.:(==)(a::GeneratedSpec, b::GeneratedSpec) = a.persisted == b.persisted && expr_code(a.expression) == expr_code(b.expression)
+Base.hash(g::GeneratedSpec, h::UInt) = hash(expr_code(g.expression), hash(g.persisted, h))
+
+"Julia code for an expression in a migration file."
+expr_code(e::F) = "F($(repr(e.name)))"
+expr_code(e::Value) = "Value($(e.value isa Union{Integer,AbstractFloat,Bool,AbstractString,Nothing} ? repr(e.value) : throw(ArgumentError("generated expressions take numbers, strings and booleans as literals"))))"
+expr_code(e::CombinedExpression) = "CombinedExpression($(repr(e.op)), $(expr_code(e.lhs)), $(expr_code(e.rhs)))"
+expr_code(e::Func) = "Func($(repr(e.name)), Any[" * join([a isa Expression ? expr_code(a) : repr(a) for a in e.args], ", ") * "])"
+expr_code(e) = throw(ArgumentError("generated expressions can use F, literals, + - * /, Lower, Upper, Length, Coalesce and Concat, not $(typeof(e))"))
+
+"An expression over field names rewritten over the columns of `T`."
+expr_to_columns(T, e::F) = F(constraint_column(T, e.name))
+expr_to_columns(T, e::Value) = e
+expr_to_columns(T, e::CombinedExpression) = CombinedExpression(e.op, expr_to_columns(T, e.lhs), expr_to_columns(T, e.rhs))
+function expr_to_columns(T, e::Func)
+    e.name in (:lower, :upper, :length, :coalesce, :concat) || expr_code(e.name)
+    Func(e.name, Any[a isa Expression ? expr_to_columns(T, a) : a for a in e.args])
+end
+expr_to_columns(T, e) = (expr_code(e); e)
+
+"SQL for a generated column's expression."
+gen_sql(b::DatabaseBackend, e::F) = quote_name(b, e.name)
+gen_sql(b::DatabaseBackend, e::Value) = lit(b, e.value)
+gen_sql(b::DatabaseBackend, e::CombinedExpression) = "(" * gen_sql(b, e.lhs) * " " * e.op * " " * gen_sql(b, e.rhs) * ")"
+function gen_sql(b::DatabaseBackend, e::Func)
+    a = [gen_sql(b, x) for x in e.args if x isa Expression]
+    e.name === :lower && return "LOWER($(a[1]))"
+    e.name === :upper && return "UPPER($(a[1]))"
+    e.name === :length && return "$(length_function(b))($(a[1]))"
+    e.name === :coalesce && return "COALESCE($(join(a, ", ")))"
+    "(" * join(["COALESCE(CAST($s AS $(cast_type(b, :text))), '')" for s in a], " || ") * ")"     # concat
+end
+
 """
     Column(name, kind; null=false, default=nothing, unique=false, index=false,
            max_length=nothing, references=nothing)
@@ -23,11 +68,13 @@ struct Column
     max_length::Union{Nothing,Int}
     references::Union{Nothing,String}
     of::Union{Nothing,Symbol}        # arrays: element kind; foreign keys: :uuid when the target's pk is a UUID
+    generated::Union{Nothing,GeneratedSpec}
 end
 Column(name, kind::Symbol; null = false, default = nothing, unique = false, index = false,
-       max_length = nothing, references = nothing, of = nothing) =
+       max_length = nothing, references = nothing, of = nothing, generated = nothing) =
     Column(string(name), kind, null, default, unique, index && !unique, max_length,
-           references === nothing ? nothing : string(references), of === nothing ? nothing : Symbol(of))
+           references === nothing ? nothing : string(references), of === nothing ? nothing : Symbol(of),
+           generated === nothing || generated isa GeneratedSpec ? generated : GeneratedSpec(generated...))
 
 Base.:(==)(a::Column, b::Column) = all(isequal(getfield(a, f), getfield(b, f)) for f in fieldnames(Column))
 Base.hash(c::Column, h::UInt) = hash(c.name, hash(c.kind, h))
@@ -36,7 +83,7 @@ same_definition(a::Column, b::Column) = all(isequal(getfield(a, f), getfield(b, 
 "A copy of `c` with some attributes changed: `with_column(c; name=\"new\")`."
 function with_column(c::Column; name = c.name, kw...)
     attrs = merge((null = c.null, default = c.default, unique = c.unique, index = c.index,
-                   max_length = c.max_length, references = c.references, of = c.of), NamedTuple(kw))
+                   max_length = c.max_length, references = c.references, of = c.of, generated = c.generated), NamedTuple(kw))
     Column(name, c.kind; attrs...)
 end
 
@@ -68,13 +115,17 @@ mutable struct Table
     columns::Vector{Column}
     unique_together::Vector{Vector{String}}     # column names; each set gets a unique index
     parent::Union{Nothing,String}               # multi-table inheritance: `id` references this table
-    pk::Symbol                                  # :auto (integer identity) or :uuid
+    pk::Symbol                                  # :auto (integer identity), :uuid, or :composite (no id column)
     indexes::Vector{Index}                      # Meta(indexes=...), with names filled in
+    constraints::Vector{Any}                    # ConstraintSpecs (constraints.jl), by name
+    pk_columns::Vector{String}                  # pk = :composite: the primary key's columns
 end
-Table(name, app, model, columns, unique_together = Vector{String}[]; parent = nothing, pk = :auto, indexes = Index[]) =
-    Table(name, app, model, columns, unique_together, parent === nothing ? nothing : string(parent), Symbol(pk), collect(Index, indexes))
+Table(name, app, model, columns, unique_together = Vector{String}[]; parent = nothing, pk = :auto, indexes = Index[], constraints = Any[],
+      pk_columns = String[]) =
+    Table(name, app, model, columns, unique_together, parent === nothing ? nothing : string(parent), Symbol(pk), collect(Index, indexes),
+          sort(collect(Any, constraints); by = c -> c.name), collect(String, pk_columns))
 Base.copy(t::Table) = Table(t.name, t.app, t.model, copy(t.columns), [copy(u) for u in t.unique_together],
-                            t.parent, t.pk, copy(t.indexes))
+                            t.parent, t.pk, copy(t.indexes), copy(t.constraints), copy(t.pk_columns))
 normalize_unique(sets) = sort([collect(String, string.(u)) for u in sets])
 function getcolumn(t::Table, name)
     i = findfirst(c -> c.name == name, t.columns)
@@ -92,14 +143,26 @@ schema_kind(kind::Symbol) = kind in STRING_KINDS || kind in (:file, :image) ? :s
 "The snapshot `Column` for a model field."
 function column_state(f::Field)
     d = f.default isa NoDefault || f.default isa Function || f.default isa Type ? nothing : f.default
+    f.db_default === nothing || (d = db_default_value(f.db_default))
+    gen = f.generated === nothing ? nothing : GeneratedSpec(expr_to_columns(f.model, f.generated[1]), f.generated[2])
+    gen === nothing || (d = nothing)
     d !== nothing && f.kind in (:json, :array, :intrange, :daterange, :datetimerange, :uuid) && (d = nothing)  # set by Julia, not the DB
     ref = f.kind === :fk ? modelmeta(related_model(f)).table : nothing
+    f.kind === :fk && is_composite(related_model(f)) &&
+        throw(ArgumentError("$(nameof(f.model)).$(f.name): foreign keys to $(nameof(related_model(f))) aren't supported (it has a composite primary key)"))
     of = f.kind === :array ? f.related : f.kind === :geometry ? geo_of(f) :
          f.kind === :fk && pk_kind(related_model(f)) === :uuid ? :uuid : nothing
     Column(column(f), schema_kind(f.kind); null = f.null, default = d, unique = f.unique,
            index = f.db_index, max_length = schema_kind(f.kind) in (:string, :citext) || (f.kind === :array && f.related === :string) ? f.max_length : nothing,
-           references = ref, of = of)
+           references = ref, of = of, generated = gen)
 end
+
+"The column default for a field's `db_default`: a value, or SQL for `Now()`."
+db_default_value(v::Func) = v.name === :now ? SQLDefault("CURRENT_TIMESTAMP") :
+    throw(ArgumentError("db_default takes a value or Now(), not $(v.name)()"))
+db_default_value(v::Value) = v.value
+db_default_value(v::Expression) = throw(ArgumentError("db_default takes a value or Now()"))
+db_default_value(v) = v
 
 "The snapshot `Table` for a model."
 function table_state(T::Type)
@@ -113,10 +176,18 @@ function table_state(T::Type)
         push!(idx, Index(cols, something(ix.name, constraint_name(m.table, cols..., ix.method === :gin ? "gin" : "idx")),
                          ix.unique, ix.method))
     end
+    pk = get(modelmeta(root).extra, :pk, :auto)
+    pkcols = String[]
+    if pk isa CompositePrimaryKey
+        (P === nothing && isempty(child_models(T))) ||
+            throw(ArgumentError("$(m.name): a model with a composite primary key can't take part in multi-table inheritance"))
+        pkcols = [col(n) for n in pk.fields]
+        pk = :composite
+    end
     Table(m.table, m.app, m.name, [column_state(f) for f in m.fields],
           normalize_unique([[col(n) for n in u] for u in m.unique_together]);
-          parent = P === nothing ? nothing : modelmeta(P).table, pk = get(modelmeta(root).extra, :pk, :auto),
-          indexes = sort(idx; by = i -> i.name))
+          parent = P === nothing ? nothing : modelmeta(P).table, pk = pk, pk_columns = pkcols,
+          indexes = sort(idx; by = i -> i.name), constraints = Any[constraint_spec(T, c) for c in model_constraints(T)])
 end
 
 "The schema the given models describe."
@@ -144,6 +215,11 @@ end
 
 function column_sql(b::DatabaseBackend, c::Column; adding = false, inline_fk = inline_foreign_keys(b))
     s = quote_name(b, c.name) * " " * column_type_for(b, c)
+    if c.generated !== nothing
+        c.generated.persisted || !(b isa PostgresBackend) ||
+            throw(ArgumentError("PostgreSQL only has stored generated columns: use db_persist = true for '$(c.name)'"))
+        return s * " GENERATED ALWAYS AS (" * gen_sql(b, c.generated.expression) * ")" * (c.generated.persisted ? " STORED" : " VIRTUAL")
+    end
     c.null || (s *= " NOT NULL")
     d = c.default
     (d === nothing && adding && !c.null) && (d = backfill_value(c))
@@ -193,8 +269,11 @@ returned on their own so they can run once every table exists.
 function create_table_sql(b::DatabaseBackend, t::Table; if_not_exists = false)
     ine = if_not_exists ? "IF NOT EXISTS " : ""
     stmts = unique(String[s for c in t.columns for s in column_prereqs(b, c.kind)])
-    push!(stmts, "CREATE TABLE $ine$(quote_name(b, t.name)) ($(pk_column_sql(b, t))" *
-                 join(", " .* [column_sql(b, c) for c in t.columns]) * ")")
+    checks = [check_clause(b, c) for c in t.constraints if c.kind === :check]
+    defs = [column_sql(b, c) for c in t.columns]
+    t.pk === :composite ? push!(defs, "PRIMARY KEY (" * join([quote_name(b, x) for x in t.pk_columns], ", ") * ")") :
+                          pushfirst!(defs, pk_column_sql(b, t))
+    push!(stmts, "CREATE TABLE $ine$(quote_name(b, t.name)) (" * join(vcat(defs, checks), ", ") * ")")
     for c in t.columns
         append!(stmts, index_sql(b, t.name, c; if_not_exists = if_not_exists))
     end
@@ -203,6 +282,9 @@ function create_table_sql(b::DatabaseBackend, t::Table; if_not_exists = false)
     end
     for ix in t.indexes
         append!(stmts, index_spec_sql(b, t.name, ix; if_not_exists = if_not_exists))
+    end
+    for c in t.constraints
+        c.kind === :unique && append!(stmts, unique_constraint_sql(b, t.name, c; if_not_exists = if_not_exists))
     end
     fks = String[s for c in t.columns for s in fk_sql(b, t.name, c)]
     (t.parent !== nothing && !inline_foreign_keys(b)) && push!(fks, foreign_key_sql(b, t.name, "id", t.parent))
@@ -245,6 +327,10 @@ function rename_table_sql(b::DatabaseBackend, old::Table, new::Table)
 end
 
 function add_column_sql(b::DatabaseBackend, t::Table, c::Column, deferred::Vector{String})
+    if c.generated !== nothing && c.generated.persisted && !can_alter_table(b)     # SQLite: ADD COLUMN can't be STORED
+        old = copy(t); filter!(x -> x.name != c.name, old.columns)
+        return remake_table_sql(b, old, t)
+    end
     stmts = vcat(column_prereqs(b, c.kind), ["ALTER TABLE $(quote_name(b, t.name)) ADD COLUMN " * column_sql(b, c; adding = true)])
     # The backfill default only exists for the existing rows; drop it where the database allows.
     if can_alter_table(b) && c.default === nothing && !c.null && backfill_value(c) !== nothing
@@ -275,6 +361,9 @@ function alter_column_sql(b::DatabaseBackend, old::Table, new::Table, name, defe
     can_alter_table(b) || return remake_table_sql(b, old, new)
     c0, c1 = getcolumn(old, name), getcolumn(new, name)
     t, col = quote_name(b, new.name), quote_name(b, name)
+    if c0.generated !== nothing || c1.generated !== nothing        # generated: drop and add it again
+        return vcat(["ALTER TABLE $t DROP COLUMN $col"], add_column_sql(b, new, c1, deferred))
+    end
     stmts = String[]
     if c0.references != c1.references
         for fk in foreign_key_names(b, new.name, name)
@@ -305,10 +394,13 @@ drop the old table and rename. Used where `ALTER TABLE` can't make the change (S
 Columns are matched by name; new columns get their default or backfill value.
 """
 function remake_table_sql(b::DatabaseBackend, old::Table, new::Table)
-    tmp = Table("new__" * new.name, new.app, new.model, new.columns; parent = new.parent, pk = new.pk)   # indexes come after the rename
+    # indexes come after the rename; CHECK constraints are part of the CREATE TABLE
+    tmp = Table("new__" * new.name, new.app, new.model, new.columns; parent = new.parent, pk = new.pk,
+                constraints = filter(c -> c.kind === :check, new.constraints), pk_columns = new.pk_columns)
     q(s) = quote_name(b, s)
-    cols, exprs = [q("id")], [q("id")]
+    cols, exprs = new.pk === :composite ? (String[], String[]) : ([q("id")], [q("id")])
     for c in new.columns
+        c.generated === nothing || continue          # computed again by the new table
         push!(cols, q(c.name))
         if hascolumn(old, c.name)
             bf = c.null ? nothing : backfill_value(c)
@@ -330,6 +422,9 @@ function remake_table_sql(b::DatabaseBackend, old::Table, new::Table)
     end
     for ix in new.indexes
         append!(stmts, index_spec_sql(b, new.name, ix))
+    end
+    for c in new.constraints
+        c.kind === :unique && append!(stmts, unique_constraint_sql(b, new.name, c))
     end
     stmts
 end

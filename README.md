@@ -283,6 +283,44 @@ get_for_model(Post), model_class(ct)          # ContentType <-> model
 - **Content types:** `migrate` fills the `ContentType` table, whose migration ships with Juango.
 - **`GenericRelation`** supports lookups (the join also matches the content type), `Count(:comments)`, `prefetch_related(:comments)`, and deleting the object deletes its comments. `prefetch_related(:content_object)` loads mixed targets with one query per model.
 
+#### Constraints, database defaults and generated columns
+
+```julia
+@model struct Booking
+    room = CharField(max_length = 10)
+    start = DateField()
+    stop = DateField()
+    cancelled = BooleanField(default = false)
+    code = CharField(max_length = 10, blank = true)
+    created = DateTimeField(db_default = Now())          # the database fills it in on INSERT
+    room_upper = GeneratedField(expression = Upper(:room), output_field = CharField(max_length = 10))
+    Meta(constraints = [
+        CheckConstraint(condition = Q(stop__gte = F(:start)), name = "stop_after_start"),
+        UniqueConstraint(fields = [:room, :start], condition = Q(cancelled = false), name = "one_per_day"),
+        UniqueConstraint(Lower(:code); name = "code_ci_unique"),
+    ])
+end
+```
+
+- Constraints are created and dropped by migrations, enforced by the database, and checked by `full_clean` and model forms, which report a violation as a form-wide error. MySQL/MariaDB can't build conditional or expression unique indexes, so there only the validation applies. `unique_together` is validated the same way now.
+- A `db_default` field holds `DB_DEFAULT` until the object is saved. The value the database chose is then read back. A `db_default` can be a value or `Now()`.
+- A `GeneratedField` is computed by the database and read back after every `save!`. It can use `F`, literals, `+ - * /`, `Lower`, `Upper`, `Length`, `Coalesce` and `Concat`. `db_persist = false` makes a virtual column; PostgreSQL only has stored ones.
+
+A table can have a composite primary key instead of `id`:
+
+```julia
+@model struct OrderLine
+    order = ForeignKey(Order, on_delete = :CASCADE)
+    product = CharField(max_length = 20)
+    qty = IntegerField(default = 1)
+    Meta(pk = CompositePrimaryKey(:order, :product))
+end
+line = get(OrderLine; pk = (order.id, "apple"))     # line.pk == (order.id, "apple")
+filter(OrderLine; pk__in = [(1, "apple"), (1, "pear")])
+```
+
+As in Django, other models can't point a ForeignKey or many-to-many field at such a model, it can't use multi-table inheritance, and the admin doesn't support it. Saving with a changed key field writes a new row.
+
 #### JSON, arrays, UUIDs, ranges and full-text search
 
 ```julia

@@ -112,6 +112,7 @@ function ModelForm(::Type{T}; data = nothing, files = nothing, instance = nothin
             init[n] = f.kind === :fk ? getproperty(instance, attname(f)) :
                       f.kind === :m2m ? (instance.id === nothing ? Any[] : [o.id for o in getproperty(instance, n)]) :
                       getproperty(instance, n)
+            init[n] === DB_DEFAULT && (init[n] = nothing)
         end
     end
     merge!(init, Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(initial)))
@@ -248,10 +249,34 @@ function is_valid(f::Form)
         foreach(e -> add_error!(f, fld.name, e), errs)
         isempty(errs) && (f.cleaned_data[fld.name] = v)
     end
+    f.model !== nothing && isempty(f.errors) && model_form_constraint_errors!(f)
     f.clean === nothing || f.clean(f)
     clean_form(f, Val(Symbol(f.name)))
     f.validated = true
     isempty(f.errors)
+end
+
+"""
+Check the model's `unique_together` and `Meta(constraints = ...)` against the values the form
+would save: the instance's, with the cleaned data on top. Constraints that use a field the
+form doesn't have (and no instance supplies) are skipped.
+"""
+function model_form_constraint_errors!(f::Form)
+    T = f.model
+    inst = f.instance
+    values = Dict{Symbol,Any}()
+    if inst !== nothing
+        for fld in all_fields(T)
+            values[fld.name] = field_data(inst, attname(fld))
+        end
+    end
+    for (k, v) in f.cleaned_data
+        findfield(modelmeta(T), Symbol(k)) === nothing || (values[Symbol(k)] = v)
+    end
+    id = inst === nothing ? nothing : inst.id
+    for e in vcat(unique_together_errors(T, values, id), constraint_errors(T, values, id))
+        add_error!(f, nothing, e)
+    end
 end
 
 "Attach an error to a field (or to the whole form with `field=nothing`)."

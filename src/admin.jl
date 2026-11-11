@@ -124,6 +124,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    prepopulated_fields = Dict{Symbol,Vector{Symbol}}(), raw_id_fields = Symbol[],
                    autocomplete_fields = Symbol[], list_editable = Symbol[], date_hierarchy = nothing, save_as = false)
     modelmeta(T)  # validates T is a model
+    Juango.is_composite(T) && throw(ArgumentError("the admin doesn't support $(nameof(T)): it has a composite primary key"))
     slug = model_name(T)
     acts = AdminAction[to_action(a) for a in actions]
     delete_action && pushfirst!(acts, action(delete_selected; description = "Delete selected $(modelmeta(T).verbose_name_plural)",

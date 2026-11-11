@@ -44,7 +44,14 @@ mutable struct Field
     model::Any
     through::Any        # ManyToManyField: the intermediate model (generated when not given)
     one_to_one::Bool    # OneToOneField: a unique FK whose reverse side is a single object
+    db_default::Any     # value (or Now()) the database fills in when a new row leaves the field out
+    generated::Any      # GeneratedField: (expression, persisted) computed by the database
 end
+
+"The value of a field with `db_default` until the row is saved and the database has filled it in."
+struct DatabaseDefault end
+const DB_DEFAULT = DatabaseDefault()
+Base.show(io::IO, ::DatabaseDefault) = print(io, "DB_DEFAULT")
 
 normchoices(::Nothing) = nothing
 normchoices(cs) = Pair{Any,String}[c isa Pair ? (c.first => string(c.second)) : (c => string(c)) for c in cs]
@@ -53,7 +60,8 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                max_length = nothing, choices = nothing, related = nothing, on_delete = :CASCADE,
                related_name = nothing, auto_now = false, auto_now_add = false, verbose_name = "",
                help_text = "", validators = Any[], widget = nothing, editable = true,
-               db_index = false, required = nothing, label = nothing, through = nothing, one_to_one = false)
+               db_index = false, required = nothing, label = nothing, through = nothing, one_to_one = false,
+               db_default = nothing, generated = nothing)
     required === nothing || (blank = !required)
     label === nothing || (verbose_name = string(label))
     if auto_now || auto_now_add
@@ -64,7 +72,30 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           Symbol(uppercase(string(on_delete))), related_name === nothing ? nothing : Symbol(related_name),
           auto_now, auto_now_add, verbose_name isa AbstractString ? verbose_name : string(verbose_name),
           help_text isa AbstractString ? help_text : string(help_text), collect(Any, validators),
-          widget === nothing ? nothing : Symbol(widget), editable, db_index, nothing, through, one_to_one)
+          widget === nothing ? nothing : Symbol(widget), editable, db_index, nothing, through, one_to_one,
+          db_default, generated)
+end
+
+"""
+    GeneratedField(; expression, output_field, db_persist = true)
+
+A column the database computes from other columns of the row, e.g.
+`total = GeneratedField(expression = F(:price) * F(:quantity), output_field = FloatField())`.
+It can't be assigned; the value is read back after every `save!`. Expressions use `F`,
+literals, `+ - * /`, `Lower`, `Upper`, `Length`, `Coalesce` and `Concat`. `db_persist = true`
+stores the value (PostgreSQL supports only that); `false` computes it on read.
+"""
+function GeneratedField(; expression, output_field::Field, db_persist::Bool = true, kw...)
+    f = deepcopy(output_field)
+    f.generated = (expression isa Expression ? expression : ref(expression), db_persist)
+    f.editable = false
+    f.blank = true
+    f.null = true
+    f.default = NO_DEFAULT
+    for (k, v) in kw
+        setfield!(f, k, v)
+    end
+    f
 end
 
 CharField(; max_length = 255, kw...) = Field(:char; max_length = max_length, kw...)
@@ -450,7 +481,9 @@ macro model(expr)
 end
 
 function default_value(f::Field)
+    f.generated === nothing || return nothing
     d = f.default
+    d isa NoDefault && f.db_default !== nothing && return DB_DEFAULT
     d isa NoDefault || return d isa Function || d isa Type ? d() : d
     f.null && return nothing
     f.kind in STRING_KINDS && return ""
@@ -659,15 +692,43 @@ end
 
 to_db(f::Field, v::Model) = v.id      # (other values: see fields_extra.jl)
 
-"Primary key kind of a model's table: `:auto` (integer identity) or `:uuid` (`Meta(pk = :uuid)`)."
+"""
+    CompositePrimaryKey(:order, :product)
+
+`Meta(pk = CompositePrimaryKey(...))`: the table's primary key is these fields together, and
+there is no `id` column. `obj.pk` (and `obj.id`) is a tuple of their values; look objects up
+with `get(Model; pk = (1, 2))` or `filter(Model; pk__in = [(1, 2), (1, 3)])`. As in Django,
+other models can't point a ForeignKey or ManyToManyField at such a model, it can't take part
+in multi-table inheritance, and the admin doesn't support it.
+"""
+struct CompositePrimaryKey
+    fields::Vector{Symbol}
+end
+CompositePrimaryKey(fields::Union{Symbol,AbstractString}...) = CompositePrimaryKey(Symbol[Symbol(f) for f in fields])
+
+"Primary key kind of a model's table: `:auto` (integer identity), `:uuid` (`Meta(pk = :uuid)`) or `:composite`."
 function pk_kind(T::Type)
     A = concrete_model(T)
     while (P = table_parent(A)) !== nothing
         A = P
     end
-    get(modelmeta(A).extra, :pk, :auto)
+    p = get(modelmeta(A).extra, :pk, :auto)
+    p isa CompositePrimaryKey ? :composite : p
 end
 pk_value(T::Type, v) = (v === nothing || pk_kind(T) !== :uuid || v isa UUID) ? v : UUID(string(v))
+
+is_composite(T::Type) = pk_kind(T) === :composite
+"The fields of a composite primary key, in order."
+pk_fields(T::Type) = Field[getfield_meta(T, n) for n in modelmeta(concrete_model(T)).extra[:pk].fields]
+"The primary key of rows at `alias`, as SQL: `alias.id`, or a row value `(alias.a, alias.b)`."
+pk_ref(alias, T::Type) = is_composite(T) ? "(" * join([qcol(alias, column(f)) for f in pk_fields(T)], ", ") * ")" : qcol(alias, "id")
+"The primary key column(s) of rows at `alias`, for a SELECT list."
+pk_select(alias, T::Type) = is_composite(T) ? join([qcol(alias, column(f)) for f in pk_fields(T)], ", ") : qcol(alias, "id")
+"A composite key's tuple from an object's data (`nothing` if a part is missing)."
+function composite_pk(T::Type, data)
+    vals = Any[get(data, attname(f), nothing) for f in pk_fields(T)]
+    any(isnothing, vals) ? nothing : Tuple(vals)
+end
 
 "Parse a primary key from text (URLs, form values); `nothing` if it isn't one."
 function parse_pk(T::Type, s)
@@ -677,7 +738,8 @@ function parse_pk(T::Type, s)
 end
 
 function from_row(::Type{T}, row::Dict{Symbol,Any}) where {T<:Model}
-    obj = T(Dict{Symbol,Any}(:id => pk_value(T, row[:id])), Dict{Symbol,Any}())
+    composite = is_composite(T)
+    obj = T(Dict{Symbol,Any}(:id => composite ? nothing : pk_value(T, row[:id])), Dict{Symbol,Any}())
     data = getfield(obj, :_data)
     mytable = modelmeta(T).table
     for f in all_fields(T)
@@ -686,6 +748,7 @@ function from_row(::Type{T}, row::Dict{Symbol,Any}) where {T<:Model}
         haskey(row, key) || continue             # deferred (only/defer, raw): loaded on first access
         data[attname(f)] = from_db(f, row[key])
     end
+    composite && (data[:id] = composite_pk(T, data))
     obj
 end
 
@@ -820,6 +883,21 @@ function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nos
         contains_aggregate(a) && (c.uses_aggregate = true)
         sql, colps = compile_expr(c, a)
         col = "($sql)"
+    elseif fname == "id" && is_composite(T)
+        isempty(rest) || throw(LookupError("'pk' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
+        fs = pk_fields(T)
+        part(tup) = (length(tup) == length(fs) || throw(ArgumentError("$(nameof(T)) has a $(length(fs))-part primary key; got $(repr(tup))"));
+                     Q(:AND, Any[f.name => v for (f, v) in zip(fs, tup)], false))
+        if lookup == "exact"
+            value === nothing && return (sql_false(backend()), Any[])
+            return compile_q(c, alias, T, part(value), negated)
+        elseif lookup == "in"
+            isempty(value) && return (sql_false(backend()), Any[])
+            return compile_q(c, alias, T, Q(:OR, Any[part(t) for t in value], false), negated)
+        elseif lookup == "isnull"
+            return (truthy(value) ? sql_false(backend()) : sql_true(backend()), Any[])
+        end
+        throw(LookupError("composite primary keys support the pk, pk__in and pk__isnull lookups, not '$lookup'"))
     elseif fname == "id"
         isempty(rest) || throw(LookupError("'id' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
         col = qcol(alias, "id")
@@ -1202,6 +1280,12 @@ function order_clause(c::SQLCompiler, order::Vector{String})
             M = related_model(f)
         end
         name = segs[end]
+        if name in ("id", "pk") && is_composite(M)
+            for g in pk_fields(M)
+                push!(parts, qcol(alias, column(g)) * (desc ? " DESC" : " ASC"))
+            end
+            continue
+        end
         col = if name in ("id", "pk")
             qcol(alias, "id")
         else
@@ -1279,7 +1363,7 @@ function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = 
     related = Tuple{Vector{Symbol},Any,String}[]
     group = String[]
     if idonly
-        push!(sel, qcol(c.base, "id"))
+        push!(sel, pk_select(c.base, T))
     elseif columns !== nothing
         push!(sel, columns)
     elseif qs.values_fields !== nothing
@@ -1291,12 +1375,12 @@ function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = 
             push!(sel, "$col AS $(qname(f))")
             push!(group, col)
         end
-        qs.group_by_object && pushfirst!(group, qcol(c.base, "id"))
+        qs.group_by_object && pushfirst!(group, pk_select(c.base, T))
     else
         if isempty(qs.deferred)
             push!(sel, qname(c.base) * ".*")
         else
-            push!(sel, qcol(c.base, "id"))
+            is_composite(T) || push!(sel, qcol(c.base, "id"))
             for f in modelmeta(concrete_model(T)).fields
                 f.name in qs.deferred || push!(sel, qcol(c.base, column(f)))
             end
@@ -1313,7 +1397,7 @@ function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = 
         end
         related, rcols = related_columns!(c, qs.related)
         append!(sel, rcols)
-        push!(group, qcol(c.base, "id"))
+        push!(group, pk_select(c.base, T))
         append!(group, [qcol(a, "id") for (_, _, a) in related])
     end
     if columns === nothing && !idonly
@@ -1341,7 +1425,7 @@ function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = 
         c.scope = 0
     end
     if grouped && columns !== nothing && !idonly && qs.values_fields === nothing
-        group = [qcol(c.base, "id")]
+        group = [pk_select(c.base, T)]
     end
     o, extra = ordered ? order_clause(c, qs.order) : ("", String[])
     (columns === nothing && !idonly && !grouped) && append!(sel, extra)
@@ -1563,7 +1647,7 @@ end
 function Base.count(qs::QuerySet{T}) where {T}
     qs.cache === nothing || return length(qs.cache)
     qs.isnone && return 0
-    sql, ps = needs_wrapping(qs) ? select_sql(qs; ordered = false) : select_sql(qs; columns = qcol(modelmeta(T).table, "id"), ordered = false)
+    sql, ps = needs_wrapping(qs) ? select_sql(qs; ordered = false) : select_sql(qs; columns = pk_select(modelmeta(T).table, T), ordered = false)
     execute("SELECT COUNT(*) AS n FROM ($sql) AS juango_sub", ps)[1][:n]
 end
 Base.count(::Type{T}) where {T<:Model} = count(objects(T))
@@ -1761,7 +1845,7 @@ function raw(::Type{T}, sql::AbstractString, params = Any[]) where {T<:Model}
     known = Set{Symbol}([:id; [attname(f) for f in all_fields(T)]])
     out = T[]
     for r in rows
-        haskey(r, :id) || throw(ArgumentError("raw(): the query must select the id column"))
+        is_composite(T) || haskey(r, :id) || throw(ArgumentError("raw(): the query must select the id column"))
         o = from_row(T, r)
         for (k, v) in r
             k in known || (getfield(o, :_data)[k] = v)
@@ -1853,27 +1937,42 @@ function bulk_create(objs::AbstractVector{T}; batch_size = nothing, ignore_confl
     end
     verb = ignore_conflicts && b isa MySQLBackend ? "INSERT IGNORE INTO" : "INSERT INTO"
     prepare_for_insert!(objs, T)
-    fields = meta.fields
+    fields = [f for f in meta.fields if f.generated === nothing]
     if isempty(fields)                       # nothing to put in VALUES: one row at a time
-        foreach(o -> save_table!(concrete_model(T), getfield(o, :_data), true), objs)
+        foreach(o -> (save_table!(concrete_model(T), getfield(o, :_data), true); refresh_computed!(o)), objs)
         return objs
     end
     tbl = qname(meta.table)
+    isdef(o, f) = get(getfield(o, :_data), attname(f), nothing) === DB_DEFAULT
     for with_id in (true, false)
         group = [o for o in objs if (getfield(o, :_data)[:id] !== nothing) == with_id]
         isempty(group) && continue
-        cols = vcat(with_id ? [qname("id")] : String[], [qname(column(f)) for f in fields])
-        n = batch_size === nothing ? max(1, 999 ÷ length(cols)) : Int(batch_size)
-        returning = !with_id && conflict == "" && verb == "INSERT INTO" && supports_insert_returning(b)
+        n = batch_size === nothing ? max(1, 999 ÷ (length(fields) + 1)) : Int(batch_size)
+        returning = !with_id && conflict == "" && verb == "INSERT INTO" && supports_insert_returning(b) && !is_composite(T)
         for batch in Iterators.partition(group, n)
-            ps = Any[]
+            # db_default columns left out when no row of the batch sets them; DEFAULT where some do
+            bf = [f for f in fields if !all(o -> isdef(o, f), batch)]
+            if any(f -> any(o -> isdef(o, f), batch), bf) && occursin("SQLite", vendor(b))
+                throw(ArgumentError("bulk_create on SQLite: give every object of a batch a value for a db_default field, or none"))
+            end
+            cols = vcat(with_id ? [qname("id")] : String[], [qname(column(f)) for f in bf])
+            ps, rows_sql = Any[], String[]
             for o in batch
                 data = getfield(o, :_data)
-                with_id && push!(ps, data[:id])
-                append!(ps, Any[to_db(f, get(data, attname(f), nothing)) for f in fields])
+                marks = String[]
+                with_id && (push!(ps, data[:id]); push!(marks, "?"))
+                for f in bf
+                    if isdef(o, f)
+                        push!(marks, "DEFAULT")
+                    else
+                        push!(ps, to_db(f, get(data, attname(f), nothing))); push!(marks, "?")
+                    end
+                end
+                push!(rows_sql, "(" * join(marks, ", ") * ")")
             end
-            row = "(" * join(fill("?", length(cols)), ", ") * ")"
-            sql = "$verb $tbl (" * join(cols, ", ") * ") VALUES " * join(fill(row, length(batch)), ", ") * conflict
+            sql = isempty(cols) ? "$verb $tbl DEFAULT VALUES" :
+                  "$verb $tbl (" * join(cols, ", ") * ") VALUES " * join(rows_sql, ", ") * conflict
+            isempty(cols) && length(batch) > 1 && (foreach(o -> save_table!(concrete_model(T), getfield(o, :_data), true), batch); continue)
             if returning
                 rows = execute(sql * " RETURNING " * qname("id"), ps)
                 for (o, r) in zip(batch, rows)
@@ -1885,6 +1984,7 @@ function bulk_create(objs::AbstractVector{T}; batch_size = nothing, ignore_confl
         end
         with_id && sync_sequence(b, meta.table)
     end
+    is_composite(T) && foreach(o -> (getfield(o, :_data)[:id] = composite_pk(T, getfield(o, :_data))), objs)
     objs
 end
 
@@ -1904,6 +2004,7 @@ function bulk_update(objs::AbstractVector{T}, fields; batch_size = nothing) wher
         f = findfield(modelmeta(T), n)
         f === nothing && (i = findfirst(g -> g.name === n, all_fields(T)); f = i === nothing ? nothing : all_fields(T)[i])
         (f === nothing || f.kind in (:m2m, :gfk, :grel)) && throw(LookupError("bulk_update: $(nameof(T)) has no concrete field '$n'"))
+        f.generated === nothing || throw(ArgumentError("bulk_update: '$n' is generated by the database"))
         push!(flds, f)
     end
     any(o -> o.id === nothing, objs) && throw(ArgumentError("bulk_update: all objects must be saved first"))
@@ -2074,8 +2175,9 @@ function update!(qs::QuerySet{T}; kw...) where {T}
         end
     end
     isempty(sets) && return 0
-    sub, sps = select_sql(qs; columns = qcol(meta.table, "id"), ordered = false)
-    execute_changes("UPDATE $(qname(meta.table)) SET $(join(sets, ", ")) WHERE $(qname("id")) IN ($(in_subquery(backend(), sub)))", vcat(ps, sps))
+    sub, sps = select_sql(qs; columns = pk_select(meta.table, T), ordered = false)
+    target = is_composite(T) ? "(" * join([qname(column(f)) for f in pk_fields(T)], ", ") * ")" : qname("id")
+    execute_changes("UPDATE $(qname(meta.table)) SET $(join(sets, ", ")) WHERE $target IN ($(in_subquery(backend(), sub)))", vcat(ps, sps))
 end
 
 struct ProtectedError <: Exception
@@ -2086,11 +2188,12 @@ Base.showerror(io::IO, e::ProtectedError) = print(io, "ProtectedError: ", e.msg)
 function delete_ids!(T::Type, ids::Vector)
     isempty(ids) && return 0
     T = concrete_model(T)
+    is_composite(T) && return delete_composite!(T, ids)
     for g in generic_relations(T)    # objects pointing here through a GenericForeignKey
         M = related_model(g)
         ctf, fkf = g.through
         rel = filter(base_objects(M), Q(Symbol(ctf, :_id) => get_for_model(T).id), Q(Symbol(fkf, "__in") => ids))
-        delete_ids!(M, values_list(rel, :id; flat = true))
+        delete_ids!(M, row_keys(rel))
     end
     for C in child_models(T)        # rows of subclasses that extend these rows
         delete_ids!(C, values_list(filter(base_objects(C); id__in = ids), :id; flat = true))
@@ -2098,7 +2201,7 @@ function delete_ids!(T::Type, ids::Vector)
     for (_, M, f) in reverse_relations(T)
         rel = filter(base_objects(M), Q(Symbol(attname(f), "__in") => ids))
         if f.on_delete === :CASCADE
-            delete_ids!(M, values_list(rel, :id; flat = true))
+            delete_ids!(M, row_keys(rel))
         elseif f.on_delete === :SET_NULL
             update!(rel; Symbol(attname(f)) => nothing)
         elseif f.on_delete === :PROTECT
@@ -2119,8 +2222,26 @@ function delete_ids!(T::Type, ids::Vector)
     n
 end
 
+"The primary keys of a queryset's rows: ids, or tuples for a composite key."
+row_keys(qs::QuerySet{T}) where {T} = is_composite(T) ? Any[o.pk for o in fetch(qs)] : values_list(qs, :id; flat = true)
+
+"Delete rows of a model with a composite primary key (nothing can refer to them)."
+function delete_composite!(T::Type, keys::Vector)
+    signal = has_receivers(pre_delete, T) || has_receivers(post_delete, T)
+    doomed = signal ? fetch(filter(base_objects(T); pk__in = keys)) : T[]
+    foreach(o -> send(pre_delete, T; instance = o), doomed)
+    cond = join([qname(column(f)) * " = ?" for f in pk_fields(T)], " AND ")
+    n = 0
+    for k in keys
+        n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE $cond", collect(Any, k))
+    end
+    foreach(o -> send(post_delete, T; instance = o), doomed)
+    n
+end
+
 "Delete all matching rows (with `on_delete` handling for related objects). Returns the count."
-Base.delete!(qs::QuerySet{T}) where {T} = atomic(() -> delete_ids!(T, values_list(qs, :id; flat = true)))
+Base.delete!(qs::QuerySet{T}) where {T} =
+    atomic(() -> delete_ids!(T, row_keys(qs)))
 
 Base.show(io::IO, qs::QuerySet{T}) where {T} = print(io, "<QuerySet{", nameof(T), "}>")
 function Base.show(io::IO, ::MIME"text/plain", qs::QuerySet{T}) where {T}
@@ -2161,17 +2282,48 @@ function save!(obj::T) where {T<:Model}
     end
     length(chain_) == 1 ? save_table!(chain_[1], data, true, fresh) :
         atomic(() -> foreach(M -> save_table!(M, data, M === chain_[1], fresh), chain_))
+    refresh_computed!(obj)
     has_receivers(post_save, T) && send(post_save, T; instance = obj, created = created)
+    obj
+end
+
+"Read back the values the database computed: generated fields, and db_default fields just filled in."
+function refresh_computed!(obj::T) where {T<:Model}
+    data = getfield(obj, :_data)
+    fs = [f for f in all_fields(T) if f.generated !== nothing || get(data, attname(f), nothing) === DB_DEFAULT]
+    isempty(fs) && return obj
+    for tbl in unique(modelmeta(f.model).table for f in fs)
+        mine = [f for f in fs if modelmeta(f.model).table == tbl]
+        row = execute("SELECT " * join([qname(column(f)) for f in mine], ", ") * " FROM $(qname(tbl)) WHERE $(qname("id")) = ?", [data[:id]])
+        isempty(row) && continue
+        for f in mine
+            data[attname(f)] = from_db(f, row[1][Symbol(column(f))])
+        end
+    end
     obj
 end
 
 "Write the columns of one table (`M`'s own fields) for an object's data."
 function save_table!(M::Type, data, root::Bool, fresh::Bool = false)
     meta = modelmeta(M)
-    fields = [f for f in meta.fields if haskey(data, attname(f))]   # deferred fields keep their stored values
+    # deferred fields keep their stored values; generated and not-yet-filled db_default ones are the database's
+    fields = [f for f in meta.fields if haskey(data, attname(f)) && f.generated === nothing && data[attname(f)] !== DB_DEFAULT]
     cols = [qname(column(f)) for f in fields]
     vals = Any[to_db(f, data[attname(f)]) for f in fields]
     tbl = qname(meta.table)
+    if is_composite(M)
+        # Like a changed primary key elsewhere: saving under a new key writes a new row.
+        key = composite_pk(M, data)
+        key === nothing && throw(ArgumentError("$(nameof(M)): every part of the composite primary key needs a value"))
+        if data[:id] !== nothing          # loaded or saved before: UPDATE, else (no such row) INSERT
+            cond = join([qname(column(f)) * " = ?" for f in pk_fields(M)], " AND ")
+            n = execute_changes("UPDATE $tbl SET " * join(["$c = ?" for c in cols], ", ") * " WHERE $cond", vcat(vals, collect(Any, key)))
+            n > 0 && (data[:id] = key; return)
+        end
+        execute_changes(insert_sql(backend(), tbl, cols) |> s -> replace(s, r" RETURNING .*$" => ""), vals)
+        data[:id] = composite_pk(M, data)
+        return
+    end
     if fresh
         execute(insert_sql(backend(), tbl, vcat(qname("id"), cols)) |> s -> replace(s, r" RETURNING .*$" => ""),
                 vcat(data[:id], vals))
@@ -2276,6 +2428,7 @@ function full_clean(obj::T; exclude = Symbol[]) where {T<:Model}
     for f in all_fields(T)
         (f.name in exclude || !f.editable) && continue
         v = getproperty(obj, attname(f))
+        v === DB_DEFAULT && continue                  # the database supplies it
         errs = validate_field(f, v)
         if isempty(errs) && f.unique && v !== nothing
             q = filter(base_objects(f.model), Q(attname(f) => v))
@@ -2284,7 +2437,28 @@ function full_clean(obj::T; exclude = Symbol[]) where {T<:Model}
         end
         isempty(errs) || (errors[f.name] = errs)
     end
+    # constraints and unique_together, when their fields are clean and not excluded
+    skip = Set(string.(union(exclude, keys(errors))))
+    values = Dict{Symbol,Any}(f.name => field_data(obj, attname(f)) for f in all_fields(T) if !(string(f.name) in skip))
+    errs = vcat(unique_together_errors(T, values, obj.id), constraint_errors(T, values, obj.id))
+    isempty(errs) || append!(get!(errors, :__all__, String[]), errs)
     errors
+end
+
+"Messages for `Meta(unique_together = ...)` sets that `values` would duplicate."
+function unique_together_errors(::Type{T}, values, id) where {T<:Model}
+    errs = String[]
+    for u in modelmeta(T).unique_together
+        all(n -> haskey(values, n), u) || continue
+        vals = [values[n] isa Model ? values[n].id : values[n] for n in u]
+        any(isnothing, vals) && continue
+        qs = filter(base_objects(T), Q(:AND, Any[n => v for (n, v) in zip(u, vals)], false))
+        id === nothing || (qs = filter(qs, !Q(id = id)))
+        exists(qs) && push!(errs, interpolate(gettext("%(model)s with this %(fields)s already exists."),
+            Dict("model" => uppercasefirst(string(modelmeta(T).verbose_name)),
+                 "fields" => join([label(findfield(modelmeta(T), n)) for n in u], " and "))))
+    end
+    errs
 end
 
 
