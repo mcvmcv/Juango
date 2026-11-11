@@ -1746,6 +1746,121 @@ end
     end
 end
 
+@testset "email, signing and password reset" begin
+    import Sockets
+    c = Client()
+    @test settings.EMAIL_BACKEND === :locmem                       # the test Client keeps mail in memory
+    empty!(outbox)
+    @test send_mail("Hi", "Body", "a@x.io", ["b@x.io", "c@x.io"]) == 1
+    @test only(outbox).subject == "Hi" && only(outbox).to == ["b@x.io", "c@x.io"] && only(outbox).from_email == "a@x.io"
+    @test send_mail("Nobody", "x", nothing, String[]) == 0
+
+    msg = EmailMessage("Ünïcode subject", "body text"; to = ["t@x.io"], cc = ["c@x.io"], bcc = ["secret@x.io"], reply_to = ["r@x.io"])
+    attach!(msg, "r.csv", "a,b", "text/csv")
+    attach_alternative!(msg, "<p>hi</p>")
+    s = Juango.message_string(msg)
+    @test occursin("Subject: =?utf-8?b?", s) && occursin("Cc: c@x.io", s) && occursin("Reply-To: r@x.io", s) && !occursin("secret@x.io", s)
+    @test occursin("multipart/mixed", s) && occursin("multipart/alternative", s) && occursin("filename=\"r.csv\"", s)
+    @test occursin(Juango.base64encode("body text"), s) && occursin(Juango.base64encode("<p>hi</p>"), s)
+    @test Juango.recipients(msg) == ["t@x.io", "c@x.io", "secret@x.io"]
+    @test !occursin("\r\nBcc: evil", Juango.message_string(EmailMessage("a\r\nBcc: evil@x.io", "b"; to = ["t@x.io"])))
+
+    # backends
+    configure!(EMAIL_BACKEND = :console)
+    path_, io = mktemp()
+    redirect_stdout(() -> send_mail("Console", "printed", nothing, ["t@x.io"]), io); close(io)
+    @test occursin("Subject: Console", read(path_, String))
+    dir = mktempdir()
+    configure!(EMAIL_BACKEND = :file, EMAIL_FILE_PATH = dir)
+    send_mail("Filed", "x", nothing, ["t@x.io"])
+    @test length(readdir(dir)) == 1 && occursin("Subject: Filed", read(joinpath(dir, only(readdir(dir))), String))
+    configure!(EMAIL_BACKEND = :dummy)
+    @test send_mail("Dropped", "x", nothing, ["t@x.io"]) == 1
+    configure!(EMAIL_BACKEND = :locmem, ADMINS = [("Admin", "admin@x.io")])
+    empty!(outbox)
+    mail_admins("Oops", "details")
+    @test only(outbox).subject == "[Juango] Oops" && only(outbox).to == ["admin@x.io"]
+
+    # 500 errors are mailed to ADMINS when DEBUG is off
+    empty!(outbox)
+    configure!(DEBUG = false)
+    try
+        @test get(c, "/boom/").status == 500
+    finally
+        configure!(DEBUG = true)
+    end
+    @test occursin("Internal Server Error: /boom/", only(outbox).subject) && occursin("boom", only(outbox).body)
+    configure!(ADMINS = Any[])
+
+    # SMTP against a tiny fake server
+    server = Sockets.listen(Sockets.localhost, 0)
+    port = Int(Sockets.getsockname(server)[2])
+    transcript = String[]
+    srv = @async begin
+        sock = Sockets.accept(server)
+        write(sock, "220 fake ESMTP\r\n")
+        indata = false
+        while isopen(sock)
+            l = readline(sock)
+            push!(transcript, l)
+            if indata
+                l == "." && (indata = false; write(sock, "250 queued\r\n"))
+            elseif startswith(l, "EHLO")
+                write(sock, "250-fake\r\n250 AUTH PLAIN\r\n")
+            elseif startswith(l, "AUTH")
+                write(sock, "235 ok\r\n")
+            elseif startswith(l, "DATA")
+                indata = true; write(sock, "354 go\r\n")
+            elseif startswith(l, "QUIT")
+                write(sock, "221 bye\r\n"); close(sock)
+            elseif !isempty(l)
+                write(sock, "250 ok\r\n")
+            end
+        end
+    end
+    configure!(EMAIL_BACKEND = :smtp, EMAIL_HOST = "127.0.0.1", EMAIL_PORT = port, EMAIL_HOST_USER = "u", EMAIL_HOST_PASSWORD = "p")
+    try
+        @test send_mail("SMTP test", "hello", "Site <from@x.io>", ["to@x.io"]; html_message = "<b>hello</b>") == 1
+        wait(srv)
+    finally
+        close(server)
+        configure!(EMAIL_BACKEND = :locmem, EMAIL_HOST_USER = "", EMAIL_HOST_PASSWORD = "")
+    end
+    @test "MAIL FROM:<from@x.io>" in transcript && "RCPT TO:<to@x.io>" in transcript
+    @test ("AUTH PLAIN " * Juango.base64encode("\0u\0p")) in transcript && "Subject: SMTP test" in transcript && "QUIT" in transcript
+
+    # signing
+    t = signing_dumps(Dict("a" => 1, "b" => [1, 2]))
+    @test signing_loads(t) == Dict("a" => 1, "b" => [1, 2]) && signing_loads(t; max_age = 60)["a"] == 1
+    @test_throws BadSignature signing_loads(t[1:end-1] * (t[end] == 'A' ? "B" : "A"))
+    @test_throws BadSignature signing_loads(t; salt = "other")
+    @test_throws SignatureExpired signing_loads(t; max_age = -1)
+    @test unsign_value(sign_value("hello")) == "hello"
+    @test_throws BadSignature unsign_value("hello:nope")
+
+    # password reset
+    u = create_user("resetme", "oldpassword1"; email = "reset@x.io")
+    empty!(outbox)
+    r = post(c, "/accounts/password_reset/", Dict("email" => "RESET@x.io"))
+    @test r.status == 302 && getheader(r, "Location") == "/accounts/password_reset/done/"
+    @test only(outbox).to == ["reset@x.io"] && only(outbox).subject == "Password reset on $(settings.SITE_NAME)"
+    link = match(r"http://testserver(/accounts/reset/\S+/)", only(outbox).body)[1]
+    @test occursin("resetme", only(outbox).body)
+    @test post(c, "/accounts/password_reset/", Dict("email" => "nobody@x.io")).status == 302 && length(outbox) == 1
+    @test occursin("Password reset sent", text(get(c, "/accounts/password_reset/done/")))
+    @test occursin("Enter new password", text(get(c, link)))
+    r = post(c, link, Dict("new_password1" => "newpassword9", "new_password2" => "different9"))
+    @test occursin("didn’t match", text(r))
+    r = post(c, link, Dict("new_password1" => "123", "new_password2" => "123"))
+    @test occursin("too short", text(r)) && occursin("entirely numeric", text(r))
+    r = post(c, link, Dict("new_password1" => "newpassword9", "new_password2" => "newpassword9"))
+    @test r.status == 302 && getheader(r, "Location") == "/accounts/reset/done/"
+    @test authenticate("resetme", "newpassword9") !== nothing && authenticate("resetme", "oldpassword1") === nothing
+    @test occursin("unsuccessful", text(get(c, link)))                # used: the password hash changed
+    @test !check_reset_token(get(User; id = u.id), "garbage") && occursin("unsuccessful", text(get(c, "/accounts/reset/xx/1-abc/")))
+    @test check_reset_token(get(User; id = u.id), make_reset_token(get(User; id = u.id)))
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)

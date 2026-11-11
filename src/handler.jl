@@ -106,6 +106,9 @@ function response_for_exception(req::Request, e, bt)
     end
     @error "Internal Server Error: $(req.path)" exception = (e, bt)
     settings.DEBUG && return technical_500(req, e, bt)
+    mail_admins("ERROR: Internal Server Error: $(req.path)",
+                "$(req.method) $(full_path(req))\n\n" * sprint(showerror, e) * "\n\n" * sprint(Base.show_backtrace, bt);
+                fail_silently = true)
     r = try_render("500.html", Dict{String,Any}(), 500)
     something(r, HttpResponse("<h1>Server Error (500)</h1>"; status = 500))
 end

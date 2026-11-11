@@ -18,8 +18,11 @@ mutable struct Client
     host::String
     default_headers::Dict{String,String}
 end
-Client(; enforce_csrf = false, host = "testserver", headers = Dict{String,String}()) =
+function Client(; enforce_csrf = false, host = "testserver", headers = Dict{String,String}())
+    # tests shouldn't send real mail: like Django's test runner, collect it in `Juango.outbox`
+    settings.EMAIL_BACKEND === :smtp && configure!(EMAIL_BACKEND = :locmem)
     Client(Dict{String,String}(), enforce_csrf, host, Dict{String,String}(string(k) => string(v) for (k, v) in headers))
+end
 
 function store_cookies!(c::Client, resp::HttpResponse)
     for sc in resp.cookies

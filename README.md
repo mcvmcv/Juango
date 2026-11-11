@@ -507,6 +507,24 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 - CSRF protection on POST/PUT/PATCH/DELETE: `{% csrf_token %}` or an `X-CSRFToken` header. Mark exceptions with `csrf_exempt(view)`.
 - One-time messages: `message!(req, :success, "Saved")`, rendered with `{% for m in messages %}`.
 
+### Email
+
+```julia
+send_mail("Welcome", "Hi Ann!", nothing, ["ann@example.com"]; html_message = "<p>Hi Ann!</p>")   # nothing = DEFAULT_FROM_EMAIL
+msg = EmailMessage("Report", "See attached."; to = ["boss@example.com"], cc = [...], bcc = [...], reply_to = [...])
+attach!(msg, "report.csv", csv_text, "text/csv")
+attach_alternative!(msg, html, "text/html")
+send!(msg)
+mail_admins("Disk almost full", details)          # to settings.ADMINS = [("Name", "email"), ...]
+```
+
+- **Backends.** `EMAIL_BACKEND` is `:smtp` (the default), `:console`, `:file` (`EMAIL_FILE_PATH`), `:locmem` (messages collect in `Juango.outbox`) or `:dummy`. You can also give it any function that takes a vector of messages.
+- **SMTP** uses `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD` (AUTH PLAIN), and `EMAIL_USE_TLS` (STARTTLS) or `EMAIL_USE_SSL`.
+- **Tests.** The test `Client` switches `:smtp` to `:locmem`, so tests never send real mail and can inspect `outbox`.
+- **Errors.** With `DEBUG = false`, unhandled errors are mailed to `ADMINS`.
+- **Password reset.** `auth_urls()` now includes password reset: `password_reset/` emails a link that works once, expires after `PASSWORD_RESET_TIMEOUT` (3 days), and leads to a page for choosing a new password. The templates are in `registration/password_reset_*`, and you can override them in your own template directory.
+- **Signing.** `signing_dumps(value)` / `signing_loads(s; max_age)` make tamper-proof, URL-safe tokens keyed by `SECRET_KEY`, and `sign_value`/`unsign_value` do the same for plain strings.
+
 ### Permissions and groups
 
 `migrate` creates `add_`, `change_`, `delete_` and `view_` permissions for every model, plus any declared with `Meta(permissions = [("publish_post", "Can publish posts")])`. Users get permissions directly or through groups:
