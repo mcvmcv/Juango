@@ -130,6 +130,22 @@ explain(filter(Post; published=true))        # the database's query plan
 
 Saving an object with deferred fields writes only the fields that were loaded.
 
+For many rows at once:
+
+```julia
+bulk_create([Post(; title = "p$i") for i in 1:1000]; batch_size = 500)   # ids set on SQLite, PostgreSQL, MariaDB
+bulk_create(tags; ignore_conflicts = true)                               # skip duplicates
+bulk_create(tags; update_conflicts = true, update_fields = [:count], unique_fields = [:name])
+bulk_update(posts, [:views, :title])                                     # a few UPDATE ... CASE statements
+for p in iterator(objects(Post); chunk_size = 2000)  ...  end           # pages through a big table
+atomic() do
+    acct = first(select_for_update(filter(Account; id = 1)))             # row locked until commit
+end
+union(filter(Post; featured = true), filter(Post; views__gt = 1000))     # intersection, difference too
+```
+
+`bulk_create` and `bulk_update` don't call `save!` or send signals. Combined querysets can be ordered, sliced and counted but not filtered further.
+
 #### Many-to-many
 
 ```julia

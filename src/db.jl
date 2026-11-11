@@ -145,6 +145,9 @@ function insert_sql(b::DatabaseBackend, table, cols::Vector{String})
     "INSERT INTO $table (" * join(cols, ", ") * ") VALUES (" * join(fill("?", length(cols)), ", ") * ")"
 end
 
+"Whether `INSERT ... RETURNING` works (bulk_create uses it to learn the new ids)."
+supports_insert_returning(::DatabaseBackend) = false
+
 "Called after an INSERT with an explicit id, so the id generator moves past it."
 sync_sequence(::DatabaseBackend, table) = nothing
 
@@ -507,6 +510,9 @@ Run raw SQL with `?` placeholders (portable across backends). SQL `NULL` comes b
 as `nothing`.
 """
 execute(sql::AbstractString, params = Any[]) = run_driver(driver_rows, sql, params)
+
+"Whether the current task is inside `atomic()`."
+in_atomic() = supports_pooling(backend()) ? task_db().depth > 0 : ATOMIC_DEPTH[] > 0
 
 "Run a statement and return the number of rows changed."
 execute_changes(sql::AbstractString, params = Any[]) = run_driver(driver_rowcount, sql, params)

@@ -84,3 +84,5 @@ table_columns(::PostgresBackend, table) =
 
 register_backend!("postgresql", PostgresBackend)
 register_backend!("postgres", PostgresBackend)
+
+supports_insert_returning(::PostgresBackend) = true

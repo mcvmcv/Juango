@@ -1037,10 +1037,12 @@ struct QuerySet{T<:Model}
     group_by_object::Bool                          # values() after an aggregate annotate: still one row per object
     deferred::Vector{Symbol}                       # fields left out of the SELECT (only/defer), loaded on access
     distinct_fields::Union{Nothing,Vector{String}} # distinct(): nothing = off, [] = DISTINCT, fields = DISTINCT ON
+    for_update::Any                                # select_for_update options (a NamedTuple) or nothing
+    combinator::Any                                # (op, querysets, all) for union/intersection/difference, or nothing
 end
 QuerySet{T}(where, order, limit, offset, isnone) where {T} =
     QuerySet{T}(where, order, limit, offset, isnone, Vector{Symbol}[], Prefetch[], nothing, nothing,
-                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing)
+                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing)
 
 model_of(::QuerySet{T}) where {T} = T
 
@@ -1129,6 +1131,11 @@ prefetch_related(qs::QuerySet, lookups...) =
 prefetch_related(::Type{T}, lookups...) where {T<:Model} = prefetch_related(objects(T), lookups...)
 prefetch_related(lookups::Union{AbstractString,Symbol,Prefetch}...) = qs -> prefetch_related(qs, lookups...)
 
+function assert_uncombined(qs::QuerySet, what)
+    qs.combinator === nothing ||
+        throw(ArgumentError("cannot $what the result of union/intersection/difference; filter the querysets before combining them"))
+end
+
 function assert_unsliced(qs::QuerySet, what)
     (qs.limit === nothing && qs.offset == 0) || error("cannot $what a queryset once it has been sliced")
 end
@@ -1142,6 +1149,7 @@ iendswith gt gte lt lte in isnull range year month day ne.
 """
 function Base.filter(qs::QuerySet{T}, qargs::Union{Q,Expression}...; kw...) where {T}
     assert_unsliced(qs, "filter")
+    assert_uncombined(qs, "filter")
     (isempty(qargs) && isempty(kw)) && return chain(qs)
     w = copy(qs.where)
     push!(w, Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], false))
@@ -1153,6 +1161,7 @@ Base.filter(qargs::Union{Q,Expression}...; kw...) = qs -> filter(qs, qargs...; k
 "Exclude rows matching the lookups."
 function exclude(qs::QuerySet{T}, qargs::Union{Q,Expression}...; kw...) where {T}
     assert_unsliced(qs, "exclude")
+    assert_uncombined(qs, "exclude")
     (isempty(qargs) && isempty(kw)) && return chain(qs)
     w = copy(qs.where)
     push!(w, Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], true))
@@ -1259,6 +1268,7 @@ queryset_model(::QuerySet{T}) where {T} = T
 # Not specialized on the model: one compiled copy serves every model (and lives in the package image).
 function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = true, outer = nothing, idonly = false)
     T = queryset_model(qs)
+    qs.combinator === nothing || return build_combined(qs; columns = columns, ordered = ordered, idonly = idonly)
     c = SQLCompiler(T; outer = outer)
     for (k, v) in qs.annotations
         c.annotations[k] = v
@@ -1348,7 +1358,61 @@ function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = 
           (grouped && !isempty(group) ? " GROUP BY " * join(unique(group), ", ") : "") *
           (isempty(hparts) ? "" : " HAVING " * join(hparts, " AND ")) *
           o * limit_offset_sql(backend(), qs.limit, qs.offset)
+    if qs.for_update !== nothing && columns === nothing && !idonly && qs.values_fields === nothing
+        sql *= for_update_sql(backend(), qs.for_update, c, related)
+    end
     sql, vcat(sel_ps, wps, hps), c, related
+end
+
+"The `FOR UPDATE ...` clause of `select_for_update` (nothing on SQLite, which locks the whole database)."
+function for_update_sql(b::DatabaseBackend, opts, c, related)
+    occursin("SQLite", vendor(b)) && return ""
+    s = " FOR UPDATE"
+    if !isempty(opts.of)
+        b isa PostgresBackend || throw(ArgumentError("select_for_update(of = ...) is only supported on PostgreSQL"))
+        aliases = String[]
+        for name in opts.of
+            name = string(name)
+            if name == "self"
+                push!(aliases, qname(c.base))
+            else
+                i = findfirst(r -> join(string.(r[1]), "__") == name, related)
+                i === nothing && throw(ArgumentError("select_for_update(of = ...): '$name' is not 'self' or a select_related path"))
+                push!(aliases, qname(related[i][3]))
+            end
+        end
+        s *= " OF " * join(aliases, ", ")
+    end
+    opts.nowait && (s *= " NOWAIT")
+    opts.skip_locked && (s *= " SKIP LOCKED")
+    s
+end
+
+"SQL for union/intersection/difference: the parts joined by the set operator, wrapped so the
+result can be ordered and sliced the same way on every database."
+function build_combined(@nospecialize(qs::QuerySet); columns = nothing, ordered = true, idonly = false)
+    T = queryset_model(qs)
+    op, parts, all_ = qs.combinator
+    sqls, ps = String[], Any[]
+    for p in parts
+        sql, pp = select_sql(p; ordered = false)
+        push!(sqls, sql); append!(ps, pp)
+    end
+    word = op === :union ? "UNION" : op === :intersection ? "INTERSECT" : "EXCEPT"
+    inner = join(sqls, " $word$(all_ ? " ALL" : "") ")
+    sel = idonly ? qname("id") : columns !== nothing ? replace(columns, r"^.*\." => "") : "*"
+    order = String[]
+    if ordered
+        for o in qs.order
+            name = lstrip(o, '-')
+            f = name in ("id", "pk") ? nothing : findfield(modelmeta(T), Symbol(name))
+            col = f === nothing || qs.values_fields !== nothing ? (name == "pk" ? "id" : name) : column(f)
+            push!(order, qname(col) * (startswith(o, "-") ? " DESC" : " ASC"))
+        end
+    end
+    sql = "SELECT $sel FROM ($inner) AS juango_combined" * (isempty(order) ? "" : " ORDER BY " * join(order, ", ")) *
+          limit_offset_sql(backend(), qs.limit, qs.offset)
+    sql, ps, SQLCompiler(T), Tuple{Vector{Symbol},Any,String}[]
 end
 
 "Is the queryset grouped (aggregate annotations) or in values mode? Then counting wraps the full query."
@@ -1374,6 +1438,8 @@ end
 "Execute the query and return a `Vector` of model instances."
 function fetch(qs::QuerySet{T}) where {T}
     qs.cache === nothing || return Vector{T}(qs.cache)
+    qs.for_update === nothing || in_atomic() ||
+        throw(TransactionManagementError("select_for_update() must be evaluated inside atomic()"))
     qs.values_fields === nothing || return fetch_values(qs)
     qs.isnone && return T[]
     sql, ps, _, related = build_select(qs)
@@ -1726,6 +1792,225 @@ function explain(qs::QuerySet)
     end
     join(lines, "\n")
 end
+
+# --- bulk_create, bulk_update, iterator, select_for_update, set operations ---------------------
+
+struct TransactionManagementError <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::TransactionManagementError) = print(io, "TransactionManagementError: ", e.msg)
+
+"Prepare objects for a bulk insert as `save!` would: timestamps, UUID keys, uploaded files."
+function prepare_for_insert!(objs, T)
+    ts = timezone_now()
+    for o in objs
+        data = getfield(o, :_data)
+        for f in all_fields(T)
+            a = attname(f)
+            if f.auto_now || (f.auto_now_add && get(data, a, nothing) === nothing)
+                data[a] = f.kind === :date ? Date(ts isa TimeZones.ZonedDateTime ? make_naive(ts) : ts) : ts
+            end
+        end
+        data[:id] === nothing && pk_kind(T) === :uuid && (data[:id] = uuid4())
+        store_uploaded_files!(o, data)
+    end
+end
+
+"""
+    bulk_create(objs; batch_size, ignore_conflicts, update_conflicts, update_fields, unique_fields)
+
+Insert many objects with multi-row INSERTs (no `save!`, no signals) and return them. New
+ids are set on SQLite, PostgreSQL and MariaDB (not on MySQL, nor when conflicts are ignored
+or updated).
+
+- `ignore_conflicts = true` skips rows that break a unique constraint.
+- `update_conflicts = true` updates `update_fields` of the existing row instead; PostgreSQL
+  and SQLite also need the `unique_fields` that conflict.
+"""
+function bulk_create(objs::AbstractVector{T}; batch_size = nothing, ignore_conflicts = false,
+                     update_conflicts = false, update_fields = nothing, unique_fields = nothing) where {T<:Model}
+    isempty(objs) && return objs
+    table_parent(concrete_model(T)) === nothing ||
+        throw(ArgumentError("bulk_create can't be used with multi-table inheritance ($(nameof(T)))"))
+    ignore_conflicts && update_conflicts && throw(ArgumentError("bulk_create: pass ignore_conflicts or update_conflicts, not both"))
+    b = backend()
+    meta = modelmeta(concrete_model(T))
+    fieldsof(names) = [let f = findfield(meta, Symbol(n)); f === nothing ? throw(LookupError("$(nameof(T)) has no field '$n'")) : f end
+                       for n in names]
+    conflict = ""
+    if update_conflicts
+        update_fields === nothing && throw(ArgumentError("bulk_create(update_conflicts = true) needs update_fields"))
+        ups = [qname(column(f)) for f in fieldsof(update_fields)]
+        if b isa MySQLBackend
+            conflict = " ON DUPLICATE KEY UPDATE " * join(["$c = VALUES($c)" for c in ups], ", ")
+        else
+            unique_fields === nothing && throw(ArgumentError("bulk_create(update_conflicts = true) needs unique_fields on $(vendor(b))"))
+            target = [Symbol(n) in (:id, :pk) ? qname("id") : qname(column(fieldsof([n])[1])) for n in unique_fields]
+            conflict = " ON CONFLICT (" * join(target, ", ") * ") DO UPDATE SET " * join(["$c = EXCLUDED.$c" for c in ups], ", ")
+        end
+    elseif ignore_conflicts && !(b isa MySQLBackend)
+        conflict = " ON CONFLICT DO NOTHING"
+    end
+    verb = ignore_conflicts && b isa MySQLBackend ? "INSERT IGNORE INTO" : "INSERT INTO"
+    prepare_for_insert!(objs, T)
+    fields = meta.fields
+    if isempty(fields)                       # nothing to put in VALUES: one row at a time
+        foreach(o -> save_table!(concrete_model(T), getfield(o, :_data), true), objs)
+        return objs
+    end
+    tbl = qname(meta.table)
+    for with_id in (true, false)
+        group = [o for o in objs if (getfield(o, :_data)[:id] !== nothing) == with_id]
+        isempty(group) && continue
+        cols = vcat(with_id ? [qname("id")] : String[], [qname(column(f)) for f in fields])
+        n = batch_size === nothing ? max(1, 999 ÷ length(cols)) : Int(batch_size)
+        returning = !with_id && conflict == "" && verb == "INSERT INTO" && supports_insert_returning(b)
+        for batch in Iterators.partition(group, n)
+            ps = Any[]
+            for o in batch
+                data = getfield(o, :_data)
+                with_id && push!(ps, data[:id])
+                append!(ps, Any[to_db(f, get(data, attname(f), nothing)) for f in fields])
+            end
+            row = "(" * join(fill("?", length(cols)), ", ") * ")"
+            sql = "$verb $tbl (" * join(cols, ", ") * ") VALUES " * join(fill(row, length(batch)), ", ") * conflict
+            if returning
+                rows = execute(sql * " RETURNING " * qname("id"), ps)
+                for (o, r) in zip(batch, rows)
+                    getfield(o, :_data)[:id] = pk_value(T, r[:id])
+                end
+            else
+                execute_changes(sql, ps)
+            end
+        end
+        with_id && sync_sequence(b, meta.table)
+    end
+    objs
+end
+
+"""
+    bulk_update(objs, [:title, :views]; batch_size) -> Int
+
+Write these fields of many saved objects with a few UPDATE statements (no `save!`, no
+signals); returns the number of rows changed.
+"""
+function bulk_update(objs::AbstractVector{T}, fields; batch_size = nothing) where {T<:Model}
+    isempty(objs) && return 0
+    names = Symbol[Symbol(f) for f in fields]
+    isempty(names) && throw(ArgumentError("bulk_update needs at least one field"))
+    flds = Field[]
+    for n in names
+        n in (:id, :pk) && throw(ArgumentError("bulk_update can't change the primary key"))
+        f = findfield(modelmeta(T), n)
+        f === nothing && (i = findfirst(g -> g.name === n, all_fields(T)); f = i === nothing ? nothing : all_fields(T)[i])
+        (f === nothing || f.kind in (:m2m, :gfk, :grel)) && throw(LookupError("bulk_update: $(nameof(T)) has no concrete field '$n'"))
+        push!(flds, f)
+    end
+    any(o -> o.id === nothing, objs) && throw(ArgumentError("bulk_update: all objects must be saved first"))
+    b = backend()
+    cast(f) = b isa PostgresBackend ? "CAST(? AS $(column_type_for(b, column_state(f))))" : "?"
+    total = 0
+    bytable = Dict{String,Vector{Field}}()
+    for f in flds
+        push!(get!(bytable, modelmeta(f.model).table, Field[]), f)
+    end
+    for (table, tf) in bytable
+        n = batch_size === nothing ? max(1, 900 ÷ (2 * length(tf) + 1)) : Int(batch_size)
+        for batch in Iterators.partition(objs, n)
+            sets, ps = String[], Any[]
+            for f in tf
+                push!(sets, qname(column(f)) * " = CASE " * qname("id") * join([" WHEN ? THEN " * cast(f) for _ in batch]) * " END")
+                for o in batch
+                    push!(ps, o.id, to_db(f, field_data(o, attname(f))))
+                end
+            end
+            append!(ps, Any[o.id for o in batch])
+            sql = "UPDATE $(qname(table)) SET " * join(sets, ", ") * " WHERE " * qname("id") * " IN (" * join(fill("?", length(batch)), ", ") * ")"
+            total += execute_changes(sql, ps)
+        end
+    end
+    total
+end
+
+struct QuerySetIterator
+    qs::QuerySet
+    chunk_size::Int
+end
+
+"""
+    iterator(qs; chunk_size = 2000)
+
+Iterate over a large queryset without loading it all: rows are fetched `chunk_size` at a
+time (LIMIT/OFFSET pages, ordered with the id as a tie-breaker so pages don't overlap).
+`prefetch_related` runs per chunk.
+"""
+function iterator(qs::QuerySet; chunk_size::Integer = 2000)
+    chunk_size > 0 || throw(ArgumentError("chunk_size must be positive"))
+    "?" in qs.order && throw(ArgumentError("iterator() can't page through a randomly ordered queryset"))
+    order = default_order(qs)
+    any(o -> lstrip(o, '-') in ("id", "pk"), order) || (order = vcat(order, ["id"]))
+    QuerySetIterator(qs.combinator === nothing ? chain(qs; order = order) : qs, Int(chunk_size))
+end
+iterator(::Type{T}; kw...) where {T<:Model} = iterator(objects(T); kw...)
+Base.IteratorSize(::Type{QuerySetIterator}) = Base.SizeUnknown()
+Base.eltype(it::QuerySetIterator) = it.qs.values_fields === nothing ? model_of(it.qs) : Dict{Symbol,Any}
+function Base.iterate(it::QuerySetIterator, st = (Any[], 1, 0, false))
+    buf, i, pos, done = st
+    if i > length(buf)
+        done && return nothing
+        buf = fetch(it.qs[pos+1:pos+it.chunk_size])
+        isempty(buf) && return nothing
+        i, pos, done = 1, pos + length(buf), length(buf) < it.chunk_size
+    end
+    buf[i], (buf, i + 1, pos, done)
+end
+
+"""
+    select_for_update(qs; nowait = false, skip_locked = false, of = ())
+
+Lock the selected rows until the end of the transaction (`SELECT ... FOR UPDATE`). Must be
+evaluated inside `atomic()`. `nowait` fails instead of waiting for a lock, `skip_locked`
+leaves locked rows out, and `of = ("self", "author")` (PostgreSQL) locks only those tables
+of a `select_related` query. SQLite locks the whole database for a write transaction, so
+there it only checks for the transaction.
+"""
+function select_for_update(qs::QuerySet; nowait = false, skip_locked = false, of = ())
+    nowait && skip_locked && throw(ArgumentError("select_for_update: nowait and skip_locked can't both be set"))
+    chain(qs; for_update = (nowait = nowait, skip_locked = skip_locked, of = collect(of)))
+end
+select_for_update(::Type{T}; kw...) where {T<:Model} = select_for_update(objects(T); kw...)
+
+function combine(op, qs::QuerySet{T}, others; keep_all = false) where {T}
+    isempty(others) && return qs
+    parts = QuerySet[]
+    for q in (qs, others...)
+        model_of(q) === T || throw(ArgumentError("$op: all querysets must be of $(nameof(T))"))
+        (q.limit === nothing && q.offset == 0) || throw(ArgumentError("$op: slice the combined queryset, not its parts"))
+        isempty(q.related) || throw(ArgumentError("$op: select_related isn't supported in combined querysets"))
+        if q.combinator !== nothing && q.combinator[1] === op && q.combinator[3] == keep_all
+            append!(parts, q.combinator[2])          # (a ∪ b) ∪ c is one UNION of three parts
+        else
+            push!(parts, q)
+        end
+    end
+    vf = first(parts).values_fields
+    all(p -> p.values_fields == vf, parts) || throw(ArgumentError("$op: the querysets must select the same fields"))
+    QuerySet{T}(Q[], String[], nothing, 0, false, Vector{Symbol}[], copy(qs.prefetch), nothing, nothing,
+                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all))
+end
+
+"""
+    union(qs, others...; all = false)
+    intersection(qs, others...)
+    difference(qs, others...)
+
+Combine querysets of the same model with SQL `UNION`, `INTERSECT` or `EXCEPT` (`all = true`
+keeps duplicates). The result can be ordered (by field names), sliced, counted and
+iterated, but not filtered further. `values` querysets combine too.
+"""
+Base.union(qs::QuerySet, others::QuerySet...; all = false) = combine(:union, qs, others; keep_all = all)
+intersection(qs::QuerySet, others::QuerySet...; all = false) = combine(:intersection, qs, others; keep_all = all)
+difference(qs::QuerySet, others::QuerySet...; all = false) = combine(:difference, qs, others; keep_all = all)
 
 struct DoesNotExist <: Exception
     model::Any

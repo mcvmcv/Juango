@@ -823,3 +823,89 @@ end
     plan = explain(filter(qs; status = "p"))
     @test plan isa String && !isempty(plan)
 end
+
+@testset "bulk_create, bulk_update, iterator, select_for_update, union" begin
+    au = create(Author; name = "Bulk Author")
+    # bulk_create: one INSERT per batch; ids come back where the database can return them
+    arts = [Article(; title = "bu-$i", author = au, views = i) for i in 1:5]
+    objs, n = count_queries(() -> bulk_create(arts; batch_size = 2))
+    @test objs === arts && n <= 4                   # 3 INSERTs (+ MariaDB's one-time version check)
+    qs = filter(Article; title__startswith = "bu-")
+    @test count(qs) == 5 && all(a -> a.created !== nothing, arts)
+    got_ids = all(a -> a.id !== nothing, arts)
+    @test got_ids == Juango.supports_insert_returning(Juango.backend())
+    got_ids && @test get(Article; id = arts[3].id).title == "bu-3"
+    # explicit ids, then the sequence still works for save!
+    mx = maximum(values_list(objects(Author), :id; flat = true))
+    bulk_create([Author(; id = mx + 10, name = "Bulk Explicit")])
+    @test get(Author; name = "Bulk Explicit").id == mx + 10 && create(Author; name = "Bulk After").id > mx + 10
+    # conflicts on a unique field
+    bulk_create([Author(; name = "Bulk Author"), Author(; name = "Bulk New")]; ignore_conflicts = true)
+    @test count(filter(Author; name__startswith = "Bulk")) == 4
+    @test_throws IntegrityError bulk_create([Author(; name = "Bulk Author")])
+    bulk_create([Author(; name = "Bulk Author", email = "up@x.io")]; update_conflicts = true,
+                update_fields = [:email], unique_fields = [:name])
+    @test get(Author; name = "Bulk Author").email == "up@x.io"
+    @test_throws ArgumentError bulk_create([Author(; name = "x")]; update_conflicts = true)
+    @test isempty(bulk_create(Author[]))
+
+    # bulk_update
+    objs = collect(order_by(qs, "views"))
+    for o in objs
+        o.views *= 10; o.title *= "!"; o.rating = 1.5
+    end
+    @test bulk_update(objs, [:views, :title, :rating]; batch_size = 2) == 5
+    @test values_list(order_by(filter(Article; author = au), "views"), :views; flat = true) == [10, 20, 30, 40, 50]
+    @test get(Article; id = objs[1].id).title == "bu-1!" && get(Article; id = objs[1].id).rating == 1.5
+    @test_throws ArgumentError bulk_update(objs, [:id])
+    @test_throws Juango.LookupError bulk_update(objs, [:nope])
+    qs = filter(Article; author = au)
+
+    # iterator: chunks of 2 -> 3 queries for 5 rows, in order
+    titles, n = count_queries(() -> [a.title for a in iterator(order_by(qs, "views"); chunk_size = 2)])
+    @test titles == ["bu-$(i)!" for i in 1:5] && n == 3
+    @test length(collect(iterator(qs; chunk_size = 10))) == 5
+    @test [d[:views] for d in iterator(order_by(values(qs, :views), "-views"); chunk_size = 3)] == [50, 40, 30, 20, 10]
+    @test_throws ArgumentError iterator(order_by(qs, "?"))
+
+    # select_for_update
+    target = first(qs)
+    @test_throws TransactionManagementError collect(select_for_update(qs))
+    @test atomic(() -> length(collect(select_for_update(filter(qs; id = target.id))))) == 1
+    sql = first(Juango.select_sql(select_for_update(qs; nowait = true)))
+    @test occursin("FOR UPDATE NOWAIT", sql) == !occursin("SQLite", Juango.vendor(Juango.backend()))
+    if IS_POSTGRES || IS_MYSQL
+        locked, release = Channel{Bool}(1), Channel{Bool}(1)
+        holder = @async atomic() do
+            collect(select_for_update(filter(Article; id = target.id))); put!(locked, true); take!(release)
+        end
+        take!(locked)
+        err = try
+            atomic(() -> collect(select_for_update(filter(Article; id = target.id); nowait = true))); nothing
+        catch e
+            e
+        end
+        @test err !== nothing                                   # the row is locked by the other transaction
+        @test isempty(atomic(() -> collect(select_for_update(filter(Article; id = target.id); skip_locked = true))))
+        put!(release, true); wait(holder)
+        IS_POSTGRES && @test occursin("FOR UPDATE OF", first(Juango.select_sql(select_for_update(select_related(qs, :author); of = ("self", "author")))))
+    end
+
+    # union / intersection / difference
+    low, high = filter(qs; views__lte = 20), filter(qs; views__gte = 40)
+    u = union(low, high)
+    @test count(u) == 4 && sort([a.views for a in u]) == [10, 20, 40, 50]
+    @test [a.views for a in order_by(u, "-views")] == [50, 40, 20, 10]
+    @test [a.views for a in order_by(u, "views")[2:3]] == [20, 40] && first(order_by(u, "views")).views == 10
+    @test count(union(low, low)) == 2 && count(union(low, low; all = true)) == 4
+    @test count(union(low, high, filter(qs; views = 30))) == 5
+    mid = filter(qs; views__gte = 20, views__lte = 40)
+    @test sort([a.views for a in intersection(qs, mid)]) == [20, 30, 40]
+    @test sort([a.views for a in difference(qs, mid)]) == [10, 50]
+    @test values_list(order_by(union(values(low, :title), values(high, :title)), "title"), :title; flat = true) ==
+          ["bu-1!", "bu-2!", "bu-4!", "bu-5!"]
+    @test exists(u) && !exists(intersection(low, high))
+    @test_throws ArgumentError filter(u; views = 10)
+    @test_throws ArgumentError union(low, filter(Author; name = "x"))
+    @test union(low) === low
+end

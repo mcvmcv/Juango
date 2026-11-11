@@ -121,7 +121,8 @@ export Model, @model, @abstract_model, OneToOneField, Index, GinIndex, Field, Ma
        ExtractYear, ExtractMonth, ExtractDay, When, Case, OuterRef, Subquery, Exists, Window, RowNumber,
        Rank, DenseRank, Lag, Lead,
        MultipleObjectsReturned, ProtectedError, get_absolute_url,
-       defer, distinct, latest, earliest, in_bulk, dates, datetimes, raw, explain, deferred_fields
+       defer, distinct, latest, earliest, in_bulk, dates, datetimes, raw, explain, deferred_fields,
+       bulk_create, bulk_update, iterator, select_for_update, intersection, difference, TransactionManagementError
 # forms
 export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data, save_m2m!, has_changed, changed_fields,
        FormSet, formset_factory, modelformset_factory, inlineformset_factory, management_form, empty_form,

@@ -101,3 +101,16 @@ foreign_key_names(::MySQLBackend, table, col) =
 
 register_backend!("mysql", MySQLBackend)
 register_backend!("mariadb", MySQLBackend)
+
+# MariaDB 10.5+ has INSERT ... RETURNING; MySQL doesn't. Asked once per database URL.
+const MARIADB = Dict{String,Bool}()
+const MARIADB_LOCK = ReentrantLock()
+function supports_insert_returning(b::MySQLBackend)
+    lock(MARIADB_LOCK) do
+        get!(MARIADB, b.url) do
+            v = string(execute("SELECT VERSION() AS v")[1][:v])
+            m = match(r"^(\d+)\.(\d+)", v)
+            occursin("MariaDB", v) && m !== nothing && (parse(Int, m[1]), parse(Int, m[2])) >= (10, 5)
+        end
+    end
+end

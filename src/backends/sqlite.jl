@@ -109,3 +109,5 @@ function sqlite_from_url(url)
     SQLiteBackend(String(m.captures[1]))
 end
 register_backend!("sqlite", sqlite_from_url)
+
+supports_insert_returning(::SQLiteBackend) = true            # SQLite 3.35+
