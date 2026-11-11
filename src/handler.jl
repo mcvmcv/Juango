@@ -83,7 +83,7 @@ function handle_request_inner(req::Request)
         req.resolver_match === nothing || req.resolver_match.language === nothing ||
             (req.meta[:language_prefix] = req.resolver_match.language)
         resp = build_handler()(req)
-        req.method == "HEAD" && (resp.body = UInt8[])
+        req.method == "HEAD" && (resp.body = UInt8[]; resp.stream = nothing)
         resp
     catch e
         response_for_exception(req, e, catch_backtrace())

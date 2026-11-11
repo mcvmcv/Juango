@@ -187,6 +187,7 @@ mutable struct HttpResponse
     cookies::Vector{String}
     context::Any
     templates::Vector{String}
+    stream::Any             # an iterable of chunks for a streaming response (see streaming.jl), else nothing
 end
 
 function HttpResponse(content = ""; status::Integer = 200,
@@ -194,11 +195,11 @@ function HttpResponse(content = ""; status::Integer = 200,
     body = content isa AbstractVector{UInt8} ? Vector{UInt8}(content) : Vector{UInt8}(codeunits(string(content)))
     hs = Pair{String,String}[string(k) => string(v) for (k, v) in headers]
     any(h -> lowercase(h.first) == "content-type", hs) || pushfirst!(hs, "Content-Type" => content_type)
-    HttpResponse(Int(status), hs, body, String[], nothing, String[])
+    HttpResponse(Int(status), hs, body, String[], nothing, String[], nothing)
 end
 
-"Response body as a `String`."
-text(r::HttpResponse) = String(copy(r.body))
+"Response body as a `String` (a streaming response is read to the end first)."
+text(r::HttpResponse) = (consume_stream!(r); String(copy(r.body)))
 Base.String(r::HttpResponse) = text(r)
 Base.show(io::IO, r::HttpResponse) =
     print(io, "<HttpResponse status=", r.status, " ", repr(something(getheader(r, "Content-Type"), "")), ">")

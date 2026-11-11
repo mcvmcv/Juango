@@ -2416,6 +2416,146 @@ end
     end
 end
 
+@testset "streaming, server-sent events and websockets" begin
+    H = Juango.HTTP
+    # the value of `f(ws)` (WebSockets.open returns the handshake response)
+    wsrun(f, url; kw...) = (out = Ref{Any}(nothing); H.WebSockets.open(ws -> (out[] = f(ws)), url; kw...); out[])
+    # streaming responses through the test client
+    gen(req) = StreamingHttpResponse(("row $i\n" for i in 1:3); content_type = "text/plain")
+    writer(req) = StreamingHttpResponse(content_type = "text/plain") do io
+        print(io, gettext("Save")); write(io, UInt8[0x21])
+    end
+    events(req) = EventStreamResponse() do io
+        write(io, sse_event("hi"))
+        write(io, sse_event(Dict("n" => 1); event = "tick", id = 7))
+        write(io, sse_comment("keepalive"))
+    end
+    slow(req) = StreamingHttpResponse(content_type = "text/plain") do io
+        write(io, "first\n"); sleep(0.8); write(io, "second\n")
+    end
+    fdir = mktempdir()
+    fpath = joinpath(fdir, "report ü.csv")
+    write(fpath, repeat("a,b,c\n", 30_000))            # 180 KB: several blocks
+    file(req) = FileResponse(fpath; as_attachment = true)
+    plainfile(req) = FileResponse(joinpath(fdir, "missing.txt"))
+    function echo_handler(ws, req; prefix)
+        for msg in ws
+            msg == "who" ? ws_send(ws, req.user.is_authenticated ? req.user.username : "anon") :
+                           ws_send(ws, prefix * (msg isa String ? msg : "<$(length(msg)) bytes>"))
+        end
+    end
+    echo = websocket(echo_handler)
+    private = login_required(websocket((ws, req) -> ws_send(ws, "secret")))
+    old_urls = settings.ROOT_URLCONF
+    configure!(ROOT_URLCONF = [path("gen/", gen), path("writer/", writer), path("events/", events), path("slow/", slow),
+                               path("file/", file), path("missing/", plainfile),
+                               path("ws/<str:prefix>/", echo), path("private-ws/", private)])
+    try
+        c = Client()
+        r = get(c, "/gen/")
+        @test is_streaming(r) && text(r) == "row 1\nrow 2\nrow 3\n" && !is_streaming(r)
+        @test with_language(() -> text(get(c, "/writer/")), "de") == "Sichern!"          # the view's language while streaming
+        r = get(c, "/events/")
+        @test getheader(r, "Content-Type") == "text/event-stream; charset=utf-8" && getheader(r, "Cache-Control") == "no-cache"
+        @test text(r) == "data: hi\n\nevent: tick\nid: 7\ndata: {\"n\":1}\n\n: keepalive\n\n"
+        @test sse_event("a\nb"; retry = 3000) == "retry: 3000\ndata: a\ndata: b\n\n"
+        r = get(c, "/file/")
+        @test text(r) == read(fpath, String) && getheader(r, "Content-Length") == string(filesize(fpath))
+        @test getheader(r, "Content-Type") == "application/octet-stream"
+        @test getheader(r, "Content-Disposition") == "attachment; filename*=UTF-8''report%20%C3%BC.csv"
+        @test Juango.content_disposition("a\"b.txt") == "inline; filename=\"a\\\"b.txt\""
+        @test get(c, "/missing/").status == 404
+        @test isempty(text(request(c, "HEAD", "/gen/")))
+        r = get(c, "/ws/x/")
+        @test r.status == 426 && getheader(r, "Upgrade") == "websocket"
+
+        # caching skips streaming responses
+        @test !Juango.cacheable(Request("GET", "/gen/"), gen(nothing))
+
+        # over a real server
+        port = let s = Juango.Sockets.listen(Juango.Sockets.localhost, 0)
+            p = Int(Juango.Sockets.getsockname(s)[2]); close(s); p
+        end
+        server = runserver("127.0.0.1", port; block = false, quiet = true)
+        base = "127.0.0.1:$port"
+        try
+            r = H.get("http://$base/gen/")
+            @test String(r.body) == "row 1\nrow 2\nrow 3\n"
+            r = H.get("http://$base/file/")
+            @test r.body == read(fpath) && H.header(r, "Content-Length") == string(filesize(fpath))
+            r = H.get("http://$base/events/")
+            @test occursin("event: tick", String(r.body))
+            # the first chunk arrives before the view has finished
+            first_at = Ref(0.0); got = IOBuffer()
+            H.open("GET", "http://$base/slow/") do s
+                H.startread(s)
+                while !eof(s)
+                    b = readavailable(s)
+                    isempty(b) && continue
+                    position(got) == 0 && (first_at[] = time())
+                    write(got, b)
+                end
+            end
+            @test String(take!(got)) == "first\nsecond\n"
+            @test time() - first_at[] > 0.5           # "first" came ~0.8 s before the end
+            @test H.get("http://$base/articles/"; status_exception = false).status == 404       # urlconf swapped
+            @test H.get("http://$base/ws/x/"; status_exception = false).status == 426
+
+            # websockets: echo, binary frames, the url kwargs, the session's user
+            H.WebSockets.open("ws://$base/ws/echo:/") do ws
+                ws_send(ws, "hello")
+                @test ws_receive(ws) == "echo:hello"
+                ws_send(ws, UInt8[1, 2, 3])
+                @test ws_receive(ws) == "echo:<3 bytes>"
+                ws_send(ws, "who")
+                @test ws_receive(ws) == "anon"
+            end
+            # several connections at once
+            replies = asyncmap(1:5) do i
+                wsrun("ws://$base/ws/n/") do ws
+                    ws_send(ws, string(i)); ws_receive(ws)
+                end
+            end
+            @test replies == ["n$i" for i in 1:5]
+            # foreign origins are refused, trusted ones allowed
+            refused = try
+                H.WebSockets.open(ws -> nothing, "ws://$base/ws/x/"; headers = ["Origin" => "http://evil.example"]); false
+            catch e
+                true
+            end
+            @test refused
+            configure!(CSRF_TRUSTED_ORIGINS = ["https://app.example"])
+            @test wsrun("ws://$base/ws/ok/"; headers = ["Origin" => "https://app.example"]) do ws
+                ws_send(ws, "1"); ws_receive(ws)
+            end == "ok1"
+            @test wsrun("ws://$base/ws/ok/"; headers = ["Origin" => "http://$base"]) do ws
+                ws_send(ws, "2"); ws_receive(ws)
+            end == "ok2"
+            # login_required refuses the handshake; with a session cookie it goes through
+            @test try
+                H.WebSockets.open(ws -> nothing, "ws://$base/private-ws/"); false
+            catch
+                true
+            end
+            lc = Client()
+            force_login!(lc, get(User; username = "root"))
+            cookie = "$(settings.SESSION_COOKIE_NAME)=$(lc.cookies[settings.SESSION_COOKIE_NAME])"
+            @test wsrun(ws -> ws_receive(ws), "ws://$base/private-ws/"; headers = ["Cookie" => cookie]) == "secret"
+            @test wsrun("ws://$base/ws/x/"; headers = ["Cookie" => cookie]) do ws
+                ws_send(ws, "who"); ws_receive(ws)
+            end == "root"
+
+            # concurrent requests are served in parallel (each takes 0.8 s)
+            t = @elapsed asyncmap(_ -> H.get("http://$base/slow/"), 1:6)
+            @test t < 2.5
+        finally
+            close(server)
+        end
+    finally
+        configure!(ROOT_URLCONF = old_urls, CSRF_TRUSTED_ORIGINS = String[])
+    end
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)

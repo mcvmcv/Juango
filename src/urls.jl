@@ -221,7 +221,8 @@ struct ReverseEntry
 end
 
 const REVERSE_CACHE = IdDict{Any,Dict{String,Vector{ReverseEntry}}}()
-push!(SETTINGS_CHANGED_HOOKS, () -> empty!(REVERSE_CACHE))
+const REVERSE_LOCK = ReentrantLock()
+push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> empty!(REVERSE_CACHE), REVERSE_LOCK))
 
 function build_reverse_index!(idx, patterns, prefix, ns)
     for pat in patterns
@@ -254,8 +255,9 @@ Build the URL for the named pattern. Use `"namespace:name"` for included pattern
     reverse_url("blog:post", 3)         # positional arguments also work
 """
 function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLCONF, query = nothing, kwargs...)
-    idx = get!(() -> build_reverse_index!(Dict{String,Vector{ReverseEntry}}(), urlconf, "", nothing),
-               REVERSE_CACHE, urlconf)
+    idx = lock(REVERSE_LOCK) do
+        get!(() -> build_reverse_index!(Dict{String,Vector{ReverseEntry}}(), urlconf, "", nothing), REVERSE_CACHE, urlconf)
+    end
     entries = get(idx, name, nothing)
     entries === nothing && throw(NoReverseMatch("'$name' is not a valid view name"))
     kw = Dict{Symbol,Any}(kwargs)

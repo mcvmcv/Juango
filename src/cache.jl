@@ -47,7 +47,8 @@ mutable struct RedisCache <: CacheBackend
 end
 
 const CACHE_INSTANCES = Dict{String,CacheBackend}()
-push!(SETTINGS_CHANGED_HOOKS, () -> (foreach(close_cache, values(CACHE_INSTANCES)); empty!(CACHE_INSTANCES)))
+const CACHE_INSTANCES_LOCK = ReentrantLock()
+push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> (foreach(close_cache, values(CACHE_INSTANCES)); empty!(CACHE_INSTANCES)), CACHE_INSTANCES_LOCK))
 close_cache(::CacheBackend) = nothing
 close_cache(c::RedisCache) = (c.sock === nothing || try close(c.sock) catch end; c.sock = nothing)
 
@@ -75,10 +76,12 @@ end
 The cache configured under `name` in `settings.CACHES`.
 """
 function cache(name::AbstractString = "default")
-    get!(CACHE_INSTANCES, string(name)) do
-        conf = settings.CACHES
-        haskey(conf, name) || throw(ImproperlyConfigured("no cache named '$name' in CACHES"))
-        make_cache(conf[name])
+    lock(CACHE_INSTANCES_LOCK) do
+        get!(CACHE_INSTANCES, string(name)) do
+            conf = settings.CACHES
+            haskey(conf, name) || throw(ImproperlyConfigured("no cache named '$name' in CACHES"))
+            make_cache(conf[name])
+        end
     end
 end
 
@@ -285,7 +288,7 @@ end
 
 # --- whole responses ---------------------------------------------------------------------------------------
 
-cacheable(req, resp) = req.method in ("GET", "HEAD") && resp.status == 200 && isempty(resp.cookies) &&
+cacheable(req, resp) = req.method in ("GET", "HEAD") && resp.status == 200 && isempty(resp.cookies) && !is_streaming(resp) &&
     !occursin(r"cookie"i, something(getheader(resp, "Vary"), "")) && !occursin(r"no-store|private"i, something(getheader(resp, "Cache-Control"), ""))
 page_key(req, prefix) = "views.cache_page:" * prefix * ":" * get_host(req) * full_path(req)
 

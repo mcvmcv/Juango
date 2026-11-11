@@ -423,6 +423,42 @@ configure!(ROOT_URLCONF=urlpatterns, DATABASE="db.sqlite3", TEMPLATE_DIRS=["temp
 
 Converters: `str int slug path uuid`, plus `register_converter!`.
 
+### Streaming, server-sent events and WebSockets
+
+A streaming response sends its body while it is produced, so it never has to sit in memory whole.
+
+```julia
+export_csv(req) = StreamingHttpResponse(content_type = "text/csv") do io
+    for p in objects(Post)                      # each write goes out as a chunk
+        println(io, p.id, ",", p.title)
+    end
+end
+report(req; name) = FileResponse(joinpath("reports", name); as_attachment = true)   # 64 KiB at a time
+
+ticker(req) = EventStreamResponse() do io       # text/event-stream, not buffered by proxies
+    for i in 1:10
+        write(io, sse_event(Dict("n" => i); event = "tick", id = i))
+        sleep(1)
+    end
+end
+
+chat = websocket() do ws, req                   # sessions and req.user are loaded as usual
+    for msg in ws                               # String for text frames, Vector{UInt8} for binary
+        ws_send(ws, "$(req.user.username): $msg")
+    end
+end
+room(ws, req; name) = ws_send(ws, "welcome to $name")          # URL parameters arrive as keywords
+
+urlpatterns = [path("posts.csv", export_csv), path("reports/<str:name>", report), path("ticks/", ticker),
+               path("ws/chat/", login_required(chat)), path("ws/room/<slug:name>/", websocket(room))]
+```
+
+`StreamingHttpResponse` also takes any iterable of strings or bytes (a generator, a `Channel`). The body is produced in the view's language and time zone. The test client reads streams to the end when you call `text(resp)`, and `is_streaming(resp)` tells you if it hasn't yet. Streaming responses are never cached.
+
+A WebSocket handshake goes through the middleware like any request, so `login_required` and friends can refuse it. The browser's `Origin` must be the site itself or listed in `CSRF_TRUSTED_ORIGINS`, so other sites can't open sockets with a visitor's cookies. A plain GET to a WebSocket URL gets 426 Upgrade Required. Pass `websocket(handler; subprotocols = ["chat.v1"])` to negotiate a subprotocol.
+
+**Concurrency.** `runserver` handles each connection in its own task, so a slow view, a sleeping event stream or an open WebSocket doesn't hold up other requests. Database queries on PostgreSQL wait cooperatively, so other tasks run meanwhile, and each task gets its own pooled connection (see Database backends). Start Julia with threads (`julia -t auto manage.jl runserver`) and the views also run in parallel on all cores. The shared caches (templates, URL reversing, content types, translations and cache backends) are protected by locks. A view can start its own work with `Threads.@spawn`, and the spawned task takes its own database connection.
+
 ### Templates
 
 This is the Django template language. Tags: `if/elif/else` (with `and or not in == != < > <= >= is`), `for … empty` (with `forloop.*` and `reversed`), `extends`/`block` (with `block.super`), `include … with … only`, `with`, `url … as`, `csrf_token`, `static`, `cycle`, `firstof`, `now`, `comment`, `verbatim`, `spaceless`, `autoescape`, `load`.
@@ -750,8 +786,6 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
 - **ORM features not yet built:** symmetrical self-referential many-to-many, filtering on window functions, and `select_related` into a model that inherits from another table (use `prefetch_related`).
 - No `INSTALLED_APPS`/app registry. A project is a set of Julia files you `include`, as in the `startproject` layout.
-- File uploads: multipart fields are parsed, and uploaded files are exposed raw in `req.meta[:FILES]`. There is no `FileField`.
-- No i18n, caching framework, signals, or permission groups.
 - `runserver` is HTTP.jl's server. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and set `SESSION_COOKIE_SECURE`/`CSRF_COOKIE_SECURE`.
 
 ## Layout
@@ -769,6 +803,7 @@ src/
   backends/      sqlite.jl, postgres.jl  ext/         LibPQ driver (optional)
   handler.jl     request pipeline        admin.jl     the admin
   server.jl      HTTP server             management.jl  CLI, startproject
+  streaming.jl   streaming, SSE, WebSockets
   testclient.jl  test Client             templates/   built-in admin templates
 test/runtests.jl                          examples/blog/  complete example app
 ```
