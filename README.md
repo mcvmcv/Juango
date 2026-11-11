@@ -820,6 +820,33 @@ urlpatterns = [..., sitemap_urls(sitemaps)...]
 
 `/sitemap.xml` is a sitemap index that points at `/sitemap-posts.xml` and `/sitemap-pages.xml`. With a single section, it is that section's urlset. `items` is a collection, a QuerySet or a function returning one. `location`, `lastmod`, `changefreq` and `priority` are each a value, a function of the item, or a field name. Without a `location`, models use `get_absolute_url` and strings are taken as URLs. URLs become absolute with the request's host (set `protocol = "https"` to force a scheme). Sections larger than `limit` (50,000) are split into pages (`?p=2`), and the index lists each page.
 
+### Syndication feeds
+
+A `Feed` is a view that produces RSS 2.0 or Atom 1.0:
+
+```julia
+latest = Feed(title = "My blog", link = "/blog/", description = "The latest posts",
+              items = () -> filter(Post; published = true)[1:10],
+              item_description = :body, item_pubdate = :created, item_author_name = p -> p.author.username)
+by_author = Feed(get_object = (req; id) -> get_object_or_404(objects(User); id),
+                 title = u -> "Posts by $(u.username)", link = u -> "/authors/$(u.id)/",
+                 items = u -> filter(Post; author = u, published = true))
+urlpatterns = [path("feed/", latest), path("feed/atom/", Feed(latest; feed_type = :atom)),
+               path("authors/<int:id>/feed/", by_author), ...]
+```
+
+Feed-level options (`title`, `link`, `description`, `items`, `language`, `author_name`, `ttl`, `feed_url`) are values or functions of the object that `get_object` returns. Item options are values, functions of the item, or field names:
+
+- `item_title` (default: the item as a string)
+- `item_description`
+- `item_link` (default: `get_absolute_url`)
+- `item_pubdate` and `item_updateddate`
+- `item_author_name`
+- `item_guid` (default: the link)
+- `item_categories`
+
+`title_template` and `description_template` render each item with `obj` and `site` in the context. Links are made absolute with the request's host.
+
 ### Middleware
 
 A middleware has Django's shape: a factory `get_response -> (req -> response)`.
@@ -919,7 +946,7 @@ src/
   server.jl      HTTP server             management.jl  CLI, startproject
   streaming.jl   streaming, SSE, WebSockets
   apps.jl        App, INSTALLED_APPS
-  sitemaps.jl    Sitemap, sitemap_urls
+  sitemaps.jl    Sitemap, sitemap_urls   feeds.jl     Feed (RSS, Atom)
   testclient.jl  test Client             templates/   built-in admin templates
 test/runtests.jl                          examples/blog/  complete example app
 ```

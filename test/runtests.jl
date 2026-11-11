@@ -2907,6 +2907,62 @@ end
     end
 end
 
+@testset "syndication feeds" begin
+    fa = create(Author; name = "Feed <Author>")
+    items = [create(Article; title = "feed-$i & co", body = "<p>Body $i</p>", author = fa, published = true) for i in 1:3]
+    date_of(a) = DateTime(2024, 3, a.id % 28 + 1, 12, 30)
+    latest = Feed(title = "Latest articles", link = "/articles/", description = "New <stuff>",
+                  items = () -> order_by(filter(Article; title__startswith = "feed-"), "-id"),
+                  item_description = :body, item_pubdate = date_of, item_author_name = a -> a.author.name,
+                  item_categories = a -> ["news", "a&b"], language = "en", ttl = 60)
+    atom = Feed(latest; feed_type = :atom, author_name = "Editor")
+    by_author = Feed(title = au -> "Articles by $(au.name)", link = au -> "/authors/$(au.id)/",
+                     get_object = (req; id) -> get_object_or_404(objects(Author); id = id),
+                     items = au -> filter(Article; author = au), item_link = a -> "https://elsewhere.example/a/$(a.id)",
+                     item_guid = a -> "urn:article:$(a.id)")
+    write(joinpath(TPL, "feed_title.html"), "[{{ obj.title|upper }} @ {{ site }}]")
+    templated = Feed(latest; title_template = "feed_title.html", description_template = "feed_title.html")
+    old_urls = settings.ROOT_URLCONF
+    try
+        configure!(ROOT_URLCONF = vcat(old_urls, [path("feed/", latest), path("feed/atom/", atom),
+                                                   path("feed/author/<int:id>/", by_author), path("feed/t/", templated)]))
+        c = Client()
+        r = get(c, "/feed/")
+        x = text(r)
+        a3 = items[3]
+        @test r.status == 200 && getheader(r, "Content-Type") == "application/rss+xml; charset=utf-8"
+        @test startswith(x, "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<rss version=\"2.0\"")
+        @test occursin("<title>Latest articles</title><link>http://testserver/articles/</link><description>New &lt;stuff&gt;</description>", x)
+        @test occursin("<atom:link href=\"http://testserver/feed/\" rel=\"self\"/><language>en</language>", x)
+        @test occursin("<ttl>60</ttl>", x) && occursin("<lastBuildDate>", x)
+        @test occursin("<item><title>feed-3 &amp; co</title><link>http://testserver/articles/$(a3.id)/</link><description>&lt;p&gt;Body 3&lt;/p&gt;</description>", x)
+        @test occursin("<pubDate>" * Dates.format(date_of(a3), "e, dd u yyyy HH:MM:SS") * " +0000</pubDate>", x)
+        @test occursin("<dc:creator xmlns:dc=\"http://purl.org/dc/elements/1.1/\">Feed &lt;Author&gt;</dc:creator>", x)
+        @test occursin("<guid>http://testserver/articles/$(a3.id)/</guid><category>news</category><category>a&amp;b</category>", x)
+        @test count("<item>", x) == 3 && findfirst("feed-3", x)[1] < findfirst("feed-1", x)[1]
+
+        r = get(c, "/feed/atom/")
+        x = text(r)
+        @test getheader(r, "Content-Type") == "application/atom+xml; charset=utf-8"
+        @test occursin("<feed xmlns=\"http://www.w3.org/2005/Atom\" xml:lang=\"en\"><title>Latest articles</title>", x)
+        @test occursin("<link href=\"http://testserver/articles/\" rel=\"alternate\"/><link href=\"http://testserver/feed/atom/\" rel=\"self\"/>", x)
+        @test occursin("<id>http://testserver/articles/</id><updated>", x) && occursin("<subtitle>New &lt;stuff&gt;</subtitle><author><name>Editor</name></author>", x)
+        @test occursin("<entry><title>feed-3 &amp; co</title><link href=\"http://testserver/articles/$(a3.id)/\" rel=\"alternate\"/>", x)
+        @test occursin("<published>" * Dates.format(date_of(a3), "yyyy-mm-ddTHH:MM:SS") * "Z</published>", x)
+        @test occursin("<summary type=\"html\">&lt;p&gt;Body 3&lt;/p&gt;</summary><category term=\"news\"/>", x)
+
+        x = text(get(c, "/feed/author/$(fa.id)/"))
+        @test occursin("<title>Articles by Feed &lt;Author&gt;</title><link>http://testserver/authors/$(fa.id)/</link>", x)
+        @test occursin("<link>https://elsewhere.example/a/$(a3.id)</link>", x) && occursin("<guid isPermaLink=\"false\">urn:article:$(a3.id)</guid>", x)
+        @test get(c, "/feed/author/999999/").status == 404
+
+        x = text(get(c, "/feed/t/"))
+        @test occursin("<title>[FEED-3 &amp;amp; CO @ testserver]</title>", x)
+    finally
+        configure!(ROOT_URLCONF = old_urls)
+    end
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)
