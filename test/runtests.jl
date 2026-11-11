@@ -2004,6 +2004,99 @@ end
     end
 end
 
+@testset "signals" begin
+    log = Any[]
+    function on_save(sender; instance, created, signal, kw...)
+        push!(log, (signal.name, sender, instance isa Topic ? instance.name : instance, created))
+    end
+    on_delete(sender; instance, signal, kw...) = push!(log, (signal.name, sender, instance.name))
+    connect!(pre_save, on_save; sender = Topic)
+    connect!(post_save, on_save; sender = Topic)
+    connect!(post_save, on_save; sender = Topic)                       # connecting twice has no effect
+    connect!(pre_delete, on_delete; sender = Topic)
+    connect!(post_delete, on_delete; sender = Topic)
+    try
+        t = create(Topic; name = "sig-a")
+        @test log == [("pre_save", Topic, "sig-a", true), ("post_save", Topic, "sig-a", true)]
+        empty!(log)
+        t.name = "sig-b"; save!(t)
+        @test log == [("pre_save", Topic, "sig-b", false), ("post_save", Topic, "sig-b", false)]
+        empty!(log)
+        create(Author; name = "Sig Author")                           # other senders don't reach these receivers
+        @test isempty(log)
+        delete!(t)
+        @test log == [("pre_delete", Topic, "sig-b"), ("post_delete", Topic, "sig-b")]
+        empty!(log)
+
+        # cascaded deletes send signals too
+        deleted = String[]
+        on_art(sender; instance, kw...) = push!(deleted, instance.title)
+        connect!(post_delete, on_art; sender = Article)
+        a = create(Author; name = "Sig Cascade")
+        create(Article; title = "sig-child", author = a)
+        delete!(a)
+        @test deleted == ["sig-child"]
+        disconnect!(post_delete, on_art; sender = Article)
+
+        # many-to-many changes
+        changes = Any[]
+        on_m2m(sender; action, instance, model, pk_set, reverse, kw...) = push!(changes, (action, instance isa Essay ? instance.title : instance.name, model, pk_set, reverse))
+        through = Juango.through_model(only(Juango.modelmeta(Essay).m2m))
+        connect!(m2m_changed, on_m2m; sender = through)
+        e = create(Essay; title = "sig-essay")
+        t1, t2 = create(Topic; name = "sig-t1"), create(Topic; name = "sig-t2")
+        empty!(log)
+        add!(e.topics, t1, t2)
+        add!(e.topics, t1)                                               # nothing new: no signal
+        remove!(e.topics, t2)
+        clear!(t1.essays)
+        @test changes == [(:pre_add, "sig-essay", Topic, Set([t1.id, t2.id]), false), (:post_add, "sig-essay", Topic, Set([t1.id, t2.id]), false),
+                          (:pre_remove, "sig-essay", Topic, Set([t2.id]), false), (:post_remove, "sig-essay", Topic, Set([t2.id]), false),
+                          (:pre_clear, "sig-t1", Essay, nothing, true), (:post_clear, "sig-t1", Essay, nothing, true)]
+        disconnect!(m2m_changed, on_m2m; sender = through)
+
+        # dispatch_uid, any sender, robust sending, do-block receivers
+        sig = Signal("custom")
+        seen = Any[]
+        receiver(sig) do sender, args
+            push!(seen, (sender, args.value))
+            args.value * 2
+        end
+        connect!(sig, (s; kw...) -> error("broken receiver"); dispatch_uid = "broken")
+        @test_throws ErrorException send(sig, :me; value = 1)
+        res = send_robust(sig, :me; value = 2)
+        @test last(res[1]) == 4 && last(res[2]) isa ErrorException && (:me, 2) in seen
+        @test disconnect!(sig; dispatch_uid = "broken") && !disconnect!(sig; dispatch_uid = "broken")
+        @test [last(r) for r in send(sig, :other; value = 5)] == [10]
+        @test has_receivers(sig, :anyone) && !has_receivers(Signal(), :anyone)
+
+        # requests and authentication
+        events = Any[]
+        rs(sender; request, kw...) = push!(events, (:started, request.path))
+        rf(sender; request, response, kw...) = push!(events, (:finished, response.status))
+        li(sender; request, user, kw...) = push!(events, (:in, user.username))
+        lo(sender; request, user, kw...) = push!(events, (:out, user.username))
+        lf(sender; credentials, kw...) = push!(events, (:failed, credentials["username"]))
+        connect!(request_started, rs); connect!(request_finished, rf)
+        connect!(user_logged_in, li; sender = User); connect!(user_logged_out, lo; sender = User)
+        connect!(user_login_failed, lf; sender = :authenticate)
+        create_user("sigu", "pw123456")
+        c = Client()
+        post(c, "/accounts/login/", Dict("username" => "sigu", "password" => "wrong"))
+        post(c, "/accounts/login/", Dict("username" => "sigu", "password" => "pw123456"))
+        post(c, "/accounts/logout/")
+        @test (:started, "/accounts/login/") in events && (:finished, 302) in events
+        @test (:failed, "sigu") in events && (:in, "sigu") in events && (:out, "sigu") in events
+        @test !any(e -> e == (:failed, "pw123456"), events)
+        foreach(((s, f),) -> disconnect!(s, f; sender = s === request_started || s === request_finished ? nothing : s === user_login_failed ? :authenticate : User),
+                [(request_started, rs), (request_finished, rf), (user_logged_in, li), (user_logged_out, lo), (user_login_failed, lf)])
+        @test !has_receivers(request_started, :handler)
+    finally
+        disconnect!(pre_save, on_save; sender = Topic); disconnect!(post_save, on_save; sender = Topic)
+        disconnect!(pre_delete, on_delete; sender = Topic); disconnect!(post_delete, on_delete; sender = Topic)
+    end
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)

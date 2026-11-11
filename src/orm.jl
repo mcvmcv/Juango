@@ -1586,11 +1586,15 @@ function delete_ids!(T::Type, ids::Vector)
             exists(rel) && throw(ProtectedError("cannot delete $(nameof(T)) objects because they are referenced through protected foreign key $(nameof(M)).$(f.name)"))
         end
     end
+    signal = has_receivers(pre_delete, T) || has_receivers(post_delete, T)
+    doomed = signal ? fetch(filter(base_objects(T); id__in = ids)) : T[]
+    foreach(o -> send(pre_delete, T; instance = o), doomed)
     n = 0
     for chunk in Iterators.partition(ids, 500)
         n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE $(qname("id")) IN (" *
                              join(fill("?", length(chunk)), ",") * ")", collect(chunk))
     end
+    foreach(o -> send(post_delete, T; instance = o), doomed)
     P = table_parent(T)
     P === nothing || delete_ids!(P, ids)     # the parent rows these rows extend
     n
@@ -1627,6 +1631,8 @@ function save!(obj::T) where {T<:Model}
             data[a] = f.kind === :date ? Date(ts) : ts
         end
     end
+    created = data[:id] === nothing
+    has_receivers(pre_save, T) && send(pre_save, T; instance = obj, created = created)
     store_uploaded_files!(obj, data)
     chain_ = reverse(vcat([concrete_model(T)], ancestors(T)))     # root table first
     fresh = false
@@ -1636,6 +1642,7 @@ function save!(obj::T) where {T<:Model}
     end
     length(chain_) == 1 ? save_table!(chain_[1], data, true, fresh) :
         atomic(() -> foreach(M -> save_table!(M, data, M === chain_[1], fresh), chain_))
+    has_receivers(post_save, T) && send(post_save, T; instance = obj, created = created)
     obj
 end
 
@@ -1769,6 +1776,7 @@ struct M2MOwner
     mine::Field      # FK in the join model pointing at the instance
     other::Field     # FK pointing at the related objects
     id::Any
+    forward::Bool    # changed from the side that declares the ManyToManyField
 end
 
 function m2m_queryset(m::Model, f::Field, forward::Bool)
@@ -1778,7 +1786,7 @@ function m2m_queryset(m::Model, f::Field, forward::Bool)
     id = getfield(m, :_data)[:id]
     step1, step2 = m2m_path(f, !forward)      # from the other model back to this instance
     qs = filter(objects(Other), Q(Symbol(step1, "__", step2) => id))
-    chain(qs; owner = M2MOwner(through_model(f), mine, other, id))
+    chain(qs; owner = M2MOwner(through_model(f), mine, other, id, forward))
 end
 
 function m2m_owner(qs::QuerySet)
@@ -1788,6 +1796,14 @@ function m2m_owner(qs::QuerySet)
 end
 objid(x::Model) = (x.id === nothing && throw(ArgumentError("cannot relate an unsaved $(typeof(x))")); x.id)
 objid(x) = x
+
+"Send m2m_changed for a many-to-many change (only when someone listens)."
+function m2m_signal(o, action, ids)
+    has_receivers(m2m_changed, o.through) || return
+    owner = related_model(o.mine)
+    send(m2m_changed, o.through; action = action, instance = get(base_objects(owner); id = o.id),
+         model = related_model(o.other), pk_set = ids === nothing ? nothing : Set(ids), reverse = !o.forward)
+end
 
 """
     add!(post.tags, tag1, tag2; through_defaults=Dict())
@@ -1802,11 +1818,14 @@ function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}())
     atomic() do
         have = Set(values_list(filter(base_objects(o.through), Q(attname(o.mine) => o.id), Q(Symbol(attname(o.other), "__in") => ids)),
                                attname(o.other); flat = true))
-        for id in ids
-            id in have && continue
+        new = [id for id in ids if !(id in have)]
+        isempty(new) && return
+        m2m_signal(o, :pre_add, new)
+        for id in new
             save!(o.through(; attname(o.mine) => o.id, attname(o.other) => id,
                             (Symbol(k) => v for (k, v) in pairs(through_defaults))...))
         end
+        m2m_signal(o, :post_add, new)
     end
     qs
 end
@@ -1815,14 +1834,19 @@ end
 function remove!(qs::QuerySet, objs...)
     o = m2m_owner(qs)
     ids = objid.(collect(objs))
-    isempty(ids) || delete!(filter(base_objects(o.through), Q(attname(o.mine) => o.id), Q(Symbol(attname(o.other), "__in") => ids)))
+    isempty(ids) && return qs
+    m2m_signal(o, :pre_remove, ids)
+    delete!(filter(base_objects(o.through), Q(attname(o.mine) => o.id), Q(Symbol(attname(o.other), "__in") => ids)))
+    m2m_signal(o, :post_remove, ids)
     qs
 end
 
 "Remove every object from a many-to-many relation."
 function clear!(qs::QuerySet)
     o = m2m_owner(qs)
+    m2m_signal(o, :pre_clear, nothing)
     delete!(filter(base_objects(o.through), Q(attname(o.mine) => o.id)))
+    m2m_signal(o, :post_clear, nothing)
     qs
 end
 

@@ -64,6 +64,13 @@ Run a request through URL resolution, middleware and the view. This is what
 both the HTTP server and the test `Client` call.
 """
 function handle_request(req::Request)
+    has_receivers(request_started, :handler) && send(request_started, :handler; request = req)
+    resp = handle_request_inner(req)
+    has_receivers(request_finished, :handler) && send(request_finished, :handler; request = req, response = resp)
+    resp
+end
+
+function handle_request_inner(req::Request)
     try
         if settings.DEBUG && !isempty(string(settings.MEDIA_ROOT)) && startswith(req.path, settings.MEDIA_URL)
             return serve_media(req)

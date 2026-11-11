@@ -29,6 +29,7 @@ include("utils.jl")
 include("http.jl")
 include("urls.jl")
 include("template.jl")
+include("signals.jl")
 include("db.jl")
 include("backends/sqlite.jl")
 include("backends/postgres.jl")
@@ -83,6 +84,8 @@ export FileField, ImageField, UploadedFile, FieldFile, FileSystemStorage, FileEx
        save_file, delete_file, image_size, default_storage
 export JSONField, ArrayField, UUIDField, CICharField, IntegerRangeField, DateRangeField, DateTimeRangeField,
        ValueRange, SearchVector, SearchQuery, SearchRank, uuid4, UUID
+export Signal, connect!, disconnect!, receiver, send, send_robust, has_receivers, pre_save, post_save, pre_delete,
+       post_delete, m2m_changed, request_started, request_finished, user_logged_in, user_logged_out, user_login_failed
 export cache, cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, get_or_set, cache_get_many,
        cache_set_many, incr, decr, incr_version, cache_page, CacheMiddleware, create_cache_table
 export EmailMessage, EmailMultiAlternatives, send!, send_mail, mail_admins, attach!, attach_alternative!, outbox,

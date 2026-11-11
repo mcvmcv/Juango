@@ -99,11 +99,15 @@ create_superuser(username::AbstractString, password = nothing; kw...) =
 """
 function authenticate(username::AbstractString, password::AbstractString)
     u = first(filter(objects(User); username = username))
-    if u === nothing
+    ok = if u === nothing
         make_password(password)   # equalise timing
-        return nothing
+        false
+    else
+        u.is_active && check_password(u, password)
     end
-    (u.is_active && check_password(u, password)) ? u : nothing
+    ok && return u
+    has_receivers(user_login_failed, :authenticate) && send(user_login_failed, :authenticate; credentials = Dict("username" => username))
+    nothing
 end
 authenticate(::Nothing, ::Any) = nothing
 authenticate(::Any, ::Nothing) = nothing
@@ -127,11 +131,14 @@ function login!(req::Request, u::User)
     save!(u)
     req.user = u
     rotate_csrf_token!(req)
+    has_receivers(user_logged_in, User) && send(user_logged_in, User; request = req, user = u)
     u
 end
 
 "Log the current user out and flush the session."
 function logout!(req::Request)
+    u = req.user
+    u isa User && has_receivers(user_logged_out, User) && send(user_logged_out, User; request = req, user = u)
     req.session isa Session && flush!(req.session)
     req.user = AnonymousUser()
     nothing

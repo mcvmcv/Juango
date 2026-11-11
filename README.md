@@ -555,6 +555,32 @@ const edit_post = permission_required("project.change_post")(edit_post_view)   #
 - **Groups in the admin.** Groups are registered in the admin, and a user's groups and permissions can be edited on their page.
 - **Not yet supported.** Object-level permissions (`has_perm(user, perm; obj)`) return `false` except for superusers.
 
+### Signals
+
+```julia
+function on_post_saved(sender; instance, created, kw...)       # always accept kw...
+    created && send_mail("New post", instance.title, nothing, ["editor@example.com"])
+end
+connect!(post_save, on_post_saved; sender = Post)
+
+receiver(post_delete; sender = Post) do sender, args              # do-block: arguments as a NamedTuple
+    cache_delete("post:$(args.instance.id)")
+end
+
+const order_placed = Signal("order_placed")                      # your own signals
+send(order_placed, Order; order = o)                             # send_robust collects exceptions instead
+```
+
+- **Built-in signals:**
+  - `pre_save` and `post_save` (`instance`, `created`)
+  - `pre_delete` and `post_delete` (`instance`, also sent for cascaded deletes)
+  - `m2m_changed` (`action`, `instance`, `model`, `pk_set`, `reverse`; the sender is the join model)
+  - `request_started` and `request_finished`
+  - `user_logged_in`, `user_logged_out` and `user_login_failed` (without the password)
+- **Filtering.** `sender` limits a receiver to one model (or other sender). `dispatch_uid` identifies a receiver for `disconnect!`.
+- **What doesn't send.** Bulk `update!` doesn't send `pre_save`/`post_save`, as in Django.
+- **When to use them.** To change a model's own behaviour, overriding `save!` (as the blog example does) is usually clearer. Signals are for code that lives elsewhere, such as caches, search indexes and notifications.
+
 ### Caching
 
 ```julia
