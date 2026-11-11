@@ -2963,6 +2963,54 @@ end
     end
 end
 
+@testset "flatpages" begin
+    IC = Juango.ImproperlyConfigured
+    @test_throws IC flatpage(Request("GET", "/x/"); url = "x/")      # "juango.flatpages" isn't installed
+    old_apps, old_mw, old_urls = settings.INSTALLED_APPS, settings.MIDDLEWARE, settings.ROOT_URLCONF
+    mkpath(joinpath(TPL, "flatpages"))
+    write(joinpath(TPL, "flatpages", "special.html"), "SPECIAL {{ flatpage.title }}")
+    fproot = create_superuser("fproot", "fproot-password-1")
+    try
+        configure!(INSTALLED_APPS = vcat(Juango.default_installed_apps(), ["juango.flatpages"]),
+                   MIDDLEWARE = vcat(old_mw, [FlatpageFallbackMiddleware]),
+                   ROOT_URLCONF = vcat(old_urls, [path("pages/", flatpage_urls())]))
+        @test Admin.is_registered(FlatPage) && isempty(Juango.app_issues())
+        create(FlatPage; url = "/about/", title = "About <us>", content = "<p>Hello</p>")
+        create(FlatPage; url = "/members/", title = "Members", content = "secret", registration_required = true)
+        create(FlatPage; url = "/special/", title = "Special", content = "x", template_name = "flatpages/special.html")
+        c = Client()
+        r = get(c, "/about/")                                         # the fallback middleware
+        @test r.status == 200 && occursin("<title>About <us></title>", text(r)) && occursin("<p>Hello</p>", text(r))
+        r = get(c, "/about?x=1")
+        @test r.status == 301 && getheader(r, "Location") == "/about/?x=1"
+        @test get(c, "/pages/about/").status == 200                   # under a prefix
+        @test get(c, "/pages/nope/").status == 404 && get(c, "/nothing-here/").status == 404
+        @test text(get(c, "/special/")) == "SPECIAL Special"
+        r = get(c, "/members/")
+        @test r.status == 302 && startswith(getheader(r, "Location"), settings.LOGIN_URL)
+        force_login!(c, fproot)
+        @test occursin("secret", text(get(c, "/members/")))
+        @test get(c, "/articles/").status == 200                      # other pages are untouched
+
+        # {% get_flatpages %}
+        list(src, d = Dict{String,Any}()) = tr("{% load flatpages %}" * src * "{% for p in fp %}{{ p.url }} {% endfor %}", d)
+        @test list("{% get_flatpages as fp %}") == "/about/ /special/ "
+        @test list("{% get_flatpages for u as fp %}", Dict{String,Any}("u" => fproot)) == "/about/ /members/ /special/ "
+        @test list("{% get_flatpages '/s' as fp %}") == "/special/ "
+        @test list("{% get_flatpages pre for u as fp %}", Dict{String,Any}("pre" => "/m", "u" => AnonymousUser())) == ""
+        @test_throws TemplateSyntaxError Template("{% load flatpages %}{% get_flatpages %}")
+
+        # edited in the admin
+        @test get(c, "/admin/flatpage/").status == 200
+        r = post(c, "/admin/flatpage/add/", Dict("url" => "/new/", "title" => "New", "content" => "Fresh", "template_name" => ""))
+        @test r.status == 302 && occursin("Fresh", text(get(Client(), "/new/")))
+    finally
+        configure!(INSTALLED_APPS = old_apps, MIDDLEWARE = old_mw, ROOT_URLCONF = old_urls)
+        Admin.unregister!(FlatPage)
+        Juango.execute("DELETE FROM " * Juango.qname("juango_flatpage"))
+    end
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)

@@ -68,6 +68,7 @@ include("handler.jl")
 include("server.jl")
 include("testclient.jl")
 include("admin.jl")
+include("flatpages.jl")
 include("management.jl")
 
 # --- public API -------------------------------------------------------------
@@ -134,6 +135,7 @@ export render, redirect, get_object_or_404, get_list_or_404, TemplateView, Redir
        require_http_methods, require_GET, require_POST, csrf_exempt, get_csrf_token
 # server, testing, management
 export Sitemap, sitemap_urls, sitemap_view, sitemap_index_view, Feed
+export FlatPage, FlatpageFallbackMiddleware, flatpage, flatpage_urls
 export StreamingHttpResponse, FileResponse, EventStreamResponse, sse_event, sse_comment, websocket, WebSocketView,
        ws_send, ws_receive, ws_close, ws_isopen, is_streaming
 export runserver, handle_request, Client, post, request, force_login!, execute_from_command_line,

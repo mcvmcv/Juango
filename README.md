@@ -313,7 +313,7 @@ urlpatterns = [path("blog/", include_urls(Blog.APP)), ...]     # namespaced: {% 
 - **Commands**: `App(...; commands = Dict("import_posts" => ("Import posts from a feed", args -> ...)))` adds `manage.jl import_posts`.
 - **`requires`** lists other apps that must be installed. `manage.jl check` reports any that are missing.
 
-Juango's own features are apps too: `juango.admin`, `juango.auth`, `juango.contenttypes`, `juango.sessions` and `juango.messages`. A project can leave any of them out, which removes that app's URLs (`Admin.urls()` and `auth_urls()` refuse to run), commands (`createsuperuser`, `changepassword`, `clearsessions`) and dependency checks. Their models stay in one `juango` migration history, so their tables are created anyway. `installed_apps()`, `is_installed("blog")`, `get_app("blog")` and `app_models("blog")` query the registry.
+Juango's own features are apps too: `juango.admin`, `juango.auth`, `juango.contenttypes`, `juango.sessions` and `juango.messages`, all installed by default, plus the optional `juango.flatpages`. A project can leave any of them out, which removes that app's URLs (`Admin.urls()` and `auth_urls()` refuse to run), commands (`createsuperuser`, `changepassword`, `clearsessions`) and dependency checks. Their models stay in one `juango` migration history, so their tables are created anyway. `installed_apps()`, `is_installed("blog")`, `get_app("blog")` and `app_models("blog")` query the registry.
 
 ### Migrations
 
@@ -847,6 +847,19 @@ Feed-level options (`title`, `link`, `description`, `items`, `language`, `author
 
 `title_template` and `description_template` render each item with `obj` and `site` in the context. Links are made absolute with the request's host.
 
+### Flat pages
+
+Simple pages such as "About" or "Terms" can live in the database and be edited in the admin:
+
+```julia
+configure!(INSTALLED_APPS = [..., "juango.flatpages"],               # registers FlatPage in the admin
+           MIDDLEWARE = vcat(settings.MIDDLEWARE, [FlatpageFallbackMiddleware]))
+# and/or serve them under a prefix:
+urlpatterns = [..., path("pages/", flatpage_urls())]                  # /pages/about/ shows the page with url "/about/"
+```
+
+The fallback middleware turns any 404 into the flat page at that URL, if there is one. It also adds a missing trailing slash, as APPEND_SLASH does. A page renders its `template_name` (default `flatpages/default.html`) with `flatpage` in the context. The page's title and content are HTML from the admin and are inserted unescaped. Pages with `registration_required` send anonymous visitors to the login page. For menus, `{% load flatpages %}{% get_flatpages '/about/' for user as pages %}` lists pages, optionally under a URL prefix. Pages that need a login are included only for a logged-in `user`.
+
 ### Middleware
 
 A middleware has Django's shape: a factory `get_response -> (req -> response)`.
@@ -947,6 +960,7 @@ src/
   streaming.jl   streaming, SSE, WebSockets
   apps.jl        App, INSTALLED_APPS
   sitemaps.jl    Sitemap, sitemap_urls   feeds.jl     Feed (RSS, Atom)
+  flatpages.jl   FlatPage, fallback middleware
   testclient.jl  test Client             templates/   built-in admin templates
 test/runtests.jl                          examples/blog/  complete example app
 ```
