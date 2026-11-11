@@ -138,7 +138,7 @@ function cmd_migrate(args)
         end
     end
     if app !== nothing && target === nothing
-        # "migrate juango": everything pending for that app (and what it depends on)
+        # "migrate auth": everything pending for that app (and what it depends on)
         g = Migrations.build_graph()
         ks = [k for k in Migrations.topo_order(g) if k[1] == app]
         isempty(ks) && return println("App '$app' has no migrations.")

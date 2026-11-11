@@ -57,8 +57,9 @@ function App(label::AbstractString; mod = nothing, path = nothing, verbose_name 
 end
 Base.show(io::IO, a::App) = print(io, "<App: ", a.label, ">")
 
-# Juango's own apps. Their models share the "juango" migration app (one migration history),
-# so leaving an app out drops its URLs, commands and middleware, not its tables.
+# Juango's own apps. Each owns its models (auth.User, sessions.SessionRecord, ...) and their
+# migrations (src/migrations/<label>/); an app left out of INSTALLED_APPS gets no tables,
+# URLs or commands.
 const ADMIN_APP = App("admin"; name = "juango.admin", verbose_name = "Administration", requires = ["auth", "contenttypes", "sessions", "messages"])
 const AUTH_APP = App("auth"; name = "juango.auth", verbose_name = "Authentication and Authorization", requires = ["contenttypes"])
 const CONTENTTYPES_APP = App("contenttypes"; name = "juango.contenttypes", verbose_name = "Content Types")
@@ -67,7 +68,15 @@ const MESSAGES_APP = App("messages"; name = "juango.messages", verbose_name = "M
 const BUILTIN_APPS = (ADMIN_APP, AUTH_APP, CONTENTTYPES_APP, SESSIONS_APP, MESSAGES_APP)
 default_installed_apps() = Any["juango.admin", "juango.auth", "juango.contenttypes", "juango.sessions", "juango.messages"]
 
-is_builtin(a::App) = any(b -> b === a, BUILTIN_APPS)
+is_builtin(a::App) = any(b -> b === a, BUILTIN_APPS) || a.label == "flatpages"
+"Labels of Juango's own apps (flatpages is defined in flatpages.jl)."
+const BUILTIN_LABELS = ("admin", "auth", "contenttypes", "sessions", "messages", "flatpages")
+
+"""
+Whether a model takes part in migrations, content types and permissions: models of Juango's
+own apps only while their app is installed; every other model always.
+"""
+model_in_use(T) = (a = modelmeta(T).app; !(a in BUILTIN_LABELS) || is_installed(a))
 
 const INSTALLED = Ref{Union{Nothing,Vector{App}}}(nothing)
 const APPS_LOCK = ReentrantLock()

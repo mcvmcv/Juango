@@ -17,7 +17,7 @@
                              help_text = "The user gets every permission of these groups.")
     user_permissions = ManyToManyField(:Permission; blank = true, related_name = :user_set,
                                        verbose_name = "User permissions")
-    Meta(table = "auth_user", ordering = ["username"])
+    Meta(table = "auth_user", ordering = ["username"], app_label = "auth")
 end
 
 Base.show(io::IO, u::User) = print(io, u.username)

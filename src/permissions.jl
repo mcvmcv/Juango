@@ -13,7 +13,7 @@
     name = CharField(max_length = 255)
     content_type = ForeignKey(ContentType, on_delete = :CASCADE)
     codename = CharField(max_length = 100)
-    Meta(table = "auth_permission", unique_together = [(:content_type, :codename)],
+    Meta(table = "auth_permission", app_label = "auth", unique_together = [(:content_type, :codename)],
          ordering = ["content_type__app_label", "content_type__model", "codename"])
 end
 Base.show(io::IO, p::Permission) = print(io, p.content_type.app_label, " | ", p.content_type.model, " | ", p.name)
@@ -23,7 +23,7 @@ default_queryset(::Type{Permission}) = select_related(base_objects(Permission), 
 @model struct Group
     name = CharField(max_length = 150, unique = true)
     permissions = ManyToManyField(Permission; blank = true)
-    Meta(table = "auth_group", ordering = ["name"])
+    Meta(table = "auth_group", ordering = ["name"], app_label = "auth")
 end
 Base.show(io::IO, g::Group) = print(io, g.name)
 
@@ -36,7 +36,7 @@ perm_name(T::Type, action) = (m = modelmeta(T); "$(modelmeta(concrete_model(T)).
 function update_permissions!()
     table_exists(backend(), modelmeta(Permission).table) || return
     for T in MODEL_LIST
-        T <: AutoThrough && continue
+        (T <: AutoThrough || !model_in_use(T)) && continue
         m = modelmeta(T)
         ct = get_for_model(T)
         wanted = [(a * "_" * lowercase(m.name), "Can $a $(m.verbose_name)") for a in DEFAULT_PERMISSIONS]

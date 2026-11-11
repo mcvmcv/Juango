@@ -2,7 +2,7 @@
 using Juango.Migrations
 
 Migration(
-    dependencies = [("juango", "0001_initial")],
+    dependencies = [("auth", "0001_initial")],
     initial = true,
     operations = [
         CreateModel("post"; model = "Post", columns = [

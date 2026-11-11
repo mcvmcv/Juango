@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        julia: ["1.10", "1"]
+        julia: ["1.11", "1"]                 # test/Project.toml uses [sources], new in 1.11
         database: [sqlite, postgres, mysql]
     services:
       postgres:

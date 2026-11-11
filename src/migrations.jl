@@ -7,9 +7,10 @@
 #   julia --project manage.jl showmigrations
 #   julia --project manage.jl sqlmigrate 0002 [--backwards]
 #
-# Each app has a directory of migration files `NNNN_name.jl`. Built-in models (users,
-# sessions) belong to the app "juango", whose migrations ship with Juango. Everything else
-# belongs to "project" (directory `settings.MIGRATIONS_DIR`), unless a model sets
+# Each app has a directory of migration files `NNNN_name.jl`. Juango's own apps (auth,
+# contenttypes, sessions, admin, flatpages) ship theirs in src/migrations/<label>/ and are
+# migrated only when installed. Models of an `App` use its migrations/ folder; everything
+# else belongs to "project" (directory `settings.MIGRATIONS_DIR`), unless a model sets
 # `Meta(app_label=...)` and `settings.MIGRATION_MODULES` maps that app to a directory.
 # An app without migration files is synchronised instead (tables and columns are created,
 # never altered), which is how Juango behaved before migrations existed.
@@ -288,7 +289,7 @@ const BUILTIN_DIR = joinpath(@__DIR__, "migrations")
 function migration_dir(app::AbstractString)
     mm = settings.MIGRATION_MODULES
     haskey(mm, app) && return string(mm[app])
-    app == "juango" && return BUILTIN_DIR
+    app in Juango.BUILTIN_LABELS && return joinpath(BUILTIN_DIR, app)
     app == "project" && return string(settings.MIGRATIONS_DIR)
     a = get(Juango.APP_DEFS, app, nothing)                          # an app's own migrations/ folder
     a === nothing || a.path === nothing || return joinpath(a.path, "migrations")
@@ -296,7 +297,8 @@ function migration_dir(app::AbstractString)
 end
 
 "Every app that owns models or has a configured migration directory."
-known_apps() = sort(unique(vcat(["juango"], [modelmeta(T).app for T in all_models()],
+known_apps() = sort(unique(vcat([l for l in Juango.BUILTIN_LABELS if Juango.is_installed(l) && isdir(joinpath(BUILTIN_DIR, l))],
+                                [modelmeta(T).app for T in all_models() if Juango.model_in_use(T)],
                                 collect(String, keys(settings.MIGRATION_MODULES)),
                                 [a.label for a in Juango.installed_apps() if a.path !== nothing])))
 
@@ -527,7 +529,7 @@ function migrate(; app = nothing, target = nothing, fake = false, sync = false, 
     log(msg) = verbose && println(msg)
     if sync
         log("Synchronizing all models (migration files ignored):")
-        sync_models!(all_models(); verbose = verbose) || log("  No changes.")
+        sync_models!(filter(Juango.model_in_use, all_models()); verbose = verbose) || log("  No changes.")
         return nothing
     end
     target !== nothing && app === nothing && (app = "project")
@@ -535,7 +537,7 @@ function migrate(; app = nothing, target = nothing, fake = false, sync = false, 
     check_conflicts(g)
     applied = applied_migrations()
     plan = migration_plan(g, applied; app = app, target = target)
-    unmigrated = [T for T in all_models() if !(modelmeta(T).app in migrated_apps())]
+    unmigrated = [T for T in all_models() if Juango.model_in_use(T) && !(modelmeta(T).app in migrated_apps())]
     log("Operations to perform:")
     isempty(g.nodes) || log("  Apply all migrations: " * join(sort(unique(first.(collect(keys(g.nodes))))), ", "))
     isempty(unmigrated) || target !== nothing ||

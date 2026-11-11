@@ -313,7 +313,7 @@ urlpatterns = [path("blog/", include_urls(Blog.APP)), ...]     # namespaced: {% 
 - **Commands**: `App(...; commands = Dict("import_posts" => ("Import posts from a feed", args -> ...)))` adds `manage.jl import_posts`.
 - **`requires`** lists other apps that must be installed. `manage.jl check` reports any that are missing.
 
-Juango's own features are apps too: `juango.admin`, `juango.auth`, `juango.contenttypes`, `juango.sessions` and `juango.messages`, all installed by default, plus the optional `juango.flatpages`. A project can leave any of them out, which removes that app's URLs (`Admin.urls()` and `auth_urls()` refuse to run), commands (`createsuperuser`, `changepassword`, `clearsessions`) and dependency checks. Their models stay in one `juango` migration history, so their tables are created anyway. `installed_apps()`, `is_installed("blog")`, `get_app("blog")` and `app_models("blog")` query the registry.
+Juango's own features are apps too: `juango.admin`, `juango.auth`, `juango.contenttypes`, `juango.sessions` and `juango.messages`, all installed by default, plus the optional `juango.flatpages`. Each owns its models and migrations, as in Django: `auth.User`, `auth.Group`, `auth.Permission`, `contenttypes.ContentType`, `sessions.SessionRecord`, `admin.LogEntry` and `flatpages.FlatPage`, with permission names such as `auth.change_user`. A project can leave any of them out. That app's tables are then not created, and its URLs (`Admin.urls()` and `auth_urls()` refuse to run) and commands (`createsuperuser`, `changepassword`, `clearsessions`) go too. `manage.jl check` reports apps whose requirements are missing (admin needs auth, contenttypes, sessions and messages; auth needs contenttypes). `installed_apps()`, `is_installed("blog")`, `get_app("blog")` and `app_models("blog")` query the registry.
 
 ### Migrations
 
@@ -350,7 +350,7 @@ Migration(
 - **Checking in CI.** `makemigrations --check` exits with status 1 if models have changes without a migration.
 - **What's tracked.** Only schema attributes are tracked: column type, `null`, database default, `unique`, `db_index` and the foreign key target. Changing `choices`, `help_text` or validators never creates a migration.
 
-**Apps.** Juango's built-in tables (`auth_user`, `juango_session`) are the `juango` app, and their migrations ship with Juango. Your models are the `project` app, stored in `settings.MIGRATIONS_DIR` (`startproject` sets it to `<project>/migrations`). A model can opt into another app with `Meta(app_label = "billing")` plus `MIGRATION_MODULES = Dict("billing" => "path/to/dir")`. Full reusable apps are [#29](https://github.com/mcvmcv/Juango/issues/29).
+**Apps.** Juango's own apps (`auth`, `contenttypes`, `sessions`, `admin`, `flatpages`) ship their migrations with Juango, and they are applied only for installed apps. Models defined in an `App`'s module use that app's `migrations/` folder (see Apps). Your other models are the `project` app, stored in `settings.MIGRATIONS_DIR` (`startproject` sets it to `<project>/migrations`). A model can also opt into another app with `Meta(app_label = "billing")` plus `MIGRATION_MODULES = Dict("billing" => "path/to/dir")`.
 
 **No migration files yet?** An app without migration files is synchronised: missing tables and columns are created and nothing is altered, which is how Juango worked before migrations existed. `migrate --sync` does that for every app. When you switch an existing database over, run `makemigrations`, then `migrate`. Initial migrations whose tables already exist are marked as applied ("FAKED") instead of run. `migrate --fake` records migrations without running them, as in Django.
 
@@ -938,7 +938,6 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 - **Migrations can't be squashed yet.** Migration files describe tables and columns, and there are no historical model classes as in Django, so data migrations use raw SQL or today's models.
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
 - **ORM features not yet built:** symmetrical self-referential many-to-many, filtering on window functions, and `select_related` into a model that inherits from another table (use `prefetch_related`).
-- Built-in models are labelled `juango.User`, `juango.Group` and so on, not `auth.User`. They share one migration history, so leaving out a built-in app doesn't remove its tables.
 - `runserver` is HTTP.jl's server. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and set `SESSION_COOKIE_SECURE`/`CSRF_COOKIE_SECURE`.
 
 ## Layout
@@ -962,7 +961,7 @@ src/
   sitemaps.jl    Sitemap, sitemap_urls   feeds.jl     Feed (RSS, Atom)
   flatpages.jl   FlatPage, fallback middleware
   testclient.jl  test Client             templates/   built-in admin templates
-test/runtests.jl                          examples/blog/  complete example app
+test/            setup.jl + one file per area   examples/blog/  complete example app
 ```
 
-Run the tests with `julia --project -e 'using Pkg; Pkg.test()'`.
+Run the tests with `julia --project -e 'using Pkg; Pkg.test()'`. Each part of the suite runs in its own process, one after another. Run one part with `julia --project=test test/orm.jl`; the parts are `templates`, `orm`, `forms`, `views`, `admin`, `services`, `db` and `migrations`. `JUANGO_TEST_DATABASE` picks the database: unset for in-memory SQLite, or a `postgresql://` or `mysql://` URL.

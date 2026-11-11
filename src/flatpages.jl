@@ -16,7 +16,7 @@
     template_name = CharField(max_length = 70, blank = true,
                               help_text = "Example: “flatpages/contact_page.html”. If this isn’t provided, “flatpages/default.html” is used.")
     registration_required = BooleanField(default = false, help_text = "If this is checked, only logged-in users will be able to view the page.")
-    Meta(table = "juango_flatpage", ordering = ["url"], verbose_name = "flat page", verbose_name_plural = "flat pages")
+    Meta(table = "juango_flatpage", app_label = "flatpages", ordering = ["url"], verbose_name = "flat page", verbose_name_plural = "flat pages")
 end
 Base.show(io::IO, p::FlatPage) = print(io, p.url, " -- ", p.title)
 get_absolute_url(p::FlatPage) = p.url

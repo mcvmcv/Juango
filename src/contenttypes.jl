@@ -19,7 +19,7 @@
 @model struct ContentType
     app_label = CharField(max_length = 100)
     model = CharField(max_length = 100)
-    Meta(table = "juango_content_type", unique_together = [(:app_label, :model)], verbose_name = "content type")
+    Meta(table = "juango_content_type", app_label = "contenttypes", unique_together = [(:app_label, :model)], verbose_name = "content type")
 end
 Base.show(io::IO, ct::ContentType) = print(io, ct.app_label, " | ", ct.model)
 
@@ -56,7 +56,7 @@ end
 function update_contenttypes!()
     table_exists(backend(), modelmeta(ContentType).table) || return
     for T in MODEL_LIST
-        (modelmeta(T).proxy || T <: AutoThrough) && continue
+        (modelmeta(T).proxy || T <: AutoThrough || !model_in_use(T)) && continue
         get_for_model(T)
     end
 end

@@ -4,7 +4,7 @@
     session_key = CharField(max_length = 40, unique = true)
     session_data = TextField(blank = true)
     expire_date = DateTimeField(db_index = true)
-    Meta(table = "juango_session", verbose_name = "session")
+    Meta(table = "juango_session", verbose_name = "session", app_label = "sessions")
 end
 
 """

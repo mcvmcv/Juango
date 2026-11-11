@@ -11,7 +11,7 @@
     object_repr = CharField(max_length = 200)
     action_flag = IntegerField()
     change_message = TextField(blank = true)
-    Meta(table = "juango_admin_log", ordering = ["-action_time", "-id"],
+    Meta(table = "juango_admin_log", app_label = "admin", ordering = ["-action_time", "-id"],
          verbose_name = "log entry", verbose_name_plural = "log entries")
 end
 
