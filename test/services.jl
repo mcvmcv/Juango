@@ -197,9 +197,9 @@ end
         cache_set("a", Dict("x" => [1, 2]))
         v = cache_get("a"); push!(v["x"], 3)
         @test cache_get("a") == Dict("x" => [1, 2])                      # stored values are copies
-        cache_set("short", 1; timeout = 2); cache_set("never", 1; timeout = 0)
+        cache_set("short", 1; timeout = 0.3); cache_set("never", 1; timeout = 0)
         @test cache_has("short") && !cache_has("never")
-        sleep(2.2)
+        sleep(0.4)
         @test !cache_has("short")
         @test cache_add("k", 1) && !cache_add("k", 2) && cache_get("k") == 1
         @test cache_delete("k") && !cache_delete("k")
@@ -232,7 +232,7 @@ end
         @test cache_get("obj"; cache_name = "db") == (a = 1, b = "two", c = [1.5])
         cache_set("obj", "replaced"; cache_name = "db")
         @test cache_get("obj"; cache_name = "db") == "replaced"
-        cache_set("brief", 1; timeout = 1, cache_name = "db"); sleep(1.2)
+        cache_set("brief", 1; timeout = 0.3, cache_name = "db"); sleep(0.4)
         @test cache_get("brief"; cache_name = "db") === nothing
         cache_set("n", 1; cache_name = "db")
         @test incr("n"; cache_name = "db") == 2
@@ -304,7 +304,7 @@ end
         old_dirs = settings.TEMPLATE_DIRS
         configure!(TEMPLATE_DIRS = vcat([tdir], old_dirs), TEMPLATE_CACHE_CHECK_MTIME = false)
         @test render_to_string("cached.html") == "v1"
-        sleep(1.1); write(joinpath(tdir, "cached.html"), "v2")
+        sleep(0.05); write(joinpath(tdir, "cached.html"), "v2")    # mtimes have sub-ms resolution
         @test render_to_string("cached.html") == "v1"
         configure!(TEMPLATE_CACHE_CHECK_MTIME = true)
         @test render_to_string("cached.html") == "v2"

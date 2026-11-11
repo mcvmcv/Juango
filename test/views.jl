@@ -295,7 +295,7 @@ end
         write(io, sse_comment("keepalive"))
     end
     slow(req) = StreamingHttpResponse(content_type = "text/plain") do io
-        write(io, "first\n"); sleep(0.8); write(io, "second\n")
+        write(io, "first\n"); sleep(0.4); write(io, "second\n")
     end
     fdir = mktempdir()
     fpath = joinpath(fdir, "report ü.csv")
@@ -365,7 +365,7 @@ end
                 end
             end
             @test String(take!(got)) == "first\nsecond\n"
-            @test time() - first_at[] > 0.5           # "first" came ~0.8 s before the end
+            @test time() - first_at[] > 0.25          # "first" came ~0.4 s before the end
             @test H.get("http://$base/articles/"; status_exception = false).status == 404       # urlconf swapped
             @test H.get("http://$base/ws/x/"; status_exception = false).status == 426
 
