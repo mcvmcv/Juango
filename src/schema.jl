@@ -87,7 +87,7 @@ hascolumn(t::Table, name) = any(c -> c.name == name, t.columns)
 const SchemaState = Dict{String,Table}
 copy_state(s::SchemaState) = SchemaState(k => copy(v) for (k, v) in s)
 
-schema_kind(kind::Symbol) = kind in STRING_KINDS ? :string : kind
+schema_kind(kind::Symbol) = kind in STRING_KINDS || kind in (:file, :image) ? :string : kind
 
 "The snapshot `Column` for a model field."
 function column_state(f::Field)

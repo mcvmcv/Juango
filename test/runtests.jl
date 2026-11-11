@@ -205,6 +205,15 @@ end
     Meta(permissions = [("publish_memo", "Can publish memos")])
 end
 
+@model struct Attachment
+    title = CharField(max_length = 50)
+    file = FileField(upload_to = "docs/%Y/", validators = [FileExtensionValidator(["txt", "pdf"])])
+    photo = ImageField(upload_to = "photos/", blank = true, width_field = :photo_w, height_field = :photo_h)
+    photo_w = IntegerField(null = true, blank = true, editable = false)
+    photo_h = IntegerField(null = true, blank = true, editable = false)
+end
+Base.show(io::IO, a::Attachment) = print(io, a.title)
+
 @model struct Locked
     article = ForeignKey(:Article, on_delete = :PROTECT)
 end
@@ -1660,6 +1669,80 @@ end
         Admin.register!(Author; list_display = [:name, :email], search_fields = [:name])
         Admin.register!(Article; list_display = [:title, :author, :status, :published, "Len" => a -> length(a.body)],
                         search_fields = [:title, :body], list_filter = [:published, :status, :author])
+    end
+end
+
+@testset "file uploads and storage" begin
+    media = mktempdir()
+    old_media = settings.MEDIA_ROOT
+    configure!(MEDIA_ROOT = media)
+    png = vcat(UInt8[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13], Vector{UInt8}("IHDR"),
+               UInt8[0, 0, 0, 3, 0, 0, 0, 2, 8, 6, 0, 0, 0], zeros(UInt8, 8))
+    try
+        # image sizes without an image library
+        @test image_size(png) == (3, 2)
+        @test image_size(vcat(Vector{UInt8}("GIF89a"), UInt8[5, 0, 7, 0], zeros(UInt8, 4))) == (5, 7)
+        @test image_size(UInt8[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0, 0, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x09, 0x00, 0x0a, 0, 0, 0]) == (10, 9)
+        @test image_size(vcat(Vector{UInt8}("RIFF"), zeros(UInt8, 4), Vector{UInt8}("WEBPVP8X"), zeros(UInt8, 8), UInt8[3, 0, 0, 1, 0, 0], zeros(UInt8, 4))) == (4, 2)
+        @test image_size(Vector{UInt8}("not an image")) === nothing
+
+        # storage: safe names, no escaping the root, no overwriting
+        @test Juango.get_valid_name("../../etc/passwd") == "passwd" && Juango.get_valid_name(" my file (1).txt") == "my_file_1.txt"
+        st = FileSystemStorage()
+        n1 = save_file(st, "a/b/report.txt", Vector{UInt8}("one"))
+        n2 = save_file(st, "a/b/report.txt", Vector{UInt8}("two"))
+        @test n1 == "a/b/report.txt" && n2 != n1 && startswith(n2, "a/b/report_") && endswith(n2, ".txt")
+        @test read(st, n1) == Vector{UInt8}("one") && Juango.exists(st, n2) && size(st, n2) == 3
+        @test Juango.url(st, n1) == "/media/a/b/report.txt"
+        @test save_file(st, "../../outside.txt", UInt8[1]) == "outside.txt" && isfile(joinpath(media, "outside.txt"))
+        @test_throws ArgumentError Juango.path(st, "../secret")
+        delete_file(st, n2)
+        @test !Juango.exists(st, n2)
+
+        # model fields
+        a = create(Attachment; title = "notes", file = UploadedFile("my notes.txt", "hello"), photo = UploadedFile("p.png", png))
+        @test a.file isa FieldFile && startswith(a.file.name, "docs/$(year(now()))/my_notes") && String(read(a.file)) == "hello"
+        @test a.photo_w == 3 && a.photo_h == 2 && a.photo.width == 3 && a.file.size == 5
+        r = get(Attachment; id = a.id)
+        @test r.file.name == a.file.name && r.file.url == "/media/" * a.file.name && r.photo.height == 2
+        @test tr("{{ a.file.url }} {{ a.photo.width }}", Dict("a" => r)) == "/media/$(a.file.name) 3"
+        nophoto = create(Attachment; title = "bare", file = UploadedFile("x.txt", "x"))
+        @test get(Attachment; id = nophoto.id).photo === nothing
+
+        # forms
+        f = ModelForm(Attachment; data = Dict("title" => "via form"), files = Dict("file" => UploadedFile("doc.pdf", "%PDF")))
+        @test is_valid(f) && Juango.has_changed(f)
+        saved = save!(f)
+        @test endswith(saved.file.name, "doc.pdf") && String(read(saved.file)) == "%PDF"
+        bad = ModelForm(Attachment; data = Dict("title" => "x"), files = Dict("file" => UploadedFile("evil.exe", "MZ"), "photo" => UploadedFile("fake.png", "text")))
+        @test !is_valid(bad) && occursin("not allowed", only(bad.errors[:file])) && occursin("valid image", only(bad.errors[:photo]))
+        @test !is_valid(ModelForm(Attachment; data = Dict("title" => "no file")))          # required
+        keep = ModelForm(Attachment; data = Dict("title" => "renamed"), instance = get(Attachment; id = a.id))
+        @test is_valid(keep) && save!(keep).file.name == a.file.name                      # no upload: file kept
+        clear = ModelForm(Attachment; data = Dict("title" => "renamed", "photo-clear" => "on"), instance = get(Attachment; id = a.id))
+        @test is_valid(clear) && save!(clear).photo === nothing
+        html = string(as_p(ModelForm(Attachment; instance = get(Attachment; id = nophoto.id))))
+        @test occursin("type=\"file\" name=\"file\"", html) && occursin("Currently: <a href=\"/media/", html) && occursin("accept=\"image/*\"", html)
+
+        # multipart requests, the admin, and media served in development
+        body, ctype = Juango.multipart_body(Dict("title" => "t", "file" => UploadedFile("up.txt", "uploaded"; content_type = "text/plain")))
+        req = Request("POST", "/x"; headers = Dict("content-type" => ctype), body = body)
+        @test req.POST["title"] == "t" && req.FILES["file"].name == "up.txt" && String(read(req.FILES["file"])) == "uploaded"
+        @test req.FILES["file"].content_type == "text/plain" && isempty(Request("GET", "/").FILES)
+        c = Client()
+        force_login!(c, get(User; username = "root"))
+        Admin.register!(Attachment; list_display = [:title, :file])
+        @test occursin("enctype=\"multipart/form-data\"", text(get(c, "/admin/attachment/add/")))
+        r = post(c, "/admin/attachment/add/", Dict("title" => "from admin", "file" => UploadedFile("admin.txt", "via admin")))
+        @test r.status == 302
+        fa = get(Attachment; title = "from admin")
+        @test String(read(fa.file)) == "via admin" && isfile(fa.file.path)
+        r = get(c, fa.file.url)
+        @test r.status == 200 && text(r) == "via admin" && startswith(getheader(r, "Content-Type"), "text/plain")
+        @test get(c, "/media/../runtests.jl").status == 404 && get(c, "/media/nope.txt").status == 404
+        Admin.unregister!(Attachment)
+    finally
+        configure!(MEDIA_ROOT = old_media)
     end
 end
 

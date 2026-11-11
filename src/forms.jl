@@ -31,6 +31,7 @@ mutable struct Form
     prefix::String
     validated::Bool
     clean::Any
+    files::Any            # uploaded files (req.FILES) for file fields
 end
 
 """
@@ -40,7 +41,7 @@ end
 `add_error!(form, field_or_nothing, msg)` or modify `form.cleaned_data`.
 """
 function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
-              name = "Form", model = nothing, instance = nothing)
+              name = "Form", model = nothing, instance = nothing, files = nothing)
     fs = Field[]
     for (n, f) in fields
         f = deepcopy(f)
@@ -48,7 +49,7 @@ function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), pref
         push!(fs, f)
     end
     Form(string(name), fs, data, Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(initial)),
-         Dict{Symbol,Vector{String}}(), Dict{Symbol,Any}(), model, instance, string(prefix), false, clean)
+         Dict{Symbol,Vector{String}}(), Dict{Symbol,Any}(), model, instance, string(prefix), false, clean, files)
 end
 
 """
@@ -72,9 +73,9 @@ macro form(name, body)
     end
     F = GlobalRef(@__MODULE__, :Form)
     quote
-        function $(esc(name))(data = nothing; initial = Dict{Symbol,Any}(), prefix = "", clean = nothing)
+        function $(esc(name))(data = nothing; initial = Dict{Symbol,Any}(), prefix = "", clean = nothing, files = nothing)
             $F(Pair{Symbol,Any}[$(pairs_...)]; data = data, initial = initial, prefix = prefix,
-               clean = clean, name = $(string(name)))
+               clean = clean, name = $(string(name)), files = files)
         end
     end
 end
@@ -88,7 +89,7 @@ clean_form(f::Form, ::Val) = nothing
 A form generated from a model's fields. `save!(form)` writes the cleaned data
 into the instance (creating one if needed) and saves it.
 """
-function ModelForm(::Type{T}; data = nothing, instance = nothing, fields = nothing, exclude = Symbol[],
+function ModelForm(::Type{T}; data = nothing, files = nothing, instance = nothing, fields = nothing, exclude = Symbol[],
                    initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
                    labels = Dict{Symbol,String}(), help_texts = Dict{Symbol,String}(),
                    widgets = Dict{Symbol,Symbol}()) where {T<:Model}
@@ -115,7 +116,7 @@ function ModelForm(::Type{T}; data = nothing, instance = nothing, fields = nothi
     end
     merge!(init, Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(initial)))
     Form(fs; data = data, initial = init, prefix = prefix, clean = clean, name = "$(nameof(T))Form",
-         model = T, instance = instance)
+         model = T, instance = instance, files = files)
 end
 
 Base.show(io::IO, f::Form) = print(io, "<", f.name, " bound=", f.data !== nothing, " fields=(",
@@ -226,6 +227,12 @@ function is_valid(f::Form)
     empty!(f.errors)
     empty!(f.cleaned_data)
     for fld in f.fields
+        if fld.kind in FILE_KINDS
+            v, errs = clean_file_field(f, fld)
+            foreach(e -> add_error!(f, fld.name, e), errs)
+            isempty(errs) && (f.cleaned_data[fld.name] = v)
+            continue
+        end
         v, err = to_julia(fld, raw_value(f, fld))
         if err !== nothing
             add_error!(f, fld.name, err)
@@ -277,12 +284,50 @@ extra forms and unchanged objects).
 """
 has_changed(f::Form) = f.data !== nothing && !isempty(changed_fields(f))
 
+"The file uploaded for a field, or `nothing`."
+function file_upload(f::Form, fld::Field)
+    f.files === nothing && return nothing
+    v = get(f.files, html_name(f, fld), nothing)
+    v isa AbstractVector && (v = isempty(v) ? nothing : first(v))
+    v isa UploadedFile ? v : nothing
+end
+file_cleared(f::Form, fld::Field) = f.data !== nothing && haskey(f.data, html_name(f, fld) * "-clear")
+
+"A file field's value: the upload, `nothing` when cleared, else the current file."
+function clean_file_field(f::Form, fld::Field)
+    up = file_upload(f, fld)
+    current = initial_for(f, fld)
+    v = up !== nothing ? up : file_cleared(f, fld) ? nothing : current
+    errs = String[]
+    if up !== nothing && file_cleared(f, fld)
+        push!(errs, "Please either submit a file or check the clear checkbox, not both.")
+    elseif v === nothing
+        fld.blank || push!(errs, "This field is required.")
+    elseif up !== nothing
+        isempty(up.data) && push!(errs, "The submitted file is empty.")
+        fld.max_length !== nothing && length(up.name) > fld.max_length &&
+            push!(errs, "Ensure this filename has at most $(fld.max_length) characters (it has $(length(up.name))).")
+        fld.kind === :image && image_size(up.data) === nothing &&
+            push!(errs, "Upload a valid image. The file you uploaded was either not an image or a corrupted image.")
+        for val in fld.validators
+            r = val(up)
+            r isa AbstractString && push!(errs, r)
+            r === false && push!(errs, "Enter a valid value.")
+        end
+    end
+    v, errs
+end
+
 "Names of the fields whose submitted value differs from the initial value."
 function changed_fields(f::Form)
     out = Symbol[]
     f.data === nothing && return out
     for fld in f.fields
         fld.name in (:DELETE, :ORDER, :id) && continue
+        if fld.kind in FILE_KINDS
+            (file_upload(f, fld) !== nothing || file_cleared(f, fld)) && push!(out, fld.name)
+            continue
+        end
         v, err = to_julia(fld, raw_value(f, fld))
         init = initial_for(f, fld)
         fld.kind === :bool && (init = truthy(init))
@@ -391,6 +436,17 @@ function widget_html(bf::BoundField)
         # autocomplete: a select holding the current choice, filled by searching (admin JavaScript)
         opt = cur === nothing ? "" : "<option value=\"$(escape_html(string(cur.id)))\" selected>$(escape_html(string(cur)))</option>"
         return "<select$attrs data-autocomplete=\"$(model_name(R))\"><option value=\"\">---------</option>$opt</select>"
+    elseif fld.kind in FILE_KINDS
+        cur = get(f.initial, fld.name, nothing)
+        io = IOBuffer()
+        if cur isa FieldFile && !isempty(cur)
+            print(io, "Currently: <a href=\"", escape_html(cur.url), "\">", escape_html(cur.name), "</a>")
+            fld.blank && print(io, " <label><input type=\"checkbox\" name=\"$name-clear\" id=\"$id-clear\"> Clear</label>")
+            print(io, "<br>Change: ")
+        end
+        r = (!fld.blank && !(cur isa FieldFile)) ? " required" : ""
+        print(io, "<input type=\"file\" name=\"$name\" id=\"$id\"$r", fld.kind === :image ? " accept=\"image/*\"" : "", ">")
+        return String(take!(io))
     elseif fld.kind === :geometry
         return geometry_widget(name, id, fld, f.data !== nothing ? val : get(f.initial, fld.name, nothing))
     elseif fld.kind === :m2m
@@ -459,6 +515,7 @@ function tattr(f::Form, ::Val{S}) where {S}
     S === :errors && return f.errors
     S === :non_field_errors && return non_field_errors(f)
     S === :is_bound && return f.data !== nothing
+    S === :is_multipart && return any(x -> x.kind in FILE_KINDS, f.fields)
     S === :cleaned_data && return f.cleaned_data
     S === :instance && return f.instance
     S === :hidden_fields && return [bf for bf in f if bf.field.widget === :hidden]

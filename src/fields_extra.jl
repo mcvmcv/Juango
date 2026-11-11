@@ -105,6 +105,7 @@ function encode_range(::DatabaseBackend, r::ValueRange)
 end
 
 function to_db(f::Field, v)
+    f.kind in (:file, :image) && return v === nothing ? "" : file_to_db(f, v)     # no file is stored as ''
     v === nothing && return dbparam(v)
     k = f.kind
     k === :json && return JSON.json(json_scalar_tree(v))
@@ -189,6 +190,7 @@ function from_db_extra(f::Field, v)
     k === :uuid && return v isa UUID ? v : UUID(string(v))
     k === :citext && return String(string(v))
     k === :geometry && return decode_geometry(v)
+    k in (:file, :image) && return file_from_db(f, v)
     NOTFOUND
 end
 

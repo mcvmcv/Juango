@@ -100,10 +100,45 @@ function parse_cookies(s::AbstractString)
     d
 end
 
-"Parse the non-file fields of a multipart body (files are kept in `req.meta[:FILES]`)."
+"""
+    UploadedFile(name, data; content_type="application/octet-stream")
+
+A file from a multipart upload (`req.FILES["avatar"]`): `name`, `content_type`, `size` and
+the bytes (`read(f)`). Also used to post files with the test `Client`.
+"""
+struct UploadedFile
+    name::String
+    content_type::String
+    data::Vector{UInt8}
+end
+UploadedFile(name, data; content_type = "application/octet-stream") =
+    UploadedFile(string(name), string(content_type), data isa AbstractString ? Vector{UInt8}(codeunits(data)) : Vector{UInt8}(data))
+Base.read(f::UploadedFile) = copy(f.data)
+Base.read(f::UploadedFile, ::Type{String}) = String(copy(f.data))
+Base.size(f::UploadedFile) = length(f.data)
+Base.getproperty(f::UploadedFile, s::Symbol) = s === :size ? length(getfield(f, :data)) : getfield(f, s)
+Base.show(io::IO, f::UploadedFile) = print(io, "<UploadedFile ", repr(f.name), " (", length(f.data), " bytes)>")
+
+"Uploaded files by field name (several per name for `multiple` inputs): `get(req.FILES, \"doc\", nothing)`, `getlist`."
+struct FileDict
+    data::Dict{String,Vector{UploadedFile}}
+end
+FileDict() = FileDict(Dict{String,Vector{UploadedFile}}())
+Base.get(d::FileDict, k, default) = (v = get(d.data, string(k), nothing); v === nothing || isempty(v) ? default : first(v))
+Base.getindex(d::FileDict, k) = (v = get(d, k, nothing); v === nothing ? throw(KeyError(k)) : v)
+Base.haskey(d::FileDict, k) = haskey(d.data, string(k))
+Base.keys(d::FileDict) = keys(d.data)
+Base.isempty(d::FileDict) = isempty(d.data)
+Base.length(d::FileDict) = length(d.data)
+getlist(d::FileDict, k) = get(d.data, string(k), UploadedFile[])
+
+Base.getproperty(r::Request, s::Symbol) = s === :FILES ? get(getfield(r, :meta), :FILES, FileDict()) : getfield(r, s)
+Base.propertynames(r::Request, private::Bool = false) = (fieldnames(Request)..., :FILES)
+
+"Parse a multipart body: fields into `req.POST`, files into `req.FILES`."
 function parse_multipart_fields(req::Request)
     q = QueryDict()
-    files = Dict{String,Any}()
+    files = FileDict()
     try
         hreq = HTTP.Request(req.method, "/", collect(req.headers), req.body)
         parts = HTTP.parse_multipart_form(hreq)
@@ -112,7 +147,9 @@ function parse_multipart_fields(req::Request)
             if p.filename === nothing
                 push!(get!(q.data, p.name, String[]), String(read(p.data)))
             else
-                files[p.name] = (filename = p.filename, content_type = p.contenttype, data = read(p.data))
+                isempty(p.filename) && continue      # an empty file input
+                push!(get!(files.data, p.name, UploadedFile[]),
+                      UploadedFile(p.filename, read(p.data); content_type = something(p.contenttype, "application/octet-stream")))
             end
         end
     catch

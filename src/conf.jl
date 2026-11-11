@@ -19,6 +19,9 @@ function default_settings()
         :TEMPLATE_DIRS => String[],
         :STATIC_URL => "/static/",
         :STATIC_DIRS => String[],
+        :MEDIA_ROOT => "",
+        :MEDIA_URL => "/media/",
+        :DEFAULT_FILE_STORAGE => nothing,
         :ALLOWED_HOSTS => String["localhost", "127.0.0.1", "[::1]"],
         :APPEND_SLASH => true,
         :MIDDLEWARE => Any[

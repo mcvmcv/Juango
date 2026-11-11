@@ -550,7 +550,7 @@ function change_form(req::Request, ma::ModelAdmin, obj)
     editable = adding || can(req, ma, :change)
     req.method == "POST" && !editable && require_perm(req, ma, :change)
     data = req.method == "POST" ? req.POST : nothing
-    form = configure_widgets!(ma, Juango.ModelForm(T; data = data, instance = obj, fields = admin_fields(ma)))
+    form = configure_widgets!(ma, Juango.ModelForm(T; data = data, files = req.FILES, instance = obj, fields = admin_fields(ma)))
     inlines = save_as_new ? Any[] : inline_formsets(ma, req, obj, data)
     if req.method == "POST" && is_valid(form) && all(x -> is_valid(x[2]), inlines)
         o = Juango.atomic() do

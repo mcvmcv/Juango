@@ -471,6 +471,34 @@ fs = CommentFormSet(req.POST; instance = post)   # the foreign key to the post i
 - **`formset.empty_form`** renders a form with `__prefix__` in place of the index, for adding rows with JavaScript.
 - **`add_error!(formset, msg)`** adds a formset-wide error from a `clean` function.
 
+### File uploads
+
+```julia
+configure!(MEDIA_ROOT = joinpath(BASE_DIR, "media"), MEDIA_URL = "/media/")   # startproject sets MEDIA_ROOT
+
+@model struct Document
+    title  = CharField(max_length = 100)
+    file   = FileField(upload_to = "docs/%Y/%m/", validators = [FileExtensionValidator(["pdf"]), MaxFileSizeValidator(5_000_000)])
+    cover  = ImageField(upload_to = "covers/", blank = true, width_field = :cover_w, height_field = :cover_h)
+    cover_w = IntegerField(null = true, editable = false)
+    cover_h = IntegerField(null = true, editable = false)
+end
+
+form = ModelForm(Document; data = req.POST, files = req.FILES)    # <form enctype="multipart/form-data">
+is_valid(form) && save!(form)
+doc.file.url, doc.file.size, doc.file.path, read(doc.file), doc.cover.width
+create(Document; title = "x", file = req.FILES["file"])           # an UploadedFile is stored by save!
+```
+
+- **Uploads.** `req.FILES` holds the uploads (`getlist` for `multiple` inputs). Each is an `UploadedFile` with a name, content type, size and bytes.
+- **Storage.** Files go through a storage: `FileSystemStorage` by default, or set `DEFAULT_FILE_STORAGE` for another. It provides `save_file`, `read`, `delete_file`, `url`, `size` and `path`.
+- **Safe file names.** Names are sanitised, can't escape `MEDIA_ROOT`, and never overwrite: an existing name gets a random suffix.
+- **Images.** `ImageField` accepts PNG, GIF, JPEG and WebP. Juango reads the size itself, so no image library is needed.
+- **Forms and admin.** Forms show the current file with a "Clear" checkbox when the field is optional, and the admin handles uploads.
+- **Testing.** The test client uploads when the data contains an `UploadedFile`: `post(c, url, Dict("file" => UploadedFile("a.txt", "hi")))`.
+- **Serving.** With `DEBUG`, the development server serves `MEDIA_URL`. In production, serve `MEDIA_ROOT` from your web server.
+- **Deleting objects keeps their files**, as in Django. Use `delete_file` to remove them.
+
 ### Auth, sessions, CSRF, messages
 
 - `User` model with PBKDF2-SHA256 password hashes in Django's format, so existing Django hashes verify.

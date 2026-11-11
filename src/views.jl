@@ -195,7 +195,7 @@ function success_redirect(success_url, obj)
 end
 
 function form_view(::Type{T}, req, obj, fields, template, success_url, extra_context, success_message) where {T}
-    form = ModelForm(T; data = req.method == "POST" ? req.POST : nothing, instance = obj, fields = fields)
+    form = ModelForm(T; data = req.method == "POST" ? req.POST : nothing, files = req.FILES, instance = obj, fields = fields)
     if req.method == "POST" && is_valid(form)
         saved = save!(form)
         success_message === nothing || message!(req, :success, success_message)

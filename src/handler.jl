@@ -65,6 +65,9 @@ both the HTTP server and the test `Client` call.
 """
 function handle_request(req::Request)
     try
+        if settings.DEBUG && !isempty(string(settings.MEDIA_ROOT)) && startswith(req.path, settings.MEDIA_URL)
+            return serve_media(req)
+        end
         if settings.DEBUG && !isempty(settings.STATIC_DIRS) && startswith(req.path, settings.STATIC_URL)
             return serve_static(req)
         end

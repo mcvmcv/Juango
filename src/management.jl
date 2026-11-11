@@ -269,6 +269,7 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
             ROOT_URLCONF = urlpatterns,
             TEMPLATE_DIRS = [joinpath(BASE_DIR, "templates")],
             STATIC_DIRS = [joinpath(BASE_DIR, "static")],
+            MEDIA_ROOT = joinpath(BASE_DIR, "media"),     # uploaded files (FileField/ImageField)
             SITE_NAME = "$name",
         )
         """,

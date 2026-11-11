@@ -1627,6 +1627,7 @@ function save!(obj::T) where {T<:Model}
             data[a] = f.kind === :date ? Date(ts) : ts
         end
     end
+    store_uploaded_files!(obj, data)
     chain_ = reverse(vcat([concrete_model(T)], ancestors(T)))     # root table first
     fresh = false
     if data[:id] === nothing && pk_kind(T) === :uuid

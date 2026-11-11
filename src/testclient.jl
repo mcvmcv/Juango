@@ -52,6 +52,9 @@ function request(c::Client, method::AbstractString, target::AbstractString; data
         if method in ("GET", "HEAD", "DELETE")
             q = urlencode(data)
             isempty(q) || (target *= (occursin('?', target) ? "&" : "?") * q)
+        elseif any(p -> (v = last(p); v isa UploadedFile || v isa AbstractVector && any(x -> x isa UploadedFile, v)), collect(pairs_of(data)))
+            payload, ctype = multipart_body(data)
+            hs["content-type"] = ctype
         else
             payload = Vector{UInt8}(codeunits(urlencode(data)))
             hs["content-type"] = "application/x-www-form-urlencoded"
@@ -75,6 +78,27 @@ function request(c::Client, method::AbstractString, target::AbstractString; data
         resp.context isa AbstractDict && (resp.context["__redirect_chain__"] = chain)
     end
     resp
+end
+
+"Encode form data (with `UploadedFile` values) as multipart/form-data."
+function multipart_body(data)
+    boundary = "----JuangoBoundary" * random_string(16)
+    io = IOBuffer()
+    for (k, v) in pairs_of(data)
+        for x in (v isa AbstractVector ? v : [v])
+            print(io, "--", boundary, "\r\n")
+            if x isa UploadedFile
+                print(io, "Content-Disposition: form-data; name=\"", k, "\"; filename=\"", x.name, "\"\r\n")
+                print(io, "Content-Type: ", x.content_type, "\r\n\r\n")
+                write(io, x.data)
+            else
+                print(io, "Content-Disposition: form-data; name=\"", k, "\"\r\n\r\n", x)
+            end
+            print(io, "\r\n")
+        end
+    end
+    print(io, "--", boundary, "--\r\n")
+    take!(io), "multipart/form-data; boundary=" * boundary
 end
 
 "GET request with the test client: `get(client, \"/path\"; data=Dict(...))`."
