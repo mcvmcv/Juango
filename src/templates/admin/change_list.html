@@ -14,12 +14,19 @@
       {% if q %}<span class="muted">{{ result_count }} result{{ result_count|pluralize }} (<a href="?">{{ total }} total</a>)</span>{% endif %}
     </form>
     {% endif %}
+    {% if date_hierarchy %}
+    <div class="toolbar date-hierarchy">
+      {% if date_hierarchy.back %}<a href="{{ date_hierarchy.back.url }}">{{ date_hierarchy.back.label }}</a>{% endif %}
+      {% for l in date_hierarchy.links %}<a href="{{ l.url }}">{{ l.label }}</a>{% endfor %}
+    </div>
+    {% endif %}
     <form method="post">
       {% csrf_token %}
-      {% if can_delete %}
+      {{ management_form }}
+      {% if actions %}
       <div class="toolbar">
-        <input type="hidden" name="action" value="delete_selected">
-        <button class="button secondary" type="submit" onclick="return confirm('Delete the selected {{ opts.verbose_name_plural }}?')">Delete selected</button>
+        <label>Action: <select name="action"><option value="">---------</option>{% for a in actions %}<option value="{{ a.name }}">{{ a.description }}</option>{% endfor %}</select></label>
+        <button class="button secondary" type="submit" name="index" value="0">Go</button>
       </div>
       {% endif %}
       <div class="module">
@@ -28,7 +35,7 @@
         <tbody>
         {% for row in rows %}
           <tr>
-            <td>{% if can_delete %}<input type="checkbox" class="action-select" name="_selected_action" value="{{ row.id }}" aria-label="Select row">{% endif %}</td>
+            <td>{% if actions %}<input type="checkbox" class="action-select" name="_selected_action" value="{{ row.id }}" aria-label="Select row">{% endif %}{{ row.hidden }}</td>
             {% for cell in row.cells %}{% if forloop.first %}<th><a href="{{ row.url }}">{{ cell }}</a></th>{% else %}<td>{{ cell }}</td>{% endif %}{% endfor %}
           </tr>
         {% empty %}
@@ -37,6 +44,7 @@
         </tbody>
       </table>
       </div>
+      {% if list_editable %}<div class="submit-row"><input type="submit" name="_save" value="Save"></div>{% endif %}
     </form>
     <p class="paginator">
       {% if prev_url %}<a href="{{ prev_url }}">‹ previous</a> · {% endif %}

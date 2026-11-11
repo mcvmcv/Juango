@@ -275,18 +275,21 @@ normalized(x) = x
 Whether submitted data differs from the initial values (used by formsets to skip blank
 extra forms and unchanged objects).
 """
-function has_changed(f::Form)
-    f.data === nothing && return false
+has_changed(f::Form) = f.data !== nothing && !isempty(changed_fields(f))
+
+"Names of the fields whose submitted value differs from the initial value."
+function changed_fields(f::Form)
+    out = Symbol[]
+    f.data === nothing && return out
     for fld in f.fields
         fld.name in (:DELETE, :ORDER, :id) && continue
         v, err = to_julia(fld, raw_value(f, fld))
-        err === nothing || return true
         init = initial_for(f, fld)
         fld.kind === :bool && (init = truthy(init))
         fld.kind === :m2m && init === nothing && (init = Any[])
-        isequal(normalized(v), normalized(init)) || return true
+        (err !== nothing || !isequal(normalized(v), normalized(init))) && push!(out, fld.name)
     end
-    false
+    out
 end
 non_field_errors(f::Form) = get(f.errors, :__all__, String[])
 
@@ -378,6 +381,16 @@ function widget_html(bf::BoundField)
     if fld.kind === :bool
         checked = f.data !== nothing ? (val !== nothing && lowercase(string(val)) in ("on", "true", "1", "yes")) : truthy(val)
         return "<input type=\"checkbox\"$attrs$(checked ? " checked" : "")>"
+    elseif fld.kind === :fk && fld.widget in (:raw_id, :autocomplete)
+        R = related_model(fld)
+        cur = (val === nothing || val == "") ? nothing : first(filter(base_objects(R); id = parse_pk(R, val)))
+        if fld.widget === :raw_id     # an id box, with the current object's name
+            return "<input type=\"text\"$attrs size=\"10\" class=\"raw-id\" value=\"$(escape_html(display_string(val)))\">" *
+                   (cur === nothing ? "" : " <span class=\"muted\">" * escape_html(string(cur)) * "</span>")
+        end
+        # autocomplete: a select holding the current choice, filled by searching (admin JavaScript)
+        opt = cur === nothing ? "" : "<option value=\"$(escape_html(string(cur.id)))\" selected>$(escape_html(string(cur)))</option>"
+        return "<select$attrs data-autocomplete=\"$(model_name(R))\"><option value=\"\">---------</option>$opt</select>"
     elseif fld.kind === :geometry
         return geometry_widget(name, id, fld, f.data !== nothing ? val : get(f.initial, fld.name, nothing))
     elseif fld.kind === :m2m

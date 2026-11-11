@@ -1,0 +1,17 @@
+{% extends "admin/base.html" %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">Home</a> › <a href="{% url 'admin:changelist' model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › <a href="{% url 'admin:change' model=opts.slug id=object.id %}">{{ object }}</a> › History</div>{% endblock %}
+{% block content %}
+<h1 class="page">{{ title }}</h1>
+<div class="module">
+<table>
+  <thead><tr><th>Date/time</th><th>User</th><th>Action</th></tr></thead>
+  <tbody>
+  {% for e in entries %}
+  <tr><td>{{ e.action_time|date:"N j, Y, g:i a" }}</td><td>{% if e.user %}{{ e.user }}{% else %}-{% endif %}</td><td>{{ e.change_message }}</td></tr>
+  {% empty %}
+  <tr><td colspan="3" class="muted">This object doesn’t have a change history. It probably wasn’t added via this admin site.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

@@ -3,24 +3,32 @@
 {% block content %}
 <div class="toolbar" style="justify-content:space-between">
   <h1 class="page" style="margin:0">{{ title }}</h1>
-  {% if view_on_site %}<a class="button secondary" href="{{ view_on_site }}">View on site ›</a>{% endif %}
+  <span>{% if history_url %}<a class="button secondary" href="{{ history_url }}">History</a>{% endif %}
+  {% if view_on_site %}<a class="button secondary" href="{{ view_on_site }}">View on site ›</a>{% endif %}</span>
 </div>
 {% if form.errors %}<p class="errorlist" style="color:var(--err);font-weight:600">Please correct the error{{ form.errors|length|pluralize }} below.</p>{% endif %}
 <form method="post">
   {% csrf_token %}
+  {% for group in groups %}
   <div class="module">
-    {% if form.non_field_errors %}<div class="form-row"><ul class="errorlist">{% for e in form.non_field_errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
-    {% if editable %}{% for field in form %}
+    {% if group.name %}<h2>{{ group.name }}</h2>{% endif %}
+    {% if forloop.first and form.non_field_errors %}<div class="form-row"><ul class="errorlist">{% for e in form.non_field_errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+    {% for row in group.rows %}
+    {% if row.readonly %}
+    <div class="form-row"><label>{{ row.label }}:</label><div>{{ row.value }}</div></div>
+    {% else %}
     <div class="form-row">
-      {{ field.label_tag }}
+      {{ row.field.label_tag }}
       <div>
-        {% if field.errors %}<ul class="errorlist">{% for e in field.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
-        {{ field }}
-        {% if field.help_text %}<div class="help">{{ field.help_text }}</div>{% endif %}
+        {% if row.field.errors %}<ul class="errorlist">{% for e in row.field.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+        {{ row.field }}
+        {% if row.field.help_text %}<div class="help">{{ row.field.help_text }}</div>{% endif %}
       </div>
     </div>
+    {% endif %}
     {% endfor %}
-    {% for pf in password_fields %}
+    {% if forloop.last %}
+    {% if editable %}{% for pf in password_fields %}
     <div class="form-row">
       <label for="id_{{ pf.name }}">{{ pf.label }}:</label>
       <div>
@@ -32,14 +40,81 @@
     {% for r in readonly %}
     <div class="form-row"><label>{{ r.label }}:</label><div>{{ r.value }}</div></div>
     {% endfor %}
+    {% endif %}
   </div>
+  {% endfor %}
+  {% for inline in inlines %}
+  <div class="module inline-group">
+    <h2>{{ inline.verbose_name_plural|capfirst }}</h2>
+    {{ inline.management_form }}
+    {% if inline.non_form_errors %}<ul class="errorlist">{% for e in inline.non_form_errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+    {% if inline.style == "tabular" %}
+    <table>
+      <thead><tr>{% for h in inline.headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+      <tbody>
+      {% for f in inline.forms %}
+      <tr>{% for bf in f.fields %}<td>{% if forloop.first %}{{ f.hidden }}{% endif %}{% if bf.errors %}<ul class="errorlist">{% for e in bf.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}{{ bf }}</td>{% endfor %}</tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    {% for f in inline.forms %}
+    <fieldset class="inline-related"><legend>{% if f.title %}{{ f.title }}{% else %}New{% endif %}</legend>
+      {{ f.hidden }}
+      {% for bf in f.fields %}<div class="form-row">{{ bf.label_tag }}<div>{% if bf.errors %}<ul class="errorlist">{% for e in bf.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}{{ bf }}</div></div>{% endfor %}
+    </fieldset>
+    {% endfor %}
+    {% endif %}
+  </div>
+  {% endfor %}
   <div class="submit-row">
     {% if can_delete %}<a class="deletelink" href="{% url 'admin:delete' model=opts.slug id=object.id %}">Delete</a>{% endif %}
     {% if editable %}
+    {% if save_as %}<input type="submit" name="_saveasnew" value="Save as new" class="button secondary">{% endif %}
     {% if can_add %}<input type="submit" name="_addanother" value="Save and add another" class="button secondary">{% endif %}
     <input type="submit" name="_continue" value="Save and continue editing" class="button secondary">
     <input type="submit" name="_save" value="Save">
     {% endif %}
   </div>
 </form>
+<script>
+(function () {
+  // prepopulated_fields: fill e.g. the slug from the title while typing
+  var slugify = function (s) { return s.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w\s-]/g, "").trim().replace(/[\s_-]+/g, "-"); };
+  ({{ prepopulated|safe }}).forEach(function (p) {
+    var target = document.getElementById(p.target), touched = false;
+    if (!target) return;
+    target.addEventListener("input", function () { touched = true; });
+    p.sources.forEach(function (id) {
+      var src = document.getElementById(id);
+      src && src.addEventListener("input", function () {
+        if (touched) return;
+        target.value = slugify(p.sources.map(function (s) { var e = document.getElementById(s); return e ? e.value : ""; }).join(" "));
+      });
+    });
+  });
+  // autocomplete_fields: a search box that refills the select from the admin's JSON endpoint
+  var root = document.body.dataset.adminRoot;
+  document.querySelectorAll("select[data-autocomplete]").forEach(function (sel) {
+    var box = document.createElement("input");
+    box.type = "search"; box.placeholder = "Search…"; box.style.marginRight = "6px";
+    sel.parentNode.insertBefore(box, sel);
+    var timer;
+    box.addEventListener("input", function () {
+      clearTimeout(timer);
+      timer = setTimeout(function () {
+        fetch(root + sel.dataset.autocomplete + "/autocomplete/?term=" + encodeURIComponent(box.value), {credentials: "same-origin"})
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            var keep = sel.value;
+            sel.innerHTML = '<option value="">---------</option>';
+            d.results.forEach(function (o) { var opt = new Option(o.text, o.id); sel.add(opt); });
+            if (keep) sel.value = keep;
+          });
+      }, 250);
+    });
+  });
+})();
+</script>
 {% endblock %}

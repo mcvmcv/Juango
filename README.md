@@ -529,7 +529,31 @@ Admin.register!(Post; list_display=[:title, :author, :published, "Words" => p ->
                 search_fields=[:title, :body], list_filter=[:published, :author])
 ```
 
-The admin gives you login, a model index, change lists (search, filters, pagination, bulk delete), add/change forms with validation, and delete confirmation that shows cascade effects. Users are registered automatically, with password hashing in the form.
+The admin gives you login, a model index, change lists (search, filters, pagination), add/change forms with validation, and delete confirmation that shows cascade effects. Users and groups are registered automatically, with password hashing in the user form. More options:
+
+```julia
+function publish(admin, req, qs)                    # an action: runs on the selected objects
+    update!(qs; published = true)
+    message!(req, :success, "Published $(count(qs)).")
+end
+
+Admin.register!(Post;
+    list_display = [:title, :author, :published],
+    list_editable = [:published],                   # edit right in the change list
+    date_hierarchy = :created,                      # drill down by year / month / day
+    actions = [Admin.action(publish; description = "Publish selected", confirm = true), Admin.export_csv],
+    fieldsets = ["Content" => [:title, :slug, :body], "Publishing" => [:author, :published]],
+    readonly_fields = [:views],
+    prepopulated_fields = Dict(:slug => [:title]),  # filled while typing, when adding
+    autocomplete_fields = [:author],                # search box (Author's admin needs search_fields)
+    raw_id_fields = [],                             # or a plain id box for huge tables
+    inlines = [Admin.TabularInline(Comment; fields = [:name, :body], extra = 1)],   # or StackedInline
+    save_as = true)                                 # "Save as new"
+```
+
+- **Bulk delete** is a built-in action with a confirmation page; `delete_action = false` removes it.
+- **Change history.** Every add, change and delete is recorded as a `LogEntry` with a message like "Changed title. Added comment “Nice”." Each object has a history page, and the index lists your recent actions. Record your own entries with `log_action!(user, obj, CHANGE, "Published.")`.
+- **Permissions apply** to actions (`permission = :change` by default) and to inlines (add, change and delete on the inline model).
 
 ### Testing
 

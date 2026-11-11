@@ -45,6 +45,7 @@ include("sessions.jl")
 include("auth.jl")
 include("contenttypes.jl")
 include("permissions.jl")
+include("adminlog.jl")
 include("messages.jl")
 include("middleware.jl")
 include("views.jl")
@@ -74,6 +75,7 @@ export GeometryField, PointField, LineStringField, PolygonField, MultiPointField
        geojson, from_geojson, wkt, ewkt, parse_wkt, parse_wkb
 export JSONField, ArrayField, UUIDField, CICharField, IntegerRangeField, DateRangeField, DateTimeRangeField,
        ValueRange, SearchVector, SearchQuery, SearchRank, uuid4, UUID
+export LogEntry, log_action!, ADDITION, CHANGE, DELETION
 export Permission, Group, has_perm, has_perms, has_module_perms, get_all_permissions, permission_required, perm_name
 export ContentType, GenericForeignKey, GenericRelation, get_for_model, model_class
 export Model, @model, @abstract_model, OneToOneField, Index, GinIndex, Field, ManyToManyField, add!, remove!, set!, clear!, base_objects, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
@@ -86,7 +88,7 @@ export Model, @model, @abstract_model, OneToOneField, Index, GinIndex, Field, Ma
        Rank, DenseRank, Lag, Lead,
        MultipleObjectsReturned, ProtectedError, get_absolute_url
 # forms
-export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data, save_m2m!, has_changed,
+export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data, save_m2m!, has_changed, changed_fields,
        FormSet, formset_factory, modelformset_factory, inlineformset_factory, management_form, empty_form,
        deleted_forms, ordered_forms
 # auth & sessions

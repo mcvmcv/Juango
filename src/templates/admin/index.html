@@ -15,4 +15,16 @@
     {% endfor %}
   </table>
 </div>
+<div class="module">
+  <h2>Recent actions</h2>
+  <table>
+    {% for r in recent_actions %}
+    <tr><td><span class="{% if r.entry.is_addition %}yes{% elif r.entry.is_deletion %}no{% else %}muted{% endif %}">{% if r.entry.is_addition %}+{% elif r.entry.is_deletion %}✘{% else %}✎{% endif %}</span>
+      {% if r.url %}<a href="{{ r.url }}">{{ r.entry.object_repr }}</a>{% else %}{{ r.entry.object_repr }}{% endif %}
+      <span class="muted">{{ r.type }}</span></td></tr>
+    {% empty %}
+    <tr><td class="muted">None available</td></tr>
+    {% endfor %}
+  </table>
+</div>
 {% endblock %}
