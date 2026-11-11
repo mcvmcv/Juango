@@ -237,11 +237,11 @@ end
 URL patterns for logging in and out and resetting passwords: `path(\"accounts/\", auth_urls())` gives
 `login/`, `logout/`, `password_reset/`, `password_reset/done/`, `reset/<uidb64>/<token>/` and `reset/done/`.
 """
-auth_urls() = include_urls([
+auth_urls() = (require_app("auth", "auth_urls()"); include_urls([
     path("login/", LoginView(); name = "login"),
     path("logout/", LogoutView(); name = "logout"),
     path("password_reset/", PasswordResetView(); name = "password_reset"),
     path("password_reset/done/", template_page("registration/password_reset_done.html", "PasswordResetDoneView"); name = "password_reset_done"),
     path("reset/<str:uidb64>/<str:token>/", PasswordResetConfirmView(); name = "password_reset_confirm"),
     path("reset/done/", template_page("registration/password_reset_complete.html", "PasswordResetCompleteView"); name = "password_reset_complete"),
-])
+]))

@@ -2556,6 +2556,89 @@ end
     end
 end
 
+@testset "apps" begin
+    quiet(f) = redirect_stdout(f, devnull)
+    IC = Juango.ImproperlyConfigured
+    tmp = mktempdir()
+    root = quiet(() -> startapp("shop"; dir = tmp))
+    @test isfile(joinpath(root, "Shop.jl")) && isfile(joinpath(root, "templates", "shop", "index.html")) &&
+          isdir(joinpath(root, "migrations")) && isdir(joinpath(root, "static", "shop"))
+    @test_throws ErrorException quiet(() -> startapp("Bad-Name"; dir = tmp))
+    write(joinpath(root, "models.jl"), "@model struct Product\n    name = CharField(max_length = 50)\nend\n")
+    write(joinpath(root, "static", "shop", "app.css"), "body{}")
+    mkpath(joinpath(root, "locale", "de", "LC_MESSAGES"))
+    write(joinpath(root, "locale", "de", "LC_MESSAGES", "juango.po"), "msgid \"Shop hello\"\nmsgstr \"Hallo Laden\"\n")
+    include(joinpath(root, "Shop.jl"))
+    Shop = Main.Shop
+    Product = Shop.Product
+    calls = Ref(0)
+    Shop.APP.ready = () -> (calls[] += 1)
+    old_apps, old_urls = settings.INSTALLED_APPS, settings.ROOT_URLCONF
+    try
+        configure!(INSTALLED_APPS = vcat(Juango.default_installed_apps(), [Shop.APP]),
+                   ROOT_URLCONF = vcat(old_urls, [path("shop/", include_urls(Shop.APP))]))
+        configure!(DEBUG = true)
+        @test calls[] == 1                                              # ready runs once
+        @test is_installed("shop") && is_installed(Shop) && get_app("shop") === Shop.APP && !is_installed("nope")
+        @test is_installed("juango.admin") && get_app("auth") === Juango.AUTH_APP
+
+        # models belong to the app that defines them
+        @test model_label(Product) == "shop.Product" && get_model("shop.product") === Product && app_models("shop") == [Product]
+        @test model_label(User) == "juango.User" && get_model("juango.User") === User
+        @test_throws IC get_model("shop.Nope")
+        @test Juango.Migrations.migration_dir("shop") == joinpath(root, "migrations") && "shop" in Juango.Migrations.known_apps()
+        p = only(quiet(() -> makemigrations(; app = "shop")))
+        @test p == joinpath(root, "migrations", "0001_initial.jl") && occursin("CreateModel", read(p, String))
+        @test isempty(quiet(() -> Juango.execute_from_command_line(["makemigrations", "shop"])))     # nothing new
+        quiet(() -> Juango.sync_models!([Product]))
+        @test get_for_model(Product).app_label == "shop"
+
+        # templates, URLs, static files and translations from the app's folder
+        c = Client()
+        r = get(c, "/shop/")
+        @test r.status == 200 && occursin("<h1>Shop</h1>", text(r)) && reverse_url("shop:index") == "/shop/"
+        r = get(c, "/static/shop/app.css")
+        @test r.status == 200 && text(r) == "body{}"
+        @test joinpath(root, "static") in static_dirs()
+        @test with_language(() -> gettext("Shop hello"), "de") == "Hallo Laden"
+        sroot = mktempdir()
+        configure!(STATIC_ROOT = sroot)
+        @test collectstatic() >= 1 && read(joinpath(sroot, "shop", "app.css"), String) == "body{}"
+        configure!(APP_DIRS = false)
+        @test !(joinpath(root, "templates") in Juango.template_dirs()) && !(joinpath(root, "static") in static_dirs())
+        configure!(APP_DIRS = true)
+
+        # management commands from apps
+        Shop.APP.commands["shophello"] = ("Say hi", args -> "hi " * join(args, " "))
+        @test Juango.execute_from_command_line(["shophello", "there"]) == "hi there"
+        helptext = mktemp() do path, io
+            redirect_stdout(() -> Juango.execute_from_command_line(["help"]), io); flush(io); read(path, String)
+        end
+        @test occursin("shophello", helptext)
+        @test isempty(quiet(() -> Juango.execute_from_command_line(["check"])))
+
+        # leaving built-in apps out
+        configure!(INSTALLED_APPS = ["juango.auth", "juango.contenttypes", Shop])
+        @test_throws IC Admin.urls()
+        cmds = Juango.all_commands()
+        @test !haskey(cmds, "clearsessions") && haskey(cmds, "createsuperuser") && haskey(cmds, "shophello")
+        @test any(i -> occursin("SessionMiddleware", i), Juango.app_issues())
+        configure!(INSTALLED_APPS = ["juango.admin", "juango.contenttypes", "juango.sessions", "juango.messages"])
+        @test any(i -> occursin("requires 'auth'", i), Juango.app_issues())
+        @test_throws IC Juango.auth_urls()
+        @test !haskey(Juango.all_commands(), "createsuperuser")
+        @test_throws IC configure!(INSTALLED_APPS = ["nope"])
+        @test_throws IC configure!(INSTALLED_APPS = [Shop.APP, "shop"])
+        @test_throws IC App("not valid")
+    finally
+        configure!(INSTALLED_APPS = old_apps, ROOT_URLCONF = old_urls, STATIC_ROOT = "", APP_DIRS = true)
+        table = Juango.modelmeta(Product).table
+        Juango.unregister_model!(Product)
+        Juango.execute("DROP TABLE IF EXISTS " * Juango.qname(table))
+    end
+    @test !is_installed("shop") && haskey(Juango.all_commands(), "clearsessions")
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)

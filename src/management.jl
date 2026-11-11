@@ -104,6 +104,7 @@ function cmd_check(args)
     for d in settings.TEMPLATE_DIRS
         isdir(d) || push!(issues, "Template directory '$d' does not exist.")
     end
+    append!(issues, app_issues())
     for T in MODEL_LIST
         for f in modelmeta(T).fields
             f.kind === :fk || continue
@@ -146,9 +147,15 @@ function cmd_migrate(args)
     migrate(; app = app, target = target, fake = haskey(flags, "fake"), sync = haskey(flags, "sync"))
 end
 
-# makemigrations [--app NAME] [--name NAME] [--empty] [--merge] [--dry-run] [--check] [--noinput]
+# makemigrations [app...] [--app NAME] [--name NAME] [--empty] [--merge] [--dry-run] [--check] [--noinput]
+# Without an app: the project's models and every installed app that has a directory.
 function cmd_makemigrations(args)
-    _, flags = parse_flags(args)
+    pos, flags = parse_flags(args)
+    apps = !isempty(pos) ? pos : haskey(flags, "app") ? [flags["app"]] :
+           unique(vcat(["project"], [a.label for a in installed_apps() if a.path !== nothing]))
+    rest = String[x for x in args if !(x in pos)]
+    length(apps) > 1 && return reduce(vcat, [cmd_makemigrations(vcat(rest, ["--app", a])) for a in apps])
+    flags["app"] = only(apps)
     q = haskey(flags, "noinput") || haskey(flags, "no-input") ? (_ -> false) : Migrations.ask
     paths = makemigrations(; app = get(flags, "app", "project"), name = get(flags, "name", nothing),
                            empty = haskey(flags, "empty"), merge = haskey(flags, "merge"),
@@ -167,8 +174,9 @@ end
 
 function cmd_help(args)
     println("Usage: julia --project manage.jl <command> [options]\n\nAvailable commands:")
-    for k in sort(collect(keys(COMMANDS)))
-        println("  ", rpad(k, 18), COMMANDS[k][1])
+    cmds = all_commands()
+    for k in sort(collect(keys(cmds)))
+        println("  ", rpad(k, 18), cmds[k][1])
     end
 end
 
@@ -186,6 +194,13 @@ for (n, h, f) in (
     ("sqlmigrate", "Print the SQL for a migration: sqlmigrate [app] <name> [--backwards]", cmd_sqlmigrate),
     ("createsuperuser", "Create an admin user (--username, --email, --password, --noinput)", cmd_createsuperuser),
     ("showurls", "List all URL patterns", cmd_showurls),
+    ("startapp", "Create an app skeleton: startapp <name> [--dir DIR]", function (args)
+        pos, flags = parse_flags(args)
+        isempty(pos) && error("usage: startapp <name>")
+        startapp(pos[1]; dir = get(flags, "dir", pwd()))
+    end),
+    ("collectstatic", "Copy static files from STATIC_DIRS and apps into STATIC_ROOT (--clear)",
+     args -> println(collectstatic(; clear = haskey(last(parse_flags(args)), "clear")), " static files copied to ", settings.STATIC_ROOT)),
     ("convert_naive_datetimes", "Rewrite stored naive datetimes as UTC when turning USE_TZ on: convert_naive_datetimes [--from Europe/Berlin]",
      args -> (f = last(parse_flags(args)); println("Converted ", convert_naive_datetimes(; from_tz = get(f, "from", settings.TIME_ZONE)), " columns."))),
     ("makemessages", "Collect translatable strings: makemessages -l de [-l fr]", function (args)
@@ -216,6 +231,10 @@ for (n, h, f) in (
     ("help", "Show this message", cmd_help))
     COMMANDS[n] = (h, f)
 end
+# commands that belong to an optional built-in app (gone when it isn't installed)
+for (n, app) in (("createsuperuser", AUTH_APP), ("changepassword", AUTH_APP), ("clearsessions", SESSIONS_APP))
+    app.commands[n] = pop!(COMMANDS, n)
+end
 
 """
     execute_from_command_line(args=ARGS)
@@ -228,7 +247,7 @@ function execute_from_command_line(args = ARGS)
         return cmd_help(args)
     end
     cmd = args[1]
-    entry = get(COMMANDS, cmd, nothing)
+    entry = get(all_commands(), cmd, nothing)
     if entry === nothing
         println(stderr, "Unknown command: '$cmd'. Type 'julia --project manage.jl help' for usage.")
         return nothing
@@ -279,6 +298,8 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
             # For PostgreSQL: Pkg.add("LibPQ"), add `using LibPQ` to project.jl, then
             # DATABASE = "postgresql://user:password@localhost:5432/$name",
             DATABASE = joinpath(BASE_DIR, "db.sqlite3"),
+            # Your apps (`julia --project manage.jl startapp blog`) go here too, e.g. Blog.APP
+            INSTALLED_APPS = ["juango.admin", "juango.auth", "juango.contenttypes", "juango.sessions", "juango.messages"],
             MIGRATIONS_DIR = joinpath(BASE_DIR, "migrations"),
             ROOT_URLCONF = urlpatterns,
             TEMPLATE_DIRS = [joinpath(BASE_DIR, "templates")],
@@ -375,4 +396,106 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
       julia --project manage.jl runserver
     """)
     root
+end
+
+# --- startapp ----------------------------------------------------------------------------------------
+
+"""
+    startapp(name; dir=pwd()) -> path
+
+Create an app skeleton in `dir/name`: a module `Name` (in `Name.jl`) with `const APP`,
+models, admin, views and URLs, and `templates/name/`, `static/name/` and `migrations/`.
+"""
+function startapp(name::AbstractString; dir = pwd())
+    occursin(r"^[a-z_][a-z0-9_]*$", name) || error("'$name' is not a valid app name (use lowercase letters, digits, underscores).")
+    root = joinpath(dir, name)
+    ispath(root) && error("'$root' already exists")
+    M = join(uppercasefirst.(split(name, '_'; keepempty = false)))
+    files = Dict(
+        "$M.jl" => """
+        # The $name app. To install it, in project.jl:
+        #     include(joinpath(BASE_DIR, "$name", "$M.jl")); using .$M
+        # then add $M.APP to INSTALLED_APPS and route to it with
+        #     path("$name/", include_urls($M.APP))
+        module $M
+
+        using Juango
+        using Dates
+
+        const APP = App("$name"; mod = @__MODULE__, path = @__DIR__, urls = () -> urlpatterns)
+
+        include("models.jl")
+        include("admin.jl")
+        include("views.jl")
+        include("urls.jl")
+
+        end
+        """,
+        "models.jl" => """
+        # Models here get the label "$name" (e.g. $name.Item); their migrations go in migrations/:
+        #     julia --project manage.jl makemigrations $name
+        #
+        # @model struct Item
+        #     name = CharField(max_length = 100)
+        # end
+        """,
+        "admin.jl" => "# Admin.register!(Item; list_display = [:name])\n",
+        "views.jl" => """
+        index(req) = render(req, "$name/index.html", Dict("app" => APP))
+        """,
+        "urls.jl" => """
+        const urlpatterns = [
+            path("", index; name = "index"),        # {% url '$name:index' %}
+        ]
+        """,
+        "templates/$name/index.html" => """
+        <h1>{{ app.verbose_name }}</h1>
+        <p>This page is <code>$name/templates/$name/index.html</code>.</p>
+        """,
+        "static/$name/.gitkeep" => "",
+        "migrations/.gitkeep" => "",
+        "tests.jl" => """
+        using Test
+        @testset "$name" begin
+            @test get(Client(), reverse_url("$name:index")).status == 200
+        end
+        """,
+    )
+    for (rel, content) in files
+        p = joinpath(root, rel)
+        mkpath(dirname(p))
+        write(p, content)
+    end
+    println("""Created app '$name' in $root
+
+    Install it: include("$name/$M.jl") and `using .$M` in project.jl, add $M.APP to INSTALLED_APPS,
+    and add path("$name/", include_urls($M.APP)) to urlpatterns.
+    """)
+    root
+end
+
+"""
+    collectstatic(; clear=false) -> Int
+
+Copy every static file (STATIC_DIRS first, then each installed app's `static/`; the first
+file found for a path wins) into STATIC_ROOT, for a web server to serve in production.
+"""
+function collectstatic(; clear = false, verbose = false)
+    root = string(settings.STATIC_ROOT)
+    isempty(root) && throw(ImproperlyConfigured("set STATIC_ROOT to the directory collectstatic should copy files to"))
+    clear && isdir(root) && foreach(p -> rm(joinpath(root, p); recursive = true), readdir(root))
+    seen = Set{String}()
+    for dir in static_dirs()
+        for (d, _, fs) in walkdir(dir), f in fs
+            src = joinpath(d, f)
+            rel = relpath(src, dir)
+            (rel in seen || f == ".gitkeep") && continue
+            push!(seen, rel)
+            dst = joinpath(root, rel)
+            mkpath(dirname(dst))
+            cp(src, dst; force = true)
+            verbose && println("  ", rel)
+        end
+    end
+    length(seen)
 end

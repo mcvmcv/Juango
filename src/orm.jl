@@ -133,9 +133,9 @@ const MODEL_LIST = Any[]
 
 """
 App a model belongs to for migrations: `Meta(app_label=...)`, else `\"juango\"` for Juango's
-built-in models and `\"project\"` for everything else.
+built-in models, the label of the `App` whose module defines it, or `\"project\"`.
 """
-default_app_label(T) = parentmodule(T) === (@__MODULE__) ? "juango" : "project"
+default_app_label(T) = parentmodule(T) === (@__MODULE__) ? "juango" : something(module_app_label(parentmodule(T)), "project")
 
 "Remove a model from the registry (mostly for tests that redefine models)."
 function unregister_model!(T::Type)

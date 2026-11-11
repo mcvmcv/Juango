@@ -27,6 +27,7 @@ const VERSION_STRING = "0.1.0"
 
 include("conf.jl")
 include("utils.jl")
+include("apps.jl")
 include("http.jl")
 include("urls.jl")
 include("template.jl")
@@ -130,7 +131,8 @@ export render, redirect, get_object_or_404, get_list_or_404, TemplateView, Redir
 export StreamingHttpResponse, FileResponse, EventStreamResponse, sse_event, sse_comment, websocket, WebSocketView,
        ws_send, ws_receive, ws_close, ws_isopen, is_streaming
 export runserver, handle_request, Client, post, request, force_login!, execute_from_command_line,
-       startproject
+       startproject, startapp, collectstatic
+export App, installed_apps, is_installed, get_app, get_model, model_label, app_models, static_dirs
 export Admin
 
 function __init__()

@@ -680,6 +680,7 @@ end
 URL patterns for the admin, namespaced `admin`: `path("admin/", Admin.urls())`.
 """
 function urls()
+    Juango.require_app("admin", "Admin.urls()")
     s(v) = staff_member_required(v)
     include_urls([
         path("", s(index); name = "index"),

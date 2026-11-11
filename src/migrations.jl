@@ -290,12 +290,15 @@ function migration_dir(app::AbstractString)
     haskey(mm, app) && return string(mm[app])
     app == "juango" && return BUILTIN_DIR
     app == "project" && return string(settings.MIGRATIONS_DIR)
+    a = get(Juango.APP_DEFS, app, nothing)                          # an app's own migrations/ folder
+    a === nothing || a.path === nothing || return joinpath(a.path, "migrations")
     nothing
 end
 
 "Every app that owns models or has a configured migration directory."
 known_apps() = sort(unique(vcat(["juango"], [modelmeta(T).app for T in all_models()],
-                                collect(String, keys(settings.MIGRATION_MODULES)))))
+                                collect(String, keys(settings.MIGRATION_MODULES)),
+                                [a.label for a in Juango.installed_apps() if a.path !== nothing])))
 
 const FILE_RE = r"^(\d{4})_([A-Za-z0-9_]+)\.jl$"
 

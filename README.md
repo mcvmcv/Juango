@@ -285,6 +285,36 @@ Computed attributes for templates (and `obj.name` in Julia) use `tattr`:
 Juango.tattr(p::Post, ::Val{:summary}) = first(p.body, 100)
 ```
 
+### Apps
+
+An app bundles models, views, URLs, templates, static files, translations, migrations and management commands, so a project can install it as a unit. `julia --project manage.jl startapp blog` creates one:
+
+```
+blog/
+  Blog.jl          module Blog; const APP = App("blog"; mod = @__MODULE__, path = @__DIR__, urls = () -> urlpatterns)
+  models.jl  admin.jl  views.jl  urls.jl  tests.jl
+  templates/blog/  static/blog/  migrations/
+```
+
+Install it in `project.jl` and the settings:
+
+```julia
+include(joinpath(BASE_DIR, "blog", "Blog.jl")); using .Blog
+
+configure!(INSTALLED_APPS = ["juango.admin", "juango.auth", "juango.contenttypes", "juango.sessions",
+                             "juango.messages", Blog.APP], ...)
+urlpatterns = [path("blog/", include_urls(Blog.APP)), ...]     # namespaced: {% url 'blog:index' %}
+```
+
+- **Models** defined in the app's module get its label: `model_label(Blog.Post) == "blog.Post"` and `get_model("blog.post")`. The label also applies to content types and permission names (`blog.add_post`).
+- **Migrations** go in `blog/migrations/`. `makemigrations blog` writes them there, and plain `makemigrations` covers the project and every installed app.
+- **Templates, static files and translations** are found in each app's `templates/`, `static/` and `locale/`, after the project's own directories. Set `APP_DIRS = false` to turn this off. `collectstatic` copies every static file into `STATIC_ROOT` for production.
+- **`ready`** (`App(...; ready = () -> connect!(post_save, ...))`) runs once, when the app is installed. Use it to connect signals.
+- **Commands**: `App(...; commands = Dict("import_posts" => ("Import posts from a feed", args -> ...)))` adds `manage.jl import_posts`.
+- **`requires`** lists other apps that must be installed. `manage.jl check` reports any that are missing.
+
+Juango's own features are apps too: `juango.admin`, `juango.auth`, `juango.contenttypes`, `juango.sessions` and `juango.messages`. A project can leave any of them out, which removes that app's URLs (`Admin.urls()` and `auth_urls()` refuse to run), commands (`createsuperuser`, `changepassword`, `clearsessions`) and dependency checks. Their models stay in one `juango` migration history, so their tables are created anyway. `installed_apps()`, `is_installed("blog")`, `get_app("blog")` and `app_models("blog")` query the registry.
+
 ### Migrations
 
 Migrations are versioned, reviewable files that move the database schema forwards and backwards:
@@ -778,14 +808,14 @@ r, n = count_queries(() -> get(c, "/posts/"))
 
 ## Settings
 
-Set them with `configure!(...)` and read them with `settings.NAME`. The main ones: `DEBUG`, `SECRET_KEY`, `DATABASE` (a SQLite path, `":memory:"`, a `scheme://` URL, or a backend instance), `ROOT_URLCONF`, `TEMPLATE_DIRS`, `STATIC_URL`, `STATIC_DIRS`, `ALLOWED_HOSTS`, `MIDDLEWARE`, `CONTEXT_PROCESSORS`, `LOGIN_URL`, `LOGIN_REDIRECT_URL`, `APPEND_SLASH`, `SESSION_COOKIE_AGE`, `PASSWORD_ITERATIONS`, `SQL_DEBUG`. Any extra keyword becomes a custom setting.
+Set them with `configure!(...)` and read them with `settings.NAME`. The main ones: `DEBUG`, `SECRET_KEY`, `DATABASE` (a SQLite path, `":memory:"`, a `scheme://` URL, or a backend instance), `INSTALLED_APPS`, `APP_DIRS`, `ROOT_URLCONF`, `TEMPLATE_DIRS`, `STATIC_URL`, `STATIC_DIRS`, `STATIC_ROOT`, `ALLOWED_HOSTS`, `MIDDLEWARE`, `CONTEXT_PROCESSORS`, `LOGIN_URL`, `LOGIN_REDIRECT_URL`, `APPEND_SLASH`, `SESSION_COOKIE_AGE`, `PASSWORD_ITERATIONS`, `SQL_DEBUG`. Any extra keyword becomes a custom setting.
 
 ## Differences from Django (current limitations)
 
 - **Migrations can't be squashed yet.** Migration files describe tables and columns, and there are no historical model classes as in Django, so data migrations use raw SQL or today's models.
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
 - **ORM features not yet built:** symmetrical self-referential many-to-many, filtering on window functions, and `select_related` into a model that inherits from another table (use `prefetch_related`).
-- No `INSTALLED_APPS`/app registry. A project is a set of Julia files you `include`, as in the `startproject` layout.
+- Built-in models are labelled `juango.User`, `juango.Group` and so on, not `auth.User`. They share one migration history, so leaving out a built-in app doesn't remove its tables.
 - `runserver` is HTTP.jl's server. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and set `SESSION_COOKIE_SECURE`/`CSRF_COOKIE_SECURE`.
 
 ## Layout
@@ -804,6 +834,7 @@ src/
   handler.jl     request pipeline        admin.jl     the admin
   server.jl      HTTP server             management.jl  CLI, startproject
   streaming.jl   streaming, SSE, WebSockets
+  apps.jl        App, INSTALLED_APPS
   testclient.jl  test Client             templates/   built-in admin templates
 test/runtests.jl                          examples/blog/  complete example app
 ```

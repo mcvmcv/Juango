@@ -11,10 +11,10 @@ const MIME_TYPES = Dict(
     ".wasm" => "application/wasm", ".xml" => "application/xml",
 )
 
-"Serve a file from `settings.STATIC_DIRS` (used by `runserver` when `DEBUG`)."
+"Serve a file from STATIC_DIRS or an app's `static/` (used by `runserver` when `DEBUG`)."
 function serve_static(req::Request)
     rel = req.path[ncodeunits(settings.STATIC_URL)+1:end]
-    for dir in settings.STATIC_DIRS
+    for dir in static_dirs()
         root = normpath(abspath(dir))
         p = normpath(joinpath(root, rel))
         (startswith(p, root) && isfile(p)) || continue
@@ -75,7 +75,7 @@ function handle_request_inner(req::Request)
         if settings.DEBUG && !isempty(string(settings.MEDIA_ROOT)) && startswith(req.path, settings.MEDIA_URL)
             return serve_media(req)
         end
-        if settings.DEBUG && !isempty(settings.STATIC_DIRS) && startswith(req.path, settings.STATIC_URL)
+        if settings.DEBUG && startswith(req.path, settings.STATIC_URL) && !isempty(static_dirs())
             return serve_static(req)
         end
         host_allowed(req) || throw(BadRequest("Invalid HTTP_HOST header: '$(get_host(req))'. You may need to add it to ALLOWED_HOSTS."))

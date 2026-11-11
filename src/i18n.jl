@@ -254,7 +254,6 @@ push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> empty!(CATALOGS), CATALOG_LOCK))
 reload_translations!() = lock(() -> empty!(CATALOGS), CATALOG_LOCK)
 
 locale_dirs() = vcat(String[string(p) for p in settings.LOCALE_PATHS], app_locale_dirs(), [BUILTIN_LOCALE_DIR])
-app_locale_dirs() = String[]       # filled in by the app registry
 
 function load_catalog_file(dir, loc)
     base = joinpath(dir, loc, "LC_MESSAGES", "juango")

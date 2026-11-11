@@ -16,6 +16,9 @@ function default_settings()
         :SECRET_KEY => "juango-insecure-change-me-in-production",
         :DATABASE => "db.sqlite3",
         :ROOT_URLCONF => Any[],
+        :INSTALLED_APPS => default_installed_apps(),
+        :APP_DIRS => true,
+        :STATIC_ROOT => "",
         :TEMPLATE_DIRS => String[],
         :STATIC_URL => "/static/",
         :STATIC_DIRS => String[],
@@ -102,6 +105,7 @@ function configure!(; kwargs...)
         SETTINGS[k] = v
     end
     foreach(h -> h(), SETTINGS_CHANGED_HOOKS)
+    haskey(kwargs, :INSTALLED_APPS) && installed_apps()       # fail early, and run the apps' ready hooks
     nothing
 end
 

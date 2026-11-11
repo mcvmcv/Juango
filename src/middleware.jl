@@ -189,3 +189,5 @@ cp_messages(req) = Dict("messages" => LazyMessages(req, nothing))
 cp_static(req) = Dict("STATIC_URL" => settings.STATIC_URL, "DEBUG" => settings.DEBUG)
 
 tattr(req::Request, ::Val{:get_full_path}) = full_path(req)
+
+push!(MIDDLEWARE_APPS, SessionMiddleware => "sessions", AuthenticationMiddleware => "auth")

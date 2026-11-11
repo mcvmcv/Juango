@@ -420,7 +420,8 @@ const TEMPLATE_CACHE = Dict{String,Tuple{Float64,Template}}()
 const TEMPLATE_LOCK = ReentrantLock()
 push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> empty!(TEMPLATE_CACHE), TEMPLATE_LOCK))
 
-template_dirs() = vcat(String[abspath(d) for d in settings.TEMPLATE_DIRS], [BUILTIN_TEMPLATE_DIR])
+"Where templates are looked up: TEMPLATE_DIRS, each installed app's `templates/` (APP_DIRS), Juango's own."
+template_dirs() = vcat(String[abspath(d) for d in settings.TEMPLATE_DIRS], app_dirs("templates"), [BUILTIN_TEMPLATE_DIR])
 
 function find_template(name::AbstractString)
     tried = String[]
