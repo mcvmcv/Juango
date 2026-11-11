@@ -294,12 +294,24 @@ function rewrite_placeholders(b::DatabaseBackend, sql::AbstractString)
 end
 
 # --- connection state ---------------------------------------------------------------------
+#
+# Backends that support pooling (PostgreSQL, MySQL) keep a pool of connections: a statement
+# borrows one and gives it back, and a transaction keeps one for its whole duration, so tasks
+# run queries in parallel and one task's transaction is invisible to the others until it
+# commits. SQLite keeps a single connection behind a lock (one writer at a time anyway).
 
 const DB_LOCK = ReentrantLock()
 const DB_BACKEND = Ref{Union{Nothing,DatabaseBackend}}(nothing)
 const DB_SETTING = Ref{Any}(nothing)
-const DB_CONN = Ref{Any}(nothing)
-const ATOMIC_DEPTH = Ref(0)
+const DB_CONN = Ref{Any}(nothing)        # the single connection of non-pooled backends
+const ATOMIC_DEPTH = Ref(0)              # transaction depth of non-pooled backends
+
+"Whether the backend uses a connection pool (otherwise one shared connection)."
+supports_pooling(::DatabaseBackend) = false
+"Cheap local check that a connection is still open (no round trip)."
+connection_usable(::DatabaseBackend, conn) = true
+"A round trip to check a connection works (before reusing one that sat idle)."
+ping(::DatabaseBackend, conn) = true
 
 "The backend selected by `settings.DATABASE` (no connection is opened)."
 function backend()
@@ -314,7 +326,104 @@ function backend()
     end
 end
 
-"Close the current connection (a new one opens on the next query)."
+mutable struct PooledConnection
+    conn::Any
+    created::Float64
+    last_used::Float64
+end
+
+mutable struct ConnectionPool
+    backend::DatabaseBackend
+    idle::Vector{PooledConnection}
+    total::Int
+    lock::ReentrantLock
+end
+const POOL = Ref{Union{Nothing,ConnectionPool}}(nothing)
+
+struct PoolTimeout <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::PoolTimeout) = print(io, "PoolTimeout: ", e.msg)
+
+"Per-task database state for pooled backends: the connection a transaction holds, and its depth."
+mutable struct TaskDB
+    conn::Union{Nothing,PooledConnection}
+    depth::Int
+end
+task_db() = get!(() -> TaskDB(nothing, 0), task_local_storage(), :juango_db)::TaskDB
+
+function pool(b::DatabaseBackend)
+    lock(DB_LOCK) do
+        (POOL[] === nothing || POOL[].backend !== b) && (POOL[] = ConnectionPool(b, PooledConnection[], 0, ReentrantLock()))
+        POOL[]
+    end
+end
+
+expired(pc::PooledConnection) = (age = settings.CONN_MAX_AGE; age !== nothing && time() - pc.last_used > age)
+discard(p::ConnectionPool, pc::PooledConnection) =
+    (try close_connection(p.backend, pc.conn) catch end; lock(() -> (p.total -= 1), p.lock); nothing)
+
+"Borrow a connection, waiting up to DATABASE_POOL_TIMEOUT seconds for one to be free."
+function checkout(b::DatabaseBackend)
+    p = pool(b)
+    deadline = time() + settings.DATABASE_POOL_TIMEOUT
+    while true
+        pc = nothing
+        create = false
+        lock(p.lock) do
+            while !isempty(p.idle) && p.total > settings.DATABASE_POOL_SIZE     # the pool was made smaller
+                try close_connection(b, popfirst!(p.idle).conn) catch end
+                p.total -= 1
+            end
+            while pc === nothing && !isempty(p.idle)
+                c = pop!(p.idle)
+                if expired(c)
+                    try close_connection(b, c.conn) catch end
+                    p.total -= 1
+                else
+                    pc = c
+                end
+            end
+            if pc === nothing && p.total < settings.DATABASE_POOL_SIZE
+                p.total += 1
+                create = true
+            end
+        end
+        if pc !== nothing
+            # health check: a connection idle for a while may have been dropped by the server
+            healthy = connection_usable(b, pc.conn) &&
+                      (!settings.CONN_HEALTH_CHECKS || time() - pc.last_used < 1 || ping(b, pc.conn))
+            healthy && return pc
+            discard(p, pc)                     # broken (server restarted?): drop it and try again
+            continue
+        end
+        if create
+            try
+                return PooledConnection(open_connection(b), time(), time())
+            catch
+                lock(() -> (p.total -= 1), p.lock)
+                rethrow()
+            end
+        end
+        time() > deadline && throw(PoolTimeout("no database connection became free within $(settings.DATABASE_POOL_TIMEOUT) seconds " *
+                                               "(DATABASE_POOL_SIZE = $(settings.DATABASE_POOL_SIZE)); is a transaction being held open?"))
+        sleep(0.005)
+    end
+end
+
+"Return a borrowed connection (closing it if CONN_MAX_AGE is 0 or it no longer works)."
+function checkin(b::DatabaseBackend, pc::PooledConnection)
+    p = pool(b)
+    pc.last_used = time()
+    if settings.CONN_MAX_AGE == 0 || p.total > settings.DATABASE_POOL_SIZE || !connection_usable(b, pc.conn)
+        discard(p, pc)
+    else
+        lock(() -> push!(p.idle, pc), p.lock)
+    end
+    nothing
+end
+
+"Close every connection (a new one opens on the next query)."
 function close_connection!()
     lock(DB_LOCK) do
         if DB_CONN[] !== nothing && DB_BACKEND[] !== nothing
@@ -325,21 +434,35 @@ function close_connection!()
         end
         DB_CONN[] = nothing
         ATOMIC_DEPTH[] = 0
+        if POOL[] !== nothing
+            p = POOL[]
+            lock(p.lock) do
+                foreach(pc -> (try close_connection(p.backend, pc.conn) catch end), p.idle)
+                p.total -= length(p.idle)
+                empty!(p.idle)
+            end
+            POOL[] = nothing
+        end
     end
 end
 push!(SETTINGS_CHANGED_HOOKS, () -> (DB_BACKEND[] !== nothing && !isequal(DB_SETTING[], settings.DATABASE)) &&
                                     (close_connection!(); DB_BACKEND[] = nothing))
 
-"The driver connection for the current backend, opened on first use."
+"Connection pool statistics: `(size, in_use, idle)`."
+pool_status() = (p = POOL[]; p === nothing ? (size = settings.DATABASE_POOL_SIZE, in_use = 0, idle = 0) :
+                 lock(() -> (size = settings.DATABASE_POOL_SIZE, in_use = p.total - length(p.idle), idle = length(p.idle)), p.lock))
+
+"The shared driver connection of a non-pooled backend (SQLite), opened on first use."
 function connection()
     lock(DB_LOCK) do
         b = backend()
+        supports_pooling(b) && error("connection() is for single-connection backends; pooled backends lend connections per statement")
         DB_CONN[] === nothing && (DB_CONN[] = open_connection(b))
         DB_CONN[]
     end
 end
 
-const QUERY_COUNT = Ref(0)
+const QUERY_COUNT = Threads.Atomic{Int}(0)
 
 """
     count_queries(f) -> (result, n)
@@ -347,26 +470,33 @@ const QUERY_COUNT = Ref(0)
 Run `f()` and count the SQL statements it executed (useful for catching N+1 queries in tests).
 """
 function count_queries(f)
-    lock(DB_LOCK) do
-        n0 = QUERY_COUNT[]
-        r = f()
-        r, QUERY_COUNT[] - n0
+    n0 = QUERY_COUNT[]
+    r = f()
+    r, QUERY_COUNT[] - n0
+end
+
+function run_on(f, b, conn, sql, params)
+    Threads.atomic_add!(QUERY_COUNT, 1)
+    settings.SQL_DEBUG && @info "SQL" sql params
+    ps = Any[adapt_param(b, p) for p in params]
+    try
+        f(b, conn, rewrite_placeholders(b, sql), ps)
+    catch e
+        e2 = translate_error(b, e)
+        e2 === e ? rethrow() : throw(e2)
     end
 end
 
 function run_driver(f, sql, params)
-    lock(DB_LOCK) do
-        b = backend()
-        conn = connection()
-        QUERY_COUNT[] += 1
-        settings.SQL_DEBUG && @info "SQL" sql params
-        ps = Any[adapt_param(b, p) for p in params]
-        try
-            f(b, conn, rewrite_placeholders(b, sql), ps)
-        catch e
-            e2 = translate_error(b, e)
-            e2 === e ? rethrow() : throw(e2)
-        end
+    b = backend()
+    supports_pooling(b) || return lock(() -> run_on(f, b, connection(), sql, params), DB_LOCK)
+    st = task_db()
+    st.conn === nothing || return run_on(f, b, st.conn.conn, sql, params)      # inside this task's transaction
+    pc = checkout(b)
+    try
+        run_on(f, b, pc.conn, sql, params)
+    finally
+        checkin(b, pc)
     end
 end
 
@@ -388,30 +518,49 @@ execute_insert(sql::AbstractString, params = Any[]) = run_driver(driver_insert_i
     atomic(f)
 
 Run `f()` inside a transaction (nested calls use savepoints). Any exception rolls
-back the changes and is rethrown.
+back the changes and is rethrown. On pooled backends the transaction keeps one
+connection for the current task; other tasks don't see its changes until it commits.
 
     atomic() do
         save!(order); save!(invoice)
     end
 """
 function atomic(f)
-    lock(DB_LOCK) do
-        b = backend()
-        depth = ATOMIC_DEPTH[]
-        sp = "juango_sp_$(depth)"
-        execute(depth == 0 ? begin_sql(b) : savepoint_sql(b, sp))
-        ATOMIC_DEPTH[] = depth + 1
+    b = backend()
+    supports_pooling(b) || return lock(() -> transaction(f, b, () -> ATOMIC_DEPTH[], d -> (ATOMIC_DEPTH[] = d)), DB_LOCK)
+    st = task_db()
+    outer = st.depth == 0
+    outer && (st.conn = checkout(b))
+    try
+        transaction(f, b, () -> st.depth, d -> (st.depth = d))
+    finally
+        if outer
+            pc = st.conn
+            st.conn = nothing
+            st.depth = 0
+            pc === nothing || checkin(b, pc)
+        end
+    end
+end
+
+function transaction(f, b, getdepth, setdepth)
+    depth = getdepth()
+    sp = "juango_sp_$(depth)"
+    execute(depth == 0 ? begin_sql(b) : savepoint_sql(b, sp))
+    setdepth(depth + 1)
+    try
+        r = f()
+        setdepth(depth)
+        execute(depth == 0 ? commit_sql(b) : release_savepoint_sql(b, sp))
+        r
+    catch
+        setdepth(depth)
         try
-            r = f()
-            ATOMIC_DEPTH[] = depth
-            execute(depth == 0 ? commit_sql(b) : release_savepoint_sql(b, sp))
-            r
-        catch
-            ATOMIC_DEPTH[] = depth
             execute(depth == 0 ? rollback_sql(b) : rollback_savepoint_sql(b, sp))
             depth == 0 || execute(release_savepoint_sql(b, sp))
-            rethrow()
+        catch
         end
+        rethrow()
     end
 end
 

@@ -688,11 +688,14 @@ end
 end
 
 @testset "server roundtrip" begin
-    server = runserver("127.0.0.1", 8765; block = false, quiet = true)
+    port = let s = Juango.Sockets.listen(Juango.Sockets.localhost, 0)       # a free port
+        p = Int(Juango.Sockets.getsockname(s)[2]); close(s); p
+    end
+    server = runserver("127.0.0.1", port; block = false, quiet = true)
     try
-        r = Juango.HTTP.get("http://127.0.0.1:8765/articles/"; status_exception = false)
+        r = Juango.HTTP.get("http://127.0.0.1:$port/articles/"; status_exception = false)
         @test r.status == 200
-        r = Juango.HTTP.get("http://127.0.0.1:8765/nope/"; status_exception = false)
+        r = Juango.HTTP.get("http://127.0.0.1:$port/nope/"; status_exception = false)
         @test r.status == 404
     finally
         close(server)
@@ -2327,6 +2330,90 @@ end
         Juango.execute("DROP TABLE " * Juango.qname("tz_event"))
     end
     @test !(get(Article; title = "tz").created isa TZ.ZonedDateTime)      # naive again without USE_TZ
+end
+
+@testset "connection pool" begin
+    b = Juango.backend()
+    if !Juango.supports_pooling(b)
+        # SQLite: one shared connection; concurrent tasks still work, one statement at a time
+        @sync for i in 1:5
+            @async create(Topic; name = "pool-sqlite-$i")
+        end
+        @test count(filter(Topic; name__startswith = "pool-sqlite-")) == 5
+        @test pool_status().in_use == 0
+    else
+        old = (settings.DATABASE_POOL_SIZE, settings.DATABASE_POOL_TIMEOUT, settings.CONN_MAX_AGE)
+        sleep_sql = IS_POSTGRES ? "SELECT pg_sleep(0.4)" : "SELECT SLEEP(0.4)"
+        try
+            configure!(DATABASE_POOL_SIZE = 4)
+            # queries in different tasks run at the same time
+            t0 = time()
+            @sync for i in 1:4
+                @async Juango.execute(sleep_sql)
+            end
+            @test time() - t0 < 1.2                                        # one after another would take 1.6 s
+            @test pool_status().in_use == 0 && pool_status().idle >= 2
+
+            # a transaction keeps its connection; other tasks don't see it until it commits
+            started, go_on = Channel(1), Channel(1)
+            tx = @async atomic() do
+                create(Topic; name = "pool-tx")
+                put!(started, true)
+                take!(go_on)
+            end
+            take!(started)
+            seen_during = exists(filter(Topic; name = "pool-tx"))
+            @test pool_status().in_use == 1
+            put!(go_on, true); wait(tx)
+            @test !seen_during && exists(filter(Topic; name = "pool-tx"))
+            failing = @async try
+                atomic() do
+                    create(Topic; name = "pool-rolled-back")
+                    error("stop")
+                end
+            catch
+            end
+            wait(failing)
+            @test !exists(filter(Topic; name = "pool-rolled-back")) && pool_status().in_use == 0
+
+            # exhaustion times out with a clear error
+            configure!(DATABASE_POOL_SIZE = 1, DATABASE_POOL_TIMEOUT = 0.3)
+            hold, release = Channel(1), Channel(1)
+            holder = @async atomic(() -> (put!(hold, true); take!(release)))
+            take!(hold)
+            t0 = time()
+            err = try Juango.execute("SELECT 1"); nothing catch e; e end
+            @test err isa PoolTimeout && time() - t0 < 2 && occursin("DATABASE_POOL_SIZE", sprint(showerror, err))
+            put!(release, true); wait(holder)
+            @test Juango.execute("SELECT 1 AS one")[1][:one] == 1
+
+            # broken connections are noticed and replaced
+            configure!(DATABASE_POOL_SIZE = 4, DATABASE_POOL_TIMEOUT = 30)
+            @sync for i in 1:2
+                @async Juango.execute("SELECT 1")
+            end
+            if IS_POSTGRES
+                other = LibPQ.Connection(TEST_DATABASE)
+                LibPQ.execute(other, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()")
+                close(other)
+            else
+                p = Juango.mysql_params(TEST_DATABASE)
+                other = MySQL.DBInterface.connect(MySQL.Connection, p.host, p.user, p.password; port = p.port, db = p.db)
+                ids = [r[1] for r in MySQL.DBInterface.execute(other, "SELECT id FROM information_schema.processlist WHERE db = DATABASE() AND id <> CONNECTION_ID()")]
+                foreach(id -> MySQL.DBInterface.execute(other, "KILL CONNECTION $id"), ids)
+                MySQL.DBInterface.close!(other)
+            end
+            sleep(1.2)                                                       # idle long enough to be health-checked
+            @test Juango.execute("SELECT 1 AS one")[1][:one] == 1 && count(filter(Topic; name = "pool-tx")) == 1
+
+            # CONN_MAX_AGE = 0 closes connections after use
+            configure!(CONN_MAX_AGE = 0)
+            Juango.execute("SELECT 1")
+            @test pool_status().idle == 0
+        finally
+            configure!(DATABASE_POOL_SIZE = old[1], DATABASE_POOL_TIMEOUT = old[2], CONN_MAX_AGE = old[3])
+        end
+    end
 end
 
 @testset "database backends" begin

@@ -34,6 +34,11 @@ function open_connection(b::PostgresBackend)
     pg_connect(b.url)
 end
 close_connection(::PostgresBackend, conn) = pg_close(conn)
+supports_pooling(::PostgresBackend) = true
+connection_usable(::PostgresBackend, conn) = pg_usable(conn)
+ping(::PostgresBackend, conn) = pg_ping(conn)
+function pg_usable end
+function pg_ping end
 
 driver_rows(::PostgresBackend, conn, sql, params) = pg_exec(conn, sql, params)[1]
 driver_rowcount(::PostgresBackend, conn, sql, params) = pg_exec(conn, sql, params)[2]

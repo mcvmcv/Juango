@@ -17,6 +17,15 @@ function Juango.mysql_connect(p)
     conn
 end
 Juango.mysql_close(conn) = DBI.close!(conn)
+Juango.mysql_usable(conn) = isopen(conn)
+function Juango.mysql_ping(conn)
+    isopen(conn) || return false
+    try
+        DBI.execute(conn, "SELECT 1"); true
+    catch
+        false
+    end
+end
 
 # MySQL.jl 2.x returns its own string/bytes/decimal/timestamp types; turn them into plain values.
 plain(::Missing) = nothing

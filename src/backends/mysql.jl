@@ -38,6 +38,11 @@ function open_connection(b::MySQLBackend)
     mysql_connect(mysql_params(b.url))
 end
 close_connection(::MySQLBackend, conn) = mysql_close(conn)
+supports_pooling(::MySQLBackend) = true
+connection_usable(::MySQLBackend, conn) = mysql_usable(conn)
+ping(::MySQLBackend, conn) = mysql_ping(conn)
+function mysql_usable end
+function mysql_ping end
 driver_rows(::MySQLBackend, conn, sql, params) = mysql_exec(conn, sql, params)[1]
 driver_rowcount(::MySQLBackend, conn, sql, params) = mysql_exec(conn, sql, params)[2]
 driver_insert_id(::MySQLBackend, conn, sql, params) = Int(mysql_exec(conn, sql, params)[3])

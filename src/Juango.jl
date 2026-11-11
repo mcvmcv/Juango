@@ -106,7 +106,7 @@ export Model, @model, @abstract_model, OneToOneField, Index, GinIndex, Field, Ma
        FloatField, BooleanField, DateTimeField, DateField, ForeignKey, Q, QuerySet, objects,
        exclude, order_by, exists, values_list, update!, create, get_or_create, update_or_create,
        save!, refresh!, full_clean, aggregate, none, migrate, makemigrations, showmigrations, sqlmigrate,
-       atomic, IntegrityError, select_related, prefetch_related, Prefetch, count_queries, DoesNotExist,
+       atomic, IntegrityError, PoolTimeout, pool_status, select_related, prefetch_related, Prefetch, count_queries, DoesNotExist,
        annotate, F, Value, Count, Sum, Avg, Min, Max, Lower, Upper, Length, Coalesce, Concat, Cast, Now,
        ExtractYear, ExtractMonth, ExtractDay, When, Case, OuterRef, Subquery, Exists, Window, RowNumber,
        Rank, DenseRank, Lag, Lead,

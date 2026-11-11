@@ -356,6 +356,19 @@ Each connection sets `sql_mode` (`ANSI_QUOTES`, `PIPES_AS_CONCAT`, `NO_BACKSLASH
 - **No full-text search expressions.** The `__search` lookup matches words instead, and GIN indexes are skipped.
 - **Tested on MariaDB 11.** MySQL 8 should work, but `DROP INDEX IF EXISTS`, used by some migrations, is MariaDB-only.
 
+#### Connections
+
+PostgreSQL and MySQL use a connection pool, and SQLite uses one shared connection.
+
+- **Sharing.** A query borrows a connection and returns it. Queries from different tasks run at the same time, because the Postgres driver waits cooperatively and MySQL.jl uses Julia sockets.
+- **Transactions.** `atomic` keeps one connection for its task until the transaction ends, so other tasks don't see its changes until it commits. Tasks you start inside a transaction get their own connections.
+- **Settings:**
+  - `DATABASE_POOL_SIZE` (10): connections per process.
+  - `DATABASE_POOL_TIMEOUT` (30 s): how long to wait for a free connection before raising `PoolTimeout`.
+  - `CONN_MAX_AGE` (600 s): close connections idle longer than this (`0` closes after every use, `nothing` keeps them).
+  - `CONN_HEALTH_CHECKS` (true): ping a connection that sat idle before reusing it, so connections dropped by a server restart are replaced.
+- **Monitoring.** `pool_status()` reports the pool's size and how many connections are in use and idle.
+
 #### PostgreSQL
 
 PostgreSQL goes through [LibPQ.jl](https://github.com/JuliaDatabases/LibPQ.jl). LibPQ is an optional dependency, so SQLite-only projects never install it. To use Postgres:
@@ -734,7 +747,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 ## Differences from Django (current limitations)
 
 - **Migrations can't be squashed yet.** Migration files describe tables and columns, and there are no historical model classes as in Django, so data migrations use raw SQL or today's models.
-- **SQLite, PostgreSQL and MySQL/MariaDB.** Each uses a single connection behind a lock; a connection pool is [#30](https://github.com/mcvmcv/Juango/issues/30).
+- **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
 - **ORM features not yet built:** symmetrical self-referential many-to-many, filtering on window functions, and `select_related` into a model that inherits from another table (use `prefetch_related`).
 - No `INSTALLED_APPS`/app registry. A project is a set of Julia files you `include`, as in the `startproject` layout.
 - File uploads: multipart fields are parsed, and uploaded files are exposed raw in `req.meta[:FILES]`. There is no `FileField`.
