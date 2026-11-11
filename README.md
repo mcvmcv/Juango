@@ -527,11 +527,46 @@ A WebSocket handshake goes through the middleware like any request, so `login_re
 
 ### Templates
 
-This is the Django template language. Tags: `if/elif/else` (with `and or not in == != < > <= >= is`), `for … empty` (with `forloop.*` and `reversed`), `extends`/`block` (with `block.super`), `include … with … only`, `with`, `url … as`, `csrf_token`, `static`, `cycle`, `firstof`, `now`, `comment`, `verbatim`, `spaceless`, `autoescape`, `load`.
+This is the Django template language. The tags:
 
-There are 40+ filters, including `date timesince default length join truncatechars truncatewords linebreaks linebreaksbr pluralize add yesno slugify floatformat urlize json_script safe escape …`. Add your own with `register_filter!("name", (value, arg) -> ...)`. Add custom tags with `register_tag!`.
+- `if/elif/else` (with `and or not in == != < > <= >= is`) and `for … empty` (with `forloop.*` and `reversed`)
+- `extends`/`block` (with `block.super`) and `include … with … only` (the name may be a variable)
+- `with`, `url … as`, `csrf_token`, `static`, `cycle`/`resetcycle`, `firstof`, `now`, `comment`, `verbatim`, `spaceless`, `autoescape`
+- `ifchanged`, `regroup … by … as`, `widthratio`, `templatetag`, `filter`, `lorem` and `debug`
+- `querystring` (the request's query string with changes: `{% querystring page=2 sort=None %}`)
+- `partialdef`/`partial`, plus the translation, time zone and cache tags
 
-Output is HTML-escaped unless you mark it safe (`mark_safe`, `|safe`).
+Partials are named fragments. Use them in place, or render one alone with `render(req, "page.html#row", ctx)` or `{% include "page.html#row" %}`, which suits htmx-style updates:
+
+```
+{% partialdef row %}<tr><td>{{ item.name }}</td></tr>{% endpartialdef %}
+{% for item in items %}{% partial row %}{% endfor %}
+```
+
+There are over 60 filters. Among them:
+
+- dates and times: `date time timesince timeuntil`
+- text: `default join length truncatechars truncatewords truncatechars_html truncatewords_html wordwrap center ljust rjust`
+- HTML: `linebreaks urlize urlizetrunc striptags unordered_list json_script safe escape escapejs`
+- lists and numbers: `dictsort slice pluralize add yesno slugify floatformat filesizeformat stringformat get_digit phone2numeric`
+
+Add your own with `register_filter!("name", (value, arg) -> ...)`.
+
+**Tag libraries** work like Django's `@register.simple_tag` and `@register.inclusion_tag`. Templates load them with `{% load name %}`:
+
+```julia
+lib = TagLibrary("shop")
+price(amount; currency = "€") = "$currency$(round(amount; digits = 2))"
+simple_tag!(price, lib, "price")                       # {% price item.cost currency="£" %}, {% price 3 as p %}
+inclusion_tag!(lib, "cart", "shop/cart.html"; takes_context = true) do ctx
+    Dict("items" => ctx["cart"].items)                 # {% cart %} renders shop/cart.html with this
+end
+filter!((v, _) -> round(Int, 100v), lib, "cents")      # library filters are available everywhere
+```
+
+`{% load price from shop %}` loads single tags. `tag!(lib, name, (parser, token) -> node)` adds a full custom tag, and so does `register_tag!` for every template.
+
+Output is HTML-escaped unless you mark it safe (`mark_safe`, `|safe`). A syntax error names the template file and line, and in DEBUG the error page shows the lines around it.
 
 ### Forms
 
@@ -865,6 +900,7 @@ src/
   http.jl        Request/HttpResponse    sessions.jl  DB-backed sessions
   urls.jl        path/resolve/reverse    auth.jl      User, hashing, login views
   template.jl    template language       middleware.jl  middleware, CSRF
+  templatetags.jl  more tags & filters, tag libraries, partials
   db.jl          backend interface       views.jl     shortcuts, generic views
   backends/      sqlite.jl, postgres.jl  ext/         LibPQ driver (optional)
   handler.jl     request pipeline        admin.jl     the admin

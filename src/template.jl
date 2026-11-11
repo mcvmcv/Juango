@@ -6,9 +6,15 @@
 #   {% url %} {% csrf_token %} {% with %} {% static %} {% cycle %} {% firstof %} {% now %}
 #   {% comment %} {% autoescape %} {% spaceless %} {% verbatim %} {# comments #}
 
-struct TemplateSyntaxError <: Exception
+"A template that can't be parsed. `template`, `origin` (its file), `line` and `source` say where."
+mutable struct TemplateSyntaxError <: Exception
     msg::String
+    template::Union{Nothing,String}
+    origin::Union{Nothing,String}
+    line::Int
+    source::Union{Nothing,String}
 end
+TemplateSyntaxError(msg::AbstractString) = TemplateSyntaxError(String(msg), nothing, nothing, 0, nothing)
 Base.showerror(io::IO, e::TemplateSyntaxError) = print(io, "TemplateSyntaxError: ", e.msg)
 struct TemplateDoesNotExist <: Exception
     name::String
@@ -306,6 +312,7 @@ mutable struct Parser
     pos::Int
     name::String
     current::Union{Nothing,Token}
+    extra::Dict{Symbol,Any}     # :origin, :source, :tags (from {% load %}), :partials
 end
 
 const TAGS = Dict{String,Function}()
@@ -319,8 +326,12 @@ to parse an enclosed block.
 """
 register_tag!(name, f) = (TAGS[string(name)] = f; nothing)
 
-tsyntax(p::Parser, msg) = throw(TemplateSyntaxError("$msg (in template '$(p.name)'" *
-                                                      (p.current === nothing ? ")" : ", line $(p.current.line))")))
+function tsyntax(p::Parser, msg)
+    origin = get(p.extra, :origin, nothing)
+    line = p.current === nothing ? 0 : p.current.line
+    where_ = "in template '$(p.name)'" * (origin === nothing || origin == p.name ? "" : " ($origin)") * (line == 0 ? "" : ", line $line")
+    throw(TemplateSyntaxError("$msg ($where_)", p.name, origin, line, get(p.extra, :source, nothing)))
+end
 
 "Parse nodes until one of the `until` block tags; returns `(nodes, end_token_contents)`."
 function parse_nodes(p::Parser, until::Vector{String} = String[])
@@ -344,6 +355,7 @@ function parse_nodes(p::Parser, until::Vector{String} = String[])
             cmd = first(split(t.contents))
             cmd in until && return nodes, t.contents
             handler = get(TAGS, cmd, nothing)
+            handler === nothing && (handler = get(get(p.extra, :tags, Dict{String,Function}()), cmd, nothing))
             handler === nothing && tsyntax(p, isempty(until) ? "invalid block tag '$cmd'" :
                                                "invalid block tag '$cmd', expected $(join(until, " or "))")
             node = try
@@ -359,7 +371,7 @@ function parse_nodes(p::Parser, until::Vector{String} = String[])
 end
 
 function Template(src::AbstractString; name = "<string>", origin = nothing)
-    p = Parser(tokenize(src), 1, name, nothing)
+    p = Parser(tokenize(src), 1, name, nothing, Dict{Symbol,Any}(:origin => origin, :source => src))
     nodes, _ = parse_nodes(p)
     Template(name, nodes, origin)
 end
@@ -444,6 +456,7 @@ isn't checked again.
 """
 const TEMPLATE_BY_NAME = Dict{String,Any}()
 function get_template(name::AbstractString)
+    occursin('#', name) && return partial_template(name)         # "page.html#partial"
     if !settings.TEMPLATE_CACHE_CHECK_MTIME
         t = lock(() -> get(TEMPLATE_BY_NAME, name, nothing), TEMPLATE_LOCK)
         t === nothing || return t
@@ -935,7 +948,7 @@ function render!(io::IO, n::StaticNode, ctx::Context)
     n.asvar === nothing ? write(io, escape_html(url)) : (ctx[n.asvar] = url)
 end
 
-tag_load(p, t) = nothing
+tag_load(p, t) = load_libraries!(p, t)       # templatetags.jl
 
 # --- comment / verbatim / spaceless / autoescape ----------------------------------------
 
@@ -1010,6 +1023,8 @@ end
 function render!(io::IO, n::CycleNode, ctx::Context)
     counters = get!(Dict{UInt,Int}, ctx.render_ctx, :cycles)
     k = objectid(n)
+    ctx.render_ctx[:last_cycle] = k                                   # for {% resetcycle %}
+    n.asvar === nothing || (get!(Dict{String,UInt}, ctx.render_ctx, :cycle_names)[n.asvar] = k)
     i = get(counters, k, 0)
     counters[k] = i + 1
     v = eval_fe(n.values[mod(i, length(n.values))+1], ctx)

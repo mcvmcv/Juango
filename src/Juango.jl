@@ -31,6 +31,7 @@ include("apps.jl")
 include("http.jl")
 include("urls.jl")
 include("template.jl")
+include("templatetags.jl")
 include("i18n.jl")
 include("signals.jl")
 include("db.jl")
@@ -80,7 +81,7 @@ export Request, HttpResponse, JsonResponse, HttpResponseRedirect, HttpResponsePe
 export path, re_path, include_urls, reverse_url, resolve
 # templates
 export Template, render_to_string, get_template, mark_safe, SafeString, register_filter!,
-       register_tag!, tattr, escape_html
+       register_tag!, tattr, escape_html, TagLibrary, simple_tag!, inclusion_tag!, tag!, TemplateSyntaxError
 # orm
 export GeometryField, PointField, LineStringField, PolygonField, MultiPointField, MultiLineStringField, MultiPolygonField,
        Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon, D, Distance, Area, GeoLength, AsGeoJSON,
