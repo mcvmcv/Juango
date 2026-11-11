@@ -183,7 +183,7 @@ end
 # --- context processors --------------------------------------------------------------------------
 
 cp_request(req) = Dict("request" => req)
-cp_auth(req) = Dict("user" => something(req.user, AnonymousUser()))
+cp_auth(req) = (u = something(req.user, AnonymousUser()); Dict("user" => u, "perms" => PermWrapper(u)))
 cp_csrf(req) = Dict("csrf_token" => get_csrf_token(req))
 cp_messages(req) = Dict("messages" => LazyMessages(req, nothing))
 cp_static(req) = Dict("STATIC_URL" => settings.STATIC_URL, "DEBUG" => settings.DEBUG)

@@ -1,14 +1,31 @@
 using Test
 using Juango
 using Dates
+const JSON = Juango.JSON
 import LibPQ    # loads the PostgreSQL driver extension
+import MySQL    # loads the MySQL/MariaDB driver extension
 
 # JUANGO_TEST_DATABASE picks the database: unset for in-memory SQLite, a SQLite path or
 # sqlite:/// URL, or a postgresql:// URL. For Postgres a fresh database juango_test_<pid>
 # is created on that server and dropped afterwards; the database in the URL is untouched.
 const TEST_DB_SETTING = get(ENV, "JUANGO_TEST_DATABASE", ":memory:")
 const IS_POSTGRES = occursin(r"^postgres(ql)?://"i, TEST_DB_SETTING)
-const TEST_DATABASE = if IS_POSTGRES
+const IS_MYSQL = occursin(r"^(mysql|mariadb)://"i, TEST_DB_SETTING)
+const TEST_DATABASE = if IS_MYSQL
+    name = "juango_test_$(getpid())"
+    p = Juango.mysql_params(TEST_DB_SETTING)
+    admin = MySQL.DBInterface.connect(MySQL.Connection, p.host, p.user, p.password; port = p.port)
+    MySQL.DBInterface.execute(admin, "DROP DATABASE IF EXISTS $name")
+    MySQL.DBInterface.execute(admin, "CREATE DATABASE $name CHARACTER SET utf8mb4")
+    MySQL.DBInterface.close!(admin)
+    atexit() do
+        Juango.close_connection!()
+        c = MySQL.DBInterface.connect(MySQL.Connection, p.host, p.user, p.password; port = p.port)
+        MySQL.DBInterface.execute(c, "DROP DATABASE IF EXISTS $name")
+        MySQL.DBInterface.close!(c)
+    end
+    replace(TEST_DB_SETTING, r"^((?:mysql|mariadb)://[^/?]*)(/[^?]*)?"i => SubstitutionString("\\1/$name"))
+elseif IS_POSTGRES
     name = "juango_test_$(getpid())"
     admin = LibPQ.Connection(TEST_DB_SETTING)
     LibPQ.execute(admin, "SET client_min_messages TO warning")
@@ -181,6 +198,11 @@ end
 Base.show(io::IO, t::Ticket) = print(io, t.name)
 @model struct Stub
     ticket = ForeignKey(:Ticket)
+end
+
+@model struct Memo
+    text = CharField(max_length = 50)
+    Meta(permissions = [("publish_memo", "Can publish memos")])
 end
 
 @model struct Locked
@@ -1282,15 +1304,194 @@ end
     @test only(st_["gadget"].indexes).method === :gin
 end
 
+@testset "permissions and groups" begin
+    @test exists(filter(Permission; codename = "change_article"))
+    p = get(Permission; codename = "change_article")
+    @test p.content_type.model == "article" && p.name == "Can change article" && string(p) == "project | article | Can change article"
+    @test perm_name(Article, :change) == "project.change_article"
+    @test exists(filter(Permission; codename = "publish_memo")) && exists(filter(Permission; codename = "view_memo"))
+    @test count(filter(Permission; codename__endswith = "_user")) == 4
+    perm(code) = get(Permission; codename = code)
+    fresh(u) = get(User; id = u.id)            # permissions are cached per user object
+
+    u = create_user("permy", "pw12345")
+    u.is_staff = true; save!(u)
+    @test !has_perm(u, "project.change_article") && isempty(get_all_permissions(u))
+    add!(u.user_permissions, perm("view_article"))
+    u = fresh(u)
+    @test has_perm(u, "project.view_article") && !has_perm(u, "project.change_article")
+    editors = create(Group; name = "editors")
+    add!(editors.permissions, perm("change_article"), perm("add_article"))
+    add!(u.groups, editors)
+    u = fresh(u)
+    @test has_perms(u, ["project.view_article", "project.change_article", "project.add_article"])
+    @test !has_perm(u, "project.delete_article") && !has_perm(u, "project.change_article"; obj = Article())
+    @test get_all_permissions(u) == Set(["project.view_article", "project.change_article", "project.add_article"])
+    @test has_module_perms(u, "project") && !has_module_perms(u, "juango")
+    @test [g.name for g in u.groups] == ["editors"] && [x.username for x in editors.user_set] == ["permy"]
+    root = get(User; username = "root")
+    @test has_perm(root, "project.delete_article") && has_perm(root, "anything.at_all") && has_module_perms(root, "juango")
+    off = create_user("offline", "pw12345"); off.is_superuser = true; off.is_active = false; save!(off)
+    @test !has_perm(off, "project.view_article")
+    @test !has_perm(Juango.AnonymousUser(), "project.view_article")
+
+    # permission_required
+    view = permission_required("project.add_article", "project.change_article")(req -> HttpResponse("ok"))
+    req(user) = (r = Request("GET", "/x"); r.user = user; r)
+    @test view(req(u)).status == 200
+    @test_throws PermissionDenied view(req(create_user("nobody", "pw12345")))
+    @test view(req(Juango.AnonymousUser())).status == 302
+    @test permission_required(r -> "x", "project.delete_article"; raise_exception = false)(req(u)).status == 302
+
+    # templates
+    tpl = "{% if perms.project.add_article %}A{% endif %}{% if perms.project.delete_article %}D{% endif %}" *
+          "{% if perms.project %}P{% endif %}{% if perms.juango %}J{% endif %}{% if \"project.view_article\" in perms %}V{% endif %}"
+    @test tr(tpl, Dict("perms" => Juango.PermWrapper(u))) == "APV"
+
+    # the admin follows permissions
+    c = Client()
+    force_login!(c, u)
+    r = get(c, "/admin/")
+    @test occursin("Articles", text(r)) && !occursin("Users", text(r))
+    @test get(c, "/admin/user/").status == 403
+    r = get(c, "/admin/article/")
+    @test r.status == 200 && occursin("Add article", text(r)) && !occursin("Delete selected", text(r))
+    a = create(Article; title = "perm-art", author = create(Author; name = "Perm Author"))
+    r = get(c, "/admin/article/$(a.id)/change/")
+    @test r.status == 200 && occursin("name=\"_save\"", text(r)) && !occursin("class=\"deletelink\"", text(r))
+    @test get(c, "/admin/article/$(a.id)/delete/").status == 403
+    @test post(c, "/admin/article/", Dict("action" => "delete_selected", "_selected_action" => string(a.id))).status == 403
+    @test exists(filter(Article; id = a.id))
+
+    viewer = create_user("viewer", "pw12345"); viewer.is_staff = true; save!(viewer)
+    add!(viewer.user_permissions, perm("view_article"))
+    c2 = Client()
+    force_login!(c2, viewer)
+    r = get(c2, "/admin/article/$(a.id)/change/")
+    @test r.status == 200 && occursin("View article", text(r)) && occursin("perm-art", text(r)) && !occursin("name=\"_save\"", text(r))
+    @test post(c2, "/admin/article/$(a.id)/change/", Dict("title" => "hacked")).status == 403
+    @test get(Article; id = a.id).title == "perm-art"
+    @test get(c2, "/admin/article/add/").status == 403
+    @test !occursin("Add article", text(get(c2, "/admin/article/")))
+
+    bare = create_user("bare", "pw12345"); bare.is_staff = true; save!(bare)
+    c3 = Client()
+    force_login!(c3, bare)
+    @test occursin("You don’t have permission", text(get(c3, "/admin/")))
+
+    # groups are in the admin, and a user's groups can be edited there
+    rc = Client()
+    force_login!(rc, root)
+    @test occursin("Groups", text(get(rc, "/admin/")))
+    r = get(rc, "/admin/user/$(bare.id)/change/")
+    @test occursin("name=\"groups\"", text(r)) && occursin("name=\"user_permissions\"", text(r))
+end
+
+@testset "GIS" begin
+    # geometry values: WKT, EWKT, WKB and GeoJSON (no database needed)
+    p = Point(174.7762, -41.2865)
+    @test wkt(p) == "POINT(174.7762 -41.2865)" && ewkt(p) == "SRID=4326;POINT(174.7762 -41.2865)"
+    @test parse_wkt(ewkt(p)) == p && parse_wkt("POINT (1 2)"; srid = 2193) == Point(1, 2; srid = 2193)
+    sq = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    @test wkt(sq) == "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"          # rings are closed
+    for g in (sq, LineString([(0, 0), (1, 1.5)]), MultiPoint([(1, 2), (3, 4)]), MultiPolygon([sq, Polygon([(20, 20), (21, 20), (21, 21)])]),
+              MultiLineString([[(0, 0), (1, 1)], [(2, 2), (3, 3)]]), Polygon([[(0, 0), (9, 0), (9, 9), (0, 0)], [(1, 1), (2, 1), (2, 2), (1, 1)]]))
+        @test parse_wkt(wkt(g)) == g && from_geojson(geojson(g)) == g && from_geojson(JSON.json(geojson(g))) == g
+    end
+    @test parse_wkt("MULTIPOINT(1 2, 3 4)") == MultiPoint([(1, 2), (3, 4)])
+    @test parse_wkb("0101000000000000000000F03F0000000000000040") == Point(1, 2)                 # WKB
+    @test parse_wkb("0101000020E6100000000000000000F03F0000000000000040") == Point(1, 2)         # EWKB with SRID
+    @test parse_wkb("0101000020910800000000000000005940000000000000F03F").srid == 2193
+    @test geojson(p) == Dict("type" => "Point", "coordinates" => [174.7762, -41.2865])
+    @test Juango.meters(D(km = 1.5)) == 1500 && Juango.meters(D(mi = 1)) ≈ 1609.344
+    @test_throws ArgumentError parse_wkt("CIRCLE(1 2)")
+    f = PointField()
+    @test Juango.parse_geometry_input(f, "POINT(1 2)") == Point(1, 2)
+    @test Juango.parse_geometry_input(f, "{\"type\": \"Point\", \"coordinates\": [1, 2]}") == Point(1, 2)
+    @test_throws ArgumentError Juango.parse_geometry_input(f, "LINESTRING(0 0, 1 1)")
+
+    if !IS_POSTGRES
+        @test_throws Juango.ImproperlyConfigured Juango.geometry_column_type(Juango.backend(), :POINT)
+    else
+        quiet(fn) = redirect_stdout(fn, devnull)
+        try
+            @eval @model struct City
+                name = CharField(max_length = 50)
+                location = PointField()
+                Meta(app_label = "gistest", table = "gis_city")
+            end
+            @eval @model struct Region
+                name = CharField(max_length = 50)
+                area = PolygonField()
+                Meta(app_label = "gistest", table = "gis_region")
+            end
+            @eval @model struct Route
+                name = CharField(max_length = 50)
+                path = LineStringField(geography = true)
+                Meta(app_label = "gistest", table = "gis_route")
+            end
+            quiet(() -> Juango.sync_models!([City, Region, Route]))
+            @test !isempty(Juango.execute("SELECT 1 FROM pg_indexes WHERE tablename = 'gis_city' AND indexdef LIKE '%gist%'"))
+            wlg = create(City; name = "Wellington", location = Point(174.7762, -41.2865))
+            create(City; name = "Auckland", location = Point(174.7633, -36.8485))
+            create(City; name = "Christchurch", location = Point(172.6362, -43.5321))
+            region = create(Region; name = "Lower North Island",
+                            area = Polygon([(174.0, -41.8), (176.5, -41.8), (176.5, -39.5), (174.0, -39.5)]))
+            @test get(City; name = "Wellington").location == Point(174.7762, -41.2865)
+            @test get(Region; id = region.id).area == region.area
+            names(qs) = sort([c.name for c in qs])
+
+            @test names(filter(City; location__within = region.area)) == ["Wellington"]
+            @test names(filter(City; location__intersects = region.area)) == ["Wellington"]
+            @test [r.name for r in filter(Region; area__contains = wlg.location)] == ["Lower North Island"]
+            @test names(filter(City; location__disjoint = region.area)) == ["Auckland", "Christchurch"]
+            near = Point(174.78, -41.29)
+            @test names(filter(City; location__distance_lte = (near, D(km = 50)))) == ["Wellington"]
+            @test names(filter(City; location__distance_gt = (near, D(km = 400)))) == ["Auckland"]
+            @test names(filter(City; location__dwithin = (near, D(km = 350)))) == ["Christchurch", "Wellington"]
+            @test names(filter(City; location__within = Polygon([(1748000, 5420000), (1760000, 5420000), (1760000, 5440000), (1748000, 5440000)]; srid = 2193))) == ["Wellington"]
+
+            ranked = collect(order_by(annotate(objects(City); d = Distance(:location, near)), "d"))
+            @test [c.name for c in ranked] == ["Wellington", "Christchurch", "Auckland"]
+            @test 400_000 < ranked[3].d < 500_000                       # metres, Wellington-Auckland ~495 km
+            @test 3e10 < first(annotate(objects(Region); a = Area(:area))).a < 6e10
+            @test JSON.parse(first(annotate(filter(City; name = "Auckland"); g = AsGeoJSON(:location))).g)["type"] == "Point"
+
+            create(Route; name = "SH1", path = LineString([(174.7762, -41.2865), (174.7633, -36.8485)]))
+            r = get(Route; name = "SH1")
+            @test r.path isa LineString && 490_000 < first(annotate(objects(Route); l = GeoLength(:path))).l < 500_000
+            @test [x.name for x in filter(Route; path__distance_lte = (Point(174.77, -40.0), D(km = 20)))] == ["SH1"]
+
+            fc = geojson(order_by(objects(City), "name"); geometry = :location)
+            @test fc["type"] == "FeatureCollection" && length(fc["features"]) == 3
+            @test fc["features"][1]["properties"]["name"] == "Auckland" && fc["features"][1]["geometry"]["type"] == "Point"
+
+            fm = ModelForm(City; data = Dict("name" => "Nelson", "location" => "POINT(173.284 -41.2706)"))
+            @test is_valid(fm) && save!(fm).location == Point(173.284, -41.2706)
+            bad = ModelForm(City; data = Dict("name" => "x", "location" => "LINESTRING(0 0, 1 1)"))
+            @test !is_valid(bad) && occursin("Expected a point", only(bad.errors[:location]))
+            html = string(as_p(ModelForm(City; instance = wlg)))
+            @test occursin("leaflet", html) && occursin("geo-map", html) && occursin("SRID=4326;POINT(174.7762 -41.2865)", html)
+        finally
+            foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "gistest", Juango.all_models()))
+            for t in ("gis_route", "gis_region", "gis_city")
+                Juango.execute("DROP TABLE IF EXISTS \"$t\"")
+            end
+        end
+    end
+end
+
 @testset "database backends" begin
     B = Juango
-    @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : B.SQLiteBackend)
+    @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)
     @test B.backend_from_setting("site.db") == B.SQLiteBackend("site.db")
     @test B.backend_from_setting("sqlite:///:memory:") == B.SQLiteBackend(":memory:")
     @test B.backend_from_setting("sqlite:////var/db/x.db") == B.SQLiteBackend("/var/db/x.db")
     @test B.backend_from_setting("postgresql://u@h/db") == B.PostgresBackend("postgresql://u@h/db")
     @test B.backend_from_setting("postgres://u@h/db") isa B.PostgresBackend
-    @test_throws B.ImproperlyConfigured B.backend_from_setting("mysql://u@h/db")
+    @test B.backend_from_setting("mysql://u@h/db") isa B.MySQLBackend
+    @test B.mysql_params("mysql://bob:p%40ss@db.local:3307/app") == (user = "bob", password = "p@ss", host = "db.local", port = 3307, db = "app")
+    @test_throws B.ImproperlyConfigured B.backend_from_setting("oracle://u@h/db")
     pg = B.PostgresBackend("postgresql://u@h/db")
     @test B.rewrite_placeholders(pg, "a = ? AND b = '?' AND c IN (?, ?)") == "a = \$1 AND b = '?' AND c IN (\$2, \$3)"
     @test B.insert_sql(pg, "\"t\"", ["\"a\""]) == "INSERT INTO \"t\" (\"a\") VALUES (?) RETURNING \"id\""
@@ -1371,7 +1572,7 @@ end
     finally
         configure!(DATABASE = old)
     end
-    @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : B.SQLiteBackend)
+    @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)
 end
 
 @testset "migrations" begin
@@ -1410,7 +1611,7 @@ end
         @test findfirst("CreateModel(\"mig_author\"", src)[1] < findfirst("CreateModel(\"mig_post\"", src)[1]
         @test occursin("Column(\"author_id\", :fk; index = true, references = \"mig_author\")", src)
         @test quiet(() -> makemigrations(app = "migtest", questioner = no)) == String[]
-        @test occursin("CREATE TABLE \"mig_post\"", sqlmigrate("migtest", "0001"))
+        @test occursin("CREATE TABLE $(Juango.qname("mig_post"))", sqlmigrate("migtest", "0001"))
         @test occursin("DROP TABLE", sqlmigrate("migtest", "0001"; backwards = true))
 
         _, out = capture(() -> migrate())

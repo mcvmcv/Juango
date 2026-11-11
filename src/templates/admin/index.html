@@ -7,8 +7,8 @@
   <table>
     {% for m in model_list %}
     <tr>
-      <th><a href="{% url 'admin:changelist' model=m.slug %}">{{ m.verbose_name_plural|capfirst }}</a> <span class="muted">({{ m.count }})</span></th>
-      <td style="text-align:right"><a href="{% url 'admin:add' model=m.slug %}">+ Add</a> &nbsp; <a href="{% url 'admin:changelist' model=m.slug %}">Change</a></td>
+      <th>{% if m.can_view %}<a href="{% url 'admin:changelist' model=m.slug %}">{{ m.verbose_name_plural|capfirst }}</a> <span class="muted">({{ m.count }})</span>{% else %}{{ m.verbose_name_plural|capfirst }}{% endif %}</th>
+      <td style="text-align:right">{% if m.can_add %}<a href="{% url 'admin:add' model=m.slug %}">+ Add</a>{% endif %} &nbsp; {% if m.can_view %}<a href="{% url 'admin:changelist' model=m.slug %}">{% if m.can_change %}Change{% else %}View{% endif %}</a>{% endif %}</td>
     </tr>
     {% empty %}
     <tr><td>You don’t have permission to view or edit anything.</td></tr>

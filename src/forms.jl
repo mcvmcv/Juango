@@ -188,6 +188,12 @@ function to_julia(fld::Field, raw)
         catch
             return nothing, "Enter a comma-separated list of valid values."
         end
+    elseif k === :geometry
+        try
+            return parse_geometry_input(fld, s), nothing
+        catch e
+            return nothing, e isa ArgumentError && startswith(e.msg, "Expected") ? e.msg : "Enter a valid geometry (WKT or GeoJSON)."
+        end
     elseif k === :uuid
         v = tryparse(UUID, s)
         return v, v === nothing ? "Enter a valid UUID." : nothing
@@ -340,6 +346,8 @@ function widget_html(bf::BoundField)
     if fld.kind === :bool
         checked = f.data !== nothing ? (val !== nothing && lowercase(string(val)) in ("on", "true", "1", "yes")) : truthy(val)
         return "<input type=\"checkbox\"$attrs$(checked ? " checked" : "")>"
+    elseif fld.kind === :geometry
+        return geometry_widget(name, id, fld, f.data !== nothing ? val : get(f.initial, fld.name, nothing))
     elseif fld.kind === :m2m
         chosen = Set(string(x isa Model ? x.id : x) for x in (val isa AbstractVector ? val : Any[]))
         io = IOBuffer()

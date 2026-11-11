@@ -13,10 +13,10 @@ jobs:
       fail-fast: false
       matrix:
         julia: ["1.10", "1"]
-        database: [sqlite, postgres]
+        database: [sqlite, postgres, mysql]
     services:
       postgres:
-        image: postgres:17
+        image: postgis/postgis:17-3.5          # PostgreSQL with PostGIS, for the GIS tests
         env:
           POSTGRES_USER: juango
           POSTGRES_PASSWORD: juango
@@ -24,6 +24,16 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: juango
+          MARIADB_USER: juango
+          MARIADB_PASSWORD: juango
+          MARIADB_DATABASE: juango
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -32,6 +42,12 @@ jobs:
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
       - name: Select database
-        if: matrix.database == 'postgres'
-        run: echo "JUANGO_TEST_DATABASE=postgresql://juango:juango@localhost:5432/juango" >> "$GITHUB_ENV"
+        run: |
+          case "${{ matrix.database }}" in
+            postgres) echo "JUANGO_TEST_DATABASE=postgresql://juango:juango@localhost:5432/juango" >> "$GITHUB_ENV" ;;
+            mysql)
+              # the tests create and drop their own database
+              docker exec "${{ job.services.mariadb.id }}" mariadb -uroot -pjuango -e "GRANT ALL ON *.* TO 'juango'@'%'"
+              echo "JUANGO_TEST_DATABASE=mysql://juango:juango@127.0.0.1:3306/juango" >> "$GITHUB_ENV" ;;
+          esac
       - uses: julia-actions/julia-runtest@v1

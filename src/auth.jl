@@ -13,6 +13,10 @@
     is_active = BooleanField(default = true)
     date_joined = DateTimeField(auto_now_add = true)
     last_login = DateTimeField(null = true, blank = true, editable = false)
+    groups = ManyToManyField(:Group; blank = true, related_name = :user_set,
+                             help_text = "The user gets every permission of these groups.")
+    user_permissions = ManyToManyField(:Permission; blank = true, related_name = :user_set,
+                                       verbose_name = "User permissions")
     Meta(table = "auth_user", ordering = ["username"])
 end
 

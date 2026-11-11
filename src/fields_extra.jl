@@ -111,6 +111,7 @@ function to_db(f::Field, v)
     k === :array && return encode_array(backend(), v)
     k in RANGE_KINDS && return encode_range(backend(), v)
     k === :uuid && return string(v)
+    k === :geometry && return encode_geometry(v)
     dbparam(v)
 end
 json_scalar_tree(v::AbstractDict) = Dict{String,Any}(string(k) => json_scalar_tree(x) for (k, x) in v)
@@ -187,13 +188,14 @@ function from_db_extra(f::Field, v)
     k in RANGE_KINDS && return decode_range(f, v)
     k === :uuid && return v isa UUID ? v : UUID(string(v))
     k === :citext && return String(string(v))
+    k === :geometry && return decode_geometry(v)
     NOTFOUND
 end
 
 # --- lookups ---------------------------------------------------------------------------------------
 
 "SQL for a JSON key path value (`data__owner__name`). `numeric` casts for number comparisons."
-function json_key_sql(::DatabaseBackend, col, keys, numeric::Bool)
+function json_key_sql(::DatabaseBackend, col, keys, numeric::Bool; boolean = false)
     sql = "($col #>> CAST(? AS TEXT[]))"
     (numeric ? "CAST($sql AS NUMERIC)" : sql), Any[pg_array_literal(keys)]
 end
@@ -231,7 +233,9 @@ when the field/lookup pair isn't special.
 function special_lookup(c::SQLCompiler, f::Field, col, lookup, value)
     b = backend()
     k = f.kind
-    if lookup == "search"
+    if k === :geometry
+        return spatial_lookup(f, col, lookup, value)
+    elseif lookup == "search"
         return search_sql(b, col, value)
     elseif k === :json
         lookup == "exact" && value !== nothing && return json_exact_sql(b, col, value)
@@ -262,7 +266,7 @@ function transform_column(f::Field, col, rest::Vector{String}, lookup, value)
         lookup == "isnull" && return json_key_isnull_sql(b, col, rest)
         nums = value isa Number && !(value isa Bool) || value isa AbstractVector && !isempty(value) &&
                all(x -> x isa Number && !(x isa Bool), value) || value isa Tuple
-        return json_key_sql(b, col, rest, nums)
+        return json_key_sql(b, col, rest, nums; boolean = value isa Bool)
     elseif f.kind === :array && rest == ["len"]
         return array_len_sql(b, col), Any[]
     elseif f.kind === :array && length(rest) == 1 && all(isdigit, rest[1])

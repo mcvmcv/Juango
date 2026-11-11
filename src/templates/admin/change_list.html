@@ -3,7 +3,7 @@
 {% block content %}
 <div class="toolbar" style="justify-content:space-between">
   <h1 class="page" style="margin:0">{{ title }}</h1>
-  <a class="button" href="{% url 'admin:add' model=opts.slug %}">Add {{ opts.verbose_name }} +</a>
+  {% if can_add %}<a class="button" href="{% url 'admin:add' model=opts.slug %}">Add {{ opts.verbose_name }} +</a>{% endif %}
 </div>
 <div class="layout">
   <div class="main">
@@ -16,17 +16,19 @@
     {% endif %}
     <form method="post">
       {% csrf_token %}
+      {% if can_delete %}
       <div class="toolbar">
         <input type="hidden" name="action" value="delete_selected">
         <button class="button secondary" type="submit" onclick="return confirm('Delete the selected {{ opts.verbose_name_plural }}?')">Delete selected</button>
       </div>
+      {% endif %}
       <div class="module">
       <table>
         <thead><tr><th style="width:24px"><input type="checkbox" onclick="document.querySelectorAll('.action-select').forEach(c=>c.checked=this.checked)" aria-label="Select all"></th>{% for h in headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
         <tbody>
         {% for row in rows %}
           <tr>
-            <td><input type="checkbox" class="action-select" name="_selected_action" value="{{ row.id }}" aria-label="Select row"></td>
+            <td>{% if can_delete %}<input type="checkbox" class="action-select" name="_selected_action" value="{{ row.id }}" aria-label="Select row">{% endif %}</td>
             {% for cell in row.cells %}{% if forloop.first %}<th><a href="{{ row.url }}">{{ cell }}</a></th>{% else %}<td>{{ cell }}</td>{% endif %}{% endfor %}
           </tr>
         {% empty %}

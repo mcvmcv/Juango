@@ -68,10 +68,13 @@ function unregister!(T::Type)
 end
 is_registered(T::Type) = haskey(REGISTRY, model_name(T))
 
-register_builtin!() = is_registered(User) || register!(User;
-    list_display = [:username, :email, :first_name, :last_name, :is_staff],
-    search_fields = [:username, :first_name, :last_name, :email],
-    list_filter = [:is_staff, :is_superuser, :is_active], password_fields = [:password])
+function register_builtin!()
+    is_registered(User) || register!(User;
+        list_display = [:username, :email, :first_name, :last_name, :is_staff],
+        search_fields = [:username, :first_name, :last_name, :email],
+        list_filter = [:is_staff, :is_superuser, :is_active], password_fields = [:password])
+    is_registered(Juango.Group) || register!(Juango.Group; list_display = [:name], search_fields = [:name])
+end
 
 get_admin(slug) = (ma = get(REGISTRY, slug, nothing); ma === nothing ? throw(Http404("No admin for model '$slug'")) : ma)
 
@@ -79,16 +82,29 @@ opts(ma::ModelAdmin) = (m = modelmeta(ma.model);
     Dict{String,Any}("slug" => ma.slug, "verbose_name" => m.verbose_name, "verbose_name_plural" => m.verbose_name_plural,
                      "name" => m.name))
 
+# --- permissions: superusers may do everything; staff need the model's permissions ----------------
+
+can(req, ma::ModelAdmin, action) = Juango.has_perm(req.user, Juango.perm_name(ma.model, action))
+can_view(req, ma) = can(req, ma, :view) || can(req, ma, :change)
+"Throw 403 unless the user may do one of `actions` on the model."
+require_perm(req, ma, actions...) = any(a -> can(req, ma, a), actions) ||
+    throw(Juango.PermissionDenied("You don't have permission to $(join(string.(actions), " or ")) $(modelmeta(ma.model).verbose_name_plural)."))
+visible_models(req) = [s for s in ORDER if can_view(req, REGISTRY[s]) || can(req, REGISTRY[s], :add)]
+
 base_context(req, title) = Dict{String,Any}(
     "title" => title, "site_header" => settings.SITE_NAME * " administration",
     "site_title" => settings.SITE_NAME * " site admin",
-    "models" => [opts(REGISTRY[s]) for s in ORDER])
+    "models" => [opts(REGISTRY[s]) for s in visible_models(req)])
 
 # --- views -------------------------------------------------------------------------------------
 
 function index(req::Request)
     ctx = base_context(req, "Site administration")
-    ctx["model_list"] = [merge(opts(REGISTRY[s]), Dict{String,Any}("count" => count(REGISTRY[s].model))) for s in ORDER]
+    ctx["model_list"] = [merge(opts(REGISTRY[s]), Dict{String,Any}(
+                             "count" => can_view(req, REGISTRY[s]) ? count(admin_queryset(REGISTRY[s], req)) : nothing,
+                             "can_add" => can(req, REGISTRY[s], :add), "can_view" => can_view(req, REGISTRY[s]),
+                             "can_change" => can(req, REGISTRY[s], :change)))
+                         for s in visible_models(req)]
     render(req, "admin/index.html", ctx)
 end
 
@@ -172,7 +188,9 @@ function changelist(req::Request; model)
     ma = get_admin(model)
     T = ma.model
     meta = modelmeta(T)
+    require_perm(req, ma, :view, :change)
     if req.method == "POST" && get(req.POST, "action", "") == "delete_selected"
+        require_perm(req, ma, :delete)
         ids = filter(!isnothing, [Juango.parse_pk(T, i) for i in Juango.getlist(req.POST, "_selected_action")])
         if isempty(ids)
             message!(req, :warning, "Items must be selected in order to perform actions on them. No items have been changed.")
@@ -218,6 +236,7 @@ function changelist(req::Request; model)
         "opts" => opts(ma), "headers" => [header_label(ma, c) for c in ma.list_display], "rows" => rows,
         "page_obj" => pg, "paginator" => p, "q" => q, "has_search" => !isempty(ma.search_fields),
         "filters" => filter_specs(req, ma), "total" => count(admin_queryset(ma, req)), "result_count" => p.count,
+        "can_add" => can(req, ma, :add), "can_delete" => can(req, ma, :delete),
         "prev_url" => pg.has_previous ? query_with(req, "page" => pg.previous_page_number) : nothing,
         "next_url" => pg.has_next ? query_with(req, "page" => pg.next_page_number) : nothing))
     render(req, "admin/change_list.html", ctx)
@@ -231,6 +250,9 @@ function change_form(req::Request, ma::ModelAdmin, obj)
     T = ma.model
     meta = modelmeta(T)
     adding = obj === nothing
+    adding ? require_perm(req, ma, :add) : require_perm(req, ma, :view, :change)
+    editable = adding || can(req, ma, :change)
+    req.method == "POST" && !editable && require_perm(req, ma, :change)
     form = Juango.ModelForm(T; data = req.method == "POST" ? req.POST : nothing, instance = obj, fields = admin_fields(ma))
     if req.method == "POST" && is_valid(form)
         o = save!(form; commit = false)
@@ -258,8 +280,12 @@ function change_form(req::Request, ma::ModelAdmin, obj)
     readonly = adding ? Any[] :
         [Dict{String,Any}("label" => label(f), "value" => format_value(getproperty(obj, attname(f))))
          for f in Juango.all_fields(T) if !f.editable]
-    ctx = base_context(req, (adding ? "Add " : "Change ") * meta.verbose_name)
+    ctx = base_context(req, (adding ? "Add " : editable ? "Change " : "View ") * meta.verbose_name)
+    if !editable     # view permission only: show the values, no form
+        readonly = vcat([Dict{String,Any}("label" => label(f), "value" => readonly_value(obj, f)) for f in form.fields], readonly)
+    end
     merge!(ctx, Dict{String,Any}(
+        "editable" => editable, "can_delete" => !adding && can(req, ma, :delete), "can_add" => can(req, ma, :add),
         "opts" => opts(ma), "form" => form, "object" => obj, "adding" => adding, "readonly" => readonly,
         "password_fields" => [Dict("name" => string(pf), "label" => uppercasefirst(string(pf))) for pf in ma.password_fields],
         "view_on_site" => adding ? nothing : get_absolute_url(obj)))
@@ -276,9 +302,20 @@ end
 
 change_view(req::Request; model, id) = (ma = get_admin(model); change_form(req, ma, admin_object(ma, req, id)))
 
+function readonly_value(obj, f::Field)
+    v = getproperty(obj, f.name)
+    f.kind === :m2m && return join(string.(collect(v)), ", ")
+    if f.choices !== nothing
+        i = findfirst(c -> string(c.first) == string(v), f.choices)
+        i === nothing || return f.choices[i].second
+    end
+    format_value(v)
+end
+
 function delete_view(req::Request; model, id)
     ma = get_admin(model)
     meta = modelmeta(ma.model)
+    require_perm(req, ma, :delete)
     obj = admin_object(ma, req, id)
     if req.method == "POST"
         name = string(obj)

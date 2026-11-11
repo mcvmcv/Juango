@@ -68,7 +68,8 @@ foreign_key_names(::PostgresBackend, table, col) =
         JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = ANY(con.conkey)
         WHERE con.contype = 'f' AND ns.nspname = current_schema() AND rel.relname = ? AND att.attname = ?""", [table, col])]
 
-column_prereqs(::PostgresBackend, kind::Symbol) = kind === :citext ? ["CREATE EXTENSION IF NOT EXISTS citext"] : String[]
+column_prereqs(::PostgresBackend, kind::Symbol) = kind === :citext ? ["CREATE EXTENSION IF NOT EXISTS citext"] :
+    kind === :geometry ? ["CREATE EXTENSION IF NOT EXISTS postgis"] : String[]
 
 table_exists(::PostgresBackend, table) =
     !isempty(execute("SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?", [table]))

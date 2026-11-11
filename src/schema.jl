@@ -94,7 +94,8 @@ function column_state(f::Field)
     d = f.default isa NoDefault || f.default isa Function || f.default isa Type ? nothing : f.default
     d !== nothing && f.kind in (:json, :array, :intrange, :daterange, :datetimerange, :uuid) && (d = nothing)  # set by Julia, not the DB
     ref = f.kind === :fk ? modelmeta(related_model(f)).table : nothing
-    of = f.kind === :array ? f.related : f.kind === :fk && pk_kind(related_model(f)) === :uuid ? :uuid : nothing
+    of = f.kind === :array ? f.related : f.kind === :geometry ? geo_of(f) :
+         f.kind === :fk && pk_kind(related_model(f)) === :uuid ? :uuid : nothing
     Column(column(f), schema_kind(f.kind); null = f.null, default = d, unique = f.unique,
            index = f.db_index, max_length = schema_kind(f.kind) in (:string, :citext) || (f.kind === :array && f.related === :string) ? f.max_length : nothing,
            references = ref, of = of)
@@ -136,6 +137,7 @@ end
 "The SQL type of a snapshot column."
 function column_type_for(b::DatabaseBackend, c::Column)
     c.kind === :array && return array_column_type(b, c.of, c.max_length)
+    c.kind === :geometry && return geometry_column_type(b, c.of)
     c.kind === :fk && c.of === :uuid && return column_type(b, :uuid, nothing)
     column_type(b, c.kind === :string ? :char : c.kind, c.max_length)
 end
@@ -155,14 +157,16 @@ index_name(table, c::Column) = constraint_name(table, c.name, c.unique ? "uniq" 
 function index_sql(b::DatabaseBackend, table, c::Column; if_not_exists = true)
     (c.unique || c.index) || return String[]
     ine = if_not_exists ? "IF NOT EXISTS " : ""
-    ["CREATE $(c.unique ? "UNIQUE " : "")INDEX $ine$(quote_name(b, index_name(table, c))) ON $(quote_name(b, table)) ($(quote_name(b, c.name)))"]
+    c.kind === :geometry &&       # spatial index
+        return ["CREATE INDEX $ine$(quote_name(b, index_name(table, c))) ON $(quote_name(b, table)) USING GIST ($(quote_name(b, c.name)))"]
+    ["CREATE $(c.unique ? "UNIQUE " : "")INDEX $ine$(quote_name(b, index_name(table, c))) ON $(quote_name(b, table)) ($(index_column(b, c)))"]
 end
 
 unique_together_name(table, cols) = constraint_name(table, cols..., "uniq")
 unique_together_sql(b::DatabaseBackend, table, cols; if_not_exists = false) =
     "CREATE UNIQUE INDEX $(if_not_exists ? "IF NOT EXISTS " : "")$(quote_name(b, unique_together_name(table, cols))) ON " *
     "$(quote_name(b, table)) (" * join([quote_name(b, c) for c in cols], ", ") * ")"
-drop_unique_together_sql(b::DatabaseBackend, table, cols) = "DROP INDEX IF EXISTS " * quote_name(b, unique_together_name(table, cols))
+drop_unique_together_sql(b::DatabaseBackend, table, cols) = drop_index_stmt(b, table, unique_together_name(table, cols))
 
 "Statements that change a table's unique-together indexes from `old` to `new` sets."
 function alter_unique_together_sql(b::DatabaseBackend, table, old, new)
@@ -171,8 +175,11 @@ function alter_unique_together_sql(b::DatabaseBackend, table, old, new)
     stmts
 end
 
+"Give an index a new name: drop and recreate by default (`create` are the statements creating it anew)."
+rename_index_stmts(b::DatabaseBackend, table, oldname, newname, create) = vcat([drop_index_stmt(b, table, oldname)], create)
+
 drop_index_sql(b::DatabaseBackend, table, c::Column) =
-    ["DROP INDEX IF EXISTS " * quote_name(b, constraint_name(table, c.name, s)) for s in ("uniq", "idx")]
+    [drop_index_stmt(b, table, constraint_name(table, c.name, s)) for s in ("uniq", "idx")]
 
 fk_sql(b::DatabaseBackend, table, c::Column) =
     (c.references === nothing || inline_foreign_keys(b)) ? String[] : [foreign_key_sql(b, table, c.name, c.references)]
@@ -217,22 +224,22 @@ function index_spec_sql(b::DatabaseBackend, table, ix::Index; if_not_exists = fa
     ["CREATE $(ix.unique ? "UNIQUE " : "")INDEX $(if_not_exists ? "IF NOT EXISTS " : "")$(quote_name(b, ix.name)) ON " *
      "$(quote_name(b, table))$using_ (" * join([quote_name(b, c) for c in ix.columns], ", ") * ")"]
 end
-drop_index_spec_sql(b::DatabaseBackend, ix::Index) =
-    supports_index_method(b, ix.method) ? ["DROP INDEX IF EXISTS " * quote_name(b, ix.name)] : String[]
+drop_index_spec_sql(b::DatabaseBackend, table, ix::Index) =
+    supports_index_method(b, ix.method) ? [drop_index_stmt(b, table, ix.name)] : String[]
 
 
 drop_table_sql(b::DatabaseBackend, t::Table) = ["DROP TABLE $(quote_name(b, t.name))"]
 
 function rename_table_sql(b::DatabaseBackend, old::Table, new::Table)
     stmts = ["ALTER TABLE $(quote_name(b, old.name)) RENAME TO $(quote_name(b, new.name))"]
+    # the indexes keep their old names but now live on the renamed table
     for c in old.columns
         (c.unique || c.index) || continue
-        append!(stmts, drop_index_sql(b, old.name, c))
-        append!(stmts, index_sql(b, new.name, c))
+        append!(stmts, rename_index_stmts(b, new.name, index_name(old.name, c), index_name(new.name, c), index_sql(b, new.name, c)))
     end
     for u in old.unique_together
-        push!(stmts, drop_unique_together_sql(b, old.name, u))
-        push!(stmts, unique_together_sql(b, new.name, u))
+        append!(stmts, rename_index_stmts(b, new.name, unique_together_name(old.name, u), unique_together_name(new.name, u),
+                                          [unique_together_sql(b, new.name, u)]))
     end
     stmts
 end
@@ -258,8 +265,7 @@ function rename_column_sql(b::DatabaseBackend, old::Table, new::Table, oldname, 
     c0, c1 = getcolumn(old, oldname), getcolumn(new, newname)
     stmts = ["ALTER TABLE $(quote_name(b, old.name)) RENAME COLUMN $(quote_name(b, oldname)) TO $(quote_name(b, newname))"]
     if c0.unique || c0.index
-        append!(stmts, drop_index_sql(b, old.name, c0))
-        append!(stmts, index_sql(b, new.name, c1))
+        append!(stmts, rename_index_stmts(b, new.name, index_name(old.name, c0), index_name(new.name, c1), index_sql(b, new.name, c1)))
     end
     append!(stmts, alter_unique_together_sql(b, new.name, old.unique_together, new.unique_together))
     stmts

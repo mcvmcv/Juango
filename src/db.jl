@@ -48,7 +48,6 @@ register_backend!(scheme::AbstractString, f) = (BACKEND_SCHEMES[lowercase(scheme
 const PLANNED_BACKENDS = Dict(
     "postgres" => "PostgreSQL support is planned (https://github.com/mcvmcv/Juango/issues/2)",
     "postgresql" => "PostgreSQL support is planned (https://github.com/mcvmcv/Juango/issues/2)",
-    "mysql" => "MySQL support is planned (https://github.com/mcvmcv/Juango/issues/11)",
 )
 
 """
@@ -196,6 +195,17 @@ extract_sql(::DatabaseBackend, part::Symbol, expr) = "EXTRACT($(uppercase(string
 
 "Whether the database supports an index method (`:btree`, `:gin`)."
 supports_index_method(::DatabaseBackend, m::Symbol) = m in (:btree, :gin)
+
+"Wrap a subquery used as `x IN (subquery)` (MySQL needs a derived table)."
+in_subquery(::DatabaseBackend, sql) = sql
+"Type name for CAST(x AS ...)."
+cast_type(b::DatabaseBackend, kind::Symbol) = column_type(b, kind, nothing)
+"SQL function for the length of text in characters."
+length_function(::DatabaseBackend) = "LENGTH"
+"A column inside CREATE INDEX (MySQL needs a prefix length for text)."
+index_column(b::DatabaseBackend, c) = quote_name(b, c.name)
+"DROP INDEX statement."
+drop_index_stmt(b::DatabaseBackend, table, name) = "DROP INDEX IF EXISTS " * quote_name(b, name)
 
 "Expression for random ordering."
 random_function(::DatabaseBackend) = "RANDOM()"

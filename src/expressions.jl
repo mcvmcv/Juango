@@ -242,10 +242,10 @@ function compile_expr(c::SQLCompiler, e::Func)
     n = e.name
     n === :lower && return "LOWER($(sqls[1]))", ps
     n === :upper && return "UPPER($(sqls[1]))", ps
-    n === :length && return "LENGTH($(sqls[1]))", ps
+    n === :length && return "$(length_function(b))($(sqls[1]))", ps
     n === :coalesce && return "COALESCE($(join(sqls, ", ")))", ps
-    n === :concat && return "(" * join(["COALESCE(CAST($s AS $(column_type(b, :text, nothing))), '')" for s in sqls], " || ") * ")", ps
-    n === :cast && return "CAST($(sqls[1]) AS $(column_type(b, e.args[2] === :string ? :text : e.args[2], nothing)))", ps
+    n === :concat && return "(" * join(["COALESCE(CAST($s AS $(cast_type(b, :text))), '')" for s in sqls], " || ") * ")", ps
+    n === :cast && return "CAST($(sqls[1]) AS $(cast_type(b, e.args[2] === :string ? :text : e.args[2])))", ps
     n === :now && return "?", Any[now()]     # Julia's clock and local time, like the DateTimes Juango stores
     n === :extract && return extract_sql(b, e.args[2], sqls[1]), ps
     throw(ArgumentError("unknown function $n"))
@@ -392,7 +392,7 @@ function aggregate(qs::QuerySet{T}; kw...) where {T}
         append!(ps, p)
     end
     sub, sps = select_sql(qs; columns = qcol(c.table, "id"), ordered = false)
-    row = execute("SELECT $(join(sel, ", ")) FROM $(qname(c.table))$(join(c.joins)) WHERE $(qcol(c.base, "id")) IN ($sub)",
+    row = execute("SELECT $(join(sel, ", ")) FROM $(qname(c.table))$(join(c.joins)) WHERE $(qcol(c.base, "id")) IN ($(in_subquery(backend(), sub)))",
                   vcat(ps, sps))[1]
     Dict{Symbol,Any}(k => row[k] for k in keys(kw))
 end

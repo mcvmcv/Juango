@@ -10,7 +10,7 @@
   {% csrf_token %}
   <div class="module">
     {% if form.non_field_errors %}<div class="form-row"><ul class="errorlist">{% for e in form.non_field_errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
-    {% for field in form %}
+    {% if editable %}{% for field in form %}
     <div class="form-row">
       {{ field.label_tag }}
       <div>
@@ -28,16 +28,18 @@
         <div class="help">{% if adding %}Leave blank to create the account with an unusable password.{% else %}Leave blank to keep the current password. Passwords are stored hashed (PBKDF2-SHA256).{% endif %}</div>
       </div>
     </div>
-    {% endfor %}
+    {% endfor %}{% endif %}
     {% for r in readonly %}
     <div class="form-row"><label>{{ r.label }}:</label><div>{{ r.value }}</div></div>
     {% endfor %}
   </div>
   <div class="submit-row">
-    {% if not adding %}<a class="deletelink" href="{% url 'admin:delete' model=opts.slug id=object.id %}">Delete</a>{% endif %}
-    <input type="submit" name="_addanother" value="Save and add another" class="button secondary">
+    {% if can_delete %}<a class="deletelink" href="{% url 'admin:delete' model=opts.slug id=object.id %}">Delete</a>{% endif %}
+    {% if editable %}
+    {% if can_add %}<input type="submit" name="_addanother" value="Save and add another" class="button secondary">{% endif %}
     <input type="submit" name="_continue" value="Save and continue editing" class="button secondary">
     <input type="submit" name="_save" value="Save">
+    {% endif %}
   </div>
 </form>
 {% endblock %}

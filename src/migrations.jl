@@ -230,9 +230,9 @@ forwards(op::DeleteModel, b, from, to, deferred) = drop_table_sql(b, from[op.tab
 backwards(op::DeleteModel, b, from, to, deferred) = forwards(CreateModel(op.table), b, to, from, deferred)
 
 forwards(op::AddIndex, b, from, to, deferred) = Juango.index_spec_sql(b, op.table, op.index)
-backwards(op::AddIndex, b, from, to, deferred) = Juango.drop_index_spec_sql(b, op.index)
+backwards(op::AddIndex, b, from, to, deferred) = Juango.drop_index_spec_sql(b, op.table, op.index)
 forwards(op::RemoveIndex, b, from, to, deferred) =
-    Juango.drop_index_spec_sql(b, only(filter(i -> i.name == op.name, from[op.table].indexes)))
+    Juango.drop_index_spec_sql(b, op.table, only(filter(i -> i.name == op.name, from[op.table].indexes)))
 backwards(op::RemoveIndex, b, from, to, deferred) =
     Juango.index_spec_sql(b, op.table, only(filter(i -> i.name == op.name, from[op.table].indexes)))
 
@@ -547,6 +547,7 @@ function migrate(; app = nothing, target = nothing, fake = false, sync = false, 
         sync_models!(unmigrated; verbose = verbose) || log("  No changes.")
     end
     Juango.update_contenttypes!()
+    Juango.update_permissions!()
     if verbose && target === nothing
         for a in migrated_apps()
             isempty(detect_changes(g, a; questioner = _ -> false)) && continue

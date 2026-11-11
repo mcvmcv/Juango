@@ -30,16 +30,20 @@ include("template.jl")
 include("db.jl")
 include("backends/sqlite.jl")
 include("backends/postgres.jl")
+include("backends/mysql.jl")
 include("orm.jl")
 include("expressions.jl")
 include("fields_extra.jl")
+include("gis.jl")
 include("backends/sqlite_extra.jl")
 include("schema.jl")
+include("backends/mysql_extra.jl")
 include("migrations.jl")
 include("forms.jl")
 include("sessions.jl")
 include("auth.jl")
 include("contenttypes.jl")
+include("permissions.jl")
 include("messages.jl")
 include("middleware.jl")
 include("views.jl")
@@ -64,8 +68,12 @@ export path, re_path, include_urls, reverse_url, resolve
 export Template, render_to_string, get_template, mark_safe, SafeString, register_filter!,
        register_tag!, tattr, escape_html
 # orm
+export GeometryField, PointField, LineStringField, PolygonField, MultiPointField, MultiLineStringField, MultiPolygonField,
+       Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon, D, Distance, Area, GeoLength, AsGeoJSON,
+       geojson, from_geojson, wkt, ewkt, parse_wkt, parse_wkb
 export JSONField, ArrayField, UUIDField, CICharField, IntegerRangeField, DateRangeField, DateTimeRangeField,
        ValueRange, SearchVector, SearchQuery, SearchRank, uuid4, UUID
+export Permission, Group, has_perm, has_perms, has_module_perms, get_all_permissions, permission_required, perm_name
 export ContentType, GenericForeignKey, GenericRelation, get_for_model, model_class
 export Model, @model, @abstract_model, OneToOneField, Index, GinIndex, Field, ManyToManyField, add!, remove!, set!, clear!, base_objects, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
        FloatField, BooleanField, DateTimeField, DateField, ForeignKey, Q, QuerySet, objects,

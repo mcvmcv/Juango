@@ -685,7 +685,8 @@ Base.:~(a::Q) = !a
 const LOOKUPS = Set(["exact", "iexact", "contains", "icontains", "startswith", "istartswith",
                      "endswith", "iendswith", "gt", "gte", "lt", "lte", "in", "isnull", "range",
                      "year", "month", "day", "ne", "contained_by", "overlap", "has_key", "has_keys",
-                     "has_any_keys", "search"])
+                     "has_any_keys", "search", "intersects", "within", "covers", "coveredby", "disjoint", "touches",
+                     "crosses", "overlaps", "equals", "distance_lt", "distance_lte", "distance_gt", "distance_gte", "dwithin"])
 
 
 struct LookupError <: Exception
@@ -930,7 +931,7 @@ function lookup_condition(c::SQLCompiler, col, lookup, value, conv)
         if value isa QuerySet
             sql, ps = value.values_fields === nothing ? subquery_sql(c, value; columns = nothing, idonly = true) :
                       subquery_sql(c, value)
-            return ("$col IN ($sql)", ps)
+            return ("$col IN ($(in_subquery(backend(), sql)))", ps)
         elseif value isa Subquery
             sql, ps = compile_expr(c, value)
             return ("$col IN $sql", ps)
@@ -1555,7 +1556,7 @@ function update!(qs::QuerySet{T}; kw...) where {T}
     end
     isempty(sets) && return 0
     sub, sps = select_sql(qs; columns = qcol(meta.table, "id"), ordered = false)
-    execute_changes("UPDATE $(qname(meta.table)) SET $(join(sets, ", ")) WHERE $(qname("id")) IN ($sub)", vcat(ps, sps))
+    execute_changes("UPDATE $(qname(meta.table)) SET $(join(sets, ", ")) WHERE $(qname("id")) IN ($(in_subquery(backend(), sub)))", vcat(ps, sps))
 end
 
 struct ProtectedError <: Exception

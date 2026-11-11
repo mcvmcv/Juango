@@ -159,6 +159,32 @@ values_list(objects(Post), :title, :author__name)               # tuples; flat=t
 - **Window functions:** `annotate(qs; rank = Window(RowNumber(); partition_by=[:author], order_by=["-views"]))`, also with `Rank`, `DenseRank`, `Lag`, `Lead` and aggregates over a window. You can order by them but not filter on them.
 - **`values()` is lazy.** It returns a queryset whose rows are `Dict`s. Aggregates in `annotate` after `values(:field)` group by that field. As in Django, combining aggregates over two different reverse relations multiplies rows, so use `distinct=true`.
 
+#### GIS (PostGIS)
+
+```julia
+@model struct City
+    name     = CharField(max_length = 100)
+    location = PointField()                       # SRID 4326; also LineString/Polygon/Multi*/GeometryField
+end
+@model struct Region
+    area = PolygonField()                         # geography = true for a geography column
+end
+
+near = Point(174.78, -41.29)                      # (longitude, latitude)
+filter(City; location__within = region.area)      # also intersects, contains, covers, disjoint, touches, ...
+filter(City; location__distance_lte = (near, D(km = 50)))          # D(m=...), D(mi=...)
+filter(City; location__dwithin = (near, D(km = 350)))
+order_by(annotate(objects(City); d = Distance(:location, near)), "d")   # metres
+annotate(objects(Region); a = Area(:area))                          # square metres; also GeoLength, AsGeoJSON
+geojson(objects(City); geometry = :location, properties = [:name])  # a FeatureCollection Dict
+```
+
+- **Geometry values.** `Point`, `LineString`, `Polygon`, `MultiPoint`, `MultiLineString` and `MultiPolygon` are plain Julia values. They read and write WKT/EWKT (`wkt`, `ewkt`, `parse_wkt`), GeoJSON (`geojson`, `from_geojson`) and WKB (`parse_wkb`). PostGIS does the spatial work.
+- **Units.** Distances and areas for SRID 4326 and geography columns are geodetic (metres). Other SRIDs use their own units, and geometries in another SRID are transformed automatically.
+- **Indexes and setup.** Geometry columns get a GiST index, and the `postgis` extension is created the first time a table needs it.
+- **Forms and admin.** Forms accept WKT or GeoJSON. The admin shows a Leaflet map, and clicking it sets a point. The map loads Leaflet 1.9.4 from unpkg and tiles from OpenStreetMap.
+- **Other databases.** GIS fields need PostgreSQL with PostGIS. On other databases they raise an error.
+
 #### Managers
 
 ```julia
@@ -310,6 +336,26 @@ configure!(DATABASE = "postgresql://user:pass@localhost:5432/mydb")   # PostgreS
 configure!(DATABASE = MyBackend(...))           # any DatabaseBackend instance
 ```
 
+#### MySQL and MariaDB
+
+```sh
+julia --project -e 'using Pkg; Pkg.add("MySQL")'
+```
+
+```julia
+using Juango
+using MySQL          # loads Juango's MySQL driver
+configure!(DATABASE = "mysql://user:password@localhost:3306/mydb")    # or mariadb://
+```
+
+Each connection sets `sql_mode` (`ANSI_QUOTES`, `PIPES_AS_CONCAT`, `NO_BACKSLASH_ESCAPES`, `STRICT_TRANS_TABLES`), so queries mean the same as on the other databases. Some differences remain:
+
+- **Case-insensitive `exact`.** String comparisons follow the column collation, which is case-insensitive by default, so `exact` ignores case, as in Django on MySQL. `contains`, `startswith` and `endswith` are case-sensitive.
+- **No transactional DDL.** A migration that fails halfway keeps the steps that already ran.
+- **JSON storage.** `JSONField` uses JSON columns, and arrays and ranges are stored as JSON with the same lookups.
+- **No full-text search expressions.** The `__search` lookup matches words instead, and GIN indexes are skipped.
+- **Tested on MariaDB 11.** MySQL 8 should work, but `DROP INDEX IF EXISTS`, used by some migrations, is MariaDB-only.
+
 #### PostgreSQL
 
 PostgreSQL goes through [LibPQ.jl](https://github.com/JuliaDatabases/LibPQ.jl). LibPQ is an optional dependency, so SQLite-only projects never install it. To use Postgres:
@@ -405,6 +451,36 @@ For cross-field validation, define `Juango.clean_form(f::Form, ::Val{:ContactFor
 - CSRF protection on POST/PUT/PATCH/DELETE: `{% csrf_token %}` or an `X-CSRFToken` header. Mark exceptions with `csrf_exempt(view)`.
 - One-time messages: `message!(req, :success, "Saved")`, rendered with `{% for m in messages %}`.
 
+### Permissions and groups
+
+`migrate` creates `add_`, `change_`, `delete_` and `view_` permissions for every model, plus any declared with `Meta(permissions = [("publish_post", "Can publish posts")])`. Users get permissions directly or through groups:
+
+```julia
+editors = create(Group; name = "editors")
+add!(editors.permissions, get(Permission; codename = "change_post"))
+add!(user.groups, editors)
+add!(user.user_permissions, get(Permission; codename = "publish_post"))
+
+has_perm(user, "project.change_post")            # "<app label>.<codename>"; perm_name(Post, :change) builds it
+has_perms(user, ["project.add_post", "project.change_post"])
+has_module_perms(user, "project")
+const edit_post = permission_required("project.change_post")(edit_post_view)   # login redirect, else 403
+```
+
+```
+{% if perms.project.add_post %}<a href="{% url 'post_new' %}">New post</a>{% endif %}
+{% if "project.publish_post" in perms %}...{% endif %}
+```
+
+- **Superusers and inactive users.** Active superusers have every permission, and inactive users have none.
+- **Caching.** Permissions are cached on the user object, so reload the user after changing them.
+- **Admin.** The admin follows these permissions:
+  - Staff only see models they have permissions for.
+  - With only `view_` permission, a user sees a read-only page.
+  - Adding, changing and deleting each need the matching permission.
+- **Groups in the admin.** Groups are registered in the admin, and a user's groups and permissions can be edited on their page.
+- **Not yet supported.** Object-level permissions (`has_perm(user, perm; obj)`) return `false` except for superusers.
+
 ### Middleware
 
 A middleware has Django's shape: a factory `get_response -> (req -> response)`.
@@ -457,7 +533,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 ## Differences from Django (current limitations)
 
 - **Migrations can't be squashed yet.** Migration files describe tables and columns, and there are no historical model classes as in Django, so data migrations use raw SQL or today's models.
-- **SQLite and PostgreSQL only.** MySQL is [#11](https://github.com/mcvmcv/Juango/issues/11). Postgres uses a single connection behind a lock; a connection pool is [#30](https://github.com/mcvmcv/Juango/issues/30).
+- **SQLite, PostgreSQL and MySQL/MariaDB.** Each uses a single connection behind a lock; a connection pool is [#30](https://github.com/mcvmcv/Juango/issues/30).
 - **ORM features not yet built:** symmetrical self-referential many-to-many, filtering on window functions, and `select_related` into a model that inherits from another table (use `prefetch_related`).
 - No `INSTALLED_APPS`/app registry. A project is a set of Julia files you `include`, as in the `startproject` layout.
 - File uploads: multipart fields are parsed, and uploaded files are exposed raw in `req.meta[:FILES]`. There is no `FileField`.
