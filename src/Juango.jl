@@ -124,6 +124,8 @@ export User, AnonymousUser, authenticate, login!, logout!, create_user, create_s
 # messages
 export message!, get_messages
 # views & shortcuts
+export FormView, ArchiveIndexView, YearArchiveView, MonthArchiveView, DayArchiveView, DateDetailView, ViewCall, default_hook,
+       LoginRequiredMixin, PermissionRequiredMixin, UserPassesTestMixin
 export render, redirect, get_object_or_404, get_list_or_404, TemplateView, RedirectView,
        ListView, DetailView, CreateView, UpdateView, DeleteView, Paginator, page,
        require_http_methods, require_GET, require_POST, csrf_exempt, get_csrf_token

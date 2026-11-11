@@ -453,6 +453,42 @@ configure!(ROOT_URLCONF=urlpatterns, DATABASE="db.sqlite3", TEMPLATE_DIRS=["temp
 
 Converters: `str int slug path uuid`, plus `register_converter!`.
 
+### Generic views
+
+`TemplateView`, `RedirectView`, `ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView` and `FormView` are configured with keywords (`template`, `queryset`, `paginate_by`, `fields`, `success_url`, `extra_context`, `context_object_name`...). Any step can be replaced with a hook. A hook receives the `ViewCall` `v`, which holds `v.request`, the URL's `v.kwargs`, `v.object`, `v.object_list`, `v.form` and `v.model`. Inside a hook, `default_hook(name, v, args...)` runs the built-in step, like `super()`:
+
+```julia
+my_posts = ListView(Post; paginate_by = 20, login_required = true,
+                    get_queryset = v -> filter(objects(Post); author = v.request.user),
+                    get_context_data = (v, ctx) -> (ctx["today"] = today(); ctx))
+
+new_post = CreateView(Post; fields = [:title, :body], login_required = true,
+                      success_message = "“%(title)s” was published.",
+                      form_valid = (v, form) -> (form.instance.author = v.request.user;
+                                                 default_hook(:form_valid, v, form)))
+
+contact = FormView(ContactForm; template = "contact.html", success_url = "/thanks/",
+                   form_valid = (v, form) -> (send_mail("Contact", form.cleaned_data[:message], ...);
+                                              default_hook(:form_valid, v, form)))
+```
+
+The hooks are `get_queryset`, `get_object`, `get_context_data(v, ctx)`, `get_template_names`, `get_success_url`, `get_initial`, `get_form`, `form_valid(v, form)` and `form_invalid(v, form)`. DeleteView deletes in its `form_valid` step, where the form is `nothing`. Templates get `view` too.
+
+Access control works on every generic view: `login_required = true`, `permission_required = "blog.change_post"` (403 when the user lacks it), and `test_func = user -> user.is_staff`. For other views, the wrappers `LoginRequiredMixin(view)`, `PermissionRequiredMixin(view, perms...)` and `UserPassesTestMixin(view, test)` do the same. `success_message` (the SuccessMessageMixin) takes `%(field)s` placeholders from the cleaned data.
+
+Date-based archives take a `date_field`:
+
+```julia
+A(view; kw...) = view(Post; date_field = :published, kw...)
+path("archive/", A(ArchiveIndexView)),                         # latest, date_list (years)
+path("archive/<int:year>/", A(YearArchiveView)),               # year, date_list (months), next_year, previous_year
+path("archive/<int:year>/<int:month>/", A(MonthArchiveView)),  # month, object_list, date_list (days), next_month...
+path("archive/<int:year>/<int:month>/<int:day>/", A(DayArchiveView)),
+path("archive/<int:year>/<int:month>/<int:day>/<slug:slug>/", A(DateDetailView)),
+```
+
+Future-dated objects are left out unless `allow_future = true`. An empty period is a 404 unless `allow_empty = true`. YearArchiveView lists its objects only with `make_object_list = true`. The default templates are `<model>_archive.html`, `_archive_year`, `_archive_month`, `_archive_day` and `_detail`. With USE_TZ, days are counted in the current time zone.
+
 ### Streaming, server-sent events and WebSockets
 
 A streaming response sends its body while it is produced, so it never has to sit in memory whole.

@@ -634,6 +634,130 @@ end
     @test r.status == 302 && !exists(filter(Article; id = new.id))
 end
 
+@testset "generic views: hooks, FormView, date archives" begin
+    quiet(f) = redirect_stdout(f, devnull)
+    @eval @model struct GvEvent
+        name = CharField(max_length = 40)
+        slug = CharField(max_length = 40, blank = true)
+        day = DateField()
+        at = DateTimeField(null = true)
+        Meta(table = "gv_event", ordering = ["day"])
+    end
+    @eval @form ContactForm begin
+        email = EmailField()
+        message = CharField(max_length = 200)
+    end
+    quiet(() -> Juango.sync_models!([GvEvent]))
+    for (n, d) in [("a", Date(2023, 12, 30)), ("b", Date(2024, 1, 5)), ("c", Date(2024, 1, 20)), ("d", Date(2024, 3, 1)),
+                   ("future", today() + Day(800))]
+        create(GvEvent; name = n, slug = n, day = d, at = DateTime(d) + Hour(12))
+    end
+    tpl(name, s) = write(joinpath(TPL, name), s)
+    tpl("gvevent_archive.html", "{% for d in date_list %}{{ d|date:'Y' }} {% endfor %}|{% for e in latest %}{{ e.name }}{% endfor %}")
+    tpl("gvevent_archive_year.html", "{{ year|date:'Y' }}:{% for d in date_list %}{{ d|date:'m' }} {% endfor %}|{% for e in object_list %}{{ e.name }}{% endfor %}|{{ next_year|date:'Y' }}<{{ previous_year|date:'Y' }}")
+    tpl("gvevent_archive_month.html", "{{ month|date:'Y-m' }}:{% for d in date_list %}{{ d|date:'d' }} {% endfor %}|{% for e in object_list %}{{ e.name }}{% endfor %}|{{ next_month|date:'Y-m' }}<{{ previous_month|date:'Y-m' }}")
+    tpl("gvevent_archive_day.html", "{{ day|date:'Y-m-d' }}|{% for e in object_list %}{{ e.name }}{% endfor %}|{{ next_day|date:'Y-m-d' }}<{{ previous_day|date:'Y-m-d' }}")
+    tpl("gvevent_detail.html", "<h1>{{ object.name }}</h1>{{ extra }}{% for m in messages %}[{{ m }}]{% endfor %}")
+    tpl("gvevent_list.html", "{% for e in object_list %}{{ e.name }},{% endfor %}{{ now }} {{ view.kind }}")
+    tpl("gvevent_form.html", "FORM{% if form.errors %} invalid{% endif %}")
+    tpl("gvevent_confirm_delete.html", "Delete {{ gvevent.name }}?")
+    tpl("contact.html", "{% if form.errors %}invalid{% endif %}[{{ form.initial.email }}]")
+    sent = Ref{Any}(nothing)
+    A(view; kw...) = view(GvEvent; date_field = :day, kw...)
+    urls = [
+        path("gv/", ListView(GvEvent; get_queryset = v -> exclude(objects(GvEvent), name = "future"),
+                             get_context_data = (v, ctx) -> (ctx["now"] = "NOW"; ctx))),
+        path("gv/<str:slug>/", DetailView(GvEvent; extra_context = Dict("extra" => "+x"),
+                                          get_object = v -> get_object_or_404(objects(GvEvent); slug = v.kwargs[:slug]))),
+        path("gv-new/", CreateView(GvEvent; fields = [:name, :day], login_required = true, success_message = "Made %(name)s",
+                                   form_valid = (v, f) -> (f.instance.slug = lowercase(f.cleaned_data[:name]) * "-s";
+                                                           default_hook(:form_valid, v, f)),
+                                   success_url = obj -> "/gv/$(obj.slug)/")),
+        path("gv-new2/", CreateView(GvEvent; fields = [:name, :day], form_invalid = (v, f) -> HttpResponse("bad"; status = 422),
+                                    template = "gvevent_form.html", initial = Dict(:name => "preset"))),
+        path("gv-edit/<int:id>/", UpdateView(GvEvent; fields = [:name, :day], test_func = u -> u.is_superuser,
+                                             get_success_url = v -> "/edited/$(v.object.name)/")),
+        path("gv-perm/<int:id>/", UpdateView(GvEvent; fields = [:name], permission_required = "project.change_gvevent")),
+        path("gv-del/<int:id>/", DeleteView(GvEvent; get_success_url = v -> "/gone/$(v.object.name)/")),
+        path("gv-private/<str:slug>/", LoginRequiredMixin(DetailView(GvEvent; slug_field = :slug))),
+        path("contact/", FormView(ContactForm; template = "contact.html", success_url = "/thanks/",
+                                  initial = Dict(:email => "me@example.com"),
+                                  form_valid = (v, f) -> (sent[] = f.cleaned_data; default_hook(:form_valid, v, f)))),
+        path("arch/", A(ArchiveIndexView)),
+        path("arch/<int:year>/", A(YearArchiveView)),
+        path("arch-ol/<int:year>/", A(YearArchiveView; make_object_list = true)),
+        path("arch/<int:year>/<int:month>/", A(MonthArchiveView)),
+        path("arch/<int:year>/<int:month>/<int:day>/", A(DayArchiveView)),
+        path("arch/<int:year>/<int:month>/<int:day>/<str:slug>/", A(DateDetailView)),
+        path("arch-at/<int:year>/<int:month>/", MonthArchiveView(GvEvent; date_field = :at)),
+        path("arch-future/", A(ArchiveIndexView; allow_future = true)),
+        path("arch-empty/<int:year>/<int:month>/", A(MonthArchiveView; allow_empty = true)),
+    ]
+    old_urls = settings.ROOT_URLCONF
+    configure!(ROOT_URLCONF = urls)
+    try
+        c = Client()
+        # hooks
+        @test text(get(c, "/gv/")) == "a,b,c,d,NOW ListView"
+        r = get(c, "/gv/b/")
+        @test text(r) == "<h1>b</h1>+x" && get(c, "/gv/zzz/").status == 404
+        r = get(c, "/gv-new/")
+        @test r.status == 302 && startswith(getheader(r, "Location"), settings.LOGIN_URL)
+        root = create_superuser("gvroot", "gvroot-password-1")
+        force_login!(c, root)
+        @test text(get(c, "/gv-new/")) == "FORM"
+        r = post(c, "/gv-new/", Dict("name" => "Party", "day" => "2024-05-05"); follow = true)
+        @test text(r) == "<h1>Party</h1>+x[Made Party]" && get(GvEvent; name = "Party").slug == "party-s"
+        @test post(c, "/gv-new/", Dict("name" => "")).status == 200 && occursin("invalid", text(post(c, "/gv-new/", Dict("name" => ""))))
+        @test post(c, "/gv-new2/", Dict("name" => "")).status == 422
+        party = get(GvEvent; name = "Party")
+        r = post(c, "/gv-edit/$(party.id)/", Dict("name" => "Fete", "day" => "2024-05-05"))
+        @test r.status == 302 && getheader(r, "Location") == "/edited/Fete/"
+        pleb = create_user("gvpleb", "pleb-password-1")
+        pc = Client()
+        force_login!(pc, pleb)
+        @test get(pc, "/gv-edit/$(party.id)/").status == 302             # test_func fails: to the login page
+        @test get(pc, "/gv-perm/$(party.id)/").status == 403             # no permission
+        @test get(c, "/gv-perm/$(party.id)/").status == 200              # superuser
+        @test text(get(c, "/gv-del/$(party.id)/")) == "Delete Fete?"
+        r = post(c, "/gv-del/$(party.id)/")
+        @test getheader(r, "Location") == "/gone/Fete/" && !exists(filter(GvEvent; id = party.id))
+        @test get(Client(), "/gv-private/b/").status == 302 && get(c, "/gv-private/b/").status == 200
+        @test_throws ArgumentError ListView(GvEvent; paginate = 3)
+
+        # FormView
+        @test text(get(c, "/contact/")) == "[me@example.com]"
+        @test text(post(c, "/contact/", Dict("email" => "nope"))) == "invalid[me@example.com]"
+        r = post(c, "/contact/", Dict("email" => "a@b.org", "message" => "hi"))
+        @test getheader(r, "Location") == "/thanks/" && sent[][:message] == "hi"
+
+        # date archives (the future event is left out)
+        @test text(get(c, "/arch/")) == "2024 2023 |dcba"
+        @test occursin("future", text(get(c, "/arch-future/")))
+        @test text(get(c, "/arch/2024/")) == "2024:01 03 ||<2023"
+        @test text(get(c, "/arch-ol/2024/")) == "2024:01 03 |bcd|<2023"
+        @test text(get(c, "/arch/2023/")) == "2023:12 ||2024<"
+        @test text(get(c, "/arch/2024/1/")) == "2024-01:05 20 |bc|2024-03<2023-12"
+        @test text(get(c, "/arch/2024/1/5/")) == "2024-01-05|b|2024-01-20<2023-12-30"
+        @test text(get(c, "/arch/2024/1/5/b/")) == "<h1>b</h1>"
+        @test get(c, "/arch/2024/1/6/b/").status == 404
+        @test get(c, "/arch/2024/2/").status == 404 && get(c, "/arch/2024/13/").status == 404
+        @test get(c, "/arch/$(year(today()) + 2)/").status == 404
+        @test text(get(c, "/arch-empty/2024/2/")) == "2024-02:||2024-03<2024-01"
+        @test text(get(c, "/arch-at/2024/1/")) == "2024-01:05 20 |bc|2024-03<2023-12"
+        configure!(USE_TZ = true, TIME_ZONE = "Pacific/Auckland")          # 12:00 UTC is the next day there
+        try
+            @test text(get(c, "/arch-at/2024/1/")) == "2024-01:06 21 |bc|2024-03<2023-12"
+        finally
+            configure!(USE_TZ = false, TIME_ZONE = "UTC")
+        end
+    finally
+        configure!(ROOT_URLCONF = old_urls)
+        Juango.unregister_model!(GvEvent)
+        Juango.execute("DROP TABLE " * Juango.qname("gv_event"))
+    end
+end
+
 @testset "admin" begin
     c = Client()
     r = get(c, "/admin/")
