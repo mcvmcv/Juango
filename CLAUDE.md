@@ -4,18 +4,22 @@ A Django-style web framework in Julia. Roadmap: GitHub issues on mcvmcv/Juango.
 
 ## Running tests: this machine has 16 GB of RAM
 
-- **Never run more than one Julia test process at a time.** A full suite run uses about
-  5 GB; three in parallel ran the machine out of memory. Test the databases one after
-  another, never in parallel.
-- **Cap every run** so it can't take the machine down:
+- **Never run more than one test suite at a time.** `test/runtests.jl` already runs two
+  groups of files in parallel (`JUANGO_TEST_JOBS`, default 2); each process peaks at about
+  1-1.5 GB. Test the databases one after another, never in parallel, and don't raise
+  `JUANGO_TEST_JOBS` without asking.
+- **Cap every run** so it can't take the machine down (the cap covers the child processes):
 
       systemd-run --user --scope -q -p MemoryMax=5G -p MemorySwapMax=0 \
-          julia --heap-size-hint=3G --project=test test/orm.jl
+          julia --project=test test/runtests.jl
 
-- **Run only the part you're working on.** The suite is split by area: `test/templates.jl`,
-  `orm.jl`, `forms.jl`, `views.jl`, `admin.jl`, `services.jl`, `db.jl` and
-  `migrations.jl`. Each one runs on its own: they share `test/setup.jl`. Run the whole
-  suite (`test/runtests.jl`, or `Pkg.test()`) once before committing.
+- **Run only the part you're working on** while developing: `test/templates.jl`, `orm.jl`,
+  `forms.jl`, `views.jl`, `admin.jl`, `services.jl`, `db.jl` or `migrations.jl`, each on its
+  own (they share `test/setup.jl`), under the same cap. Run the whole suite once before
+  committing: about 4 minutes on SQLite.
+- Juango has a precompile workload (`src/precompile.jl`). Loading LibPQ invalidates much of
+  it, so the tests load only the driver for the database under test. Keep it that way, and
+  avoid model-type specialization (`@nospecialize`) in model-independent ORM code.
 - `JUANGO_TEST_DATABASE` picks the database: unset for in-memory SQLite, or a
   `postgresql://` / `mysql://` URL. A throwaway database is created on that server and
   dropped afterwards.

@@ -964,4 +964,4 @@ src/
 test/            setup.jl + one file per area   examples/blog/  complete example app
 ```
 
-Run the tests with `julia --project -e 'using Pkg; Pkg.test()'`. Each part of the suite runs in its own process, one after another. Run one part with `julia --project=test test/orm.jl`; the parts are `templates`, `orm`, `forms`, `views`, `admin`, `services`, `db` and `migrations`. `JUANGO_TEST_DATABASE` picks the database: unset for in-memory SQLite, or a `postgresql://` or `mysql://` URL.
+Run the tests with `julia --project -e 'using Pkg; Pkg.test()'`. The files run in four groups, one process per group and two groups at a time (`JUANGO_TEST_JOBS` changes that); the whole suite takes about four minutes on SQLite, five on Postgres or MariaDB, and needs about 2 GB of memory. Run one part with `julia --project=test test/orm.jl`; the parts are `templates`, `orm`, `forms`, `views`, `admin`, `services`, `db` and `migrations`. `JUANGO_TEST_DATABASE` picks the database: unset for in-memory SQLite, or a `postgresql://` or `mysql://` URL.
