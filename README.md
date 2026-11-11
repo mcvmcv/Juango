@@ -114,6 +114,22 @@ prefetch_related(objects(Author), Prefetch(:posts; queryset=filter(Post; publish
 
 `select_related` follows forward foreign keys (`:author__profile` works too). `prefetch_related` handles reverse relations and forward foreign keys. A prefetched relation answers iteration, `count`, `first` and `exists` from memory. Filtering it further queries the database again.
 
+More QuerySet tools:
+
+```julia
+defer(objects(Post), :body)                  # leave big columns out; reading post.body loads them
+only(objects(Post), :title, :author)         # just these fields (and the id)
+distinct(values(objects(Post), :status))     # SELECT DISTINCT
+distinct(order_by(qs, "author", "-published"), :author)   # DISTINCT ON (PostgreSQL)
+latest(objects(Post), :published)            # or Meta(get_latest_by = "published"); earliest() too
+in_bulk(objects(Post), [1, 2, 3])            # Dict(id => post)
+dates(objects(Post), :published, :month)     # distinct months with posts; datetimes() for hours etc.
+raw(Post, "SELECT id, title FROM post WHERE views > ?", [100])   # model instances from your own SQL
+explain(filter(Post; published=true))        # the database's query plan
+```
+
+Saving an object with deferred fields writes only the fields that were loaded.
+
 #### Many-to-many
 
 ```julia

@@ -750,3 +750,76 @@ end
         end
     end
 end
+
+@testset "only/defer, distinct, latest/earliest, in_bulk, dates, raw, explain" begin
+    au = create(Author; name = "QS Extra")
+    mk(t, d; kw...) = (a = create(Article; title = t, body = "body of $t", author = au, views = length(t), kw...);
+                       Juango.execute("UPDATE " * Juango.qname("article") * " SET " * Juango.qname("created") * " = ? WHERE id = ?",
+                                      Any[d, a.id]); refresh!(a))
+    a1 = mk("qx-one", DateTime(2024, 1, 15, 9, 30))
+    a2 = mk("qx-two", DateTime(2024, 1, 20, 18, 5); status = "p")
+    a3 = mk("qx-three", DateTime(2024, 3, 2, 7, 0); status = "p")
+    qs = filter(Article; title__startswith = "qx-")
+
+    # defer / only: left out of the query, loaded with one query on first access
+    o = first(order_by(defer(qs, :body, :views), "id"))
+    @test Set(deferred_fields(o)) == Set([:body, :views])
+    @test o.title == "qx-one"
+    v, n = count_queries(() -> o.body)
+    @test v == "body of qx-one" && n == 1 && isempty(deferred_fields(o))
+    @test last(count_queries(() -> o.views)) == 0
+    o = first(order_by(only(qs, :title), "id"))
+    @test :body in deferred_fields(o) && :author_id in deferred_fields(o) && o.title == "qx-one"
+    @test o.author.name == "QS Extra"                                 # the FK id loads on demand too
+    @test isempty(deferred_fields(first(defer(defer(qs, :body), nothing))))
+    @test_throws Juango.LookupError defer(qs, :nope)
+    @test_throws ArgumentError defer(qs, :id)
+    # saving a deferred object writes only the loaded fields
+    o = first(order_by(only(qs, :title), "id")); o.title = "qx-one!"; save!(o)
+    r = get(Article; id = a1.id)
+    @test r.title == "qx-one!" && r.body == "body of qx-one" && r.views == 6
+    @test only(collect(filter(qs; id = a2.id))).title == "qx-two"     # Base.only still works
+
+    # distinct
+    statuses = values_list(order_by(distinct(values(qs, :status)), "status"), :status; flat = true)
+    @test statuses == ["d", "p"]
+    @test count(distinct(filter(Author; articles__title__startswith = "qx-"))) == 1
+    if IS_POSTGRES
+        firsts = collect(order_by(distinct(qs, :status), "status", "id"))
+        @test [a.title for a in firsts] == ["qx-one!", "qx-two"]
+    else
+        @test_throws ArgumentError collect(distinct(qs, :status))
+    end
+
+    # latest / earliest
+    @test latest(qs, :created).id == a3.id && earliest(qs, :created).id == a1.id
+    @test latest(qs, :status, :created).id == a3.id && earliest(qs, "-views").id == a3.id
+    @test_throws DoesNotExist latest(filter(qs; views = -1), :created)
+    @test_throws ArgumentError latest(qs)                              # no Meta(get_latest_by)
+
+    # in_bulk
+    b = in_bulk(qs)
+    @test Set(keys(b)) == Set([a1.id, a2.id, a3.id]) && b[a2.id].title == "qx-two"
+    @test collect(keys(in_bulk(qs, [a1.id, 999_999]))) == [a1.id] && isempty(in_bulk(qs, Int[]))
+    @test in_bulk(Author, ["QS Extra"]; field_name = :name)["QS Extra"].id == au.id
+    @test_throws ArgumentError in_bulk(qs; field_name = :title)
+
+    # dates / datetimes
+    @test dates(qs, :created, :month) == [Date(2024, 1, 1), Date(2024, 3, 1)]
+    @test dates(qs, :created, :year) == [Date(2024, 1, 1)]
+    @test dates(qs, :created; order = :desc) == [Date(2024, 3, 2), Date(2024, 1, 20), Date(2024, 1, 15)]
+    @test dates(qs, :created, :week) == [Date(2024, 1, 15), Date(2024, 2, 26)]
+    @test datetimes(qs, :created, :hour) == [DateTime(2024, 1, 15, 9), DateTime(2024, 1, 20, 18), DateTime(2024, 3, 2, 7)]
+    @test_throws ArgumentError dates(qs, :created, :hour)
+
+    # raw SQL
+    t = Juango.qname("article")
+    rs = raw(Article, "SELECT id, title, views * 2 AS double_views FROM $t WHERE title LIKE ? ORDER BY id", ["qx-%"])
+    @test [x.title for x in rs] == ["qx-one!", "qx-two", "qx-three"]
+    @test rs[2].double_views == 12 && :body in deferred_fields(rs[2]) && rs[2].body == "body of qx-two"
+    @test_throws ArgumentError raw(Article, "SELECT title FROM $t")
+
+    # explain
+    plan = explain(filter(qs; status = "p"))
+    @test plan isa String && !isempty(plan)
+end

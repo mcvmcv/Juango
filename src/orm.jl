@@ -496,6 +496,33 @@ function reverse_relations(T::Type)
     out
 end
 
+"""
+The stored value of a concrete field (by attribute name), loading the object's deferred
+fields (see `only`/`defer`) with one query if it isn't loaded yet.
+"""
+function field_data(m::Model, a::Symbol)
+    data = getfield(m, :_data)
+    v = get(data, a, NOTFOUND)
+    v === NOTFOUND || return v
+    load_deferred!(m)
+    data[a]
+end
+
+"Fetch an object's unloaded fields from the database (keeping the values already loaded)."
+function load_deferred!(m::Model)
+    T = typeof(m)
+    data = getfield(m, :_data)
+    data[:id] === nothing && throw(ArgumentError("$(nameof(T)) has no value for a deferred field and isn't saved"))
+    fresh = getfield(get(base_objects(T); id = data[:id]), :_data)
+    for (k, v) in fresh
+        haskey(data, k) || (data[k] = v)
+    end
+    m
+end
+
+"The fields of an object that `only`/`defer` (or `raw`) left unloaded."
+deferred_fields(m::Model) = Symbol[attname(f) for f in all_fields(typeof(m)) if !haskey(getfield(m, :_data), attname(f))]
+
 function Base.getproperty(m::Model, s::Symbol)
     data = getfield(m, :_data)
     v = get(data, s, NOTFOUND)
@@ -503,9 +530,10 @@ function Base.getproperty(m::Model, s::Symbol)
     s === :pk && return data[:id]
     s in (:_data, :_cache) && return getfield(m, s)
     T = typeof(m)
+    any(f -> attname(f) === s, all_fields(T)) && return field_data(m, s)
     f = findfield(modelmeta(T), s)
     if f !== nothing && f.kind === :fk
-        id = data[attname(f)]
+        id = field_data(m, attname(f))
         id === nothing && return nothing
         cache = getfield(m, :_cache)
         c = get(cache, s, nothing)
@@ -655,7 +683,8 @@ function from_row(::Type{T}, row::Dict{Symbol,Any}) where {T<:Model}
     for f in all_fields(T)
         t = modelmeta(f.model).table
         key = t == mytable ? attname(f) : Symbol("__", t, "__", column(f))   # inherited: labelled per table
-        data[attname(f)] = from_db(f, get(row, key, nothing))
+        haskey(row, key) || continue             # deferred (only/defer, raw): loaded on first access
+        data[attname(f)] = from_db(f, row[key])
     end
     obj
 end
@@ -1006,10 +1035,12 @@ struct QuerySet{T<:Model}
     annotations::Vector{Pair{Symbol,Any}}
     values_fields::Union{Nothing,Vector{String}}   # values() mode: rows are Dicts
     group_by_object::Bool                          # values() after an aggregate annotate: still one row per object
+    deferred::Vector{Symbol}                       # fields left out of the SELECT (only/defer), loaded on access
+    distinct_fields::Union{Nothing,Vector{String}} # distinct(): nothing = off, [] = DISTINCT, fields = DISTINCT ON
 end
 QuerySet{T}(where, order, limit, offset, isnone) where {T} =
     QuerySet{T}(where, order, limit, offset, isnone, Vector{Symbol}[], Prefetch[], nothing, nothing,
-                Pair{Symbol,Any}[], nothing, false)
+                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing)
 
 model_of(::QuerySet{T}) where {T} = T
 
@@ -1252,7 +1283,14 @@ function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = 
         end
         qs.group_by_object && pushfirst!(group, qcol(c.base, "id"))
     else
-        push!(sel, qname(c.base) * ".*")
+        if isempty(qs.deferred)
+            push!(sel, qname(c.base) * ".*")
+        else
+            push!(sel, qcol(c.base, "id"))
+            for f in modelmeta(concrete_model(T)).fields
+                f.name in qs.deferred || push!(sel, qcol(c.base, column(f)))
+            end
+        end
         let alias = c.base, A = concrete_model(T)
             while (P = table_parent(A)) !== nothing        # multi-table parents' columns
                 alias = join!(c, alias, (alias, :__parent), modelmeta(P).table, "id", "id"; left = false)
@@ -1297,8 +1335,14 @@ function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = 
     end
     o, extra = ordered ? order_clause(c, qs.order) : ("", String[])
     (columns === nothing && !idonly && !grouped) && append!(sel, extra)
-    distinct = c.distinct && !grouped
-    sql = "SELECT $(distinct ? "DISTINCT " : "")$(join(sel, ", ")) FROM $(qname(c.table))" *
+    distinct = (c.distinct || qs.distinct_fields !== nothing) && !grouped
+    dkw = distinct ? "DISTINCT " : ""
+    if distinct && qs.distinct_fields !== nothing && !isempty(qs.distinct_fields)
+        backend() isa PostgresBackend ||
+            throw(ArgumentError("distinct(fields...) (DISTINCT ON) is only supported on PostgreSQL"))
+        dkw = "DISTINCT ON (" * join([resolve_path(c, c.base, T, f)[1] for f in qs.distinct_fields], ", ") * ") "
+    end
+    sql = "SELECT $dkw$(join(sel, ", ")) FROM $(qname(c.table))" *
           (c.base == c.table ? "" : " " * qname(c.base)) * join(c.joins) *
           (isempty(wparts) ? "" : " WHERE " * join(wparts, " AND ")) *
           (grouped && !isempty(group) ? " GROUP BY " * join(unique(group), ", ") : "") *
@@ -1401,11 +1445,11 @@ function prefetch_level!(objs::Vector, name::Symbol, qs, to_attr)
     f = findfield(modelmeta(T), name)
     if f !== nothing && f.kind === :fk && f.name === name
         R = related_model(f)
-        ids = unique([getfield(o, :_data)[attname(f)] for o in objs if getfield(o, :_data)[attname(f)] !== nothing])
+        ids = unique([field_data(o, attname(f)) for o in objs if field_data(o, attname(f)) !== nothing])
         rel = isempty(ids) ? R[] : fetch(filter(something(qs, base_objects(R)); id__in = ids))
         byid = Dict(r.id => r for r in rel)
         for o in objs
-            id = getfield(o, :_data)[attname(f)]
+            id = field_data(o, attname(f))
             r = id === nothing ? nothing : get(byid, id, nothing)
             if to_attr !== nothing
                 getfield(o, :_cache)[to_attr] = r
@@ -1428,7 +1472,7 @@ function prefetch_level!(objs::Vector, name::Symbol, qs, to_attr)
     rows = fetch(filter(something(qs, objects(M)), Q(Symbol(attname(rf), "__in") => ids)))
     groups = Dict{Any,Vector{M}}()
     for r in rows
-        push!(get!(() -> M[], groups, getfield(r, :_data)[attname(rf)]), r)
+        push!(get!(() -> M[], groups, field_data(r, attname(rf))), r)
     end
     for o in objs
         getfield(o, :_cache)[something(to_attr, rn)] = PrefetchedList(get(groups, o.id, M[]))
@@ -1498,6 +1542,190 @@ function Base.last(qs::QuerySet)
 end
 Base.first(::Type{T}) where {T<:Model} = first(objects(T))
 Base.last(::Type{T}) where {T<:Model} = last(objects(T))
+
+# --- only/defer, distinct, latest/earliest, in_bulk, dates, raw, explain -----------------------
+
+function check_deferrable(T, names)
+    own = Set(f.name for f in modelmeta(concrete_model(T)).fields)
+    for n in names
+        n in (:id, :pk) && throw(ArgumentError("the primary key can't be deferred"))
+        n in own || throw(LookupError("$(nameof(T)) has no field '$n' that can be deferred"))
+    end
+end
+
+"""
+    defer(qs, :body, :notes)
+
+Leave these fields out of the query; reading one later loads the object's deferred fields
+with one more query. `defer(qs, nothing)` clears the list.
+"""
+function defer(qs::QuerySet{T}, fields...) where {T}
+    fields == (nothing,) && return chain(qs; deferred = Symbol[])
+    names = Symbol[Symbol(f) for f in fields]
+    check_deferrable(T, names)
+    chain(qs; deferred = unique(vcat(qs.deferred, names)))
+end
+defer(::Type{T}, fields...) where {T<:Model} = defer(objects(T), fields...)
+
+"""
+    only(qs, :title, :author)
+
+(Extends `Base.only`.) Load only these fields (and the id); the others are deferred, as with `defer`.
+"""
+function Base.only(qs::QuerySet{T}, field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...) where {T}
+    keep = Symbol[Symbol(field); Symbol.(collect(fields))]
+    check_deferrable(T, keep)
+    chain(qs; deferred = Symbol[f.name for f in modelmeta(concrete_model(T)).fields if !(f.name in keep)])
+end
+Base.only(::Type{T}, field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...) where {T<:Model} =
+    only(objects(T), field, fields...)
+
+"""
+    distinct(qs)
+    distinct(qs, :author, :published)     # PostgreSQL only: SELECT DISTINCT ON (...)
+
+Remove duplicate rows (`SELECT DISTINCT`). With fields, keep the first row of each group of
+equal values: order by those fields first.
+"""
+distinct(qs::QuerySet, fields::Union{Symbol,AbstractString}...) = chain(qs; distinct_fields = String[string(f) for f in fields])
+distinct(::Type{T}, fields::Union{Symbol,AbstractString}...) where {T<:Model} = distinct(objects(T), fields...)
+
+function latest_order(qs::QuerySet{T}, fields, what) where {T}
+    fs = isempty(fields) ? get(modelmeta(T).extra, :get_latest_by, nothing) : fields
+    fs === nothing && throw(ArgumentError("$what needs field names or Meta(get_latest_by = ...) on $(nameof(T))"))
+    String[string(f) for f in (fs isa Union{Symbol,AbstractString} ? (fs,) : fs)]
+end
+
+"""
+    latest(qs, :published)    earliest(qs, :published)
+
+The object with the largest (smallest) value of the fields, which default to the model's
+`Meta(get_latest_by = ...)`. Throws `DoesNotExist` when there are no objects.
+"""
+function latest(qs::QuerySet{T}, fields::Union{Symbol,AbstractString}...) where {T}
+    order = [startswith(o, "-") ? o[2:end] : "-" * o for o in latest_order(qs, fields, "latest")]
+    o = first(chain(qs; order = order))
+    o === nothing && throw(DoesNotExist(T, "latest"))
+    o
+end
+function earliest(qs::QuerySet{T}, fields::Union{Symbol,AbstractString}...) where {T}
+    o = first(chain(qs; order = latest_order(qs, fields, "earliest")))
+    o === nothing && throw(DoesNotExist(T, "earliest"))
+    o
+end
+latest(::Type{T}, fields...) where {T<:Model} = latest(objects(T), fields...)
+earliest(::Type{T}, fields...) where {T<:Model} = earliest(objects(T), fields...)
+
+"""
+    in_bulk(qs)                          # Dict id => object
+    in_bulk(qs, [1, 2, 3])
+    in_bulk(qs, ["a", "b"]; field_name = :slug)
+
+The objects as a `Dict` keyed by `field_name` (which must be unique), optionally limited to
+those keys.
+"""
+function in_bulk(qs::QuerySet{T}, keys = nothing; field_name = :id) where {T}
+    field_name = Symbol(field_name)
+    if !(field_name in (:id, :pk))
+        f = findfield(modelmeta(T), field_name)
+        (f !== nothing && f.unique) || throw(ArgumentError("in_bulk's field_name must be a unique field, not '$field_name'"))
+    end
+    field_name === :pk && (field_name = :id)
+    keys !== nothing && isempty(keys) && return Dict{Any,T}()
+    q = keys === nothing ? qs : filter(qs; Symbol(field_name, "__in") => collect(keys))
+    Dict{Any,T}(getproperty(o, field_name) => o for o in fetch(q))
+end
+in_bulk(::Type{T}, keys = nothing; kw...) where {T<:Model} = in_bulk(objects(T), keys; kw...)
+
+const DATE_KINDS = (:year, :month, :week, :day)
+const DATETIME_KINDS = (:year, :month, :week, :day, :hour, :minute, :second)
+
+function truncate_datetime(v, kind::Symbol)
+    d = Date(v)
+    kind === :year && return DateTime(Dates.year(d), 1, 1)
+    kind === :month && return DateTime(Dates.year(d), Dates.month(d), 1)
+    kind === :week && return DateTime(Dates.firstdayofweek(d))
+    kind === :day && return DateTime(d)
+    dt = DateTime(v)
+    floor(dt, kind === :hour ? Dates.Hour : kind === :minute ? Dates.Minute : Dates.Second)
+end
+
+function distinct_dates(qs::QuerySet, field, kind, order, kinds, what)
+    kind = Symbol(kind)
+    kind in kinds || throw(ArgumentError("$what: kind must be one of $(join(kinds, ", ")), not :$kind"))
+    order in (:asc, :desc) || throw(ArgumentError("$what: order must be :asc or :desc"))
+    vals = DateTime[]
+    for v in values_list(chain(qs; order = String[]), field; flat = true)
+        v === nothing && continue
+        v isa TimeZones.ZonedDateTime && (v = DateTime(localtime(v), TimeZones.Local))
+        push!(vals, truncate_datetime(v, kind))
+    end
+    sort!(unique!(vals); rev = order === :desc)
+end
+
+"""
+    dates(qs, :published, :month; order = :asc) -> Vector{Date}
+
+The distinct dates, truncated to `:year`, `:month`, `:week` (starting Monday) or `:day`, on
+which the objects' date or datetime field falls.
+"""
+dates(qs::QuerySet, field, kind = :day; order = :asc) =
+    Date.(distinct_dates(qs, field, kind, order, DATE_KINDS, "dates"))
+dates(::Type{T}, args...; kw...) where {T<:Model} = dates(objects(T), args...; kw...)
+
+"""
+    datetimes(qs, :created, :hour; order = :asc) -> Vector{DateTime}
+
+Like `dates`, for a datetime field, truncated down to `:hour`, `:minute` or `:second` too.
+Aware values are converted to the current time zone first.
+"""
+datetimes(qs::QuerySet, field, kind = :day; order = :asc) =
+    distinct_dates(qs, field, kind, order, DATETIME_KINDS, "datetimes")
+datetimes(::Type{T}, args...; kw...) where {T<:Model} = datetimes(objects(T), args...; kw...)
+
+"""
+    raw(Model, sql, params = [])
+
+Run hand-written SQL (with `?` placeholders) and build model instances from the rows. The
+rows must include `id`; fields missing from them are deferred, and extra columns become
+attributes, like annotations.
+"""
+function raw(::Type{T}, sql::AbstractString, params = Any[]) where {T<:Model}
+    rows = execute(sql, collect(Any, params))
+    known = Set{Symbol}([:id; [attname(f) for f in all_fields(T)]])
+    out = T[]
+    for r in rows
+        haskey(r, :id) || throw(ArgumentError("raw(): the query must select the id column"))
+        o = from_row(T, r)
+        for (k, v) in r
+            k in known || (getfield(o, :_data)[k] = v)
+        end
+        push!(out, o)
+    end
+    out
+end
+
+"""
+    explain(qs) -> String
+
+The database's query plan for the queryset (`EXPLAIN QUERY PLAN` on SQLite, `EXPLAIN` on
+PostgreSQL and MySQL).
+"""
+function explain(qs::QuerySet)
+    sql, ps = select_sql(qs)
+    prefix = occursin("SQLite", vendor(backend())) ? "EXPLAIN QUERY PLAN " : "EXPLAIN "
+    lines = String[]
+    for r in execute(prefix * sql, ps)
+        if haskey(r, :detail)
+            push!(lines, string(r[:detail]))
+        elseif length(r) == 1
+            push!(lines, string(first(values(r))))
+        else
+            push!(lines, join(["$k=$(something(v, "NULL"))" for (k, v) in sort!(collect(r); by = first)], " "))
+        end
+    end
+    join(lines, "\n")
+end
 
 struct DoesNotExist <: Exception
     model::Any
@@ -1633,7 +1861,7 @@ function save!(obj::T) where {T<:Model}
     ts = timezone_now()
     for f in all_fields(T)
         a = attname(f)
-        if f.auto_now || (f.auto_now_add && (data[:id] === nothing || data[a] === nothing))
+        if f.auto_now || (f.auto_now_add && (data[:id] === nothing || get(data, a, missing) === nothing))
             data[a] = f.kind === :date ? Date(ts isa TimeZones.ZonedDateTime ? make_naive(ts) : ts) : ts
         end
     end
@@ -1655,8 +1883,9 @@ end
 "Write the columns of one table (`M`'s own fields) for an object's data."
 function save_table!(M::Type, data, root::Bool, fresh::Bool = false)
     meta = modelmeta(M)
-    cols = [qname(column(f)) for f in meta.fields]
-    vals = Any[to_db(f, data[attname(f)]) for f in meta.fields]
+    fields = [f for f in meta.fields if haskey(data, attname(f))]   # deferred fields keep their stored values
+    cols = [qname(column(f)) for f in fields]
+    vals = Any[to_db(f, data[attname(f)]) for f in fields]
     tbl = qname(meta.table)
     if fresh
         execute(insert_sql(backend(), tbl, vcat(qname("id"), cols)) |> s -> replace(s, r" RETURNING .*$" => ""),
