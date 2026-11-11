@@ -127,7 +127,7 @@ function login!(req::Request, u::User)
     end
     s["_auth_user_id"] = u.id
     s["_auth_user_hash"] = session_auth_hash(u)
-    u.last_login = now()
+    u.last_login = timezone_now()
     save!(u)
     req.user = u
     rotate_csrf_token!(req)

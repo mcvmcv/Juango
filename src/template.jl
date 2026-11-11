@@ -1091,6 +1091,7 @@ end
 function format_date(d, fmt::AbstractString)
     dt = todatetime(d)
     dt === nothing && return ""
+    z = d isa PinnedTime ? d.z : d isa TimeZones.ZonedDateTime ? (get(task_local_storage(), :juango_localtime_off, false) ? d : localtime(d)) : nothing
     io = IOBuffer()
     esc = false
     for c in fmt
@@ -1123,7 +1124,14 @@ function format_date(d, fmt::AbstractString)
         elseif c == 's'; print(io, lpad(second(dt), 2, '0'))
         elseif c == 'A'; print(io, h < 12 ? "AM" : "PM")
         elseif c == 'a'; print(io, h < 12 ? "a.m." : "p.m.")
-        elseif c == 'U'; print(io, round(Int, datetime2unix(dt)))
+        elseif c == 'U'; print(io, round(Int, datetime2unix(z === nothing ? dt : DateTime(TimeZones.astimezone(z, UTC_TZ)))))
+        elseif c == 'e'; z === nothing || print(io, TimeZones.timezone(z))
+        elseif c == 'T'; z === nothing || print(io, string(z.zone.name))
+        elseif c == 'O'
+            if z !== nothing
+                off = Dates.value(Second(z.zone.offset.std + z.zone.offset.dst))
+                print(io, off < 0 ? "-" : "+", lpad(abs(off) ÷ 3600, 2, '0'), lpad((abs(off) % 3600) ÷ 60, 2, '0'))
+            end
         elseif c == 'S'
             dd = day(dt)
             print(io, dd in (11, 12, 13) ? "th" : dd % 10 == 1 ? "st" : dd % 10 == 2 ? "nd" : dd % 10 == 3 ? "rd" : "th")
@@ -1134,8 +1142,14 @@ function format_date(d, fmt::AbstractString)
     String(take!(io))
 end
 
-function timesince(d, ref = now())
-    dt = todatetime(d)
+function timesince(d, ref = nothing)
+    if d isa TimeZones.ZonedDateTime        # compare aware times in UTC
+        dt = DateTime(TimeZones.astimezone(d, UTC_TZ))
+        ref = ref === nothing ? now(Dates.UTC) : ref isa TimeZones.ZonedDateTime ? DateTime(TimeZones.astimezone(ref, UTC_TZ)) : ref
+    else
+        dt = todatetime(d)
+        ref = something(ref, now())
+    end
     dt === nothing && return ""
     secs = max(0, round(Int, Dates.value(ref - dt) / 1000))
     for (n, unit) in ((365 * 86400, "year"), (30 * 86400, "month"), (7 * 86400, "week"),

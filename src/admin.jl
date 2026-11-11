@@ -234,6 +234,7 @@ format_value(::Nothing) = "-"
 format_value(v::Bool) = SafeString(v ? "<span class=\"yes\" title=\"True\">✔</span>" : "<span class=\"no\" title=\"False\">✘</span>")
 format_value(v::DateTime) = format_date(v, "N j, Y, g:i a")
 format_value(v::Date) = format_date(v, "N j, Y")
+format_value(v::Juango.TimeZones.ZonedDateTime) = format_date(v, "N j, Y, g:i a T")
 format_value(v::AbstractString) = isempty(v) ? "-" : v
 format_value(v) = v
 

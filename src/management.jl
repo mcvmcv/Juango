@@ -186,6 +186,8 @@ for (n, h, f) in (
     ("sqlmigrate", "Print the SQL for a migration: sqlmigrate [app] <name> [--backwards]", cmd_sqlmigrate),
     ("createsuperuser", "Create an admin user (--username, --email, --password, --noinput)", cmd_createsuperuser),
     ("showurls", "List all URL patterns", cmd_showurls),
+    ("convert_naive_datetimes", "Rewrite stored naive datetimes as UTC when turning USE_TZ on: convert_naive_datetimes [--from Europe/Berlin]",
+     args -> (f = last(parse_flags(args)); println("Converted ", convert_naive_datetimes(; from_tz = get(f, "from", settings.TIME_ZONE)), " columns."))),
     ("makemessages", "Collect translatable strings: makemessages -l de [-l fr]", function (args)
         _, flags = parse_flags(replace(args, "-l" => "--l"))
         langs = String[]
@@ -282,6 +284,8 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
             TEMPLATE_DIRS = [joinpath(BASE_DIR, "templates")],
             STATIC_DIRS = [joinpath(BASE_DIR, "static")],
             MEDIA_ROOT = joinpath(BASE_DIR, "media"),     # uploaded files (FileField/ImageField)
+            USE_TZ = true,                                # aware datetimes, stored in UTC
+            TIME_ZONE = "UTC",
             SITE_NAME = "$name",
         )
         """,

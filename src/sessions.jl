@@ -30,7 +30,7 @@ Base.iterate(s::Session, st...) = iterate(s.data, st...)
 Base.keys(s::Session) = keys(s.data)
 Base.empty!(s::Session) = (empty!(s.data); s.modified = true; s)
 
-session_expiry() = now() + Second(settings.SESSION_COOKIE_AGE)
+session_expiry() = timezone_now() + Second(settings.SESSION_COOKIE_AGE)
 
 session_cache_key(k) = "juango.session:" * k
 cache_sessions() = settings.SESSION_ENGINE in (:cache, :cached_db)
@@ -48,7 +48,7 @@ function load_session(key::Union{Nothing,AbstractString})
         d === nothing || return Session(String(key), d, false, false)
         db_sessions() || return Session()
     end
-    rec = first(filter(objects(SessionRecord); session_key = key, expire_date__gt = now()))
+    rec = first(filter(objects(SessionRecord); session_key = key, expire_date__gt = timezone_now()))
     rec === nothing && return Session()
     data = try
         plainjson(JSON.parse(rec.session_data))
@@ -99,4 +99,4 @@ function drop_session(key)
 end
 
 "Remove expired session rows (the `clearsessions` command)."
-clear_expired_sessions!() = delete!(filter(objects(SessionRecord); expire_date__lt = now()))
+clear_expired_sessions!() = delete!(filter(objects(SessionRecord); expire_date__lt = timezone_now()))

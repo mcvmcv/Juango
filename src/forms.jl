@@ -170,7 +170,7 @@ function to_julia(fld::Field, raw)
         for fmt in (dateformat"yyyy-mm-ddTHH:MM:SS", dateformat"yyyy-mm-ddTHH:MM", dateformat"yyyy-mm-dd HH:MM:SS",
                     dateformat"yyyy-mm-dd HH:MM", dateformat"yyyy-mm-ddTHH:MM:SS.s", dateformat"yyyy-mm-dd")
             v = tryparse(DateTime, s, fmt)
-            v === nothing || return v, nothing
+            v === nothing || return (settings.USE_TZ ? make_aware(v) : v), nothing      # typed in the current time zone
         end
         return nothing, gettext("Enter a valid date/time.")
     elseif k === :date
@@ -405,6 +405,7 @@ function display_value(bf::BoundField)
     fld.kind === :array && return join(string.(v), ", ")
     v isa ValueRange && return string(something(v.lower, ""), ", ", something(v.upper, ""))
     v isa Model && return v.id
+    v isa TimeZones.ZonedDateTime && (v = make_naive(v))          # shown in the current time zone
     v isa DateTime && return Dates.format(v, "yyyy-mm-ddTHH:MM")
     v
 end

@@ -17,6 +17,7 @@ using SHA
 using UUIDs
 import Sockets
 import Serialization
+import TimeZones
 import HTTP
 import SQLite
 import DBInterface
@@ -35,6 +36,7 @@ include("db.jl")
 include("backends/sqlite.jl")
 include("backends/postgres.jl")
 include("backends/mysql.jl")
+include("timezones.jl")
 include("orm.jl")
 include("expressions.jl")
 include("fields_extra.jl")
@@ -88,6 +90,8 @@ export JSONField, ArrayField, UUIDField, CICharField, IntegerRangeField, DateRan
 export gettext, ngettext, pgettext, npgettext, gettext_lazy, ngettext_lazy, pgettext_lazy, @t_str, get_language,
        activate!, deactivate!, with_language, LocaleMiddleware, i18n_patterns, set_language, i18n_urls, number_format,
        localize, interpolate, language_name, makemessages, compilemessages
+export timezone_now, activate_timezone!, deactivate_timezone!, with_timezone, get_current_timezone, make_aware,
+       make_naive, localtime, is_aware, TimezoneMiddleware, convert_naive_datetimes
 export Signal, connect!, disconnect!, receiver, send, send_robust, has_receivers, pre_save, post_save, pre_delete,
        post_delete, m2m_changed, request_started, request_finished, user_logged_in, user_logged_out, user_login_failed
 export cache, cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, get_or_set, cache_get_many,

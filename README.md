@@ -586,6 +586,27 @@ urlpatterns = [i18n_patterns(path("about/", about; name = "about")),   # /en/abo
 - **Formats.** Dates use translated month and day names, and the `date` filter's default format follows the language. `localize` and `number_format` use the language's decimal separator, and thousands separators too with `USE_THOUSAND_SEPARATOR`.
 - **Built-in German.** The admin's interface and validation messages are translatable, and Juango ships a German translation (`src/locale/de`). Other languages fall back to English until someone adds a catalogue.
 
+### Time zones
+
+```julia
+configure!(USE_TZ = true, TIME_ZONE = "Europe/Berlin")   # startproject turns USE_TZ on
+post.created                       # ZonedDateTime, in UTC
+timezone_now()                     # aware "now" (auto_now fields use it)
+with_timezone("Asia/Tokyo") do ... end      # or activate_timezone!(user.tz) per request
+make_aware(DateTime(2024, 6, 1, 9)); make_naive(z); localtime(z)
+```
+
+```
+{{ post.created }}  {{ post.created|date:"H:i T" }}      {# in the current time zone #}
+{% timezone "Asia/Tokyo" %}...{% endtimezone %}  {{ t|utc }}  {{ t|timezone:"America/New_York" }}  {% localtime off %}
+```
+
+- **Storage.** With `USE_TZ`, datetimes are stored in UTC: `TIMESTAMP WITH TIME ZONE` on PostgreSQL, and UTC on SQLite and MySQL. The ORM returns aware `ZonedDateTime`s (TimeZones.jl).
+- **Naive values.** Naive `DateTime`s you pass in are taken as wall-clock times in the current time zone.
+- **Display.** Templates and forms show and read times in the current time zone: the one activated for the request (`TimezoneMiddleware` uses the session's `"juango_timezone"`), else `TIME_ZONE`. The `date` filter adds `e` (zone name), `T` (abbreviation) and `O` (offset).
+- **Existing data.** To turn `USE_TZ` on for an existing database, run `manage.jl convert_naive_datetimes --from Europe/Berlin` once. It rewrites stored values as UTC and, on PostgreSQL, converts the columns. Back up first.
+- **Lookups.** Date lookups such as `created__year` compare in UTC.
+
 ### Signals
 
 ```julia

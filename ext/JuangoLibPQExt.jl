@@ -8,6 +8,7 @@ function Juango.pg_connect(url::String)
     conn = LibPQ.Connection(url)
     # Silence NOTICEs such as "relation already exists, skipping" from CREATE ... IF NOT EXISTS.
     LibPQ.execute(conn, "SET client_min_messages TO warning")
+    LibPQ.execute(conn, "SET TIME ZONE 'UTC'")          # naive timestamps are sent and read as UTC
     conn
 end
 

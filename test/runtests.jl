@@ -2257,6 +2257,78 @@ end
     end
 end
 
+@testset "time zones" begin
+    TZ = Juango.TimeZones
+    utc, akl, tokyo = TZ.TimeZone("UTC"), TZ.TimeZone("Pacific/Auckland"), TZ.TimeZone("Asia/Tokyo")
+    quiet(f) = redirect_stdout(f, devnull)
+    # naive data written before USE_TZ, converted afterwards
+    @eval @model struct TzEvent
+        name = CharField(max_length = 20)
+        at = DateTimeField(null = true)
+        Meta(table = "tz_event", app_label = "tztest")
+    end
+    quiet(() -> Juango.sync_models!([TzEvent]))
+    old = create(TzEvent; name = "old", at = DateTime(2024, 1, 1, 12))     # Auckland wall-clock time, naive
+    configure!(USE_TZ = true, TIME_ZONE = "Pacific/Auckland")
+    try
+        @test quiet(() -> convert_naive_datetimes(; from_tz = "Pacific/Auckland")) >= 1
+        @test get(TzEvent; id = old.id).at == TZ.ZonedDateTime(2023, 12, 31, 23, utc)
+
+        # aware values in, UTC stored, aware values out
+        au = create(Author; name = "TZ Author")
+        a = create(Article; title = "tz", author = au)
+        @test a.created isa TZ.ZonedDateTime && TZ.timezone(a.created) == utc
+        @test abs(get(Article; id = a.id).created - timezone_now()) < Dates.Minute(1)
+        e = create(TzEvent; name = "naive", at = DateTime(2024, 6, 1, 12))      # naive: taken as Auckland time
+        @test get(TzEvent; id = e.id).at == TZ.ZonedDateTime(2024, 6, 1, 0, utc)
+        ny = create(TzEvent; name = "ny", at = TZ.ZonedDateTime(2024, 6, 1, 12, TZ.TimeZone("America/New_York")))
+        @test get(TzEvent; id = ny.id).at == TZ.ZonedDateTime(2024, 6, 1, 16, utc)
+        @test [x.name for x in order_by(filter(TzEvent; at__gt = TZ.ZonedDateTime(2024, 6, 1, 1, utc)), "name")] == ["ny"]
+        @test count(filter(TzEvent; at__lt = DateTime(2024, 6, 1, 12, 30))) == 2          # naive bound in Auckland time
+
+        # shown in the current time zone
+        ctx = Dict("t" => TZ.ZonedDateTime(2024, 6, 1, 0, utc))
+        @test tr("{{ t|date:\"Y-m-d H:i T\" }}", ctx) == "2024-06-01 12:00 NZST"
+        @test with_timezone(() -> tr("{{ t|date:\"H:i e O\" }}", ctx), "Asia/Tokyo") == "09:00 Asia/Tokyo +0900"
+        @test tr("{% timezone \"Europe/London\" %}{{ t|date:\"H:i T\" }}{% endtimezone %} {{ t|date:\"H:i\" }}", ctx) == "01:00 BST 12:00"
+        @test tr("{% localtime off %}{{ t|date:\"H:i\" }}{% endlocaltime %} {{ t|utc|date:\"H:i e\" }}", ctx) == "00:00 00:00 UTC"
+        @test tr("{{ t|timezone:\"Asia/Tokyo\"|date:\"H:i\" }}", ctx) == "09:00"
+        @test Juango.timesince(timezone_now() - Dates.Hour(3)) == "3 hours"
+        @test make_naive(TZ.ZonedDateTime(2024, 6, 1, 0, utc)) == DateTime(2024, 6, 1, 12)
+        @test make_aware(DateTime(2024, 6, 1, 12)) == TZ.ZonedDateTime(2024, 6, 1, 12, akl)
+        @test get_current_timezone() == akl && with_timezone(get_current_timezone, tokyo) == tokyo && get_current_timezone() == akl
+
+        # forms read and show times in the current time zone
+        @eval @form TzForm begin
+            when = DateTimeField()
+        end
+        f = TzForm(Dict("when" => "2024-01-01T12:00"))
+        @test is_valid(f) && f.cleaned_data[:when] == TZ.ZonedDateTime(2023, 12, 31, 23, utc)
+        f = with_timezone(() -> (g = TzForm(Dict("when" => "2024-01-01T12:00")); is_valid(g); g), "Asia/Tokyo")
+        @test f.cleaned_data[:when] == TZ.ZonedDateTime(2024, 1, 1, 3, utc)
+        @test occursin("value=\"2024-06-01T12:00\"", string(as_p(TzForm(; initial = Dict(:when => TZ.ZonedDateTime(2024, 6, 1, 0, utc))))))
+
+        # sessions, logins and the admin keep working with aware times
+        c = Client()
+        force_login!(c, get(User; username = "root"))
+        @test get(c, "/admin/").status == 200 && get(User; username = "root").last_login isa TZ.ZonedDateTime
+        r = get(c, "/admin/article/$(a.id)/change/")
+        @test r.status == 200 && occursin(r"NZ[SD]T", text(r))
+
+        # TimezoneMiddleware activates the session's time zone
+        mw = TimezoneMiddleware(req -> HttpResponse(string(get_current_timezone())))
+        req = Request("GET", "/"); req.session = Juango.Session(); req.session["juango_timezone"] = "Asia/Tokyo"
+        @test text(mw(req)) == "Asia/Tokyo"
+        req.session["juango_timezone"] = "Not/AZone"
+        @test text(mw(req)) == "Pacific/Auckland"
+    finally
+        configure!(USE_TZ = false, TIME_ZONE = "UTC")
+        Juango.unregister_model!(TzEvent)
+        Juango.execute("DROP TABLE " * Juango.qname("tz_event"))
+    end
+    @test !(get(Article; title = "tz").created isa TZ.ZonedDateTime)      # naive again without USE_TZ
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)

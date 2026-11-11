@@ -111,7 +111,7 @@ function column_type(::DatabaseBackend, kind::Symbol, max_length)
     kind in (:int, :fk) && return "BIGINT"
     kind === :bool && return "BOOLEAN"
     kind === :float && return "DOUBLE PRECISION"
-    kind === :datetime && return "TIMESTAMP"
+    kind === :datetime && return settings.USE_TZ ? "TIMESTAMP WITH TIME ZONE" : "TIMESTAMP"
     kind === :date && return "DATE"
     kind === :json && return "JSONB"
     kind === :uuid && return "UUID"

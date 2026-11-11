@@ -624,7 +624,7 @@ function from_db(f::Field, v)
     k === :int && return v isa Integer ? Int(v) : parse(Int, string(v))
     k === :fk && return Int(v)
     k === :float && return Float64(v)
-    k === :datetime && return v isa DateTime ? v : something(todatetime(v), v)
+    k === :datetime && return datetime_from_db(v isa DateTime || v isa TimeZones.ZonedDateTime ? v : something(todatetime(v), v))
     k === :date && return v isa Date ? v : Date(todatetime(v))
     v isa AbstractString ? String(v) : v
 end
@@ -1626,11 +1626,11 @@ INSERT (when `obj.id === nothing`) or UPDATE the object. Sets `auto_now` /
 """
 function save!(obj::T) where {T<:Model}
     data = getfield(obj, :_data)
-    ts = now()
+    ts = timezone_now()
     for f in all_fields(T)
         a = attname(f)
         if f.auto_now || (f.auto_now_add && (data[:id] === nothing || data[a] === nothing))
-            data[a] = f.kind === :date ? Date(ts) : ts
+            data[a] = f.kind === :date ? Date(ts isa TimeZones.ZonedDateTime ? make_naive(ts) : ts) : ts
         end
     end
     created = data[:id] === nothing

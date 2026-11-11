@@ -246,7 +246,7 @@ function compile_expr(c::SQLCompiler, e::Func)
     n === :coalesce && return "COALESCE($(join(sqls, ", ")))", ps
     n === :concat && return "(" * join(["COALESCE(CAST($s AS $(cast_type(b, :text))), '')" for s in sqls], " || ") * ")", ps
     n === :cast && return "CAST($(sqls[1]) AS $(cast_type(b, e.args[2] === :string ? :text : e.args[2])))", ps
-    n === :now && return "?", Any[now()]     # Julia's clock and local time, like the DateTimes Juango stores
+    n === :now && return "?", Any[timezone_now()]     # Julia's clock and local time, like the DateTimes Juango stores
     n === :extract && return extract_sql(b, e.args[2], sqls[1]), ps
     throw(ArgumentError("unknown function $n"))
 end

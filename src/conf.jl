@@ -37,6 +37,8 @@ function default_settings()
         :CACHE_MIDDLEWARE_SECONDS => 600,
         :TEMPLATE_CACHE_CHECK_MTIME => true,
         :SESSION_ENGINE => :db,
+        :USE_TZ => false,
+        :TIME_ZONE => "UTC",
         :USE_I18N => true,
         :LANGUAGE_CODE => "en",
         :LANGUAGES => [("en", "English"), ("de", "Deutsch"), ("fr", "Français"), ("es", "Español"), ("it", "Italiano"),

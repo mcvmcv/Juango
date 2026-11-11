@@ -108,6 +108,7 @@ function to_db(f::Field, v)
     f.kind in (:file, :image) && return v === nothing ? "" : file_to_db(f, v)     # no file is stored as ''
     v === nothing && return dbparam(v)
     k = f.kind
+    k === :datetime && return dbparam(to_utc_naive(v))
     k === :json && return JSON.json(json_scalar_tree(v))
     k === :array && return encode_array(backend(), v)
     k in RANGE_KINDS && return encode_range(backend(), v)
