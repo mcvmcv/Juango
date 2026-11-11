@@ -16,6 +16,7 @@ using Printf
 using SHA
 using UUIDs
 import Sockets
+import Serialization
 import HTTP
 import SQLite
 import DBInterface
@@ -53,6 +54,7 @@ include("passwordreset.jl")
 include("messages.jl")
 include("middleware.jl")
 include("views.jl")
+include("cache.jl")
 include("handler.jl")
 include("server.jl")
 include("testclient.jl")
@@ -81,6 +83,8 @@ export FileField, ImageField, UploadedFile, FieldFile, FileSystemStorage, FileEx
        save_file, delete_file, image_size, default_storage
 export JSONField, ArrayField, UUIDField, CICharField, IntegerRangeField, DateRangeField, DateTimeRangeField,
        ValueRange, SearchVector, SearchQuery, SearchRank, uuid4, UUID
+export cache, cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, get_or_set, cache_get_many,
+       cache_set_many, incr, decr, incr_version, cache_page, CacheMiddleware, create_cache_table
 export EmailMessage, EmailMultiAlternatives, send!, send_mail, mail_admins, attach!, attach_alternative!, outbox,
        signing_dumps, signing_loads, sign_value, unsign_value, BadSignature, SignatureExpired,
        PasswordResetView, PasswordResetConfirmView, make_reset_token, check_reset_token

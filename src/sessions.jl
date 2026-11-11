@@ -32,8 +32,22 @@ Base.empty!(s::Session) = (empty!(s.data); s.modified = true; s)
 
 session_expiry() = now() + Second(settings.SESSION_COOKIE_AGE)
 
+session_cache_key(k) = "juango.session:" * k
+cache_sessions() = settings.SESSION_ENGINE in (:cache, :cached_db)
+db_sessions() = settings.SESSION_ENGINE in (:db, :cached_db)
+
+"""
+Load a session. `SESSION_ENGINE` chooses the store: `:db` (the default), `:cache` (the
+default cache only; fast, but sessions vanish with the cache) or `:cached_db` (cache in
+front of the database).
+"""
 function load_session(key::Union{Nothing,AbstractString})
     key === nothing && return Session()
+    if cache_sessions()
+        d = cache_get(session_cache_key(key))
+        d === nothing || return Session(String(key), d, false, false)
+        db_sessions() || return Session()
+    end
     rec = first(filter(objects(SessionRecord); session_key = key, expire_date__gt = now()))
     rec === nothing && return Session()
     data = try
@@ -41,6 +55,7 @@ function load_session(key::Union{Nothing,AbstractString})
     catch
         Dict{String,Any}()
     end
+    cache_sessions() && cache_set(session_cache_key(key), data; timeout = settings.SESSION_COOKIE_AGE)
     Session(String(key), data, false, false)
 end
 
@@ -48,6 +63,8 @@ function save_session!(s::Session)
     if s.key === nothing
         s.key = random_string(32)
     end
+    cache_sessions() && cache_set(session_cache_key(s.key), s.data; timeout = settings.SESSION_COOKIE_AGE)
+    db_sessions() || (s.modified = false; return s)
     rec = first(filter(objects(SessionRecord); session_key = s.key))
     rec === nothing && (rec = SessionRecord(session_key = s.key))
     rec.session_data = JSON.json(s.data)
@@ -60,7 +77,7 @@ end
 "Give the session a new key, keeping its data (prevents session fixation)."
 function cycle_key!(s::Session)
     old = s.key
-    old === nothing || delete!(filter(objects(SessionRecord); session_key = old))
+    old === nothing || drop_session(old)
     s.key = random_string(32)
     s.modified = true
     s
@@ -68,12 +85,17 @@ end
 
 "Delete the session data and key."
 function flush!(s::Session)
-    s.key === nothing || delete!(filter(objects(SessionRecord); session_key = s.key))
+    s.key === nothing || drop_session(s.key)
     empty!(s.data)
     s.key = nothing
     s.modified = false
     s.flushed = true
     s
+end
+
+function drop_session(key)
+    cache_sessions() && cache_delete(session_cache_key(key))
+    db_sessions() && delete!(filter(objects(SessionRecord); session_key = key))
 end
 
 "Remove expired session rows (the `clearsessions` command)."

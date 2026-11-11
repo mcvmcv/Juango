@@ -1861,6 +1861,149 @@ end
     @test check_reset_token(get(User; id = u.id), make_reset_token(get(User; id = u.id)))
 end
 
+@testset "caching" begin
+    import Sockets
+    old_caches = settings.CACHES
+    try
+        configure!(CACHES = Dict("default" => Dict(:backend => :locmem, :max_entries => 3, :timeout => 300),
+                                 "nothing" => Dict(:backend => :dummy),
+                                 "db" => Dict(:backend => :db, :location => "juango_cache_test")))
+        cache_clear()
+        @test cache_get("missing") === nothing && cache_get("missing", 7) == 7
+        cache_set("a", Dict("x" => [1, 2]))
+        v = cache_get("a"); push!(v["x"], 3)
+        @test cache_get("a") == Dict("x" => [1, 2])                      # stored values are copies
+        cache_set("short", 1; timeout = 2); cache_set("never", 1; timeout = 0)
+        @test cache_has("short") && !cache_has("never")
+        sleep(2.2)
+        @test !cache_has("short")
+        @test cache_add("k", 1) && !cache_add("k", 2) && cache_get("k") == 1
+        @test cache_delete("k") && !cache_delete("k")
+        calls = Ref(0)
+        @test get_or_set("computed", () -> (calls[] += 1; 42)) == 42 && get_or_set("computed", () -> (calls[] += 1; 0)) == 42 && calls[] == 1
+        cache_set("n", 10)
+        @test incr("n") == 11 && incr("n", 5) == 16 && decr("n") == 15
+        @test_throws KeyError incr("no such key")
+        cache_set("v", "one"; version = 1); cache_set("v", "two"; version = 2)
+        @test cache_get("v"; version = 1) == "one" && cache_get("v"; version = 2) == "two"
+        cache_set("menu", "old")
+        @test incr_version("menu") == 2 && cache_get("menu") === nothing && cache_get("menu"; version = 2) == "old"
+        cache_clear()
+        for k in ("p", "q", "r"); cache_set(k, 1); end
+        cache_get("p")                                                    # p is now the most recently used
+        cache_set("s", 1)                                                 # evicts q, the least recently used
+        @test cache_has("p") && !cache_has("q") && cache_has("r") && cache_has("s")
+        cache_set_many(Dict("m1" => 1, "m2" => 2))
+        @test cache_get_many(["m1", "m2", "zz"]) == Dict("m1" => 1, "m2" => 2)
+        longkey = repeat("long key ", 50)                                 # long or odd keys are hashed
+        cache_set(longkey, 1)
+        @test cache_get(longkey) == 1
+
+        cache_set("x", 1; cache_name = "nothing")
+        @test cache_get("x"; cache_name = "nothing") === nothing
+
+        create_cache_table("db")
+        @test Juango.table_exists(Juango.backend(), "juango_cache_test")
+        cache_set("obj", (a = 1, b = "two", c = [1.5]); cache_name = "db")
+        @test cache_get("obj"; cache_name = "db") == (a = 1, b = "two", c = [1.5])
+        cache_set("obj", "replaced"; cache_name = "db")
+        @test cache_get("obj"; cache_name = "db") == "replaced"
+        cache_set("brief", 1; timeout = 1, cache_name = "db"); sleep(1.2)
+        @test cache_get("brief"; cache_name = "db") === nothing
+        cache_set("n", 1; cache_name = "db")
+        @test incr("n"; cache_name = "db") == 2
+        cache_clear(cache_name = "db")
+        @test cache_get("obj"; cache_name = "db") === nothing
+        Juango.execute("DROP TABLE " * Juango.qname("juango_cache_test"))
+
+        # Redis, against a fake server speaking RESP
+        server = Sockets.listen(Sockets.localhost, 0)
+        port = Int(Sockets.getsockname(server)[2])
+        store = Dict{String,String}()
+        commands = String[]
+        bulk(v) = v === nothing ? "\$-1\r\n" : string("\$", ncodeunits(v), "\r\n", v, "\r\n")
+        srv = @async begin
+            sock = Sockets.accept(server)
+            while isopen(sock) && !eof(sock)
+                args = Juango.resp_read(sock)
+                cmd = uppercase(args[1])
+                push!(commands, cmd)
+                if cmd == "GET"
+                    write(sock, bulk(get(store, args[2], nothing)))
+                elseif cmd == "SET"
+                    store[args[2]] = args[3]; write(sock, "+OK\r\n")
+                elseif cmd == "DEL"
+                    write(sock, string(":", pop!(store, args[2], nothing) === nothing ? 0 : 1, "\r\n"))
+                elseif cmd == "FLUSHDB"
+                    empty!(store); write(sock, "+OK\r\n")
+                else
+                    write(sock, "+OK\r\n")
+                end
+            end
+        end
+        configure!(CACHES = Dict("default" => Dict(:backend => :redis, :location => "redis://127.0.0.1:$port/2")))
+        cache_set("r", Dict("deep" => [1, 2]); timeout = 60)
+        @test cache_get("r") == Dict("deep" => [1, 2]) && cache_get("absent") === nothing
+        @test cache_delete("r") && !cache_has("r")
+        cache_set("n", 1)
+        @test incr("n") == 2
+        cache_clear()
+        @test isempty(store) && "SELECT" in commands && "FLUSHDB" in commands
+        configure!(CACHES = Dict("default" => Dict(:backend => :locmem)))     # closes the Redis connection
+        close(server)
+
+        # cached views and the per-site middleware
+        hits = Ref(0)
+        view = cache_page((req) -> (hits[] += 1; HttpResponse("page $(hits[])")); timeout = 60)
+        req(path) = Request("GET", path; headers = Dict("host" => "testserver"))
+        @test text(view(req("/c/"))) == "page 1" && text(view(req("/c/"))) == "page 1" && hits[] == 1
+        @test occursin("max-age=60", getheader(view(req("/c/")), "Cache-Control"))
+        @test text(view(req("/c/?page=2"))) == "page 2"
+        cookie_view = cache_page((req) -> (hits[] += 1; r = HttpResponse("c"); set_cookie!(r, "x", "1"); r))
+        cookie_view(req("/k/")); cookie_view(req("/k/"))
+        @test hits[] == 4                                                  # responses setting cookies aren't cached
+        mw = CacheMiddleware(r -> (hits[] += 1; HttpResponse("site")))
+        mw(req("/m/")); mw(req("/m/"))
+        @test hits[] == 5
+        mw(Request("POST", "/m/"))
+        @test hits[] == 6
+
+        # {% cache %} template fragments
+        tpl = "{% cache 60 \"sidebar\" uid %}{{ text }}{% endcache %}"
+        @test tr(tpl, Dict("uid" => 1, "text" => "first")) == "first"
+        @test tr(tpl, Dict("uid" => 1, "text" => "second")) == "first"
+        @test tr(tpl, Dict("uid" => 2, "text" => "second")) == "second"
+
+        # templates read once when TEMPLATE_CACHE_CHECK_MTIME is off
+        tdir = mktempdir()
+        write(joinpath(tdir, "cached.html"), "v1")
+        old_dirs = settings.TEMPLATE_DIRS
+        configure!(TEMPLATE_DIRS = vcat([tdir], old_dirs), TEMPLATE_CACHE_CHECK_MTIME = false)
+        @test render_to_string("cached.html") == "v1"
+        sleep(1.1); write(joinpath(tdir, "cached.html"), "v2")
+        @test render_to_string("cached.html") == "v1"
+        configure!(TEMPLATE_CACHE_CHECK_MTIME = true)
+        @test render_to_string("cached.html") == "v2"
+        configure!(TEMPLATE_DIRS = old_dirs)
+
+        # cache-backed sessions
+        for engine in (:cache, :cached_db)
+            configure!(SESSION_ENGINE = engine)
+            sess = Juango.Session(); sess["cart"] = [1, 2]
+            Juango.save_session!(sess)
+            @test Juango.load_session(sess.key)["cart"] == [1, 2]
+            @test exists(filter(Juango.SessionRecord; session_key = sess.key)) == (engine === :cached_db)
+            Juango.flush!(sess)
+        end
+        configure!(SESSION_ENGINE = :db)
+        c = Client()
+        force_login!(c, get(User; username = "root"))
+        @test get(c, "/admin/").status == 200
+    finally
+        configure!(CACHES = old_caches, SESSION_ENGINE = :db)
+    end
+end
+
 @testset "database backends" begin
     B = Juango
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)

@@ -437,9 +437,16 @@ end
     get_template(name) -> Template
 
 Load a template from `settings.TEMPLATE_DIRS` (then Juango's built-in templates).
-Templates are cached and reloaded automatically when the file changes.
+Templates are cached and reloaded automatically when the file changes. With
+`TEMPLATE_CACHE_CHECK_MTIME = false` (for production) a template is read once and the file
+isn't checked again.
 """
+const TEMPLATE_BY_NAME = Dict{String,Any}()
 function get_template(name::AbstractString)
+    if !settings.TEMPLATE_CACHE_CHECK_MTIME
+        t = lock(() -> get(TEMPLATE_BY_NAME, name, nothing), TEMPLATE_LOCK)
+        t === nothing || return t
+    end
     p = find_template(name)
     mt = mtime(p)
     lock(TEMPLATE_LOCK) do
@@ -447,6 +454,7 @@ function get_template(name::AbstractString)
         c !== nothing && c[1] == mt && return c[2]
         t = Template(read(p, String); name = String(name), origin = p)
         TEMPLATE_CACHE[p] = (mt, t)
+        TEMPLATE_BY_NAME[String(name)] = t
         t
     end
 end

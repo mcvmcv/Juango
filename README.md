@@ -555,6 +555,31 @@ const edit_post = permission_required("project.change_post")(edit_post_view)   #
 - **Groups in the admin.** Groups are registered in the admin, and a user's groups and permissions can be edited on their page.
 - **Not yet supported.** Object-level permissions (`has_perm(user, perm; obj)`) return `false` except for superusers.
 
+### Caching
+
+```julia
+cache_set("greeting", "hi"; timeout = 60)          # seconds; nothing = for ever, 0 = don't store
+cache_get("greeting", "default")
+get_or_set("stats", () -> expensive(); timeout = 300)
+incr("hits"); cache_add(k, v); cache_delete(k); cache_get_many(keys); incr_version("menu")
+const home = cache_page(home_view; timeout = 60)   # whole GET responses, keyed by URL
+```
+
+```
+{% cache 600 "sidebar" user.id %} ...expensive fragment... {% endcache %}
+```
+
+- **Backends.** `CACHES` names one or more caches: `Dict("default" => Dict(:backend => :locmem, :max_entries => 1000, :timeout => 300))`. The backends are:
+  - `:locmem` (per process, LRU)
+  - `:db` (run `manage.jl createcachetable`)
+  - `:redis` (`:location => "redis://host:6379/0"`, using a small built-in client)
+  - `:dummy`
+
+  Use another cache with `cache_name = "shared"`. Values are copied, or serialized for `:db` and `:redis`.
+- **Page caching.** `cache_page` and the per-site `CacheMiddleware` (`CACHE_MIDDLEWARE_SECONDS`) skip responses that set cookies or vary on `Cookie`, so per-user pages aren't shared.
+- **Templates.** `TEMPLATE_CACHE_CHECK_MTIME = false` reads each template once instead of checking its file on every render. Use it in production.
+- **Sessions.** `SESSION_ENGINE = :cache` keeps sessions in the cache only, and `:cached_db` puts the cache in front of the database. The default is `:db`.
+
 ### Middleware
 
 A middleware has Django's shape: a factory `get_response -> (req -> response)`.
