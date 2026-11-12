@@ -161,6 +161,29 @@ const EMAIL_RE = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 const SLUG_RE = r"^[-a-zA-Z0-9_]+$"
 const URL_RE = r"^https?://[^\s/$.?#].[^\s]*$"i
 
+"The `step` of a number input for a decimal with `places` digits after the point (\"0.01\")."
+decimal_step(places) = places === nothing ? "any" : places == 0 ? "1" : "0." * "0"^(places - 1) * "1"
+
+"Django's DecimalValidator: too many digits in total, after the point, or before it."
+function decimal_errors(f::Field, v)
+    d = v isa Decimal ? v : something(tryparse(Decimal, string(v)), Some(nothing))
+    d === nothing && return [gettext("Enter a number.")]
+    digits, decimals = decimal_digits(d)
+    md, dp = f.max_digits, f.decimal_places
+    if md !== nothing && digits > md
+        return [interpolate(ngettext("Ensure that there are no more than %(max)s digit in total.",
+                                     "Ensure that there are no more than %(max)s digits in total.", md), Dict("max" => md))]
+    elseif dp !== nothing && decimals > dp
+        return [interpolate(ngettext("Ensure that there are no more than %(max)s decimal place.",
+                                     "Ensure that there are no more than %(max)s decimal places.", dp), Dict("max" => dp))]
+    elseif md !== nothing && dp !== nothing && digits - decimals > md - dp
+        return [interpolate(ngettext("Ensure that there are no more than %(max)s digit before the decimal point.",
+                                     "Ensure that there are no more than %(max)s digits before the decimal point.", md - dp),
+                            Dict("max" => md - dp))]
+    end
+    String[]
+end
+
 """
 Run per-field validation on a cleaned (typed) value; returns a vector of messages.
 Validators are functions `v -> true/nothing` (ok) or an error message `String` / `false`.
@@ -178,6 +201,7 @@ function validate_field(f::Field, v)
     f.kind === :email && !occursin(EMAIL_RE, string(v)) && push!(errs, gettext("Enter a valid email address."))
     f.kind === :slug && !occursin(SLUG_RE, string(v)) && push!(errs, gettext("Enter a valid “slug” consisting of letters, numbers, underscores or hyphens."))
     f.kind === :url && !occursin(URL_RE, string(v)) && push!(errs, gettext("Enter a valid URL."))
+    f.kind === :decimal && append!(errs, decimal_errors(f, v))
     if f.choices !== nothing && !any(c -> value_eq(c.first, v) || string(c.first) == string(v), f.choices)
         push!(errs, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v)))
     end

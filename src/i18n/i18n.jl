@@ -386,7 +386,11 @@ A number with the language's decimal separator (and thousands separators when `g
 """
 function number_format(x::Real; decimals = nothing, lang = get_language(), grouping = settings.USE_THOUSAND_SEPARATOR)
     f = get_format(lang)
-    s = decimals === nothing ? (x isa Integer ? string(x) : string(Float64(x))) : Printf.format(Printf.Format("%.$(decimals)f"), x)
+    s = if x isa Decimal
+        string(decimals === nothing ? x : round(x, RoundNearestTiesAway; digits = decimals))
+    else
+        decimals === nothing ? (x isa Integer ? string(x) : string(Float64(x))) : Printf.format(Printf.Format("%.$(decimals)f"), x)
+    end
     neg = startswith(s, "-")
     neg && (s = s[2:end])
     ip, fp = occursin('.', s) ? split(s, '.'; limit = 2) : (s, "")

@@ -29,6 +29,7 @@ function serial_value(f::Field, v)
     v isa TimeZones.ZonedDateTime && return string(TimeZones.astimezone(v, UTC_TZ))
     v isa Date && return string(v)
     v isa UUID && return string(v)
+    v isa Decimal && return string(v)                  # as Django: "19.90", exactly
     v isa FieldFile && return v.name
     f.kind === :geometry && return ewkt(v)
     v isa ValueRange && return Dict("lower" => serial_value(f, v.lower), "upper" => serial_value(f, v.upper), "bounds" => v.bounds)

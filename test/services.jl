@@ -273,7 +273,7 @@ end
 
         # stored as JSON by default: values come back equal and with the same types
         vals = Any[nothing, true, 42, 1.5, NaN, Inf, "s", :sym, 'c', Int32(7), UInt8(9), big(2)^70, 3 // 4, 1.5f0,
-                   Date(2026, 1, 2), DateTime(2026, 1, 2, 3, 4, 5, 6), Dates.Time(12, 30), uuid4(), mark_safe("<b>"),
+                   Date(2026, 1, 2), DateTime(2026, 1, 2, 3, 4, 5, 6), Dates.Time(12, 30), uuid4(), mark_safe("<b>"), dec"1.50",
                    UInt8[1, 2, 255], [1, 2, 3], Any[1, "a", nothing], ["x", "y"], Symbol[], Dict("a" => 1),
                    Dict{String,Any}("a" => [1, 2], "b" => Dict{String,Any}()), Dict(:k => 1.5), Dict("__jt" => "x"),
                    Dict{Any,Any}(1 => "one", :two => 2), (1, "two"), (a = 1, b = [2.5]), "k" => :v, Set([1, 2]),
@@ -287,7 +287,7 @@ end
         cache_set("nested", nested; cache_name = "db")
         @test isequal(cache_get("nested"; cache_name = "db"), nested)          # element types inside: Any
         stored = only(Juango.execute("SELECT " * Juango.qname("value") * " FROM " * Juango.qname("juango_cache_test") *
-                                     " WHERE " * Juango.qname("cache_key") * " = ?", [Juango.make_key(cache("db"), "v25", nothing)]))
+                                     " WHERE " * Juango.qname("cache_key") * " = ?", [Juango.make_key(cache("db"), "v26", nothing)]))
         @test JSON.parse(String(stored[:value]))["v"] == Any[Any["a", 1]]      # plain, readable JSON
 
         # model instances (their field values) and responses

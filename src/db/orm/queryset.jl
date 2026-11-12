@@ -495,7 +495,7 @@ function fetch_here(qs::QuerySet{T}) where {T}
     foreach(set_instance_db!, objs)
     for (k, v) in qs.annotations, (o, r) in zip(objs, rows)
         is_filtered_relation(v) && continue
-        getfield(o, :_data)[k] = get(r, k, nothing)
+        getfield(o, :_data)[k] = expr_value(T, v, get(r, k, nothing))
     end
     if !isempty(related)
         for (obj, row) in zip(objs, rows)
@@ -536,7 +536,7 @@ function fetch_values(qs::QuerySet{T}) where {T}
             d[k] = haskey(convs, k) ? from_db(convs[k], v) : v
         end
         for (k, v) in qs.annotations
-            is_filtered_relation(v) || (d[k] = get(r, k, nothing))
+            is_filtered_relation(v) || (d[k] = expr_value(T, v, get(r, k, nothing)))
         end
         push!(out, d)
     end

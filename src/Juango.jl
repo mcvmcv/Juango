@@ -37,6 +37,7 @@ const ASSETS_DIR = joinpath(@__DIR__, "assets")     # built-in templates, transl
 # core: settings, helpers, apps, HTTP basics, URLs, templates, translations
 include("core/conf.jl")
 include("core/utils.jl")
+include("core/decimal.jl")
 include("core/apps.jl")
 include("http/http.jl")
 include("core/logging.jl")

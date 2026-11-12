@@ -18,7 +18,7 @@ end
 function intcomma(v)
     n = as_number(v)
     n === nothing && return str(v)
-    s = n isa Integer ? string(n) : (isinteger(n) && abs(n) < 1e15 ? string(Int(n)) * ".0" : string(n))
+    s = n isa Union{Integer,Decimal} ? string(n) : (isinteger(n) && abs(n) < 1e15 ? string(Int(n)) * ".0" : string(n))
     sign = startswith(s, "-") ? "-" : ""
     s = lstrip(s, '-')
     i = findfirst(==('.'), s)

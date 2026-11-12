@@ -70,13 +70,17 @@ struct Column
     of::Union{Nothing,Symbol}        # arrays: element kind; foreign keys: :uuid when the target's pk is a UUID
     generated::Union{Nothing,GeneratedSpec}
     comment::Union{Nothing,String}   # db_comment
+    max_digits::Union{Nothing,Int}   # decimals: NUMERIC(max_digits, decimal_places)
+    decimal_places::Union{Nothing,Int}
 end
 Column(name, kind::Symbol; null = false, default = nothing, unique = false, index = false,
-       max_length = nothing, references = nothing, of = nothing, generated = nothing, comment = nothing) =
+       max_length = nothing, references = nothing, of = nothing, generated = nothing, comment = nothing,
+       max_digits = nothing, decimal_places = nothing) =
     Column(string(name), kind, null, default, unique, index && !unique, max_length,
            references === nothing ? nothing : string(references), of === nothing ? nothing : Symbol(of),
            generated === nothing || generated isa GeneratedSpec ? generated : GeneratedSpec(generated...),
-           comment === nothing ? nothing : string(comment))
+           comment === nothing ? nothing : string(comment), max_digits === nothing ? nothing : Int(max_digits),
+           decimal_places === nothing ? nothing : Int(decimal_places))
 
 Base.:(==)(a::Column, b::Column) = all(isequal(getfield(a, f), getfield(b, f)) for f in fieldnames(Column))
 Base.hash(c::Column, h::UInt) = hash(c.name, hash(c.kind, h))
@@ -86,7 +90,7 @@ same_definition(a::Column, b::Column) = all(isequal(getfield(a, f), getfield(b, 
 function with_column(c::Column; name = c.name, kw...)
     attrs = merge((null = c.null, default = c.default, unique = c.unique, index = c.index,
                    max_length = c.max_length, references = c.references, of = c.of, generated = c.generated,
-                   comment = c.comment), NamedTuple(kw))
+                   comment = c.comment, max_digits = c.max_digits, decimal_places = c.decimal_places), NamedTuple(kw))
     Column(name, c.kind; attrs...)
 end
 
@@ -195,7 +199,8 @@ function column_state(f::Field)
          f.kind === :fk && pk_kind(related_model(f)) === :uuid ? :uuid : nothing
     Column(column(f), schema_kind(f.kind); null = f.null, default = d, unique = f.unique,
            index = f.db_index, max_length = schema_kind(f.kind) in (:string, :citext) || (f.kind === :array && f.related === :string) ? f.max_length : nothing,
-           references = ref, of = of, generated = gen, comment = f.db_comment)
+           references = ref, of = of, generated = gen, comment = f.db_comment,
+           max_digits = f.kind === :decimal ? f.max_digits : nothing, decimal_places = f.kind === :decimal ? f.decimal_places : nothing)
 end
 
 "The column default for a field's `db_default`: a value, or SQL for `Now()`."
@@ -253,6 +258,7 @@ end
 
 "The SQL type of a snapshot column."
 function column_type_for(b::DatabaseBackend, c::Column)
+    c.kind === :decimal && return decimal_column_type(b, c.max_digits, c.decimal_places)
     c.kind === :array && return array_column_type(b, c.of, c.max_length)
     c.kind === :geometry && return geometry_column_type(b, c.of)
     c.kind === :fk && c.of === :uuid && return column_type(b, :uuid, nothing)

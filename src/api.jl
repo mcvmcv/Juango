@@ -30,11 +30,11 @@ export Template, render_to_string, get_template, mark_safe, SafeString, escape_h
        register_filter!, register_tag!, TagLibrary, simple_tag!, inclusion_tag!, tag!, TemplateSyntaxError
 # models and fields
 export Model, @model, @abstract_model, Field, CharField, TextField, EmailField, SlugField, URLField,
-       IntegerField, FloatField, BooleanField, DateTimeField, DateField, JSONField, ArrayField, UUIDField,
-       IntegerRangeField, DateRangeField, DateTimeRangeField, ValueRange, FileField, ImageField, UploadedFile,
-       FileExtensionValidator, MaxFileSizeValidator,
-       ForeignKey, OneToOneField, ManyToManyField, ForeignObject, GeneratedField, DB_DEFAULT,
-       CompositePrimaryKey, CheckConstraint, UniqueConstraint, Index, get_absolute_url
+       IntegerField, FloatField, DecimalField, BooleanField, DateTimeField, DateField, JSONField,
+       ArrayField, UUIDField, IntegerRangeField, DateRangeField, DateTimeRangeField, ValueRange,
+       FileField, ImageField, UploadedFile, FileExtensionValidator, MaxFileSizeValidator, ForeignKey,
+       OneToOneField, ManyToManyField, ForeignObject, GeneratedField, DB_DEFAULT, CompositePrimaryKey,
+       CheckConstraint, UniqueConstraint, Index, get_absolute_url, Decimal, @dec_str
 export ContentType, GenericForeignKey, GenericRelation
 # querysets
 export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_list, annotate, aggregate,

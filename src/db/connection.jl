@@ -104,6 +104,7 @@ adapt_param(::DatabaseBackend, x::SafeString) = x.s
 adapt_param(::DatabaseBackend, x::Symbol) = string(x)
 adapt_param(::DatabaseBackend, x::AbstractString) = String(x)
 adapt_param(::DatabaseBackend, x::UUID) = string(x)
+adapt_param(::DatabaseBackend, x::Decimal) = string(x)
 adapt_param(::DatabaseBackend, x) = x
 
 "Column type for an ORM field kind (`:int`, `:bool`, `:fk`, `:float`, `:datetime`, `:date`, `:char`, `:text`, ...)."
@@ -120,8 +121,11 @@ function column_type(::DatabaseBackend, kind::Symbol, max_length)
     kind === :intrange && return "INT8RANGE"
     kind === :daterange && return "DATERANGE"
     kind === :datetimerange && return "TSRANGE"
+    kind === :decimal && return "NUMERIC"
     max_length === nothing ? "TEXT" : "VARCHAR($max_length)"
 end
+"Column type of a decimal (NUMERIC(p, s) by default)."
+decimal_column_type(::DatabaseBackend, max_digits, decimal_places) = "NUMERIC($max_digits, $decimal_places)"
 
 "Column type of an array of `of` values."
 array_column_type(b::DatabaseBackend, of, max_length) = column_type(b, of === :string ? :char : of, max_length) * "[]"

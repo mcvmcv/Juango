@@ -25,10 +25,11 @@ function Juango.pg_ping(conn)
     end
 end
 
-# numeric (from SUM/AVG/EXTRACT) arrives as text so we don't need Decimals: whole numbers
-# become Int (or BigInt), everything else Float64.
+# numeric (DecimalField columns, SUM/AVG/EXTRACT) arrives as text: whole numbers become Int (or
+# BigInt), everything else an exact Juango.Decimal (expressions that aren't decimal fields are
+# turned into Float64 by the ORM).
 function parse_numeric(s::AbstractString)
-    occursin(r"^-?\d+$", s) ? something(tryparse(Int, s), parse(BigInt, s)) : parse(Float64, s)
+    occursin(r"^-?\d+$", s) ? something(tryparse(Int, s), parse(BigInt, s)) : parse(Juango.Decimal, s)
 end
 const TYPE_MAP = Dict{Symbol,Type}(:numeric => String, :jsonb => String, :json => String, :uuid => String,
                                    :int8range => String, :daterange => String, :tsrange => String)

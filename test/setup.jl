@@ -230,6 +230,12 @@ end
     Meta(permissions = [("publish_memo", "Can publish memos")])
 end
 
+@model struct Ledger
+    label = CharField(max_length = 20)
+    amount = DecimalField(max_digits = 8, decimal_places = 2)
+    rate = DecimalField(max_digits = 30, decimal_places = 10, null = true, blank = true)
+end
+
 @model struct Attachment
     title = CharField(max_length = 50)
     file = FileField(upload_to = "docs/%Y/", validators = [FileExtensionValidator(["txt", "pdf"])])

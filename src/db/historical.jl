@@ -79,6 +79,7 @@ function historical_value(c::Column, v)
     c.kind === :datetime && return v isa DateTime || v isa TimeZones.ZonedDateTime ? v : something(todatetime(v), v)
     c.kind === :date && return v isa Date ? v : Date(todatetime(v))
     c.kind in (:int, :fk) && c.of !== :uuid && return v isa Integer ? Int(v) : parse(Int, string(v))
+    c.kind === :decimal && return c.decimal_places === nothing ? to_decimal(v) : round(to_decimal(v); digits = c.decimal_places)
     v isa AbstractString ? String(v) : v
 end
 

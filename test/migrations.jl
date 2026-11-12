@@ -666,6 +666,43 @@ end
     end
 end
 
+@testset "decimal columns in migrations" begin
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("migdec" => dir))
+    quiet(f) = redirect_stdout(f, devnull)
+    try
+        @eval @model struct DecItem
+            price = DecimalField(max_digits = 6, decimal_places = 2, default = dec"1.50")
+            Meta(table = "dec_item", app_label = "migdec")
+        end
+        p1 = only(quiet(() -> makemigrations(app = "migdec", questioner = _ -> false)))
+        @test occursin("Column(\"price\", :decimal; default = dec\"1.50\", max_digits = 6, decimal_places = 2)", read(p1, String))
+        quiet(() -> migrate())
+        o = create(DecItem; price = dec"1234.56")
+        @test refresh!(o).price == dec"1234.56"
+        @test refresh!(create(DecItem)).price == dec"1.50"
+
+        # more digits after the point: an AlterField, and existing values keep theirs
+        Juango.unregister_model!(DecItem)
+        @eval @model struct DecItem2
+            price = DecimalField(max_digits = 9, decimal_places = 4, default = dec"1.50")
+            Meta(table = "dec_item", name = "DecItem", app_label = "migdec")
+        end
+        p2 = only(quiet(() -> makemigrations(app = "migdec", questioner = _ -> false)))
+        @test occursin("AlterField(\"dec_item\", Column(\"price\", :decimal; default = dec\"1.50\", max_digits = 9, decimal_places = 4))", read(p2, String))
+        quiet(() -> migrate())
+        @test string(get(DecItem2; id = o.id).price) == "1234.5600"
+        create(DecItem2; price = dec"12345.6789")
+        @test get(DecItem2; price = dec"12345.6789").price == dec"12345.6789"
+        delete!(filter(DecItem2; price__gt = 9999))           # doesn't fit the narrower column going back
+        quiet(() -> migrate(app = "migdec", target = "zero"))
+        @test !Juango.table_exists(Juango.backend(), "dec_item")
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "migdec", Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end
+
 @testset "composite primary keys" begin
     dir = mktempdir()
     configure!(MIGRATION_MODULES = Dict("migcomp" => dir))

@@ -144,7 +144,7 @@ raw_clear(::DummyCache) = nothing
 #     nothing, Bool, Int64, Float64, String          as JSON
 #     Vector, Dict, Tuple, NamedTuple, Pair, Set      recursively (element types kept when simple)
 #     Symbol, Char, other integer and float types, BigInt, Rational, NaN/Inf
-#     Date, DateTime, Time, ZonedDateTime, UUID, SafeString, Vector{UInt8}
+#     Date, DateTime, Time, ZonedDateTime, UUID, Decimal, SafeString, Vector{UInt8}
 #     model instances (their field values, as the database stores them) and HttpResponse
 #
 # Anything else is an error when it's stored. `:serializer => :serialization` in a cache's
@@ -190,6 +190,7 @@ const CACHE_UTC = TimeZones.TimeZone("UTC")
 cache_encode(v::TimeZones.ZonedDateTime) =
     Dict{String,Any}(JT => "zdt", "v" => string(DateTime(TimeZones.astimezone(v, CACHE_UTC))), "tz" => string(TimeZones.timezone(v)))
 cache_encode(v::UUID) = tagged("uuid", string(v))
+cache_encode(v::Decimal) = tagged("decimal", string(v))
 cache_encode(v::SafeString) = tagged("safe", v.s)
 cache_encode(v::Vector{UInt8}) = tagged("bytes", base64encode(v))
 function cache_encode(v::AbstractVector)
@@ -250,6 +251,7 @@ function cache_decode(d::AbstractDict)
     tag == "time" && return Dates.Time(v)
     tag == "zdt" && return TimeZones.astimezone(TimeZones.ZonedDateTime(DateTime(v), CACHE_UTC), TimeZones.TimeZone(d["tz"]))
     tag == "uuid" && return UUID(v)
+    tag == "decimal" && return parse(Decimal, v)
     tag == "safe" && return SafeString(v)
     tag == "bytes" && return base64decode(v)
     tag == "vec" && return typed_vector(d["t"], Any[cache_decode(x) for x in v])

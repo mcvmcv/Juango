@@ -66,6 +66,7 @@ function column_type(::SQLiteBackend, kind::Symbol, max_length)
     kind in (:int, :bool, :fk) && return "INTEGER"
     kind === :float && return "REAL"
     kind === :citext && return "TEXT COLLATE NOCASE"
+    kind === :decimal && return "DECIMAL"      # NUMERIC affinity: compares as numbers
     "TEXT"
 end
 

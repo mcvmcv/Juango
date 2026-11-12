@@ -22,12 +22,13 @@ import ..Juango
 using ..Juango: Column, Table, Index, ConstraintSpec, Q, F, Value, CombinedExpression, Func, get_model, objects, save!, create, update!, SchemaState, copy_state, getcolumn, hascolumn, with_column, same_definition,
     backend, execute, atomic, settings, table_exists, table_columns, models_state, sync_models!, modelmeta,
     all_models, create_table_sql, drop_table_sql, rename_table_sql, add_column_sql, drop_column_sql,
-    rename_column_sql, alter_column_sql, backfill_value, quote_name, VERSION_STRING
+    rename_column_sql, alter_column_sql, backfill_value, quote_name, VERSION_STRING, Decimal, @dec_str
 
 export Migration, CreateModel, DeleteModel, RenameModel, AddField, RemoveField, AlterField, RenameField,
        AlterUniqueTogether, AddIndex, RemoveIndex, AddConstraint, RemoveConstraint, RunSQL, RunJulia, Column, Index,
        AlterModelTableComment, CreateExtension, HStoreExtension, TrigramExtension, UnaccentExtension, BtreeGistExtension, BtreeGinExtension, CITextExtension,
-       ConstraintSpec, Q, F, Value, CombinedExpression, Func, get_model, objects, save!, create, update!
+       ConstraintSpec, Q, F, Value, CombinedExpression, Func, get_model, objects, save!, create, update!,
+       Decimal, @dec_str
 
 include("operations.jl")
 include("loader.jl")

@@ -254,6 +254,7 @@ end
     @test occursin("author = ForeignKey(:Author; on_delete = :DO_NOTHING)", code)
     @test occursin("rating = FloatField(null = true, blank = true)", code)
     @test_throws ArgumentError inspectdb(["no_such_table"])
+    @test occursin("amount = DecimalField(max_digits = 8, decimal_places = 2)", inspectdb(["ledger"]))
     @test "topic" in Juango.introspect_tables() && !("juango_migrations" in Juango.introspect_tables())
     # the generated models work against the existing tables
     m = Module(:Inspected)

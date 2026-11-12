@@ -156,8 +156,11 @@ let F = register_filter!
     F("slugify", (v, _) -> slugify(str(v)); is_safe = true)
     F("urlencode", (v, _) -> urlquote(str(v)))
     F("floatformat", (v, a) -> begin
-        x = Float64(tonum(v))
         d = a === nothing ? -1 : tonum(a)
+        if v isa Decimal                  # exact, rounding half up as Django does
+            return d < 0 && isinteger(v) ? string(Int(v)) : string(round(v, RoundNearestTiesAway; digits = abs(d)))
+        end
+        x = Float64(tonum(v))
         if d < 0
             isinteger(x) ? string(round(Int, x)) : Printf.format(Printf.Format("%.$(abs(d))f"), x)
         else

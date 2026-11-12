@@ -36,7 +36,7 @@ function plain(v)
     T = typeof(v)
     s = string(nameof(T))
     s == "Timestamp" && return DateTime(string(v)[1:min(end, 23)])
-    s == "DecimalValue" && (t = string(v); return occursin(r"^-?\d+$", t) ? parse(Int, t) : parse(Float64, t))
+    s == "DecimalValue" && (t = string(v); return occursin(r"^-?\d+$", t) ? something(tryparse(Int, t), parse(BigInt, t)) : parse(Juango.Decimal, t))
     v
 end
 plain(v::Date) = v

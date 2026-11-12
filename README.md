@@ -180,6 +180,25 @@ union(filter(Post; featured = true), filter(Post; views__gt = 1000))     # inter
 
 `bulk_create` and `bulk_update` don't call `save!` or send signals. Combined querysets can be ordered, sliced and counted but not filtered further.
 
+#### Decimals
+
+```julia
+@model struct Product
+    name  = CharField(max_length = 100)
+    price = DecimalField(max_digits = 10, decimal_places = 2)    # NUMERIC(10, 2)
+end
+
+p = create(Product; name = "Tea", price = dec"4.95")    # dec"..." or Decimal("4.95"); integers and floats convert
+p.price * 3                                              # dec"14.85", exact
+aggregate(objects(Product); total = Sum(:price))[:total] # a Decimal, without binary rounding errors
+round(dec"2.675"; digits = 2)                            # dec"2.68" (half to even; RoundNearestTiesAway rounds half up)
+```
+
+- **The `Decimal` type.** `Decimal` is an exact decimal number, like Python's `decimal.Decimal`. Juango includes its own, because the Decimals package that LibPQ needs is too limited (no hashing, inexact division). `+`, `-` and `*` are exact, and `/` gives 28 significant digits. A Decimal keeps its scale: `dec"1.50"` prints as `1.50` and equals `dec"1.5"`. `round(d; digits)` rounds to exactly that many places and pads with zeros. Floats convert through their shortest form, so `Decimal(0.1) == dec"0.1"`.
+- **Saving and loading.** Values are rounded to `decimal_places` when they are saved and loaded. `full_clean` and forms check `max_digits` and `decimal_places` with Django's messages. The form widget is a number input with `step="0.01"`.
+- **Databases.** Postgres uses `NUMERIC(p, s)` and MySQL/MariaDB `DECIMAL(p, s)`, both exact. SQLite has no exact decimal type. Its `NUMERIC` column stores values as doubles (about 15 significant digits), which is enough for amounts of money. `Sum`, `Min`, `Max` and arithmetic on decimal fields return Decimals. Other computed numbers (`Avg` of an integer field, for example) are `Float64` as before.
+- **Output.** Fixtures store decimals as strings (`"4.95"`), as Django does. Templates print them exactly, including `floatformat`, `localize` and `intcomma`. `JsonResponse` writes them as JSON numbers.
+
 #### Many-to-many
 
 ```julia
@@ -1390,7 +1409,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. Request limi
 src/
   Juango.jl     the module: includes, in dependency order
   api.jl        the public API: exports, public names, Juango.Testing / GIS / Postgres
-  core/         settings, utils, apps, signals, signing, logging, cache, mail, files,
+  core/         settings, utils, Decimal, apps, signals, signing, logging, cache, mail, files,
                 async helpers, management commands
   http/         Request and responses, URLs, middleware, security, views, streaming,
                 HTTP caching, the request handler and server

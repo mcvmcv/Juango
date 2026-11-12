@@ -173,6 +173,9 @@ function to_julia(fld::Field, raw)
     elseif k === :float
         v = tryparse(Float64, s)
         return v, v === nothing ? gettext("Enter a number.") : nothing
+    elseif k === :decimal
+        v = tryparse(Decimal, s)
+        return v, v === nothing ? gettext("Enter a number.") : nothing
     elseif k === :datetime
         for fmt in (dateformat"yyyy-mm-ddTHH:MM:SS", dateformat"yyyy-mm-ddTHH:MM", dateformat"yyyy-mm-dd HH:MM:SS",
                     dateformat"yyyy-mm-dd HH:MM", dateformat"yyyy-mm-ddTHH:MM:SS.s", dateformat"yyyy-mm-dd")
@@ -446,7 +449,7 @@ errors_html(errs) = isempty(errs) ? "" :
     "<ul class=\"errorlist\">" * join(["<li>" * escape_html(e) * "</li>" for e in errs]) * "</ul>"
 
 input_type(fld::Field) = widget_kind(fld.widget) === :password ? "password" : widget_kind(fld.widget) === :hidden ? "hidden" :
-    fld.kind === :email ? "email" : fld.kind === :url ? "url" : fld.kind in (:int, :float) ? "number" :
+    fld.kind === :email ? "email" : fld.kind === :url ? "url" : fld.kind in (:int, :float, :decimal) ? "number" :
     fld.kind === :datetime ? "datetime-local" : fld.kind === :date ? "date" : "text"
 
 function widget_html(bf::BoundField)
@@ -510,6 +513,7 @@ function widget_html(bf::BoundField)
     t = input_type(fld)
     extra = fld.max_length !== nothing && t in ("text", "email", "url", "password") ? " maxlength=\"$(fld.max_length)\"" : ""
     t == "number" && fld.kind === :float && (extra *= " step=\"any\"")
+    t == "number" && fld.kind === :decimal && (extra *= " step=\"" * decimal_step(fld.decimal_places) * "\"")
     v = (t == "password" || val === nothing) ? "" : " value=\"" * escape_html(display_string(val)) * "\""
     "<input type=\"$t\"$attrs$extra$v>"
 end

@@ -52,6 +52,8 @@ mutable struct Field
     generated::Any      # GeneratedField: (expression, persisted) computed by the database
     symmetrical::Bool   # ManyToManyField(:self): a relation in one direction is one in both
     db_comment::Union{Nothing,String}   # a comment on the column in the database
+    max_digits::Union{Nothing,Int}      # DecimalField: digits in total
+    decimal_places::Union{Nothing,Int}  # DecimalField: digits after the point
     att::Symbol         # attname for the name in `attfor` (see `attname`)
     col::String         # string(att): the column name
     attfor::Symbol      # the name `att` and `col` were worked out for
@@ -84,7 +86,8 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                related_name = nothing, auto_now = false, auto_now_add = false, verbose_name = "",
                help_text = "", validators = Any[], widget = nothing, editable = true,
                db_index = false, required = nothing, label = nothing, through = nothing, one_to_one = false,
-               db_default = nothing, generated = nothing, symmetrical = false, db_comment = nothing)
+               db_default = nothing, generated = nothing, symmetrical = false, db_comment = nothing,
+               max_digits = nothing, decimal_places = nothing)
     required === nothing || (blank = !required)
     label === nothing || (verbose_name = string(label))
     if auto_now || auto_now_add
@@ -97,6 +100,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           help_text isa AbstractString ? help_text : string(help_text), collect(Any, validators),
           widget isa Union{AbstractString,Symbol} ? Symbol(widget) : widget, editable, db_index, nothing, through, one_to_one,
           db_default, generated, symmetrical, db_comment === nothing ? nothing : string(db_comment),
+          max_digits === nothing ? nothing : Int(max_digits), decimal_places === nothing ? nothing : Int(decimal_places),
           field_att(kind, :_), string(field_att(kind, :_)), :_)
 end
 
@@ -129,6 +133,19 @@ SlugField(; max_length = 50, kw...) = Field(:slug; max_length = max_length, db_i
 URLField(; max_length = 200, kw...) = Field(:url; max_length = max_length, kw...)
 IntegerField(; kw...) = Field(:int; kw...)
 FloatField(; kw...) = Field(:float; kw...)
+"""
+    DecimalField(; max_digits, decimal_places, kw...)
+
+An exact decimal number with at most `max_digits` digits, `decimal_places` of them after the
+point: `NUMERIC(max_digits, decimal_places)` in the database. Values are `Decimal`s, rounded to
+`decimal_places` when saved and loaded (`price = DecimalField(max_digits = 10, decimal_places = 2)`
+holds `dec"19.99"`).
+"""
+function DecimalField(; max_digits::Integer, decimal_places::Integer, kw...)
+    (max_digits >= 1 && decimal_places >= 0) || throw(ArgumentError("DecimalField needs max_digits >= 1 and decimal_places >= 0"))
+    decimal_places <= max_digits || throw(ArgumentError("DecimalField: decimal_places ($decimal_places) can't exceed max_digits ($max_digits)"))
+    Field(:decimal; max_digits = max_digits, decimal_places = decimal_places, kw...)
+end
 BooleanField(; default = false, kw...) = Field(:bool; default = default, blank = true, kw...)
 DateTimeField(; kw...) = Field(:datetime; kw...)
 DateField(; kw...) = Field(:date; kw...)

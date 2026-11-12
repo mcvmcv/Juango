@@ -1208,3 +1208,69 @@ Juango.get_by_natural_key(::Type{Topic}, name) = get(Topic; name = name)
           Dict("a" => Any[1, Dict("b" => "c")], "d" => "x\ny\n", "e" => "p q")
     @test_throws Juango.YAMLError Juango.parse_yaml("a: &x 1\nb: *x")
 end
+
+@testset "DecimalField" begin
+    @test_throws ArgumentError DecimalField(max_digits = 3, decimal_places = 4)
+    @test_throws UndefKeywordError DecimalField(max_digits = 3)
+    f = Juango.getfield_meta(Ledger, :amount)
+    c = Juango.column_state(f)
+    @test c.kind === :decimal && c.max_digits == 8 && c.decimal_places == 2
+    @test Juango.column_type_for(Juango.backend(), c) == (IS_MYSQL ? "DECIMAL(8, 2)" : "NUMERIC(8, 2)")
+    @test occursin("max_digits = 8, decimal_places = 2", Juango.Migrations.column_code(c))
+
+    a = create(Ledger; label = "a", amount = dec"19.99", rate = dec"0.0000001234")
+    b = create(Ledger; label = "b", amount = 5, rate = nothing)               # integers and floats convert
+    cc = create(Ledger; label = "c", amount = 0.1)
+    for o in (a, b, cc); refresh!(o); end
+    @test a.amount isa Decimal && string(a.amount) == "19.99" && string(a.rate) == "0.0000001234"
+    @test string(b.amount) == "5.00" && b.rate === nothing && string(cc.amount) == "0.10"
+    d = create(Ledger; label = "d", amount = dec"2.675"); refresh!(d)
+    @test string(d.amount) == "2.68"                                            # rounded to decimal_places, half to even
+    @test [o.label for o in filter(Ledger; amount__gte = dec"5", amount__lt = 20) |> order_by("amount")] == ["b", "a"]
+    @test get(Ledger; amount = dec"19.990").label == "a" && count(filter(Ledger; amount__in = [5, dec"0.1"])) == 2
+
+    # sums are exact (no 0.1 + 0.2 trouble) and come back as Decimals
+    for i in 1:3; create(Ledger; label = "s$i", amount = dec"0.1"); end
+    agg = aggregate(filter(Ledger; label__startswith = "s"); total = Sum(:amount), top = Max(:amount), avg = Avg(:amount), n = Count())
+    @test agg[:total] isa Decimal && agg[:total] == dec"0.3" && string(agg[:total]) == "0.30" && agg[:top] == dec"0.1" && agg[:n] == 3
+    @test agg[:avg] isa Decimal && agg[:avg] == dec"0.1"
+    @test aggregate(objects(Ledger); m = Avg(:id))[:m] isa Real                 # other averages are numbers as before
+    rows = values(annotate(filter(Ledger; label = "a"); double = F(:amount) * 2), :label, :amount)
+    @test only(collect(rows))[:amount] == dec"19.99" && only(collect(rows))[:double] == dec"39.98"
+    @test only(values_list(filter(Ledger; label = "a"), :amount; flat = true)) isa Decimal
+    update!(filter(Ledger; label = "a"); amount = F(:amount) + dec"0.01")
+    @test get(Ledger; label = "a").amount == dec"20.00"
+
+    # validation (Django's DecimalValidator)
+    @test isempty(full_clean(Ledger(label = "ok", amount = dec"123456.78")))
+    @test full_clean(Ledger(label = "x", amount = dec"1234567.8"))[:amount] == ["Ensure that there are no more than 6 digits before the decimal point."]
+    @test full_clean(Ledger(label = "x", amount = dec"1.234"))[:amount] == ["Ensure that there are no more than 2 decimal places."]
+    @test full_clean(Ledger(label = "x", amount = dec"123456789"))[:amount] == ["Ensure that there are no more than 8 digits in total."]
+    with_language("de") do
+        @test full_clean(Ledger(label = "x", amount = dec"1.234"))[:amount] == ["Bitte geben Sie nicht mehr als 2 Dezimalstellen ein."]
+    end
+
+    # forms
+    F_(data = nothing) = ModelForm(Ledger; fields = [:label, :amount], data = data)
+    form = F_(Dict("label" => "f", "amount" => "12.50"))
+    @test is_valid(form) && cleaned_data(form)[:amount] isa Decimal && cleaned_data(form)[:amount] == dec"12.5"
+    @test !is_valid(F_(Dict("label" => "f", "amount" => "abc"))) && !is_valid(F_(Dict("label" => "f", "amount" => "1.999")))
+    html = Juango.widget_html(F_()[:amount])
+    @test occursin("type=\"number\"", html) && occursin("step=\"0.01\"", html)
+    obj = save!(form); refresh!(obj)
+    @test obj.amount == dec"12.50"
+
+    # fixtures keep the digits; the cache stores Decimals
+    s = Juango.serialize(:json, filter(Ledger; label = "a"))
+    @test occursin("\"amount\":\"20.00\"", s)
+    back = only(Juango.deserialize(:json, s)).object
+    @test back.amount == dec"20.00" && string(back.amount) == "20.00"
+    @test only(Juango.deserialize(:yaml, Juango.serialize(:yaml, filter(Ledger; label = "a")))).object.amount == dec"20.00"
+    @test only(Juango.deserialize(:xml, Juango.serialize(:xml, filter(Ledger; label = "a")))).object.amount == dec"20.00"
+
+    # template filters format decimals exactly
+    t(s, ctx) = render(Template(s), ctx)
+    @test t("{{ x }} {{ x|floatformat:1 }} {{ x|floatformat }} {{ y|floatformat }}", Dict("x" => dec"2.25", "y" => dec"3.00")) == "2.25 2.3 2.3 3"
+    @test t("{% load humanize l10n %}{{ x|intcomma }} {{ x|localize }}", Dict("x" => dec"1234567.10")) == "1,234,567.10 1234567.10"
+    @test with_language(() -> Juango.number_format(dec"1234.565"; decimals = 2), "de") == "1234,57"
+end

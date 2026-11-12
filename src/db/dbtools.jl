@@ -77,23 +77,26 @@ function introspect_tables()
     sort([String(r[:name]) for r in rows if String(r[:name]) != "juango_migrations"])
 end
 
-"Columns of a table: `(name, type, max_length, null, pk)`."
+"Columns of a table: `(name, type, max_length, null, pk, precision, scale)`."
 function introspect_columns(table)
     b = backend()
     if b isa SQLiteBackend
         return [(name = String(r[:name]), type = lowercase(String(r[:type])), max_length = nothing,
-                 null = r[:notnull] == 0, pk = r[:pk] != 0) for r in execute("PRAGMA table_info($(quote_name(b, table)))")]
+                 null = r[:notnull] == 0, pk = r[:pk] != 0, precision = nothing, scale = nothing)
+                for r in execute("PRAGMA table_info($(quote_name(b, table)))")]
     end
     schema = b isa PostgresBackend ? "current_schema()" : "DATABASE()"
     pks = Set(String(r[:c]) for r in execute(
         "SELECT kcu.column_name AS c FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu " *
         "ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema AND tc.table_name = kcu.table_name " *
         "WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = $schema AND tc.table_name = ?", [table]))
-    rows = execute("SELECT column_name AS c, data_type AS t, character_maximum_length AS l, is_nullable AS n" *
+    rows = execute("SELECT column_name AS c, data_type AS t, character_maximum_length AS l, is_nullable AS n, " *
+                   "numeric_precision AS np, numeric_scale AS ns" *
                    (b isa MySQLBackend ? ", column_type AS ct" : "") *
                    " FROM information_schema.columns WHERE table_schema = $schema AND table_name = ? ORDER BY ordinal_position", [table])
     [(name = String(r[:c]), type = lowercase(String(b isa MySQLBackend ? r[:ct] : r[:t])),
-      max_length = r[:l] === nothing ? nothing : Int(r[:l]), null = String(r[:n]) == "YES", pk = String(r[:c]) in pks) for r in rows]
+      max_length = r[:l] === nothing ? nothing : Int(r[:l]), null = String(r[:n]) == "YES", pk = String(r[:c]) in pks,
+      precision = r[:np] === nothing ? nothing : Int(r[:np]), scale = r[:ns] === nothing ? nothing : Int(r[:ns])) for r in rows]
 end
 
 "Foreign keys of a table: column => referenced table."
@@ -125,6 +128,12 @@ function field_for(col)
     occursin(r"^tinyint\(1\)|^bool", t) && return "BooleanField()", ""
     occursin(r"int|serial", t) && return "IntegerField()", ""
     occursin(r"^(text|clob|longtext|mediumtext|tinytext|citext)", t) && return "TextField()", ""
+    if occursin(r"^(numeric|decimal)", t)
+        m = match(r"\((\d+)\s*,\s*(\d+)\)", t)          # SQLite and MySQL spell it out in the type
+        p, s = m !== nothing ? (parse(Int, m[1]), parse(Int, m[2])) : (col.precision, col.scale)
+        p === nothing ? (return "DecimalField(max_digits = 30, decimal_places = 10)", "  # TODO: max_digits and decimal_places are a guess") :
+                        (return "DecimalField(max_digits = $p, decimal_places = $(something(s, 0)))", "")
+    end
     occursin(r"real|double|float|numeric|decimal", t) && return "FloatField()", ""
     occursin(r"^timestamp|^datetime", t) && return "DateTimeField()", ""
     t == "date" && return "DateField()", ""

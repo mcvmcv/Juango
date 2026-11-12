@@ -418,6 +418,35 @@ Aggregate over the whole queryset: `aggregate(objects(Post); total = Sum(:views)
 The positional form (`:count`, `:sum`, `:avg`, `:min`, `:max`) returns a single value.
 """
 aggregate(qs::QuerySet; kw...) = in_db(() -> aggregate_here(qs; kw...), qs)
+
+"The DecimalField an expression's values come from (`F(:price)`, `Sum(:price)`, `F(:price) * 2`), else nothing."
+decimal_source(@nospecialize(T), e) = nothing
+function decimal_source(@nospecialize(T), e::F)
+    f = try
+        last(resolve_path(SQLCompiler(T), modelmeta(T).table, T, e.name))
+    catch
+        nothing
+    end
+    f isa Field && f.kind === :decimal ? f : nothing
+end
+decimal_source(@nospecialize(T), e::Aggregate) = e.func in ("SUM", "MIN", "MAX", "AVG") && e.arg !== nothing ? decimal_source(T, e.arg) : nothing
+decimal_source(@nospecialize(T), e::CombinedExpression) = something(decimal_source(T, e.lhs), decimal_source(T, e.rhs), Some(nothing))
+
+"""
+A computed value (annotation or aggregate) as Julia sees it: Decimals for expressions over a
+DecimalField (rounded to its places, except for averages and arithmetic), other non-integer
+numbers as Float64.
+"""
+function expr_value(@nospecialize(T), e, v)
+    v === nothing && return nothing
+    f = decimal_source(T, e)
+    if f !== nothing
+        # SQLite computes with doubles: keep the 15 digits they hold, not the binary noise
+        d = to_decimal(v isa AbstractFloat ? round(v; sigdigits = 15) : v)
+        return (e isa Aggregate && e.func == "AVG") || e isa CombinedExpression ? d : round(d; digits = f.decimal_places)
+    end
+    v isa Decimal ? Float64(v) : v
+end
 function aggregate_here(qs::QuerySet{T}; kw...) where {T}
     isempty(kw) && throw(ArgumentError("aggregate needs at least one name = Aggregate(...)"))
     c = SQLCompiler(T)
@@ -433,7 +462,7 @@ function aggregate_here(qs::QuerySet{T}; kw...) where {T}
     sub, sps = select_sql(qs; columns = pk_select(c.table, T), ordered = false)
     row = execute("SELECT $(join(sel, ", ")) FROM $(qname(c.table))$(join(c.joins)) WHERE $(pk_ref(c.base, T)) IN ($(in_subquery(backend(), sub)))",
                   vcat(ps, c.join_params, sps))[1]
-    Dict{Symbol,Any}(k => row[k] for k in keys(kw))
+    Dict{Symbol,Any}(k => expr_value(T, ref(v), row[k]) for (k, v) in kw)
 end
 function aggregate(qs::QuerySet, func::Symbol, field::Symbol)
     func in (:count, :sum, :avg, :min, :max) || throw(ArgumentError("unknown aggregate $func"))

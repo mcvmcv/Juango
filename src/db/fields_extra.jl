@@ -123,6 +123,7 @@ function to_db(f::Field, v)
     k === :array && return encode_array(backend(), v)
     k in RANGE_KINDS && return encode_range(backend(), v)
     k === :uuid && return string(v)
+    k === :decimal && return string(f.decimal_places === nothing ? to_decimal(v) : round(to_decimal(v); digits = f.decimal_places))
     k === :geometry && return encode_geometry(v)
     dbparam(v)
 end

@@ -527,3 +527,21 @@ msgctxt "alt. month"
 msgid "Dec."
 msgstr "Dez."
 
+
+#: db/orm/instances.jl
+msgid "Ensure that there are no more than %(max)s digit in total."
+msgid_plural "Ensure that there are no more than %(max)s digits in total."
+msgstr[0] "Bitte geben Sie nicht mehr als insgesamt %(max)s Ziffer ein."
+msgstr[1] "Bitte geben Sie nicht mehr als insgesamt %(max)s Ziffern ein."
+
+#: db/orm/instances.jl
+msgid "Ensure that there are no more than %(max)s decimal place."
+msgid_plural "Ensure that there are no more than %(max)s decimal places."
+msgstr[0] "Bitte geben Sie nicht mehr als %(max)s Dezimalstelle ein."
+msgstr[1] "Bitte geben Sie nicht mehr als %(max)s Dezimalstellen ein."
+
+#: db/orm/instances.jl
+msgid "Ensure that there are no more than %(max)s digit before the decimal point."
+msgid_plural "Ensure that there are no more than %(max)s digits before the decimal point."
+msgstr[0] "Bitte geben Sie nicht mehr als %(max)s Ziffer vor dem Komma ein."
+msgstr[1] "Bitte geben Sie nicht mehr als %(max)s Ziffern vor dem Komma ein."
