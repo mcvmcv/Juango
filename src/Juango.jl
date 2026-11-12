@@ -27,6 +27,7 @@ using Reseau: TCP, TLS
 import SQLite
 import DBInterface
 import JSON
+import Markdown
 
 const VERSION_STRING = "0.1.0"
 

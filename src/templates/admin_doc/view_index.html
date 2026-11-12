@@ -1,5 +1,5 @@
 {% extends "admin/base.html" %}
 {% block content %}<h1 class="page">Views</h1>
 <div class="module"><h2>URL patterns</h2><table><thead><tr><th>URL</th><th>Name</th><th>View</th></tr></thead><tbody>
-{% for v in views %}<tr><td><code>{{ v.route }}</code></td><td>{{ v.name }}</td><td>{{ v.view }}{% if v.doc %}<pre class="doc">{{ v.doc }}</pre>{% endif %}</td></tr>{% endfor %}
+{% for v in views %}<tr><td><code>{{ v.route }}</code></td><td>{{ v.name }}</td><td>{{ v.view }}{% if v.doc %}<div class="doc">{{ v.doc }}</div>{% endif %}</td></tr>{% endfor %}
 </tbody></table></div>{% endblock %}

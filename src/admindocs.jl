@@ -18,6 +18,13 @@ function docstring(x)
     strip(join([join(string.(d.text)) for d in values(m.docs)], "\n\n"))
 end
 
+"A docstring rendered from Markdown to HTML (a `SafeString`; empty when there is none)."
+function docstring_html(x)
+    d = docstring(x)
+    isempty(d) && return SafeString("")
+    SafeString(Markdown.html(Markdown.parse(d)))
+end
+
 field_type_label(f::Field) = f.kind === :fk ? "ForeignKey to " * modelmeta(related_model(f)).name :
     f.kind === :m2m ? "ManyToMany to " * modelmeta(related_model(f)).name :
     f.generated !== nothing ? "Generated ($(f.kind))" : uppercasefirst(string(f.kind)) * (f.max_length === nothing ? "" : " ($(f.max_length))")
@@ -51,28 +58,28 @@ function admindocs_model(req::Request; label, kw...)
               for f in vcat(all_fields(T), modelmeta(concrete_model(T)).m2m)]
     rel = [Dict{String,Any}("name" => string(n), "model" => model_label(M), "field" => string(f.name)) for (n, M, f) in reverse_relations(T)]
     doc_page(req, "admin_doc/model_detail.html", m.name,
-             Dict("model" => Dict("label" => model_label(T), "name" => m.name, "table" => m.table, "doc" => docstring(T),
+             Dict("model" => Dict("label" => model_label(T), "name" => m.name, "table" => m.table, "doc" => docstring_html(T),
                                    "verbose_name" => string(m.verbose_name)), "fields" => fields, "relations" => rel))
 end
 label_of(f::Field) = label(f)
 
 function admindocs_views(req::Request; kw...)
     rows = [Dict{String,Any}("route" => "/" * r, "name" => something(n, ""), "view" => view_label(v),
-                             "doc" => docstring(v isa Function ? v : typeof(v))) for (r, n, v) in all_routes()]
+                             "doc" => docstring_html(v isa Function ? v : typeof(v))) for (r, n, v) in all_routes()]
     doc_page(req, "admin_doc/view_index.html", "Views", Dict("views" => rows))
 end
 
 function admindocs_tags(req::Request; kw...)
-    rows = [Dict{String,Any}("name" => n, "doc" => docstring(f)) for (n, f) in sort!(collect(TAGS); by = first)]
+    rows = [Dict{String,Any}("name" => n, "doc" => docstring_html(f)) for (n, f) in sort!(collect(TAGS); by = first)]
     libs = [Dict{String,Any}("library" => l.name, "tags" => sort!(collect(keys(l.tags))), "filters" => sort!(collect(keys(l.filters))))
             for l in sort!(collect(values(TAG_LIBRARIES)); by = l -> l.name)]
     doc_page(req, "admin_doc/template_tag_index.html", "Template tags", Dict("tags" => rows, "libraries" => libs))
 end
 
 function admindocs_filters(req::Request; kw...)
-    rows = [Dict{String,Any}("name" => n, "doc" => docstring(f.fn)) for (n, f) in sort!(collect(FILTERS); by = first)]
+    rows = [Dict{String,Any}("name" => n, "doc" => docstring_html(f.fn)) for (n, f) in sort!(collect(FILTERS); by = first)]
     libs = [Dict{String,Any}("library" => l.name,
-                             "filters" => [Dict{String,Any}("name" => n, "doc" => docstring(f.fn)) for (n, f) in sort!(collect(l.filters); by = first)])
+                             "filters" => [Dict{String,Any}("name" => n, "doc" => docstring_html(f.fn)) for (n, f) in sort!(collect(l.filters); by = first)])
             for l in sort!(collect(values(TAG_LIBRARIES)); by = l -> l.name) if !isempty(l.filters)]
     doc_page(req, "admin_doc/template_filter_index.html", "Template filters", Dict("filters" => rows, "libraries" => libs))
 end

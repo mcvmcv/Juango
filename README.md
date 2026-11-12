@@ -1267,7 +1267,7 @@ Admin.register!(Post;
 
 ### Admin documentation
 
-Add `"juango.admindocs"` to `INSTALLED_APPS` and `path("admin/doc/", admindocs_urls())` before the admin's URLs. Staff then get pages listing the models (fields, relations, docstrings), the URL patterns with their views' docstrings, and the template tags and filters.
+Add `"juango.admindocs"` to `INSTALLED_APPS` and `path("admin/doc/", admindocs_urls())` before the admin's URLs. Staff then get pages listing the models (fields, relations, docstrings), the URL patterns with their views' docstrings, and the template tags and filters. Docstrings are rendered as Markdown (Django renders reStructuredText).
 
 ### Testing
 
@@ -1359,7 +1359,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. Request limi
 ## Differences from Django (current limitations)
 
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
-- **Swappable user models and admin docs** have Django's limitations: choose `AUTH_USER_MODEL` before the first `migrate`, and docstrings are shown as plain text.
+- **Swappable user models** have Django's limitation: choose `AUTH_USER_MODEL` before the first `migrate`.
 - `runserver` is HTTP.jl's server. It speaks HTTP/1.1 and HTTP/2 (cleartext with prior knowledge, or negotiated over TLS), and serves HTTPS with `runserver 8443 --cert cert.pem --key key.pem` (or `runserver(...; certfile, keyfile)`). WebSockets need HTTP/1.1, which browsers use for them anyway. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and run `manage.jl check --deploy`.
 
 ## Layout

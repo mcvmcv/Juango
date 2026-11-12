@@ -914,7 +914,13 @@ end
     @test d["catalog"]["Save"] == "Sichern" && all(startswith(k, "Sa") for k in keys(d["catalog"])) && d["plural"] == "(n != 1)"
 end
 
-"An essay about a topic (shown by the admin documentation)."
+"""
+An essay about a topic (shown by the admin documentation), with *Markdown*:
+
+    documented_view(req)
+
+Uses `HttpResponse` & <b>raw</b> text.
+"""
 function documented_view(req) HttpResponse("doc") end
 
 @testset "admin documentation" begin
@@ -934,6 +940,8 @@ function documented_view(req) HttpResponse("doc") end
         @test get(c, "/admin/doc/models/project.nosuch/").status == 404
         r = get(c, "/admin/doc/views/")
         @test occursin("/documented/", text(r)) && occursin("An essay about a topic", text(r))
+        @test occursin("<em>Markdown</em>", text(r)) && occursin("<pre><code>documented_view&#40;req&#41;</code></pre>", text(r)) &&
+              occursin("<code>HttpResponse</code> &amp;", text(r)) && !occursin("<b>raw</b>", text(r))
         @test occursin("id=\"for\"", text(get(c, "/admin/doc/tags/"))) && occursin("id=\"upper\"", text(get(c, "/admin/doc/filters/")))
         @test occursin("load humanize", text(get(c, "/admin/doc/filters/"))) && occursin("id=\"humanize-intcomma\"", text(get(c, "/admin/doc/filters/")))
     finally

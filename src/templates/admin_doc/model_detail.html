@@ -1,7 +1,7 @@
 {% extends "admin/base.html" %}
 {% block content %}<h1 class="page">{{ model.label }}</h1>
 <p>Table <code>{{ model.table }}</code> · {{ model.verbose_name }}</p>
-{% if model.doc %}<pre class="doc">{{ model.doc }}</pre>{% endif %}
+{% if model.doc %}<div class="doc">{{ model.doc }}</div>{% endif %}
 <div class="module"><h2>Fields</h2><table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody>
 {% for f in fields %}<tr><td>{{ f.name }}</td><td>{{ f.type }}{% if f.null %} (null){% endif %}{% if f.unique %} (unique){% endif %}</td><td>{{ f.verbose_name }}{% if f.help %}: {{ f.help }}{% endif %}</td></tr>{% endfor %}
 </tbody></table></div>
