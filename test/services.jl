@@ -270,6 +270,56 @@ end
         @test incr("n"; cache_name = "db") == 2
         cache_clear(cache_name = "db")
         @test cache_get("obj"; cache_name = "db") === nothing
+
+        # stored as JSON by default: values come back equal and with the same types
+        vals = Any[nothing, true, 42, 1.5, NaN, Inf, "s", :sym, 'c', Int32(7), UInt8(9), big(2)^70, 3 // 4, 1.5f0,
+                   Date(2026, 1, 2), DateTime(2026, 1, 2, 3, 4, 5, 6), Dates.Time(12, 30), uuid4(), mark_safe("<b>"),
+                   UInt8[1, 2, 255], [1, 2, 3], Any[1, "a", nothing], ["x", "y"], Symbol[], Dict("a" => 1),
+                   Dict{String,Any}("a" => [1, 2], "b" => Dict{String,Any}()), Dict(:k => 1.5), Dict("__jt" => "x"),
+                   Dict{Any,Any}(1 => "one", :two => 2), (1, "two"), (a = 1, b = [2.5]), "k" => :v, Set([1, 2]),
+                   Juango.TimeZones.ZonedDateTime(2026, 3, 4, 5, 6, Juango.TimeZones.tz"Europe/Berlin")]
+        for (i, v) in enumerate(vals)
+            cache_set("v$i", v; cache_name = "db")
+            r = cache_get("v$i"; cache_name = "db")
+            @test isequal(r, v) && typeof(r) == typeof(v)
+        end
+        nested = Dict(1 => [Dict("d" => Date(2020, 1, 1))])
+        cache_set("nested", nested; cache_name = "db")
+        @test isequal(cache_get("nested"; cache_name = "db"), nested)          # element types inside: Any
+        stored = only(Juango.execute("SELECT " * Juango.qname("value") * " FROM " * Juango.qname("juango_cache_test") *
+                                     " WHERE " * Juango.qname("cache_key") * " = ?", [Juango.make_key(cache("db"), "v25", nothing)]))
+        @test JSON.parse(String(stored[:value]))["v"] == Any[Any["a", 1]]      # plain, readable JSON
+
+        # model instances (their field values) and responses
+        au = create(Author; name = "Cached author")
+        art = create(Article; title = "Cached", author = au, rating = 2.5)
+        cache_set("art", art; cache_name = "db")
+        got = cache_get("art"; cache_name = "db")
+        @test got isa Article && got.id == art.id && got.title == "Cached" && got.rating == 2.5 &&
+              got.created == art.created && got.author_id == au.id && got.author.name == "Cached author"
+        resp = HttpResponse("hello"; status = 201); setheader!(resp, "X-Thing", "1")
+        cache_set("resp", resp; cache_name = "db")
+        got = cache_get("resp"; cache_name = "db")
+        @test got.status == 201 && text(got) == "hello" && getheader(got, "X-Thing") == "1"
+
+        # other values are refused when stored; unreadable entries are misses and get deleted
+        @test_throws Juango.CacheSerializationError cache_set("bad", r"x"; cache_name = "db")
+        @test_throws Juango.CacheSerializationError cache_set("bad", [r"x"]; cache_name = "db")
+        Juango.execute("INSERT INTO " * Juango.qname("juango_cache_test") * " (" * Juango.qname("cache_key") * ", " *
+                       Juango.qname("value") * ", " * Juango.qname("expires") * ") VALUES (?, ?, NULL)",
+                       [Juango.make_key(cache("db"), "junk", nothing), "{not json"])
+        @test cache_get("junk", 0; cache_name = "db") == 0 && !cache_has("junk"; cache_name = "db")
+        @test isempty(Juango.execute("SELECT 1 FROM " * Juango.qname("juango_cache_test") * " WHERE " *
+                                     Juango.qname("cache_key") * " = ?", [Juango.make_key(cache("db"), "junk", nothing)]))
+
+        # :serializer => :serialization stores any Julia value
+        configure!(CACHES = merge(settings.CACHES, Dict("dbjl" => Dict(:backend => :db, :location => "juango_cache_test",
+                                                                         :serializer => :serialization))))
+        cache_set("re", r"a+b"; cache_name = "dbjl")
+        @test cache_get("re"; cache_name = "dbjl") == r"a+b"
+        @test cache_get("re", :miss; cache_name = "db") === :miss    # not JSON: a miss for the JSON cache
+        @test_throws Juango.ImproperlyConfigured (configure!(CACHES = Dict("x" => Dict(:backend => :db, :serializer => :pickle))); cache("x"))
+        configure!(CACHES = Dict("default" => Dict(:backend => :locmem), "db" => Dict(:backend => :db, :location => "juango_cache_test")))
         Juango.execute("DROP TABLE " * Juango.qname("juango_cache_test"))
 
         # Redis, against a fake server speaking RESP

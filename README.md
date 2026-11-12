@@ -1117,7 +1117,10 @@ const home = cache_page(home_view; timeout = 60)   # whole GET responses, keyed 
   - `:redis` (`:location => "redis://host:6379/0"`, using a small built-in client)
   - `:dummy`
 
-  Use another cache with `cache_name = "shared"`. Values are copied, or serialized for `:db` and `:redis`.
+  Use another cache with `cache_name = "shared"`. `:locmem` stores copies of the values.
+- **What `:db` and `:redis` store.** They store JSON with type tags, so a value comes back equal and with the same type, and reading an entry never runs code. That covers `nothing`, booleans, numbers (including `BigInt`, `Rational`, `NaN`), strings, symbols, chars, dates and times (with time zones), UUIDs, `SafeString`, byte vectors, vectors, dicts, tuples, named tuples, pairs, sets, model instances and `HttpResponse`s (so `cache_page` works). Vectors, dicts and sets keep simple element types (`Vector{Int}`, `Dict{String,Date}`); nested containers come back with `Any`. Storing anything else raises `Juango.CacheSerializationError`.
+
+  `:serializer => :serialization` in a cache's settings uses Julia's `Serialization` instead, which stores any value. Like Django's pickle, it lets anyone who can write to the cache store (the Redis server, the cache table) make the reader construct arbitrary objects, which can lead to running code. It also can't be read by another Julia version. An entry that can't be read counts as a miss and is deleted.
 - **Page caching.** `cache_page` and the per-site `CacheMiddleware` (`CACHE_MIDDLEWARE_SECONDS`) skip responses that set cookies or vary on `Cookie`, so per-user pages aren't shared.
 - **Templates.** `TEMPLATE_CACHE_CHECK_MTIME = false` reads each template once instead of checking its file on every render. Use it in production.
 - **Sessions.** `SESSION_ENGINE = :cache` keeps sessions in the cache only, and `:cached_db` puts the cache in front of the database. The default is `:db`.

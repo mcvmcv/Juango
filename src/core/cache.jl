@@ -11,15 +11,17 @@
 #                              "shared"  => Dict(:backend => :redis, :location => "redis://localhost:6379/0")))
 #
 # Backends: :locmem (per process, LRU), :db (a table; run `manage.jl createcachetable`),
-# :redis (a small built-in client) and :dummy (stores nothing).
+# :redis (a small built-in client) and :dummy (stores nothing). :db and :redis store JSON
+# (see "serializers" below); `:serializer => :serialization` stores any Julia value instead.
 
 abstract type CacheBackend end
 
-"Options shared by every backend: default timeout, key prefix and version."
+"Options shared by every backend: default timeout, key prefix, version and serializer."
 struct CacheConfig
     timeout::Union{Nothing,Float64}
     key_prefix::String
     version::Int
+    serializer::Symbol      # :json or :serialization, for the backends that store text (:db, :redis)
 end
 
 mutable struct LocMemCache <: CacheBackend
@@ -57,7 +59,9 @@ opt(d, k, default) = haskey(d, k) ? d[k] : haskey(d, string(k)) ? d[string(k)] :
 
 function make_cache(d)
     t = opt(d, :timeout, 300)
-    conf = CacheConfig(t === nothing ? nothing : Float64(t), string(opt(d, :key_prefix, "")), Int(opt(d, :version, 1)))
+    ser = Symbol(opt(d, :serializer, :json))
+    ser in (:json, :serialization) || throw(ImproperlyConfigured("unknown cache serializer $(repr(ser)); use :json or :serialization"))
+    conf = CacheConfig(t === nothing ? nothing : Float64(t), string(opt(d, :key_prefix, "")), Int(opt(d, :version, 1)), ser)
     b = Symbol(opt(d, :backend, :locmem))
     b === :locmem && return LocMemCache(conf, Dict{String,Tuple{Any,Union{Nothing,Float64}}}(), Dict{String,Int}(), 0, Int(opt(d, :max_entries, 300)), ReentrantLock())
     b === :dummy && return DummyCache(conf)
@@ -132,8 +136,170 @@ raw_set(::DummyCache, k, v, exp) = nothing
 raw_delete(::DummyCache, k) = false
 raw_clear(::DummyCache) = nothing
 
-serialize_value(v) = (io = IOBuffer(); Serialization.serialize(io, v); base64encode(take!(io)))
-deserialize_value(s) = Serialization.deserialize(IOBuffer(base64decode(s)))
+# --- serializers for stored caches ---------------------------------------------------------------------
+#
+# The :db and :redis backends store values as text. By default that text is JSON with type tags,
+# so values round-trip predictably and reading a cache entry never runs code:
+#
+#     nothing, Bool, Int64, Float64, String          as JSON
+#     Vector, Dict, Tuple, NamedTuple, Pair, Set      recursively (element types kept when simple)
+#     Symbol, Char, other integer and float types, BigInt, Rational, NaN/Inf
+#     Date, DateTime, Time, ZonedDateTime, UUID, SafeString, Vector{UInt8}
+#     model instances (their field values, as the database stores them) and HttpResponse
+#
+# Anything else is an error when it's stored. `:serializer => :serialization` in a cache's
+# settings uses Julia's Serialization instead, which stores any value but, like Django's pickle,
+# lets whoever can write to the cache store make the reader construct arbitrary objects (which
+# can lead to running code), and breaks across Julia versions. An entry that can't be read is a
+# miss, and is deleted.
+
+struct CacheSerializationError <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::CacheSerializationError) = print(io, "CacheSerializationError: ", e.msg)
+
+const JT = "__jt"      # the tag key; a plain Dict that has this key is stored as a tagged dict
+
+# element types that tagged vectors and dicts keep (anything else comes back as Any)
+const CACHE_ELTYPES = Dict{String,Type}(string(T) => T for T in
+    (Any, Int64, Float64, String, Bool, Symbol, Date, DateTime, Dates.Time, UUID, Nothing))
+cache_eltype(T) = haskey(CACHE_ELTYPES, string(T)) && CACHE_ELTYPES[string(T)] === T ? string(T) : "Any"
+
+const CACHE_INT_TYPES = Dict{String,Type}(string(T) => T for T in
+    (Int8, Int16, Int32, Int128, UInt8, UInt16, UInt32, UInt64, UInt128))
+
+tagged(tag, v) = Dict{String,Any}(JT => tag, "v" => v)
+
+cache_encode(::Union{Nothing,Missing}) = nothing
+cache_encode(v::Bool) = v
+cache_encode(v::Int64) = v
+cache_encode(v::String) = v
+cache_encode(v::AbstractString) = String(v)
+cache_encode(v::Float64) = isfinite(v) ? v : tagged("float", string(v))
+cache_encode(v::Union{Float16,Float32}) = tagged("float32", string(v))
+cache_encode(v::BigInt) = tagged("bigint", string(v))
+cache_encode(v::Integer) = haskey(CACHE_INT_TYPES, string(typeof(v))) ? Dict{String,Any}(JT => "int", "t" => string(typeof(v)), "v" => string(v)) :
+    throw(CacheSerializationError("can't store a $(typeof(v)) in the cache"))
+cache_encode(v::Rational) = Dict{String,Any}(JT => "rational", "n" => cache_encode(numerator(v)), "d" => cache_encode(denominator(v)))
+cache_encode(v::Symbol) = tagged("sym", string(v))
+cache_encode(v::Char) = tagged("char", string(v))
+cache_encode(v::Date) = tagged("date", string(v))
+cache_encode(v::DateTime) = tagged("datetime", string(v))
+cache_encode(v::Dates.Time) = tagged("time", string(v))
+const CACHE_UTC = TimeZones.TimeZone("UTC")
+cache_encode(v::TimeZones.ZonedDateTime) =
+    Dict{String,Any}(JT => "zdt", "v" => string(DateTime(TimeZones.astimezone(v, CACHE_UTC))), "tz" => string(TimeZones.timezone(v)))
+cache_encode(v::UUID) = tagged("uuid", string(v))
+cache_encode(v::SafeString) = tagged("safe", v.s)
+cache_encode(v::Vector{UInt8}) = tagged("bytes", base64encode(v))
+function cache_encode(v::AbstractVector)
+    items = Any[cache_encode(x) for x in v]
+    T = cache_eltype(eltype(v))
+    T == "Any" ? items : Dict{String,Any}(JT => "vec", "t" => T, "v" => items)
+end
+cache_encode(v::Tuple) = tagged("tuple", Any[cache_encode(x) for x in v])
+cache_encode(v::NamedTuple) = Dict{String,Any}(JT => "nt", "k" => String[string(k) for k in keys(v)], "v" => Any[cache_encode(x) for x in v])
+cache_encode(v::Pair) = tagged("pair", Any[cache_encode(v.first), cache_encode(v.second)])
+cache_encode(v::AbstractSet) = Dict{String,Any}(JT => "set", "t" => cache_eltype(eltype(v)), "v" => Any[cache_encode(x) for x in v])
+function cache_encode(v::AbstractDict)
+    K, V = keytype(v), valtype(v)
+    if K <: AbstractString && V === Any && !haskey(v, JT)
+        return Dict{String,Any}(string(k) => cache_encode(x) for (k, x) in v)
+    end
+    Dict{String,Any}(JT => "dict", "kt" => cache_eltype(K), "vt" => cache_eltype(V),
+                     "v" => Any[Any[cache_encode(k), cache_encode(x)] for (k, x) in v])
+end
+function cache_encode(m::Model)
+    T = typeof(m)
+    data = getfield(m, :_data)
+    fields = Dict{String,Any}()
+    for f in all_fields(T)
+        a = attname(f)
+        haskey(data, a) || continue                       # deferred: loaded from the database on access
+        v = data[a]
+        fields[string(a)] = v === nothing ? nothing : cache_encode(to_db(f, v))
+    end
+    Dict{String,Any}(JT => "model", "model" => model_label(T), "id" => cache_encode(data[:id]),
+                     "fields" => fields, "db" => cache_encode(instance_db(m)))
+end
+function cache_encode(r::HttpResponse)
+    is_streaming(r) && throw(CacheSerializationError("can't store a streaming response in the cache"))
+    Dict{String,Any}(JT => "response", "status" => r.status, "headers" => Any[Any[k, v] for (k, v) in r.headers],
+                     "body" => base64encode(r.body), "cookies" => copy(r.cookies))
+end
+cache_encode(v) = throw(CacheSerializationError(
+    "can't store a $(typeof(v)) in the cache with the JSON serializer: store plain data, or set :serializer => :serialization for this cache"))
+
+typed_vector(t, items) = (T = get(CACHE_ELTYPES, t, Any); T === Any ? items : convert(Vector{T}, items))
+
+cache_decode(v::Vector) = Any[cache_decode(x) for x in v]
+cache_decode(v) = v
+function cache_decode(d::AbstractDict)
+    tag = get(d, JT, nothing)
+    tag === nothing && return Dict{String,Any}(k => cache_decode(x) for (k, x) in d)
+    v = get(d, "v", nothing)
+    tag == "float" && return parse(Float64, v)
+    tag == "float32" && return parse(Float32, v)
+    tag == "bigint" && return parse(BigInt, v)
+    tag == "int" && return parse(CACHE_INT_TYPES[d["t"]], v)
+    tag == "rational" && return cache_decode(d["n"]) // cache_decode(d["d"])
+    tag == "sym" && return Symbol(v)
+    tag == "char" && return only(v)
+    tag == "date" && return Date(v)
+    tag == "datetime" && return DateTime(v)
+    tag == "time" && return Dates.Time(v)
+    tag == "zdt" && return TimeZones.astimezone(TimeZones.ZonedDateTime(DateTime(v), CACHE_UTC), TimeZones.TimeZone(d["tz"]))
+    tag == "uuid" && return UUID(v)
+    tag == "safe" && return SafeString(v)
+    tag == "bytes" && return base64decode(v)
+    tag == "vec" && return typed_vector(d["t"], Any[cache_decode(x) for x in v])
+    tag == "tuple" && return Tuple(cache_decode(x) for x in v)
+    tag == "nt" && return NamedTuple{Tuple(Symbol.(d["k"]))}(Tuple(cache_decode(x) for x in v))
+    tag == "pair" && return cache_decode(v[1]) => cache_decode(v[2])
+    tag == "set" && return Set{get(CACHE_ELTYPES, d["t"], Any)}(cache_decode(x) for x in v)
+    if tag == "dict"
+        K, V = get(CACHE_ELTYPES, d["kt"], Any), get(CACHE_ELTYPES, d["vt"], Any)
+        return Dict{K,V}(cache_decode(p[1]) => cache_decode(p[2]) for p in v)
+    end
+    if tag == "model"
+        T = get_model(d["model"])
+        data = Dict{Symbol,Any}(:id => cache_decode(d["id"]))
+        for f in all_fields(T)
+            a = string(attname(f))
+            haskey(d["fields"], a) && (data[attname(f)] = from_db(f, cache_decode(d["fields"][a])))
+        end
+        db = cache_decode(d["db"])
+        return T(data, db === nothing ? Dict{Symbol,Any}() : Dict{Symbol,Any}(:__db => db))
+    end
+    if tag == "response"
+        r = HttpResponse(base64decode(d["body"]); status = d["status"])
+        r.headers = Pair{String,String}[String(h[1]) => String(h[2]) for h in d["headers"]]
+        r.cookies = String[c for c in d["cookies"]]
+        return r
+    end
+    throw(CacheSerializationError("unknown cache value tag $(repr(tag))"))
+end
+
+"Text for a stored cache entry: JSON with type tags, or base64 of Julia's Serialization."
+function serialize_value(c, v)
+    c.conf.serializer === :serialization || return JSON.json(cache_encode(v))
+    io = IOBuffer(); Serialization.serialize(io, v); base64encode(take!(io))
+end
+deserialize_value(c, s) = c.conf.serializer === :serialization ? Serialization.deserialize(IOBuffer(base64decode(s))) :
+    cache_decode(JSON.parse(s))
+
+"Read a stored entry: `(true, value)`, or a miss (deleting the entry) when it can't be read."
+function read_entry(c, k, s)
+    try
+        (true, deserialize_value(c, s))
+    catch e
+        e isa InterruptException && rethrow()
+        @debug "unreadable cache entry; treated as a miss" key = k exception = e
+        raw_delete(c, k)
+        (false, nothing)
+    end
+end
+
 
 function raw_get(c::DatabaseCache, k)
     rows = execute("SELECT \"value\", \"expires\" FROM \"$(c.table)\" WHERE \"cache_key\" = ?", [k])
@@ -143,12 +309,12 @@ function raw_get(c::DatabaseCache, k)
         raw_delete(c, k)
         return (false, nothing)
     end
-    (true, deserialize_value(String(rows[1][:value])))
+    read_entry(c, k, String(rows[1][:value]))
 end
 function raw_set(c::DatabaseCache, k, v, exp)
     atomic() do
         execute("DELETE FROM \"$(c.table)\" WHERE \"cache_key\" = ?", [k])
-        execute("INSERT INTO \"$(c.table)\" (\"cache_key\", \"value\", \"expires\") VALUES (?, ?, ?)", [k, serialize_value(v), exp])
+        execute("INSERT INTO \"$(c.table)\" (\"cache_key\", \"value\", \"expires\") VALUES (?, ?, ?)", [k, serialize_value(c, v), exp])
     end
 end
 raw_delete(c::DatabaseCache, k) = execute_changes("DELETE FROM \"$(c.table)\" WHERE \"cache_key\" = ?", [k]) > 0
@@ -196,11 +362,12 @@ function redis(c::RedisCache, args...)
 end
 function raw_get(c::RedisCache, k)
     v = redis(c, "GET", k)
-    v === nothing ? (false, nothing) : (true, deserialize_value(v))
+    v === nothing ? (false, nothing) : read_entry(c, k, v)
 end
 function raw_set(c::RedisCache, k, v, exp)
-    exp === nothing ? redis(c, "SET", k, serialize_value(v)) :
-        redis(c, "SET", k, serialize_value(v), "PX", max(1, round(Int, (exp - time()) * 1000)))
+    s = serialize_value(c, v)
+    exp === nothing ? redis(c, "SET", k, s) :
+        redis(c, "SET", k, s, "PX", max(1, round(Int, (exp - time()) * 1000)))
     nothing
 end
 raw_delete(c::RedisCache, k) = redis(c, "DEL", k) > 0
