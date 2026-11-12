@@ -57,6 +57,59 @@
     end
 end
 
+@testset "migrations: partial and expression indexes" begin
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("migidx" => dir))
+    quiet(f) = redirect_stdout(f, devnull)
+    mysql = Juango.backend() isa Juango.MySQLBackend
+    try
+        @eval @model struct MiAcct
+            email = CharField(max_length = 50)
+            handle = CharField(max_length = 50, default = "")
+            active = BooleanField(default = true)
+            Meta(table = "mi_acct", app_label = "migidx", indexes = [
+                Index(Lower(:email); name = "mi_acct_email_ci", unique = true),
+                Index(:handle; name = "mi_acct_handle_active", unique = true, condition = Q(active = true)),
+                Index(:handle; name = "mi_acct_handle_inc", include = [:active]),
+            ])
+        end
+        p1 = only(quiet(() -> makemigrations(app = "migidx", questioner = _ -> false)))
+        src = read(p1, String)
+        @test occursin("expressions = [(\"LOWER\", \"email\")]", src)
+        @test occursin("condition = Q(:AND, Any[:active => true], false)", src)
+        @test occursin("include = [\"active\"]", src)
+        quiet(() -> migrate())
+        @test isempty(quiet(() -> makemigrations(app = "migidx", questioner = _ -> false)))   # the migration matches the model
+        create(MiAcct; email = "Ann@x.io", handle = "ann")
+        create(MiAcct; email = "bob@x.io", handle = "ann", active = false)          # outside the partial index
+        if mysql
+            create(MiAcct; email = "ANN@x.io", handle = "x")                         # MySQL/MariaDB skip these indexes
+        else
+            @test_throws IntegrityError create(MiAcct; email = "ANN@x.io", handle = "x")
+            @test_throws IntegrityError create(MiAcct; email = "cy@x.io", handle = "ann")
+        end
+        ix = Index(Lower(:email); name = "n")
+        @test ix.expressions == [("LOWER", "email")] && isempty(ix.columns)
+        @test_throws ArgumentError Index(Lower(:email))                              # needs a name
+        @test_throws ArgumentError Index(:a, Lower(:b); name = "n")
+        pg = Juango.PostgresBackend
+        sqls = Juango.index_spec_sql(Juango.backend(), "t", Index(["a"]; name = "i", opclasses = ["varchar_pattern_ops"], include = ["b"], condition = Q(:AND, Any[:c => 1], false)))
+        sql = mysql ? "" : only(sqls)
+        if mysql
+            @test isempty(sqls)                                                      # no partial indexes
+        elseif Juango.backend() isa pg
+            @test occursin("varchar_pattern_ops", sql) && occursin("INCLUDE", sql) && occursin("WHERE", sql)
+        elseif !mysql
+            @test !occursin("varchar_pattern_ops", sql) && !occursin("INCLUDE", sql) && occursin("WHERE \"c\" = 1", sql)
+        end
+        quiet(() -> migrate(app = "migidx", target = "zero"))
+        @test !Juango.table_exists(Juango.backend(), "mi_acct")
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "migidx", Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end
+
 @testset "migrations" begin
     M = Juango.Migrations
     dir = mktempdir()

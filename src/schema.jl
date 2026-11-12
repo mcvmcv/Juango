@@ -88,23 +88,57 @@ function with_column(c::Column; name = c.name, kw...)
 end
 
 """
-    Index(fields...; name=nothing, unique=false, method=:btree)
+    Index(fields...; name=nothing, unique=false, method=:btree, condition=nothing, include=[], opclasses=[])
+    Index(Lower(:email), ...; name)
     GinIndex(fields...; name=nothing)
 
 An index for `Meta(indexes=[...])`. `method=:gin` (`GinIndex`) is a PostgreSQL GIN index,
 for JSON, array and full-text columns; other databases skip it.
+
+* `condition = Q(...)`: a partial index over the rows that satisfy it (PostgreSQL and
+  SQLite; MySQL/MariaDB skip the index), written like a `CheckConstraint` condition.
+* Expressions `Lower(:f)`, `Upper(:f)` or `F(:f)` instead of fields make a functional
+  index (needs `name`; not on MySQL/MariaDB).
+* `include = [:f, ...]`: non-key columns stored in the index (PostgreSQL `INCLUDE`).
+* `opclasses = ["varchar_pattern_ops", ...]`: one operator class per field (PostgreSQL).
 """
 struct Index
     columns::Vector{String}
     name::Union{Nothing,String}
     unique::Bool
     method::Symbol
+    expressions::Vector{Tuple{String,String}}   # (function, field/column); function "" = the column itself
+    condition::Union{Nothing,Q}
+    include::Vector{String}
+    opclasses::Vector{String}
 end
-Index(cols...; name = nothing, unique = false, method = :btree) =
-    Index(String[string(c) for c in (length(cols) == 1 && cols[1] isa AbstractVector ? cols[1] : cols)],
-          name === nothing ? nothing : string(name), unique, Symbol(method))
-GinIndex(cols...; name = nothing) = Index(cols...; name = name, method = :gin)
-Base.:(==)(a::Index, b::Index) = a.columns == b.columns && a.name == b.name && a.unique == b.unique && a.method == b.method
+function Index(cols...; name = nothing, unique = false, method = :btree, condition = nothing, include = String[],
+               opclasses = String[], expressions = Tuple{String,String}[])
+    items = length(cols) == 1 && cols[1] isa AbstractVector ? cols[1] : cols
+    columns = String[]
+    exprs = Tuple{String,String}[(string(a), string(b)) for (a, b) in expressions]
+    for c in items
+        if c isa Func
+            (c.name in (:lower, :upper) && length(c.args) == 1 && c.args[1] isa F) ||
+                throw(ArgumentError("Index expressions can be F(:field), Lower(:field) or Upper(:field)"))
+            push!(exprs, (uppercase(string(c.name)), c.args[1].name))
+        elseif c isa F
+            push!(exprs, ("", c.name))
+        else
+            push!(columns, string(c))
+        end
+    end
+    isempty(columns) || isempty(exprs) || throw(ArgumentError("Index: give either fields or expressions, not both"))
+    isempty(exprs) || name !== nothing || throw(ArgumentError("Index: an index on expressions needs a name"))
+    isempty(opclasses) || length(opclasses) == length(columns) ||
+        throw(ArgumentError("Index: give one operator class per field"))
+    Index(columns, name === nothing ? nothing : string(name), unique, Symbol(method), exprs, condition,
+          String[string(c) for c in include], String[string(c) for c in opclasses])
+end
+GinIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :gin, kw...)
+index_key(i::Index) = (i.columns, i.name, i.unique, i.method, i.expressions,
+                       i.condition === nothing ? nothing : q_code(i.condition), i.include, i.opclasses)
+Base.:(==)(a::Index, b::Index) = index_key(a) == index_key(b)
 Base.hash(i::Index, h::UInt) = hash(i.name, h)
 
 "A table in a migration snapshot."
@@ -177,7 +211,9 @@ function table_state(T::Type)
     for ix in get(m.extra, :indexes, Index[])
         cols = [col(c) for c in ix.columns]
         push!(idx, Index(cols, something(ix.name, constraint_name(m.table, cols..., ix.method === :gin ? "gin" : "idx")),
-                         ix.unique, ix.method))
+                         ix.unique, ix.method, Tuple{String,String}[(f, col(x)) for (f, x) in ix.expressions],
+                         ix.condition === nothing ? nothing : condition_to_columns(T, ix.condition),
+                         String[col(c) for c in ix.include], ix.opclasses))
     end
     pk = get(modelmeta(root).extra, :pk, :auto)
     pkcols = String[]
@@ -306,13 +342,31 @@ end
 
 "CREATE INDEX for a `Meta(indexes=...)` entry (nothing where the method isn't supported)."
 function index_spec_sql(b::DatabaseBackend, table, ix::Index; if_not_exists = false)
-    supports_index_method(b, ix.method) || return String[]
+    index_supported(b, ix) || return String[]
+    pg = b isa PostgresBackend
     using_ = ix.method === :btree ? "" : " USING $(ix.method)"
-    ["CREATE $(ix.unique ? "UNIQUE " : "")INDEX $(if_not_exists ? "IF NOT EXISTS " : "")$(quote_name(b, ix.name)) ON " *
-     "$(quote_name(b, table))$using_ (" * join([quote_name(b, c) for c in ix.columns], ", ") * ")"]
+    io = IOBuffer()
+    print(io, "CREATE ", ix.unique ? "UNIQUE " : "", "INDEX ", if_not_exists ? "IF NOT EXISTS " : "",
+          quote_name(b, ix.name), " ON ", quote_name(b, table), using_, " (")
+    if isempty(ix.expressions)
+        for (i, c) in enumerate(ix.columns)
+            i > 1 && print(io, ", ")
+            print(io, quote_name(b, c))
+            pg && !isempty(ix.opclasses) && print(io, " ", ix.opclasses[i])
+        end
+    else
+        join(io, (f == "" ? quote_name(b, x) : "($f($(quote_name(b, x))))" for (f, x) in ix.expressions), ", ")
+    end
+    print(io, ")")
+    pg && !isempty(ix.include) && print(io, " INCLUDE (", join((quote_name(b, c) for c in ix.include), ", "), ")")
+    ix.condition === nothing || print(io, " WHERE ", condition_sql(b, ix.condition))
+    [String(take!(io))]
 end
+"Whether the database builds this index (others skip it, as Django does)."
+index_supported(b::DatabaseBackend, ix::Index) = supports_index_method(b, ix.method) &&
+    (ix.condition === nothing || supports_partial_indexes(b)) && (isempty(ix.expressions) || supports_expression_indexes(b))
 drop_index_spec_sql(b::DatabaseBackend, table, ix::Index) =
-    supports_index_method(b, ix.method) ? [drop_index_stmt(b, table, ix.name)] : String[]
+    index_supported(b, ix) ? [drop_index_stmt(b, table, ix.name)] : String[]
 
 
 drop_table_sql(b::DatabaseBackend, t::Table) = ["DROP TABLE $(quote_name(b, t.name))"]

@@ -873,7 +873,11 @@ function column_code(c::Column)
 end
 
 index_code(i::Index) = "Index($(jl(i.columns)); name = $(jl(i.name))" * (i.unique ? ", unique = true" : "") *
-                       (i.method === :btree ? ")" : ", method = :$(i.method))")
+                       (i.method === :btree ? "" : ", method = :$(i.method)") *
+                       (isempty(i.expressions) ? "" : ", expressions = [" * join(["($(jl(f)), $(jl(c)))" for (f, c) in i.expressions], ", ") * "]") *
+                       (i.condition === nothing ? "" : ", condition = " * Juango.q_code(i.condition)) *
+                       (isempty(i.include) ? "" : ", include = $(jl(i.include))") *
+                       (isempty(i.opclasses) ? "" : ", opclasses = $(jl(i.opclasses))") * ")"
 op_code(op::CreateModel) = "CreateModel($(jl(op.table)); model = $(jl(op.model)), columns = [\n" *
     join(["            " * column_code(c) * ",\n" for c in op.columns]) * "        ]" *
     (isempty(op.unique_together) ? "" : ", unique_together = $(jl(op.unique_together))") *
