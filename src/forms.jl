@@ -84,6 +84,8 @@ end
 
 "Hook for cross-field validation of `@form`-defined forms (dispatch on `Val{:FormName}`)."
 clean_form(f::Form, ::Val) = nothing
+"Hook run by `save!(form)` on the instance before it is saved (dispatch on `Val{:FormName}`)."
+form_save_hook(f::Form, ::Val, obj) = nothing
 
 """
     ModelForm(Model; data=nothing, instance=nothing, fields=nothing, exclude=[], initial=Dict(), widgets=Dict())
@@ -381,6 +383,7 @@ function save!(f::Form; commit = true)
         findfield(modelmeta(f.model), k) === nothing && continue
         setproperty!(obj, k, v)
     end
+    form_save_hook(f, Val(Symbol(f.name)), obj)
     f.instance = obj
     if commit
         save!(obj)

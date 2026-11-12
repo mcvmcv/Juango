@@ -162,7 +162,7 @@ export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data, save_m2
 # auth & sessions
 export AbstractUser, get_user_model, USER_MODEL, username_field, ModelBackend
 export PBKDF2Hasher, Argon2Hasher, BCryptSHA256Hasher, BCryptHasher, validate_password, MinimumLengthValidator,
-       NumericPasswordValidator, CommonPasswordValidator, UserAttributeSimilarityValidator, PasswordChangeView,
+       NumericPasswordValidator, CommonPasswordValidator, UserAttributeSimilarityValidator, PasswordChangeView, UserCreationForm, UserChangeForm,
        PasswordChangeDoneView, update_session_auth_hash!
 export User, AnonymousUser, authenticate, login!, logout!, create_user, create_superuser,
        set_password!, check_password, make_password, login_required, staff_member_required,

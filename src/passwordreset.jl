@@ -122,6 +122,79 @@ end
 clean_form(f::Form, ::Val{:PasswordChangeForm}) = clean_form(f, Val(:SetPasswordForm))
 
 """
+    UserCreationForm(data = nothing; fields = [username_field], instance = nothing, kw...)
+
+Django's sign-up form for the `AUTH_USER_MODEL`: its username field (plus any `fields`),
+`password1` and `password2`. The passwords must match and pass `AUTH_PASSWORD_VALIDATORS`;
+`save!(form)` stores the password hashed. Other keywords go to `ModelForm`.
+
+    form = UserCreationForm(req.POST)
+    is_valid(form) && (user = save!(form); login!(req, user))
+"""
+function UserCreationForm(data = nothing; fields = nothing, instance = nothing, kw...)
+    U = get_user_model()
+    f = ModelForm(U; data = data, instance = instance, kw...,
+                  fields = fields === nothing ? [username_field(U)] : fields)
+    for (n, l) in ((:password1, "Password"), (:password2, "Password confirmation"))
+        fld = CharField(widget = :password, max_length = 4096, label = l)
+        fld.name = n
+        push!(f.fields, fld)
+    end
+    f.fields[end].help_text = "Enter the same password as before, for verification."
+    f.name = "UserCreationForm"
+    f
+end
+function clean_form(f::Form, ::Val{:UserCreationForm})
+    p1, p2 = get(f.cleaned_data, :password1, nothing), get(f.cleaned_data, :password2, nothing)
+    (p1 === nothing || p2 === nothing) && return
+    p1 == p2 || return add_error!(f, :password2, gettext("The two password fields didn’t match."))
+    # validate against the user as entered, so UserAttributeSimilarityValidator sees the username
+    u = f.instance === nothing ? f.model() : f.instance
+    for (k, v) in f.cleaned_data
+        findfield(modelmeta(f.model), k) === nothing || setproperty!(u, k, v)
+    end
+    foreach(msg -> add_error!(f, :password2, msg), validate_password(p1; user = u))
+end
+form_save_hook(f::Form, ::Val{:UserCreationForm}, u) = set_password!(u, f.cleaned_data[:password1])
+
+"""
+    UserChangeForm(data = nothing; instance, fields = nothing, kw...)
+
+Django's form for editing a user: the `AUTH_USER_MODEL`'s editable fields except the
+password, which can only be changed through a password form. `password_summary(user)`
+describes the stored hash for display.
+"""
+function UserChangeForm(data = nothing; instance = nothing, fields = nothing, exclude = Symbol[], kw...)
+    U = get_user_model()
+    f = ModelForm(U; data = data, instance = instance, fields = fields, exclude = vcat(Symbol.(exclude), :password), kw...)
+    f.name = "UserChangeForm"
+    f
+end
+
+"""
+    password_summary(user_or_hash) -> String
+
+A safe description of a stored password hash (algorithm and parameters, never the hash),
+like the admin's "Password" line: `"algorithm: pbkdf2_sha256 iterations: 1000000 salt: abc***"`.
+"""
+function password_summary(x)
+    h = x isa AbstractString ? x : string(something(getproperty(x, :password), ""))
+    (isempty(h) || startswith(h, "!")) && return "No password set."
+    parts = split(h, '$')
+    length(parts) < 2 && return "Invalid password format or unknown hashing algorithm."
+    algo = parts[1]
+    io = IOBuffer()
+    print(io, "algorithm: ", algo)
+    if startswith(algo, "pbkdf2") && length(parts) == 4
+        print(io, " iterations: ", parts[2], " salt: ", mask(parts[3]), " hash: ", mask(parts[4]))
+    else
+        print(io, " hash: ", mask(parts[end]))
+    end
+    String(take!(io))
+end
+mask(s, shown = 6) = (n = min(shown, length(s)); first(s, n) * "*"^max(length(s) - n, 0))
+
+"""
     update_session_auth_hash!(req, user)
 
 Keep the user logged in after changing their password (which otherwise ends their sessions):

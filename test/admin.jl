@@ -47,9 +47,13 @@
     @test occursin("Successfully deleted 3 articles", text(r))
 
     # user admin hashes passwords
-    r = post(c, "/admin/user/add/", Dict("username" => "newbie", "password" => "hunter22", "is_active" => "on"))
-    @test r.status == 302
+    r = get(c, "/admin/user/add/")
+    @test occursin("password1", text(r)) && occursin("password2", text(r)) && !occursin("is_superuser", text(r))
+    r = post(c, "/admin/user/add/", Dict("username" => "newbie", "password1" => "hunter22", "password2" => "hunter23"))
+    @test r.status == 200 && occursin("didn’t match", text(r))
+    r = post(c, "/admin/user/add/", Dict("username" => "newbie", "password1" => "hunter22", "password2" => "hunter22"))
     nb = get(User; username = "newbie")
+    @test r.status == 302 && getheader(r, "Location") == "/admin/user/$(nb.id)/change/"      # then the change page
     @test startswith(nb.password, "pbkdf2_sha256\$") && authenticate("newbie", "hunter22") == nb
     r = post(c, "/admin/user/$(nb.id)/change/", Dict("username" => "newbie", "password" => "", "is_active" => "on"))
     @test r.status == 302 && authenticate("newbie", "hunter22") !== nothing

@@ -777,6 +777,25 @@ end
         configure!(AUTH_PASSWORD_VALIDATORS = Any[MinimumLengthValidator(), NumericPasswordValidator()])
     end
 
+    # UserCreationForm / UserChangeForm
+    f = UserCreationForm(Dict("username" => "signup", "password1" => "123", "password2" => "123"))
+    @test !is_valid(f) && occursin("too short", join(f.errors[:password2])) && occursin("entirely numeric", join(f.errors[:password2]))
+    f = UserCreationForm(Dict("username" => "signup", "password1" => "tangerine-kayak-77", "password2" => "tangerine-kayak-78"))
+    @test !is_valid(f) && f.errors[:password2] == ["The two password fields didn’t match."]
+    @test !is_valid(UserCreationForm(Dict("username" => "changer0", "password1" => "", "password2" => "")))
+    f = UserCreationForm(Dict("username" => "signup", "password1" => "tangerine-kayak-77", "password2" => "tangerine-kayak-77"))
+    @test is_valid(f)
+    su = save!(f)
+    @test su.id !== nothing && authenticate("signup", "tangerine-kayak-77") == su
+    @test startswith(Juango.password_summary(su), "algorithm: pbkdf2_sha256 iterations: 1000 salt: ") &&
+          !occursin(split(su.password, '\$')[4], Juango.password_summary(su))
+    @test Juango.password_summary("!unusable") == "No password set."
+    @test is_valid(UserCreationForm(Dict("username" => "signup", "password1" => "tangerine-kayak-77", "password2" => "tangerine-kayak-77"))) == false   # username taken
+    cf = UserChangeForm(Dict("username" => "signup2", "email" => "s@x.io", "is_active" => "on"); instance = su)
+    @test !any(fl -> fl.name === :password, cf.fields) && is_valid(cf)
+    save!(cf)
+    @test refresh!(su).username == "signup2" && authenticate("signup2", "tangerine-kayak-77") == su
+
     # changing the password keeps this session and ends the others
     pu = create_user("changer", "old-password-1")
     c, other = Client(), Client()

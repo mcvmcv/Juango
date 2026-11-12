@@ -85,6 +85,7 @@ mutable struct ModelAdmin
     list_editable::Vector{Symbol}
     date_hierarchy::Union{Nothing,Symbol}
     save_as::Bool
+    add_form::Any                        # nothing, or (data, files) -> Form for the add page
 end
 
 "The objects this admin shows: `objects(Model)` or the `queryset` option."
@@ -114,6 +115,8 @@ Expose a model in the admin.
   is built in (`delete_action=false` removes it). `Admin.export_csv` is ready to add.
 * `inlines`: `[TabularInline(Comment), StackedInline(Photo)]`.
 * `save_as`: a "Save as new" button on the change form.
+* `add_form = (data, files) -> form`: a different form for the add page (the user admin uses
+  `UserCreationForm`); after adding, the change page opens.
 * `password_fields`: rendered as password inputs and hashed on save (unchanged when blank).
 * `queryset = req -> ...`: what the admin lists and edits (default `objects(Model)`).
 """
@@ -122,7 +125,8 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    password_fields = Symbol[], queryset = nothing, actions = Any[], delete_action = true,
                    inlines = InlineAdmin[], readonly_fields = Symbol[], fieldsets = Pair{String,Vector{Symbol}}[],
                    prepopulated_fields = Dict{Symbol,Vector{Symbol}}(), raw_id_fields = Symbol[],
-                   autocomplete_fields = Symbol[], list_editable = Symbol[], date_hierarchy = nothing, save_as = false)
+                   autocomplete_fields = Symbol[], list_editable = Symbol[], date_hierarchy = nothing, save_as = false,
+                   add_form = nothing)
     modelmeta(T)  # validates T is a model
     Juango.is_composite(T) && throw(ArgumentError("the admin doesn't support $(nameof(T)): it has a composite primary key"))
     slug = model_name(T)
@@ -139,7 +143,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                                 Pair{String,Vector{Symbol}}[string(k) => Symbol.(collect(v)) for (k, v) in fieldsets],
                                 Dict{Symbol,Vector{Symbol}}(Symbol(k) => Symbol.(collect(v)) for (k, v) in prepopulated_fields),
                                 Symbol.(raw_id_fields), Symbol.(autocomplete_fields), Symbol.(list_editable),
-                                date_hierarchy === nothing ? nothing : Symbol(date_hierarchy), save_as)
+                                date_hierarchy === nothing ? nothing : Symbol(date_hierarchy), save_as, add_form)
     filter!(!=(slug), ORDER)
     push!(ORDER, slug)
     T
@@ -171,7 +175,8 @@ function register_user_model!(T = Juango.get_user_model(); kw...)
     T !== User && is_registered(User) && unregister!(User)
     register!(T; list_display = [:username, :email, :first_name, :last_name, :is_staff],
               search_fields = [:username, :first_name, :last_name, :email],
-              list_filter = [:is_staff, :is_superuser, :is_active], password_fields = [:password], kw...)
+              list_filter = [:is_staff, :is_superuser, :is_active], password_fields = [:password],
+              add_form = (data, files) -> Juango.UserCreationForm(data), kw...)
 end
 
 get_admin(slug) = (ma = get(REGISTRY, slug, nothing); ma === nothing ? throw(Http404("No admin for model '$slug'")) : ma)
@@ -565,12 +570,15 @@ function change_form(req::Request, ma::ModelAdmin, obj)
     editable = adding || can(req, ma, :change)
     req.method == "POST" && !editable && require_perm(req, ma, :change)
     data = req.method == "POST" ? req.POST : nothing
-    form = configure_widgets!(ma, Juango.ModelForm(T; data = data, files = req.FILES, instance = obj, fields = admin_fields(ma)))
-    inlines = save_as_new ? Any[] : inline_formsets(ma, req, obj, data)
+    custom_add = adding && ma.add_form !== nothing
+    form = configure_widgets!(ma, custom_add ? ma.add_form(data, req.FILES) :
+                                  Juango.ModelForm(T; data = data, files = req.FILES, instance = obj, fields = admin_fields(ma)))
+    pfs = custom_add ? Symbol[] : ma.password_fields
+    inlines = save_as_new || custom_add ? Any[] : inline_formsets(ma, req, obj, data)
     if req.method == "POST" && is_valid(form) && all(x -> is_valid(x[2]), inlines)
         o = Juango.atomic() do
             o = save!(form; commit = false)
-            for pf in ma.password_fields
+            for pf in pfs
                 raw = get(req.POST, string(pf), "")
                 if !isempty(raw)
                     setproperty!(o, pf, make_password(raw))
@@ -588,7 +596,7 @@ function change_form(req::Request, ma::ModelAdmin, obj)
         end
         log_action!(req.user, o, adding ? ADDITION : CHANGE, adding ? "Added." : change_message(form, inlines))
         verb = adding ? "added" : "changed"
-        if haskey(req.POST, "_continue") || save_as_new
+        if haskey(req.POST, "_continue") || save_as_new || custom_add
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may edit it again below.")
             return Juango.HttpResponseRedirect(reverse_url("admin:change"; model = ma.slug, id = o.id))
         elseif haskey(req.POST, "_addanother")
@@ -610,10 +618,11 @@ function change_form(req::Request, ma::ModelAdmin, obj)
     merge!(ctx, Dict{String,Any}(
         "editable" => editable, "can_delete" => !adding && can(req, ma, :delete), "can_add" => can(req, ma, :add),
         "opts" => opts(ma), "form" => form, "object" => obj, "adding" => adding, "readonly" => auto_readonly,
-        "groups" => form_groups(ma, form, obj, editable),
+        "groups" => custom_add ? [Dict{String,Any}("name" => "", "rows" => [Dict{String,Any}("readonly" => false, "field" => form[f.name]) for f in form.fields])] :
+                    form_groups(ma, form, obj, editable),
         "inlines" => editable ? [inline_context(ia, fs) for (ia, fs) in inlines] : Any[],
         "prepopulated" => Juango.JSON.json(prepop), "save_as" => ma.save_as && !adding && can(req, ma, :add),
-        "password_fields" => [Dict("name" => string(pf), "label" => uppercasefirst(string(pf))) for pf in ma.password_fields],
+        "password_fields" => [Dict("name" => string(pf), "label" => uppercasefirst(string(pf))) for pf in pfs],
         "view_on_site" => adding ? nothing : get_absolute_url(obj),
         "history_url" => adding ? nothing : reverse_url("admin:history"; model = ma.slug, id = obj.id)))
     render(req, "admin/change_form.html", ctx)
