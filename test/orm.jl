@@ -1159,4 +1159,52 @@ Juango.get_by_natural_key(::Type{Topic}, name) = get(Topic; name = name)
                    {"model": "project.nosuchmodel", "pk": 1, "fields": {}}]""")
     @test_throws Exception loaddata(bad)
     @test !exists(filter(Topic; name = "rolled-back"))
+
+    # YAML and XML: the same objects, relations and natural keys as JSON
+    for fmt in (:yaml, :xml)
+        art = create(Article; title = "fmt <&> \"$fmt\": #1", body = "two\nlines", author = au, rating = 1.5, published = true)
+        es = create(Essay; title = "fmt-essay-$fmt"); add!(es.topics, t1, t2)
+        g = create(Gadget; data = Dict("k" => [1, "x"]), tags = ["a b", "c"], scores = [1, 2], ages = ValueRange(1, 5),
+                   nick = "", title = "yes", body = "null")
+        txt = serialize(fmt, [art, es, g]; indent = 2)
+        fmt === :yaml ? @test(startswith(txt, "- model: project.article\n")) : @test(occursin("<django-objects version=\"1.0\">", txt))
+        objs = deserialize(fmt, txt)
+        @test [typeof(o.object) for o in objs] == [Article, Essay, Gadget]
+        ids = (art.id, es.id, g.id, art.created)
+        delete!(art); delete!(es); delete!(g)
+        foreach(save!, objs)
+        a3, e3, g3 = get(Article; id = ids[1]), get(Essay; id = ids[2]), get(Gadget; id = ids[3])
+        @test a3.title == "fmt <&> \"$fmt\": #1" && a3.body == "two\nlines" && a3.rating == 1.5 && a3.published &&
+              a3.author_id == au.id && a3.created == ids[4]
+        @test sort([t.name for t in e3.topics]) == sort([t1.name, t2.name])
+        @test g3.data == Dict("k" => Any[1, "x"]) && g3.tags == ["a b", "c"] && g3.scores == [1, 2] && g3.title == "yes" &&
+              g3.body == "null" && g3.token == g.token && g3.ages == g.ages && g3.window === nothing
+        nat = serialize(fmt, [e3]; natural_foreign = true)
+        remove!(e3.topics, t2)
+        foreach(save!, deserialize(fmt, nat))
+        @test count(get(Essay; id = ids[2]).topics) == 2
+    end
+    dumpdata("project.Topic"; format = :yaml, output = joinpath(dir, "tops.yaml"))
+    dumpdata("project.Topic"; format = :xml, output = joinpath(dir, "tops.xml"))
+    @test loaddata(joinpath(dir, "tops.yaml")) == loaddata(joinpath(dir, "tops.xml")) == count(objects(Topic))
+    write(joinpath(dir, "hand.yml"), """
+        # written by hand
+        - model: project.topic
+          fields:
+            name: 'hand: written'   # a comment
+        - model: project.topic
+          fields: {name: flow-style}
+        """)
+    write(joinpath(dir, "hand.xml"), """<?xml version="1.0" encoding="utf-8"?>
+        <django-objects version="1.0"><object model="project.topic"><field name="name" type="CharField">x&amp;y</field></object></django-objects>""")
+    configure!(FIXTURE_DIRS = [dir])
+    try
+        @test loaddata("hand") == 3         # hand.yml and hand.xml
+        @test exists(filter(Topic; name = "hand: written")) && exists(filter(Topic; name = "flow-style")) && exists(filter(Topic; name = "x&y"))
+    finally
+        configure!(FIXTURE_DIRS = String[])
+    end
+    @test Juango.parse_yaml("a: [1, {b: 'c'}]\nd: |\n  x\n  y\ne: >-\n  p\n  q\n") ==
+          Dict("a" => Any[1, Dict("b" => "c")], "d" => "x\ny\n", "e" => "p q")
+    @test_throws Juango.YAMLError Juango.parse_yaml("a: &x 1\nb: *x")
 end

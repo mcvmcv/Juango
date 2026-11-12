@@ -173,11 +173,11 @@ function cmd_makemigrations(args)
     paths
 end
 
-# dumpdata [app[.Model] ...] [--indent N] [--format json|jsonl] [--exclude a,b] [--natural-foreign] [--natural-primary] [--output FILE]
+# dumpdata [app[.Model] ...] [--indent N] [--format json|jsonl|yaml|xml] [--exclude a,b] [--natural-foreign] [--natural-primary] [--output FILE]
 function cmd_dumpdata(args)
     pos, flags = parse_flags(args)
     ind = get(flags, "indent", nothing)
-    s = dumpdata(pos...; format = Symbol(get(flags, "format", "json")), indent = ind === nothing ? nothing : parse(Int, ind),
+    s = dumpdata(pos...; format = haskey(flags, "format") ? Symbol(flags["format"]) : haskey(flags, "output") ? fixture_format(flags["output"]) : :json, indent = ind === nothing ? nothing : parse(Int, ind),
                  exclude = haskey(flags, "exclude") ? split(flags["exclude"], ',') : String[],
                  natural_foreign = haskey(flags, "natural-foreign"), natural_primary = haskey(flags, "natural-primary"),
                  output = get(flags, "output", nothing))
@@ -270,7 +270,7 @@ for (n, h, f) in (
     ("dbshell", "Open the database's command-line client", _ -> run(dbshell_cmd())),
     ("inspectdb", "Write models for existing tables: inspectdb [table ...]", args -> print(inspectdb(isempty(first(parse_flags(args))) ? nothing : first(parse_flags(args))))),
     ("test", "Run the project's tests: test [file ...]", cmd_test),
-    ("dumpdata", "Write the database's objects as a fixture: dumpdata [app[.Model] ...] [--indent N] [--output FILE]", cmd_dumpdata),
+    ("dumpdata", "Write the database's objects as a fixture: dumpdata [app[.Model] ...] [--format json|jsonl|yaml|xml] [--indent N] [--output FILE]", cmd_dumpdata),
     ("loaddata", "Load fixtures: loaddata <name or file> ...", cmd_loaddata),
     ("squashmigrations", "Combine migrations into one: squashmigrations <app> [start] <stop> [--name NAME]", cmd_squashmigrations),
     ("createsuperuser", "Create an admin user (--username, --email, --password, --noinput)", cmd_createsuperuser),

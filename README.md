@@ -1311,22 +1311,22 @@ The `assert_*` functions return `true` or throw an `AssertionError` that says wh
 
 ```julia
 s = serialize(:json, objects(Post); indent = 2)    # Django's format: [{"model": "blog.post", "pk": 1, "fields": {...}}]
-for d in deserialize(:json, s)                     # :jsonl reads and writes one object per line
+for d in deserialize(:json, s)                     # also :jsonl (one object per line), :yaml and :xml
     save!(d)                                       # writes the row as it is, then its many-to-many values
 end
-dumpdata("blog"; output = "blog.json")             # manage.jl dumpdata blog --indent 2 --output blog.json
+dumpdata("blog"; output = "blog.json")             # manage.jl dumpdata blog --indent 2 --output blog.json (or .yaml, .xml)
 loaddata("blog.json")                              # manage.jl loaddata initial_data  (searches FIXTURE_DIRS
 load_fixtures("initial_data")                      #  and each app's fixtures/ folder); in tests
 ```
 
-Fixture files from Django's `dumpdata --format json` load as they are. Foreign keys and many-to-many values are ids, or natural keys with `natural_foreign = true` (`--natural-foreign`) for models that define them:
+Fixture files from Django's `dumpdata` (JSON, JSONL, YAML or XML) load as they are; `loaddata` picks the format from the extension (`.json`, `.jsonl`, `.yaml`/`.yml`, `.xml`). YAML and XML need no extra packages: the YAML reader handles what fixtures use (block and flow collections, quoted, plain and block scalars, comments), but not anchors, aliases or tags. Foreign keys and many-to-many values are ids, or natural keys with `natural_foreign = true` (`--natural-foreign`) for models that define them:
 
 ```julia
 Juango.natural_key(t::Tag) = (t.name,)
 Juango.get_by_natural_key(::Type{Tag}, name) = get(Tag; name = name)
 ```
 
-`loaddata` runs in one transaction. Objects with a primary key replace the row with that key. YAML and XML aren't supported.
+`loaddata` runs in one transaction. Objects with a primary key replace the row with that key.
 
 ### Management commands
 
@@ -1345,7 +1345,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. Request limi
 
 - **Historical models are table-level.** In data migrations, `get_model` gives the table as it was (columns, not relations or methods), unlike Django's historical model classes.
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
-- **Fixtures are JSON or JSONL**, not YAML or XML. The common-password list is shorter than Django's (pass your own file to `CommonPasswordValidator`).
+- **The common-password list is shorter than Django's** (pass your own file to `CommonPasswordValidator`).
 - **Composite primary keys, swappable user models and admin docs** have Django's limitations: no foreign keys to composite-key models, choose `AUTH_USER_MODEL` before the first `migrate` (the unused `auth_user` table is still created), and docstrings are shown as plain text.
 - **GZip and streaming.** `GZipMiddleware` doesn't compress streamed responses.
 - `runserver` is HTTP.jl's server. It speaks HTTP/1.1 and HTTP/2 (cleartext with prior knowledge, or negotiated over TLS), and serves HTTPS with `runserver 8443 --cert cert.pem --key key.pem` (or `runserver(...; certfile, keyfile)`). WebSockets need HTTP/1.1, which browsers use for them anyway. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and run `manage.jl check --deploy`.

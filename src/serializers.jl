@@ -7,7 +7,7 @@
 #     dumpdata("blog"; output = "blog.json")                # manage.jl dumpdata blog --indent 2
 #     loaddata("blog.json")                                 # manage.jl loaddata initial_data
 #
-# Formats: `:json` (a list) and `:jsonl` (one object per line). Foreign keys and many-to-many
+# Formats: `:json` (a list), `:jsonl` (one object per line), `:yaml` and `:xml` (fixtureformats.jl). Foreign keys and many-to-many
 # values are primary keys, or natural keys when asked (`natural_foreign = true`) for models
 # that define them:
 #
@@ -69,19 +69,22 @@ end
 """
     serialize(format, objects; fields = nothing, natural_foreign = false, natural_primary = false, indent = nothing) -> String
 
-Serialize model instances (a queryset or any collection) as `:json` or `:jsonl`.
+Serialize model instances (a queryset or any collection) as `:json`, `:jsonl`, `:yaml` or
+`:xml` (Django's formats). `indent` applies to JSON and XML.
 """
 function serialize(format::Symbol, objs; fields = nothing, natural_foreign = false, natural_primary = false, indent = nothing)
-    ds = [serialize_object(o; fields = fields === nothing ? nothing : Symbol.(fields),
-                           natural_foreign = natural_foreign, natural_primary = natural_primary) for o in objs]
-    if format === :json
-        indent === nothing ? JSON.json(ds) : JSON.json(ds; pretty = indent)
-    elseif format === :jsonl
-        join([JSON.json(d) * "\n" for d in ds])
-    else
-        throw(ArgumentError("unknown serialization format :$format (have :json, :jsonl)"))
-    end
+    format in SERIAL_FORMATS || throw(ArgumentError("unknown serialization format :$format (have $(join(SERIAL_FORMATS, ", ")))"))
+    objs = collect(objs)
+    ds = Dict{String,Any}[serialize_object(o; fields = fields === nothing ? nothing : Symbol.(fields),
+                                           natural_foreign = natural_foreign, natural_primary = natural_primary) for o in objs]
+    format === :json ? (indent === nothing ? JSON.json(ds) : JSON.json(ds; pretty = indent)) :
+    format === :jsonl ? join(JSON.json(d) * "\n" for d in ds) :
+    format === :yaml ? yaml_dump(ds) : xml_dump(ds, objs; indent = indent)
 end
+const SERIAL_FORMATS = (:json, :jsonl, :yaml, :xml)
+"The serialization format of a fixture file, from its extension."
+fixture_format(path::AbstractString) = endswith(path, ".jsonl") ? :jsonl : endswith(path, ".yaml") || endswith(path, ".yml") ? :yaml :
+                                       endswith(path, ".xml") ? :xml : :json
 
 "An object read by `deserialize`: `save!` it to write it with its many-to-many values."
 struct DeserializedObject
@@ -141,7 +144,10 @@ call `save!` on each.
 function deserialize(format::Symbol, data::AbstractString)
     items = format === :json ? JSON.parse(data) :
             format === :jsonl ? [JSON.parse(l) for l in split(data, '\n') if !isempty(strip(l))] :
-            throw(ArgumentError("unknown serialization format :$format (have :json, :jsonl)"))
+            format === :yaml ? something(parse_yaml(data), Any[]) :
+            format === :xml ? xml_objects(data) :
+            throw(ArgumentError("unknown serialization format :$format (have $(join(SERIAL_FORMATS, ", ")))"))
+    items isa AbstractVector || throw(ArgumentError("a fixture is a list of objects"))
     [deserialize_one(d) for d in items]
 end
 
@@ -222,7 +228,7 @@ fixture_dirs() = vcat(String[abspath(string(d)) for d in get(settings, :FIXTURE_
 
 function find_fixture(name::AbstractString)
     isfile(name) && return [abspath(name)]
-    exts = (".json", ".jsonl")
+    exts = (".json", ".jsonl", ".yaml", ".yml", ".xml")
     found = String[]
     for dir in fixture_dirs(), cand in (any(e -> endswith(name, e), exts) ? [name] : [name * e for e in exts])
         f = joinpath(dir, cand)
@@ -236,15 +242,14 @@ end
     loaddata(fixtures...) -> Int
 
 Load fixture files (paths, or names found in `fixture_dirs()`: `\"initial_data\"` finds
-`initial_data.json` or `.jsonl`) in one transaction; returns the number of objects. Objects
+`initial_data.json`, `.jsonl`, `.yaml`, `.yml` or `.xml`) in one transaction; returns the number of objects. Objects
 with a primary key replace the row with that key.
 """
 function loaddata(names::AbstractString...)
     n = 0
     atomic() do
         for name in names, f in find_fixture(name)
-            fmt = endswith(f, ".jsonl") ? :jsonl : :json
-            for d in deserialize(fmt, read(f, String))
+            for d in deserialize(fixture_format(f), read(f, String))
                 save!(d)
                 n += 1
             end
