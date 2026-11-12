@@ -46,7 +46,7 @@ utc_datetime(x) = todatetime(x)
 
 absolute(req::Request, url::AbstractString, protocol) =
     occursin(r"^[a-z][a-z0-9+.-]*://"i, url) ? String(url) :
-    something(protocol, is_secure(req) ? "https" : "http") * "://" * get_host(req) * (startswith(url, "/") ? url : "/" * url)
+    something(protocol, is_secure(req) ? "https" : "http") * "://" * site_domain(req) * (startswith(url, "/") ? url : "/" * url)
 
 "The `<url>` entries of one page of a section: (loc, lastmod, changefreq, priority) tuples."
 function sitemap_entries(req::Request, s::Sitemap, items, page::Int)

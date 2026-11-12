@@ -1,0 +1,7 @@
+{% extends "admin/base.html" %}
+{% block content %}<h1 class="page">Template tags</h1>
+<div class="module"><h2>Built-in tags</h2><table><tbody>
+{% for t in tags %}<tr><th id="{{ t.name }}">{{ t.name }}</th><td>{% if t.doc %}<pre class="doc">{{ t.doc }}</pre>{% endif %}</td></tr>{% endfor %}
+</tbody></table></div>
+{% for l in libraries %}<div class="module"><h2>{% templatetag openblock %} load {{ l.library }} {% templatetag closeblock %}</h2><table><tbody>
+<tr><td>{{ l.tags|join:", " }}</td></tr></tbody></table></div>{% endfor %}{% endblock %}

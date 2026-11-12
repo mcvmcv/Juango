@@ -59,7 +59,7 @@ function (f::Feed)(req::Request; kw...)
     link = abs_(feed_value(f.link, obj))
     self = abs_(something(feed_value(f.feed_url, obj), full_path(req)))
     items = collect(feed_value(f.items, obj))
-    site = get_host(req)
+    site = site_domain(req)
     render_item(tpl, item, fallback) = tpl === nothing ? fallback :
         render_to_string(tpl, Dict{String,Any}("obj" => item, "site" => site); request = req)
     entries = map(items) do item

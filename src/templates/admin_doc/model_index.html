@@ -1,0 +1,5 @@
+{% extends "admin/base.html" %}
+{% block content %}<h1 class="page">Models</h1>
+{% regroup models by app as apps %}{% for a in apps %}<div class="module"><h2>{{ a.grouper }}</h2><table><tbody>
+{% for m in a.list %}<tr><th><a href="{{ m.url }}">{{ m.name }}</a></th><td>{{ m.summary }}</td></tr>{% endfor %}
+</tbody></table></div>{% endfor %}{% endblock %}

@@ -680,6 +680,10 @@ filter!((v, _) -> round(Int, 100v), lib, "cents")      # library filters are ava
 
 Output is HTML-escaped unless you mark it safe (`mark_safe`, `|safe`). A syntax error names the template file and line, and in DEBUG the error page shows the lines around it.
 
+#### humanize
+
+`{% load humanize %}` (the filters are always available) adds `intcomma` (`1,234,567`, with the active language's separator), `intword` (`1.2 million`), `apnumber` (`four`), `ordinal` (`22nd`), `naturalday` (`today`, `yesterday`, `tomorrow`, else the date) and `naturaltime` (`3 minutes ago`, `an hour from now`).
+
 ### Forms
 
 ```julia
@@ -704,6 +708,22 @@ is_valid(form) && save!(form)
 ```
 
 For cross-field validation, define `Juango.clean_form(f::Form, ::Val{:ContactForm})` and call `add_error!`.
+
+#### Media, widgets, multi-value fields and renderers
+
+```julia
+@form EventForm begin
+    title = CharField(widget = Widget(:text; attrs = Dict("class" => "wide"), media = Media(js = ["js/title.js"])))
+    starts = SplitDateTimeField()                   # a date and a time input, one DateTime
+    code = MultiValueField([CharField(max_length = 3), IntegerField()];
+                           compress = vs -> "$(vs[1])-$(vs[2])", decompress = v -> split(v, '-'))
+end
+form = EventForm(; media = Media(css = Dict("all" => ["css/forms.css"])))
+```
+
+- `{{ form.media }}` renders the `<link>` and `<script>` tags of the form's `Media` and its widgets'. Relative paths go through `{% static %}`.
+- A `MultiValueField` reads inputs `name_0`, `name_1`, ..., cleans each with its field, and `compress`es them. An `ArgumentError` thrown by `compress` becomes the field's error.
+- `FORM_RENDERER = TemplateFormRenderer()` renders `{{ form }}` with `juango/forms/div.html` (or your `form_template`). `render_form(form; template)` renders one form with another template.
 
 ### Formsets
 
@@ -892,6 +912,19 @@ urlpatterns = [i18n_patterns(path("about/", about; name = "about")),   # /en/abo
 - **Formats.** Dates use translated month and day names, and the `date` filter's default format follows the language. `localize` and `number_format` use the language's decimal separator, and thousands separators too with `USE_THOUSAND_SEPARATOR`.
 - **Built-in German.** The admin's interface and validation messages are translatable, and Juango ships a German translation (`src/locale/de`). Other languages fall back to English until someone adds a catalogue.
 
+**In JavaScript.** Serve the active language's translations to the browser:
+
+```julia
+path("jsi18n/", JavaScriptCatalog(); name = "jsi18n")      # JSONCatalog() for the same as JSON
+```
+
+```html
+<script src="{% url 'jsi18n' %}"></script>
+<script>alert(interpolate(ngettext("%s item", "%s items", n), [n]))</script>
+```
+
+The script defines `gettext`, `ngettext`, `pgettext`, `npgettext`, `interpolate`, `pluralidx` and `get_format`, also under `juango.`. `JavaScriptCatalog(; prefixes = ["Cart"])` sends only msgids with those prefixes.
+
 ### Time zones
 
 ```julia
@@ -912,6 +945,28 @@ make_aware(DateTime(2024, 6, 1, 9)); make_naive(z); localtime(z)
 - **Display.** Templates and forms show and read times in the current time zone: the one activated for the request (`TimezoneMiddleware` uses the session's `"juango_timezone"`), else `TIME_ZONE`. The `date` filter adds `e` (zone name), `T` (abbreviation) and `O` (offset).
 - **Existing data.** To turn `USE_TZ` on for an existing database, run `manage.jl convert_naive_datetimes --from Europe/Berlin` once. It rewrites stored values as UTC and, on PostgreSQL, converts the columns. Back up first.
 - **Lookups.** Date lookups such as `created__year` compare in UTC.
+
+### Logging
+
+Juango logs to named loggers, configured by `LOGGING` in the shape of Django's `dictConfig`:
+
+```julia
+configure!(LOGGING = Dict(
+    "handlers" => Dict(
+        "console" => Dict("class" => "console", "level" => "INFO", "format" => "{levelname} {name}: {message}"),
+        "file" => Dict("class" => "file", "filename" => "site.log", "level" => "WARNING"),
+        "mail_admins" => Dict("class" => "mail_admins", "level" => "ERROR", "filters" => ["require_debug_false"])),
+    "loggers" => Dict(
+        "juango.request" => Dict("handlers" => ["mail_admins", "file"], "level" => "WARNING"),
+        "juango.db.backends" => Dict("handlers" => ["console"], "level" => "DEBUG", "propagate" => false)),
+    "root" => Dict("handlers" => ["console"], "level" => "WARNING")))
+
+log!("shop.payments", :info, "charged"; amount = 10)     # your own loggers
+```
+
+- **Loggers.** `juango.request` gets 5xx errors (with the exception) and 4xx warnings. `juango.db.backends` gets each SQL statement with its duration, at DEBUG level. `juango.security.*` gets CSRF failures and disallowed hosts. Records pass up the dotted names to the root, unless a logger has `"propagate" => false`.
+- **Handlers.** `julia` (Julia's logging), `console`, `file`, `mail_admins` and `memory` (keeps `handler.records`; useful in tests). You can also put a handler value of your own as the `"class"`, with a method `Juango.emit(handler, record, format)`.
+- **Default.** Without `LOGGING`, errors go to Julia's logger, and a 500 is mailed to `ADMINS` when `DEBUG` is false.
 
 ### Signals
 
@@ -964,6 +1019,19 @@ const home = cache_page(home_view; timeout = 60)   # whole GET responses, keyed 
 - **Templates.** `TEMPLATE_CACHE_CHECK_MTIME = false` reads each template once instead of checking its file on every render. Use it in production.
 - **Sessions.** `SESSION_ENGINE = :cache` keeps sessions in the cache only, and `:cached_db` puts the cache in front of the database. The default is `:db`.
 
+### Background tasks
+
+```julia
+@background function send_welcome(user_id; greeting = "Hi")      # @background queue_name = "mail" priority = 5 function ...
+    u = get(User; id = user_id)
+    send_mail("Welcome", "$greeting $(u.username)", "site@example.com", [u.email])
+end
+
+r = enqueue(send_welcome, user.id; greeting = "Hello")          # a TaskResult: r.status, r.return_value, r.error
+```
+
+`TASKS` picks the backend: `:immediate` (the default) runs the task at once. `:dummy` only records it (`dummy_results()`, for tests). `:database` (add `"juango.tasks"` to `INSTALLED_APPS`) stores it for `manage.jl db_worker` to run, with `run_after`, priorities and queues; arguments must be JSON-friendly, and `get_result(id)` / `refresh!(result)` read the outcome. Several workers can run at once on PostgreSQL and MySQL. Calling the function directly still just runs it.
+
 ### Sitemaps
 
 ```julia
@@ -1015,6 +1083,12 @@ urlpatterns = [..., path("pages/", flatpage_urls())]                  # /pages/a
 ```
 
 The fallback middleware turns any 404 into the flat page at that URL, if there is one. It also adds a missing trailing slash, as APPEND_SLASH does. A page renders its `template_name` (default `flatpages/default.html`) with `flatpage` in the context. The page's title and content are HTML from the admin and are inserted unescaped. Pages with `registration_required` send anonymous visitors to the login page. For menus, `{% load flatpages %}{% get_flatpages '/about/' for user as pages %}` lists pages, optionally under a URL prefix. Pages that need a login are included only for a logged-in `user`.
+
+### Sites and redirects
+
+Add `"juango.sites"` to `INSTALLED_APPS` for a `Site` per domain: `get_current_site(req)` returns the one with `SITE_ID` (default 1; `migrate` creates `example.com`), or with `SITE_ID = nothing` the one matching the request's host. Without the app it returns a `RequestSite` for the host. Sitemaps, feeds and password-reset emails use the site's domain.
+
+`"juango.redirects"` (it needs sites) keeps old URLs in the database and in the admin. Add `RedirectFallbackMiddleware` last in `MIDDLEWARE`: a 404 for a redirected path becomes a 301 to its new path, or 410 Gone when the new path is empty.
 
 ### Middleware
 
@@ -1104,6 +1178,10 @@ Admin.register!(Post;
 - **Change history.** Every add, change and delete is recorded as a `LogEntry` with a message like "Changed title. Added comment “Nice”." Each object has a history page, and the index lists your recent actions. Record your own entries with `log_action!(user, obj, CHANGE, "Published.")`.
 - **Permissions apply** to actions (`permission = :change` by default) and to inlines (add, change and delete on the inline model).
 
+### Admin documentation
+
+Add `"juango.admindocs"` to `INSTALLED_APPS` and `path("admin/doc/", admindocs_urls())` before the admin's URLs. Staff then get pages listing the models (fields, relations, docstrings), the URL patterns with their views' docstrings, and the template tags and filters.
+
 ### Testing
 
 ```julia
@@ -1145,6 +1223,10 @@ resp = post_list(req)
 
 The `assert_*` functions return `true` or throw an `AssertionError` that says what went wrong, so `@test assert_...` reports it. `load_fixtures(names...)` loads fixture files.
 
+### Static files
+
+`collectstatic` copies `STATIC_DIRS` and each app's `static/` into `STATIC_ROOT`. With `STATICFILES_STORAGE = :manifest` it also writes copies with a content hash in the name (`css/site.55e7cbb9ba48.css`) and a `staticfiles.json` manifest. It rewrites `url(...)` and `@import` references inside CSS to the hashed names. Then, with `DEBUG` off, `{% static "css/site.css" %}` gives the hashed URL, so a web server can tell browsers to cache static files forever. A name missing from the manifest raises an error.
+
 ### Fixtures and serialization
 
 ```julia
@@ -1183,7 +1265,11 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 
 - **Historical models are table-level.** In data migrations, `get_model` gives the table as it was (columns, not relations or methods), unlike Django's historical model classes.
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
-- `runserver` is HTTP.jl's server. It speaks HTTP/1.1 and HTTP/2 (cleartext with prior knowledge, or negotiated over TLS), and serves HTTPS with `runserver 8443 --cert cert.pem --key key.pem` (or `runserver(...; certfile, keyfile)`). WebSockets need HTTP/1.1, which browsers use for them anyway. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and set `SESSION_COOKIE_SECURE`/`CSRF_COOKIE_SECURE`.
+- **Templates load filters globally.** `{% load %}` is needed only for tags; every filter (humanize's too) is always available.
+- **Fixtures are JSON or JSONL**, not YAML or XML. The common-password list is shorter than Django's (pass your own file to `CommonPasswordValidator`).
+- **Composite primary keys, swappable user models and admin docs** have Django's limitations: no foreign keys to composite-key models, choose `AUTH_USER_MODEL` before the first `migrate` (the unused `auth_user` table is still created), and docstrings are shown as plain text.
+- **GZip and streaming.** `GZipMiddleware` doesn't compress streamed responses.
+- `runserver` is HTTP.jl's server. It speaks HTTP/1.1 and HTTP/2 (cleartext with prior knowledge, or negotiated over TLS), and serves HTTPS with `runserver 8443 --cert cert.pem --key key.pem` (or `runserver(...; certfile, keyfile)`). WebSockets need HTTP/1.1, which browsers use for them anyway. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and run `manage.jl check --deploy`.
 
 ## Layout
 

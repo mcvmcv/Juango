@@ -759,3 +759,111 @@ end
     @test assert_form_error(f, :name, "This field is required.") && assert_form_error(f, nothing, String[])
     @test_throws AssertionError assert_form_error(f, :name, [])
 end
+
+@testset "sites and redirects" begin
+    req = Request("GET", "/x/"; headers = Dict("host" => "shop.example.org"))
+    @test get_current_site(req) isa RequestSite && get_current_site(req).domain == "shop.example.org"
+    old_apps, old_mw = settings.INSTALLED_APPS, settings.MIDDLEWARE
+    try
+        configure!(INSTALLED_APPS = vcat(Juango.default_installed_apps(), ["juango.sites", "juango.redirects"]),
+                   MIDDLEWARE = vcat(old_mw, [RedirectFallbackMiddleware]))
+        redirect_stdout(() -> migrate(verbose = false), devnull)
+        @test get(Site; id = 1).domain == "example.com"                      # migrate made the default site
+        s = get_current_site(req)
+        @test s isa Site && s.id == 1 && get_current_site() === s           # cached
+        @test Admin.is_registered(Site) && Admin.is_registered(Redirect)
+        # SITE_ID = nothing: the site whose domain is the host
+        shop = create(Site; domain = "shop.example.org", name = "Shop")
+        override_settings(SITE_ID = nothing) do
+            @test get_current_site(req).id == shop.id
+            @test_throws Juango.ImproperlyConfigured get_current_site(Request("GET", "/"; headers = Dict("host" => "nope.example")))
+        end
+        # sitemaps and feeds use the site's domain
+        r = Juango.sitemap_view(Dict("static" => Sitemap(items = () -> ["/about/"])))(Request("GET", "/sitemap.xml"; headers = Dict("host" => "testserver")))
+        @test occursin("<loc>http://example.com/about/</loc>", text(r))
+        # redirects
+        create(Redirect; site = s, old_path = "/old-page/", new_path = "/articles/")
+        create(Redirect; site = s, old_path = "/retired/", new_path = "")
+        create(Redirect; site = s, old_path = "/q/?a=1", new_path = "https://elsewhere.example/q")
+        create(Redirect; site = shop, old_path = "/shop-only/", new_path = "/x/")
+        c = Client()
+        r = get(c, "/old-page/")
+        @test r.status == 301 && getheader(r, "Location") == "/articles/"
+        @test get(c, "/retired/").status == 410
+        @test getheader(get(c, "/q/?a=1"), "Location") == "https://elsewhere.example/q"
+        @test get(c, "/old-page").status == 301                               # APPEND_SLASH
+        @test get(c, "/shop-only/").status == 404 && get(c, "/nothing/").status == 404
+        @test get(c, "/articles/").status == 200
+        @test_throws IntegrityError create(Redirect; site = s, old_path = "/old-page/", new_path = "/y/")
+    finally
+        configure!(INSTALLED_APPS = old_apps, MIDDLEWARE = old_mw)
+        Admin.unregister!(Site); Admin.unregister!(Redirect)
+    end
+    @test get_current_site(req) isa RequestSite
+end
+
+@testset "hashed static files and the JavaScript catalog" begin
+    src, root = mktempdir(), mktempdir()
+    mkpath(joinpath(src, "css")); mkpath(joinpath(src, "img"))
+    write(joinpath(src, "img", "logo.png"), "PNGDATA")
+    write(joinpath(src, "css", "base.css"), "body { color: red }")
+    write(joinpath(src, "css", "site.css"), """@import "base.css";\n.logo { background: url("../img/logo.png") } .x { background: url(data:image/png;base64,AAA) }""")
+    override_settings(STATIC_DIRS = [src], STATIC_ROOT = root, STATICFILES_STORAGE = :manifest) do
+        @test collectstatic() == 3
+        paths = JSON.parse(read(joinpath(root, "staticfiles.json"), String))["paths"]
+        logo, site, base = paths["img/logo.png"], paths["css/site.css"], paths["css/base.css"]
+        @test occursin(r"^img/logo\.[0-9a-f]{12}\.png$", logo) && isfile(joinpath(root, logo)) && isfile(joinpath(root, "img", "logo.png"))
+        css = read(joinpath(root, site), String)
+        @test occursin("url(\"../" * logo * "\")", css) && occursin("@import \"" * basename(base) * "\"", css)
+        @test occursin("url(data:image/png;base64,AAA)", css)                 # left alone
+        override_settings(DEBUG = false) do
+            @test Juango.static_url("css/site.css") == "/static/" * site
+            @test tr("{% load static %}{% static 'img/logo.png' %}") == "/static/" * logo
+            @test Juango.static_url("img/logo.png?v=2#x") == "/static/" * logo * "?v=2#x"
+            @test_throws Juango.ImproperlyConfigured Juango.static_url("missing.js")
+        end
+        @test Juango.static_url("css/site.css") == "/static/css/site.css"          # DEBUG: the plain names
+        # a changed file gets a new name
+        write(joinpath(src, "img", "logo.png"), "NEWPNG")
+        collectstatic()
+        paths2 = JSON.parse(read(joinpath(root, "staticfiles.json"), String))["paths"]
+        @test paths2["img/logo.png"] != logo && paths2["css/site.css"] != site
+    end
+
+    # the JavaScript catalog
+    js = JavaScriptCatalog()
+    r = js(Request("GET", "/jsi18n/"))
+    @test getheader(r, "Content-Type") == "text/javascript; charset=utf-8"
+    @test occursin("juango.pluralidx", text(r)) && occursin("globals[k] = juango[k]", text(r))
+    de = with_language(() -> js(Request("GET", "/jsi18n/")), "de")
+    @test occursin("\"Save\":\"Sichern\"", text(de)) && occursin("const v = ((n != 1));", text(de))
+    j = with_language(() -> JSONCatalog(; prefixes = ["Sa"])(Request("GET", "/jsi18n.json")), "de")
+    d = JSON.parse(text(j))
+    @test d["catalog"]["Save"] == "Sichern" && all(startswith(k, "Sa") for k in keys(d["catalog"])) && d["plural"] == "(n != 1)"
+end
+
+"An essay about a topic (shown by the admin documentation)."
+function documented_view(req) HttpResponse("doc") end
+
+@testset "admin documentation" begin
+    old_apps, old_urls = settings.INSTALLED_APPS, settings.ROOT_URLCONF
+    try
+        configure!(INSTALLED_APPS = vcat(Juango.default_installed_apps(), ["juango.admindocs"]),
+                   ROOT_URLCONF = vcat([path("admin/doc/", admindocs_urls()), path("documented/", documented_view; name = "documented")], old_urls))
+        @test get(Client(), "/admin/doc/").status == 302                       # staff only
+        c = Client()
+        force_login!(c, root_user())
+        r = get(c, "/admin/doc/")
+        @test r.status == 200 && occursin("/admin/doc/models/", text(r))
+        r = get(c, "/admin/doc/models/")
+        @test occursin("project.Article", text(r)) || occursin(">Article<", text(r))
+        r = get(c, "/admin/doc/models/project.article/")
+        @test r.status == 200 && occursin("ForeignKey to Author", text(r)) && occursin("<code>article</code>", text(r))
+        @test get(c, "/admin/doc/models/project.nosuch/").status == 404
+        r = get(c, "/admin/doc/views/")
+        @test occursin("/documented/", text(r)) && occursin("An essay about a topic", text(r))
+        @test occursin("id=\"for\"", text(get(c, "/admin/doc/tags/"))) && occursin("id=\"upper\"", text(get(c, "/admin/doc/filters/")))
+    finally
+        configure!(INSTALLED_APPS = old_apps, ROOT_URLCONF = old_urls)
+    end
+end

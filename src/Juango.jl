@@ -34,6 +34,7 @@ include("conf.jl")
 include("utils.jl")
 include("apps.jl")
 include("http.jl")
+include("logging.jl")
 include("urls.jl")
 include("template.jl")
 include("templatetags.jl")
@@ -44,6 +45,7 @@ include("backends/sqlite.jl")
 include("backends/postgres.jl")
 include("backends/mysql.jl")
 include("timezones.jl")
+include("humanize.jl")
 include("orm.jl")
 include("expressions.jl")
 include("fields_extra.jl")
@@ -57,6 +59,7 @@ include("backends/mysql_extra.jl")
 include("migrations.jl")
 include("forms.jl")
 include("formsets.jl")
+include("formsextra.jl")
 include("sessions.jl")
 include("passwords.jl")
 include("auth.jl")
@@ -80,8 +83,13 @@ include("testclient.jl")
 include("testing.jl")
 include("admin.jl")
 include("flatpages.jl")
+include("sites.jl")
+include("admindocs.jl")
+include("tasks.jl")
 include("serializers.jl")
 include("dbtools.jl")
+include("staticfiles.jl")
+include("jscatalog.jl")
 include("management.jl")
 
 # --- public API -------------------------------------------------------------
@@ -122,6 +130,12 @@ export LogEntry, log_action!, ADDITION, CHANGE, DELETION
 export Permission, Group, has_perm, has_perms, has_module_perms, get_all_permissions, permission_required, perm_name
 export ContentType, GenericForeignKey, GenericRelation, get_for_model, model_class
 export using_db
+export @background, background, TaskDef, TaskResult, enqueue, get_result, db_worker, dummy_results
+export admindocs_urls
+export Media, Widget, MultiWidget, MultiValueField, SplitDateTimeField, TemplateFormRenderer, render_form
+export JavaScriptCatalog, JSONCatalog
+export Site, RequestSite, get_current_site, clear_site_cache!, Redirect, RedirectFallbackMiddleware
+export log!, log_enabled, MemoryHandler, LogRecord
 export rollback_after, override_settings, RequestFactory, assert_contains, assert_not_contains, assert_redirects,
        assert_template_used, assert_template_not_used, assert_num_queries, assert_form_error
 export flush!, inspectdb, dbshell_cmd

@@ -942,7 +942,7 @@ function tag_static(p, t)
     length(bits) in (2, 4) || throw(TemplateSyntaxError("'static' takes one argument"))
     StaticNode(parse_filter_expr(bits[2]), length(bits) == 4 ? bits[4] : nothing)
 end
-static_url(p) = settings.STATIC_URL * lstrip(string(p), '/')
+static_url(p) = settings.STATIC_URL * stored_static_name(lstrip(string(p), '/'))      # staticfiles.jl
 function render!(io::IO, n::StaticNode, ctx::Context)
     url = static_url(display_string(eval_fe(n.path, ctx)))
     n.asvar === nothing ? write(io, escape_html(url)) : (ctx[n.asvar] = url)

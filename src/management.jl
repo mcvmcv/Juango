@@ -258,6 +258,14 @@ for (n, h, f) in (
     ("makemigrations", "Write migrations for model changes (--name, --empty, --merge, --dry-run, --check, --noinput, --app)", cmd_makemigrations),
     ("showmigrations", "List migrations and whether they are applied", _ -> showmigrations()),
     ("sqlmigrate", "Print the SQL for a migration: sqlmigrate [app] <name> [--backwards]", cmd_sqlmigrate),
+    ("db_worker", "Run background tasks of the database backend: db_worker [--queue a,b] [--max-tasks N] [--stop-when-empty]",
+     function (args)
+         _, flags = parse_flags(args)
+         n = db_worker(; queues = haskey(flags, "queue") ? split(flags["queue"], ',') : nothing,
+                       max_tasks = haskey(flags, "max-tasks") ? parse(Int, flags["max-tasks"]) : nothing,
+                       stop_when_empty = haskey(flags, "stop-when-empty"))
+         println("Ran $n task(s).")
+     end),
     ("flush", "Delete all data from the database: flush [--noinput]", cmd_flush),
     ("dbshell", "Open the database's command-line client", _ -> run(dbshell_cmd())),
     ("inspectdb", "Write models for existing tables: inspectdb [table ...]", args -> print(inspectdb(isempty(first(parse_flags(args))) ? nothing : first(parse_flags(args))))),
@@ -571,5 +579,6 @@ function collectstatic(; clear = false, verbose = false)
             verbose && println("  ", rel)
         end
     end
+    manifest_storage() && post_process_manifest!(root, [replace(r, '\\' => '/') for r in seen])
     length(seen)
 end

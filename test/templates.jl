@@ -167,3 +167,26 @@ end
     @test_throws Juango.NoReverseMatch reverse_url("nope")
     @test_throws Juango.NoReverseMatch reverse_url("article_detail"; id = "abc")
 end
+
+@testset "humanize" begin
+    h(src, d = Dict{String,Any}()) = tr("{% load humanize %}" * src, d)
+    @test h("{{ 1234567|intcomma }} {{ 999|intcomma }} {{ -45000|intcomma }} {{ 1234.5|intcomma }} {{ '12345'|intcomma }}") ==
+          "1,234,567 999 -45,000 1,234.5 12,345"
+    @test with_language(() -> h("{{ 1234567|intcomma }}"), "de") == "1.234.567"
+    @test h("{{ 999999|intword }} {{ 1000000|intword }} {{ 1200000|intword }} {{ 3400000000|intword }}") ==
+          "999999 1.0 million 1.2 million 3.4 billion"
+    @test h("{{ 1|apnumber }} {{ 9|apnumber }} {{ 10|apnumber }} {{ 'x'|apnumber }}") == "one nine 10 x"
+    @test h("{% for n in ns %}{{ n|ordinal }} {% endfor %}", Dict{String,Any}("ns" => [1, 2, 3, 4, 11, 12, 13, 21, 22, 101, 111])) ==
+          "1st 2nd 3rd 4th 11th 12th 13th 21st 22nd 101st 111th "
+    today = Date(now())
+    d = Dict{String,Any}("t" => today, "y" => today - Day(1), "m" => today + Day(1), "o" => Date(2020, 3, 5))
+    @test h("{{ t|naturalday }} {{ y|naturalday }} {{ m|naturalday }} {{ o|naturalday:'Y-m-d' }}", d) == "today yesterday tomorrow 2020-03-05"
+    n = now()
+    d = Dict{String,Any}("a" => n, "b" => n - Second(30), "c" => n - Minute(1) - Second(5), "e" => n - Minute(14) - Second(1),
+                         "f" => n - Hour(1) - Second(1), "g" => n - Hour(5) - Second(1), "i" => n - Day(3) - Second(1),
+                         "j" => n + Minute(10) + Second(5), "k" => n + Day(2) + Second(5))
+    out = split(h("{{ a|naturaltime }}|{{ b|naturaltime }}|{{ c|naturaltime }}|{{ e|naturaltime }}|{{ f|naturaltime }}|{{ g|naturaltime }}|{{ i|naturaltime }}|{{ j|naturaltime }}|{{ k|naturaltime }}", d), '|')
+    @test out[1] in ("now", "a second ago") && out[2] in ("30 seconds ago", "31 seconds ago")
+    @test out[3:7] == ["a minute ago", "14 minutes ago", "an hour ago", "5 hours ago", "3 days ago"]
+    @test out[8] in ("10 minutes from now", "9 minutes from now") && out[9] == "2 days from now"
+end

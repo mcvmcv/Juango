@@ -78,7 +78,8 @@ function handle_request_inner(req::Request)
         if settings.DEBUG && startswith(req.path, settings.STATIC_URL) && !isempty(static_dirs())
             return serve_static(req)
         end
-        host_allowed(req) || throw(BadRequest("Invalid HTTP_HOST header: '$(get_host(req))'. You may need to add it to ALLOWED_HOSTS."))
+        host_allowed(req) || (log!("juango.security.DisallowedHost", :warning, "Invalid HTTP_HOST header: '$(get_host(req))'"; request = req);
+                              throw(BadRequest("Invalid HTTP_HOST header: '$(get_host(req))'. You may need to add it to ALLOWED_HOSTS.")))
         req.resolver_match = resolve(req.path)
         req.resolver_match === nothing || req.resolver_match.language === nothing ||
             (req.meta[:language_prefix] = req.resolver_match.language)
@@ -101,23 +102,23 @@ end
 
 function response_for_exception(req::Request, e, bt)
     if e isa Http404
+        log!("juango.request", :warning, "Not Found: $(req.path)"; request = req, status_code = 404)
         settings.DEBUG && return technical_404(req, e)
         r = try_render("404.html", Dict("request_path" => req.path, "exception" => e.msg), 404)
         return something(r, HttpResponseNotFound("<h1>Not Found</h1><p>The requested resource was not found on this server.</p>"))
     elseif e isa PermissionDenied
+        log!("juango.request", :warning, "Forbidden (Permission denied): $(req.path)"; request = req, status_code = 403)
         r = try_render("403.html", Dict("exception" => e.msg), 403)
         return something(r, HttpResponseForbidden())
     elseif e isa BadRequest
-        @warn "Bad request" path = req.path msg = e.msg
+        log!("juango.request", :warning, "Bad Request: $(req.path): $(e.msg)"; request = req, status_code = 400)
         r = try_render("400.html", Dict("exception" => e.msg), 400)
         return something(r, HttpResponseBadRequest(settings.DEBUG ? "<h1>Bad Request (400)</h1><p>$(escape_html(e.msg))</p>" :
                                                                     "<h1>Bad Request (400)</h1>"))
     end
-    @error "Internal Server Error: $(req.path)" exception = (e, bt)
+    # logged to juango.request: Julia's logger, and mailed to ADMINS when DEBUG is false (see LOGGING)
+    log!("juango.request", :error, "Internal Server Error: $(req.path)"; exception = (e, bt), request = req, status_code = 500)
     settings.DEBUG && return technical_500(req, e, bt)
-    mail_admins("ERROR: Internal Server Error: $(req.path)",
-                "$(req.method) $(full_path(req))\n\n" * sprint(showerror, e) * "\n\n" * sprint(Base.show_backtrace, bt);
-                fail_silently = true)
     r = try_render("500.html", Dict{String,Any}(), 500)
     something(r, HttpResponse("<h1>Server Error (500)</h1>"; status = 500))
 end

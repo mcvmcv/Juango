@@ -32,6 +32,7 @@ mutable struct Form
     validated::Bool
     clean::Any
     files::Any            # uploaded files (req.FILES) for file fields
+    media::Any            # Media (formsextra.jl): the form's own CSS and JavaScript
 end
 
 """
@@ -41,7 +42,7 @@ end
 `add_error!(form, field_or_nothing, msg)` or modify `form.cleaned_data`.
 """
 function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
-              name = "Form", model = nothing, instance = nothing, files = nothing)
+              name = "Form", model = nothing, instance = nothing, files = nothing, media = nothing)
     fs = Field[]
     for (n, f) in fields
         f = deepcopy(f)
@@ -49,7 +50,8 @@ function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), pref
         push!(fs, f)
     end
     Form(string(name), fs, data, Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(initial)),
-         Dict{Symbol,Vector{String}}(), Dict{Symbol,Any}(), model, instance, string(prefix), false, clean, files)
+         Dict{Symbol,Vector{String}}(), Dict{Symbol,Any}(), model, instance, string(prefix), false, clean, files,
+         media === nothing ? Media() : media)
 end
 
 """
@@ -73,9 +75,9 @@ macro form(name, body)
     end
     F = GlobalRef(@__MODULE__, :Form)
     quote
-        function $(esc(name))(data = nothing; initial = Dict{Symbol,Any}(), prefix = "", clean = nothing, files = nothing)
+        function $(esc(name))(data = nothing; initial = Dict{Symbol,Any}(), prefix = "", clean = nothing, files = nothing, media = nothing)
             $F(Pair{Symbol,Any}[$(pairs_...)]; data = data, initial = initial, prefix = prefix,
-               clean = clean, name = $(string(name)), files = files)
+               clean = clean, name = $(string(name)), files = files, media = media)
         end
     end
 end
@@ -128,6 +130,7 @@ html_id(f::Form, fld::Field) = "id_" * html_name(f, fld)
 
 function raw_value(f::Form, fld::Field)
     f.data === nothing && return nothing
+    fld.kind === :multi && return multi_raw(f, fld)
     fld.kind === :m2m && return raw_list(f.data, html_name(f, fld))
     get(f.data, html_name(f, fld), nothing)
 end
@@ -141,6 +144,7 @@ end
 "Convert submitted text into a typed value. Returns `(value, error_or_nothing)`."
 function to_julia(fld::Field, raw)
     k = fld.kind
+    k === :multi && return clean_multi(fld, raw)
     if k === :m2m
         ids = Any[]
         for r in (raw === nothing ? [] : raw)
@@ -157,7 +161,7 @@ function to_julia(fld::Field, raw)
     if k === :bool
         return (raw !== nothing && lowercase(string(raw)) in ("on", "true", "1", "yes")), nothing
     end
-    s = raw === nothing ? "" : (fld.widget === :password ? string(raw) : strip(string(raw)))
+    s = raw === nothing ? "" : (widget_kind(fld.widget) === :password ? string(raw) : strip(string(raw)))
     isempty(s) && return (k in STRING_KINDS && !fld.null ? "" : nothing), nothing
     if k in STRING_KINDS
         return String(s), nothing
@@ -438,24 +442,25 @@ end
 errors_html(errs) = isempty(errs) ? "" :
     "<ul class=\"errorlist\">" * join(["<li>" * escape_html(e) * "</li>" for e in errs]) * "</ul>"
 
-input_type(fld::Field) = fld.widget === :password ? "password" : fld.widget === :hidden ? "hidden" :
+input_type(fld::Field) = widget_kind(fld.widget) === :password ? "password" : widget_kind(fld.widget) === :hidden ? "hidden" :
     fld.kind === :email ? "email" : fld.kind === :url ? "url" : fld.kind in (:int, :float) ? "number" :
     fld.kind === :datetime ? "datetime-local" : fld.kind === :date ? "date" : "text"
 
 function widget_html(bf::BoundField)
     f, fld = bf.form, bf.field
+    fld.kind === :multi && return multi_widget_html(bf)
     name, id = escape_html(html_name(f, fld)), escape_html(html_id(f, fld))
     val = display_value(bf)
     req = !fld.blank && fld.kind !== :bool ? " required" : ""
-    attrs = " name=\"$name\" id=\"$id\"$req"
+    attrs = " name=\"$name\" id=\"$id\"$req" * widget_attrs(fld.widget)
     haskey(f.errors, fld.name) && (attrs *= " aria-invalid=\"true\"")
     if fld.kind === :bool
         checked = f.data !== nothing ? (val !== nothing && lowercase(string(val)) in ("on", "true", "1", "yes")) : truthy(val)
         return "<input type=\"checkbox\"$attrs$(checked ? " checked" : "")>"
-    elseif fld.kind === :fk && fld.widget in (:raw_id, :autocomplete)
+    elseif fld.kind === :fk && widget_kind(fld.widget) in (:raw_id, :autocomplete)
         R = related_model(fld)
         cur = (val === nothing || val == "") ? nothing : first(filter(base_objects(R); id = parse_pk(R, val)))
-        if fld.widget === :raw_id     # an id box, with the current object's name
+        if widget_kind(fld.widget) === :raw_id     # an id box, with the current object's name
             return "<input type=\"text\"$attrs size=\"10\" class=\"raw-id\" value=\"$(escape_html(display_string(val)))\">" *
                    (cur === nothing ? "" : " <span class=\"muted\">" * escape_html(string(cur)) * "</span>")
         end
@@ -496,7 +501,7 @@ function widget_html(bf::BoundField)
         end
         print(io, "</select>")
         return String(take!(io))
-    elseif (fld.kind in (:text, :json) && fld.widget === nothing) || fld.widget === :textarea
+    elseif (fld.kind in (:text, :json) && widget_kind(fld.widget) === nothing) || widget_kind(fld.widget) === :textarea
         return "<textarea$attrs cols=\"40\" rows=\"10\">" * escape_html(display_string(val)) * "</textarea>"
     end
     t = input_type(fld)
@@ -511,7 +516,7 @@ label_tag(bf::BoundField) = "<label for=\"" * escape_html(html_id(bf.form, bf.fi
 
 function field_row(bf::BoundField; tag = "p")
     fld = bf.field
-    fld.widget === :hidden && return widget_html(bf)
+    widget_kind(fld.widget) === :hidden && return widget_html(bf)
     errs = errors_html(get(bf.form.errors, fld.name, String[]))
     help = isempty(fld.help_text) ? "" : " <span class=\"helptext\">" * escape_html(fld.help_text) * "</span>"
     body = fld.kind === :bool ? widget_html(bf) * " " * label_tag(bf) : label_tag(bf) * " " * widget_html(bf)
@@ -530,7 +535,7 @@ function as_table(f::Form)
     SafeString(errors_html(non_field_errors(f)) * join(rows, "\n"))
 end
 
-__html__(f::Form) = as_p(f).s
+__html__(f::Form) = get(settings, :FORM_RENDERER, nothing) isa TemplateFormRenderer ? render_form(f).s : as_p(f).s
 __html__(bf::BoundField) = widget_html(bf)
 Base.show(io::IO, bf::BoundField) = print(io, "<BoundField ", bf.field.name, ">")
 
@@ -543,9 +548,11 @@ function tattr(f::Form, ::Val{S}) where {S}
     S === :is_bound && return f.data !== nothing
     S === :is_multipart && return any(x -> x.kind in FILE_KINDS, f.fields)
     S === :cleaned_data && return f.cleaned_data
+    S === :media && return render_media(form_media(f))
+    S === :render && return render_form(f)
     S === :instance && return f.instance
-    S === :hidden_fields && return [bf for bf in f if bf.field.widget === :hidden]
-    S === :visible_fields && return [bf for bf in f if bf.field.widget !== :hidden]
+    S === :hidden_fields && return [bf for bf in f if widget_kind(bf.field.widget) === :hidden]
+    S === :visible_fields && return [bf for bf in f if widget_kind(bf.field.widget) !== :hidden]
     i = findfirst(x -> x.name === S, f.fields)
     i === nothing ? NOTFOUND : BoundField(f, f.fields[i])
 end
@@ -553,6 +560,7 @@ end
 function tattr(bf::BoundField, ::Val{S}) where {S}
     S === :label && return label(bf.field)
     S === :label_tag && return SafeString(label_tag(bf))
+    S === :errors_html && return SafeString(errors_html(get(bf.form.errors, bf.field.name, String[])))
     S === :errors && return get(bf.form.errors, bf.field.name, String[])
     S === :name && return html_name(bf.form, bf.field)
     S === :id_for_label && return html_id(bf.form, bf.field)
@@ -560,7 +568,7 @@ function tattr(bf::BoundField, ::Val{S}) where {S}
     S === :help_text && return bf.field.help_text
     S === :widget && return SafeString(widget_html(bf))
     S === :row && return SafeString(field_row(bf))
-    S === :is_hidden && return bf.field.widget === :hidden
+    S === :is_hidden && return widget_kind(bf.field.widget) === :hidden
     S === :field && return bf.field
     NOTFOUND
 end

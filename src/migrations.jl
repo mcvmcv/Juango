@@ -671,6 +671,7 @@ function migrate_here(; app = nothing, target = nothing, fake = false, sync = fa
     end
     Juango.migrate_allowed(db, "contenttypes") && Juango.update_contenttypes!()
     Juango.migrate_allowed(db, "auth") && Juango.update_permissions!()
+    Juango.migrate_allowed(db, "sites") && Juango.create_default_site!()
     if verbose && target === nothing
         for a in migrated_apps()
             isempty(detect_changes(g, a; questioner = _ -> false)) && continue

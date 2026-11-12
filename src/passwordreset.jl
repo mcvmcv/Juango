@@ -184,7 +184,7 @@ function PasswordResetView(; template = "registration/password_reset_form.html",
             for u in filter(get_user_model(); email__iexact = email, is_active = true)
                 has_usable_password(u) || continue
                 ctx = Dict{String,Any}("user" => u, "uid" => uid_encode(u.id), "token" => make_reset_token(u),
-                                       "protocol" => is_secure(req) ? "https" : "http", "domain" => get_host(req),
+                                       "protocol" => is_secure(req) ? "https" : "http", "domain" => site_domain(req), "site_name" => (is_installed("sites") ? get_current_site(req).name : get_host(req)),
                                        "site_name" => settings.SITE_NAME, "email" => u.email)
                 ctx["reset_url"] = ctx["protocol"] * "://" * ctx["domain"] *
                                    reverse_url("password_reset_confirm"; uidb64 = ctx["uid"], token = ctx["token"])

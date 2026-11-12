@@ -40,6 +40,7 @@ function default_settings()
         :CACHES => Dict("default" => Dict(:backend => :locmem)),
         :CACHE_MIDDLEWARE_SECONDS => 600,
         :TEMPLATE_CACHE_CHECK_MTIME => true,
+        :SITE_ID => 1,
         :SESSION_ENGINE => :db,
         :SESSION_FILE_PATH => nothing,
         :DATABASE_ROUTERS => Any[],

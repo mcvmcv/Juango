@@ -195,3 +195,52 @@ end
         configure!(MEDIA_ROOT = old_media)
     end
 end
+
+@form MediaForm begin
+    name = CharField(max_length = 20, widget = Widget(:text; attrs = Dict("class" => "wide", "placeholder" => "Name"),
+                                                         media = Media(js = ["js/name.js"])))
+    when = SplitDateTimeField()
+    code = MultiValueField([CharField(max_length = 3), IntegerField()]; compress = vs -> "$(vs[1])-$(vs[2])",
+                           decompress = v -> v === nothing ? [nothing, nothing] : split(v, '-'), blank = true)
+end
+
+@testset "form media, multi-value fields, template renderers" begin
+    f = MediaForm(; media = Media(css = Dict("all" => ["css/forms.css", "/abs/x.css"]), js = ["js/name.js", "https://cdn.example/x.js"]))
+    @test string(tr("{{ form.media }}", Dict("form" => f))) ==
+          "<link href=\"/static/css/forms.css\" media=\"all\" rel=\"stylesheet\">\n<link href=\"/abs/x.css\" media=\"all\" rel=\"stylesheet\">\n" *
+          "<script src=\"/static/js/name.js\"></script>\n<script src=\"https://cdn.example/x.js\"></script>"
+    @test (Media(js = ["a.js"]) + Media(js = ["b.js", "a.js"])).js == ["a.js", "b.js"]
+    html = string(as_p(f))
+    @test occursin("class=\"wide\"", html) && occursin("placeholder=\"Name\"", html)
+    @test occursin("<input type=\"date\" name=\"when_0\"", html) && occursin("<input type=\"time\" name=\"when_1\"", html)
+
+    # multi-value fields clean their parts, then compress them
+    f = MediaForm(Dict("name" => "Ann", "when_0" => "2024-05-01", "when_1" => "13:45", "code_0" => "abc", "code_1" => "7"))
+    @test is_valid(f) && f.cleaned_data[:when] == (settings.USE_TZ ? make_aware(DateTime(2024, 5, 1, 13, 45)) : DateTime(2024, 5, 1, 13, 45))
+    @test f.cleaned_data[:code] == "abc-7"
+    f = MediaForm(Dict("name" => "Ann", "when_0" => "2024-05-01", "when_1" => "25:99"))
+    @test !is_valid(f) && f.errors[:when] == ["Enter a valid time."] && f.cleaned_data[:code] === nothing
+    f = MediaForm(Dict("name" => "Ann", "when_0" => "", "when_1" => ""))
+    @test !is_valid(f) && f.errors[:when] == ["This field is required."]
+    f = MediaForm(Dict("name" => "Ann", "when_0" => "2024-05-01", "when_1" => "10:00", "code_0" => "abc", "code_1" => "x"))
+    @test !is_valid(f) && f.errors[:code] == ["Enter a whole number."]
+    f = MediaForm(Dict("name" => "Ann", "when_0" => "2024-05-01", "when_1" => ""))
+    @test !is_valid(f) && f.errors[:when] == ["Enter a complete value."]
+    # an unbound form shows the initial value split into parts
+    f = MediaForm(; initial = Dict(:when => DateTime(2024, 1, 2, 3, 4), :code => "xy-9"))
+    html = string(as_p(f))
+    @test occursin("name=\"when_0\" id=\"id_when_0\" required value=\"2024-01-02\"", html) && occursin("value=\"03:04\"", html)
+    @test occursin("name=\"code_1\" id=\"id_code_1\" value=\"9\"", html)
+
+    # template renderers
+    f = ContactForm(Dict("name" => "", "email" => "bad"))
+    is_valid(f)
+    override_settings(FORM_RENDERER = TemplateFormRenderer()) do
+        out = string(tr("{{ form }}", Dict("form" => f)))
+        @test occursin("<div><ul class=\"errorlist\"><li>This field is required.</li></ul><label for=\"id_name\">", out)
+        @test count("<div>", out) == length(f.fields)
+    end
+    out = string(render_form(f; template = "juango/forms/p.html"))
+    @test occursin("<p><label for=\"id_name\">", out) && occursin("<ul class=\"errorlist\">", out)
+    @test string(tr("{{ form }}", Dict("form" => f))) == string(as_p(f))      # the default stays as_p
+end

@@ -591,8 +591,13 @@ function run_on(@nospecialize(f), b, conn, sql, @nospecialize(params))
     Threads.atomic_add!(QUERY_COUNT, 1)
     settings.SQL_DEBUG && @info "SQL" sql params
     ps = Any[adapt_param(b, p) for p in params]
+    logged = log_enabled("juango.db.backends", 10)
+    t0 = logged ? time() : 0.0
     try
-        f(b, conn, rewrite_placeholders(b, sql), ps)
+        r = f(b, conn, rewrite_placeholders(b, sql), ps)
+        logged && log!("juango.db.backends", :debug, "($(round((time() - t0) * 1000; digits = 3)) ms) $sql; args=$(repr(params))";
+                       sql = sql, params = params, duration = time() - t0, alias = current_alias())
+        r
     catch e
         e2 = translate_error(b, e)
         e2 === e ? rethrow() : throw(e2)

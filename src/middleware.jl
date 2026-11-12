@@ -163,6 +163,7 @@ function CsrfViewMiddleware(get_response)
 end
 
 function csrf_failure_response(req, reason)
+    log!("juango.security.csrf", :warning, "Forbidden (CSRF): $reason: $(req.path)"; request = req, status_code = 403)
     body = """<!doctype html><html><head><title>403 Forbidden</title></head><body>
     <h1>Forbidden <span style="color:#666">(403)</span></h1><p>CSRF verification failed. Request aborted.</p>""" *
            (settings.DEBUG ? "<p>Reason given for failure: <code>$(escape_html(reason))</code></p>" *

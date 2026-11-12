@@ -68,9 +68,9 @@ const MESSAGES_APP = App("messages"; name = "juango.messages", verbose_name = "M
 const BUILTIN_APPS = (ADMIN_APP, AUTH_APP, CONTENTTYPES_APP, SESSIONS_APP, MESSAGES_APP)
 default_installed_apps() = Any["juango.admin", "juango.auth", "juango.contenttypes", "juango.sessions", "juango.messages"]
 
-is_builtin(a::App) = any(b -> b === a, BUILTIN_APPS) || a.label == "flatpages"
-"Labels of Juango's own apps (flatpages is defined in flatpages.jl)."
-const BUILTIN_LABELS = ("admin", "auth", "contenttypes", "sessions", "messages", "flatpages")
+is_builtin(a::App) = any(b -> b === a, BUILTIN_APPS) || a.label in ("flatpages", "sites", "redirects", "admindocs", "tasks")
+"Labels of Juango's own apps (flatpages, sites and redirects are defined in their own files)."
+const BUILTIN_LABELS = ("admin", "auth", "contenttypes", "sessions", "messages", "flatpages", "sites", "redirects", "tasks")
 
 """
 Whether a model takes part in migrations, content types and permissions: models of Juango's

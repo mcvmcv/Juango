@@ -1,0 +1,5 @@
+{% extends "admin/base.html" %}
+{% block content %}<h1 class="page">Documentation</h1>
+<div class="module"><h2>Sections</h2><table><tbody>
+{% for s in sections %}<tr><th><a href="{{ s.url }}">{{ s.title }}</a></th><td>Describes {{ s.what }}.</td></tr>{% endfor %}
+</tbody></table></div>{% endblock %}

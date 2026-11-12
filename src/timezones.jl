@@ -154,6 +154,7 @@ function convert_naive_datetimes(; from_tz = settings.TIME_ZONE, verbose = true)
     n = 0
     atomic() do
         for T in all_models()
+            model_in_use(T) || continue
             m = modelmeta(T)
             m.proxy && continue
             for f in m.fields

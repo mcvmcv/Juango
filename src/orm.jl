@@ -38,7 +38,7 @@ mutable struct Field
     verbose_name::AbstractString      # may be gettext_lazy(...)
     help_text::AbstractString
     validators::Vector{Any}
-    widget::Union{Nothing,Symbol}
+    widget::Any                       # nothing, a Symbol (:textarea, :password, ...) or a widget value
     editable::Bool
     db_index::Bool
     model::Any
@@ -73,7 +73,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           Symbol(uppercase(string(on_delete))), related_name === nothing ? nothing : Symbol(related_name),
           auto_now, auto_now_add, verbose_name isa AbstractString ? verbose_name : string(verbose_name),
           help_text isa AbstractString ? help_text : string(help_text), collect(Any, validators),
-          widget === nothing ? nothing : Symbol(widget), editable, db_index, nothing, through, one_to_one,
+          widget isa Union{AbstractString,Symbol} ? Symbol(widget) : widget, editable, db_index, nothing, through, one_to_one,
           db_default, generated, symmetrical)
 end
 

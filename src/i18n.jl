@@ -18,8 +18,11 @@
 struct Catalog
     messages::Dict{Tuple{String,String},Vector{String}}   # (context, msgid) => translations (plural forms)
     plural::Function                                      # n -> index of the plural form
+    plural_expr::String                                   # the same rule as a C expression (for JavaScriptCatalog)
 end
+Catalog(msgs, plural) = Catalog(msgs, plural, "n != 1")
 Catalog() = Catalog(Dict{Tuple{String,String},Vector{String}}(), n -> n == 1 ? 0 : 1)
+plural_expr(header) = (m = match(r"plural\s*=\s*([^;]+)", header); m === nothing ? "n != 1" : strip(m[1]))
 
 function po_unescape(s)
     io = IOBuffer()
@@ -137,7 +140,7 @@ function catalog_from_entries(entries)
         (isempty(e.msgid) || e.fuzzy || all(isempty, e.msgstr)) && continue
         msgs[(e.context, e.msgid)] = e.msgstr
     end
-    Catalog(msgs, plural_rule(header_of(entries)))
+    Catalog(msgs, plural_rule(header_of(entries)), plural_expr(header_of(entries)))
 end
 
 # --- .mo (GNU gettext binary catalogue) --------------------------------------------------------------------
@@ -269,15 +272,15 @@ function catalog(lang)
             loc = to_locale(lang)
             names = unique([loc, split(loc, '_')[1]])
             msgs = Dict{Tuple{String,String},Vector{String}}()
-            rule = nothing
+            rule, expr = nothing, "n != 1"
             for dir in reverse(locale_dirs()), name in reverse(names)      # later (higher priority) entries overwrite
                 entries = load_catalog_file(dir, name)
                 entries === nothing && continue
                 c = catalog_from_entries(entries)
                 merge!(msgs, c.messages)
-                isempty(header_of(entries)) || (rule = c.plural)
+                isempty(header_of(entries)) || (rule = c.plural; expr = c.plural_expr)
             end
-            Catalog(msgs, something(rule, n -> n == 1 ? 0 : 1))
+            Catalog(msgs, something(rule, n -> n == 1 ? 0 : 1), expr)
         end
     end
 end

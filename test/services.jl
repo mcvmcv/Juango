@@ -838,3 +838,97 @@ end
         configure!(SESSION_ENGINE = :db, SESSION_FILE_PATH = nothing)
     end
 end
+
+@testset "logging" begin
+    mem, sqlmem = MemoryHandler(), MemoryHandler()
+    logfile = joinpath(mktempdir(), "site.log")
+    conf = Dict(
+        "handlers" => Dict("mem" => Dict("class" => mem, "level" => "WARNING"),
+                           "sql" => Dict("class" => sqlmem),
+                           "file" => Dict("class" => "file", "filename" => logfile, "level" => "ERROR", "format" => "{levelname}|{name}|{message}"),
+                           "mail" => Dict("class" => "mail_admins", "level" => "ERROR", "filters" => ["require_debug_false"])),
+        "loggers" => Dict("juango.db.backends" => Dict("handlers" => ["sql"], "level" => "DEBUG", "propagate" => false),
+                          "juango.request" => Dict("handlers" => ["mail", "file"], "level" => "WARNING"),
+                          "quiet" => Dict("handlers" => String[], "level" => "ERROR", "propagate" => false)),
+        "root" => Dict("handlers" => ["mem"], "level" => "INFO"))
+    override_settings(LOGGING = conf, ADMINS = [("Admin", "admin@example.com")], ALLOWED_HOSTS = ["testserver"]) do
+        log!("myapp.sub", :info, "too low for the handler")
+        log!("myapp.sub", :warning, "careful"; order = 7)
+        @test length(mem.records) == 1 && mem.records[1].name == "myapp.sub" && mem.records[1].data[:order] == 7
+        log!("quiet", :warning, "dropped")                          # below the logger's own level
+        @test length(mem.records) == 1 && !log_enabled("quiet", :warning) && log_enabled("myapp", :info)
+        # every SQL statement, with its duration, on juango.db.backends (and not propagated)
+        count(objects(Topic))
+        @test any(r -> occursin("SELECT COUNT(*)", r.message) && haskey(r.data, :duration), sqlmem.records)
+        @test !any(r -> r.name == "juango.db.backends", mem.records)
+        # requests: 4xx warnings, 5xx errors (mailed to ADMINS when DEBUG is false)
+        c = Client()
+        get(c, "/no-such-page/")
+        @test any(r -> r.message == "Not Found: /no-such-page/" && r.level == 30 && r.data[:status_code] == 404, mem.records)
+        empty!(Juango.outbox)
+        override_settings(DEBUG = false) do
+            @test get(c, "/boom/").status == 500
+        end
+        err = only(filter(r -> r.level == 40, mem.records))
+        @test err.name == "juango.request" && err.exception !== nothing && err.data[:request] isa Request
+        @test endswith(only(Juango.outbox).subject, "ERROR: Internal Server Error: /boom/") && occursin("GET /boom/", only(Juango.outbox).body)
+        @test startswith(read(logfile, String), "ERROR|juango.request|Internal Server Error: /boom/")
+        # CSRF failures on juango.security.csrf
+        post(Client(; enforce_csrf = true), "/contact/", Dict("name" => "x"))
+        @test any(r -> r.name == "juango.security.csrf" && occursin("CSRF", r.message), mem.records)
+        @test_throws Juango.ImproperlyConfigured (configure!(LOGGING = Dict("root" => Dict("handlers" => ["nope"]))); log!("x", :error, "y"))
+    end
+    # the default: a 500 with DEBUG on isn't mailed
+    empty!(Juango.outbox)
+    override_settings(ADMINS = [("Admin", "admin@example.com")]) do
+        redirect_stderr(devnull) do
+            get(Client(), "/boom/")
+        end
+    end
+    @test isempty(Juango.outbox)
+end
+
+@background function add_numbers(a, b; times = 1)
+    (a + b) * times
+end
+@background queue_name = "mail" priority = 5 function failing_task(msg)
+    error("task failed: $msg")
+end
+
+@testset "background tasks" begin
+    @test add_numbers(1, 2) == 3                                          # calling it just runs it
+    r = enqueue(add_numbers, 2, 3; times = 2)                             # the immediate backend
+    @test r.status === :successful && r.return_value == 10 && r.started_at !== nothing
+    r = redirect_stderr(() -> enqueue(failing_task, "x"), devnull)
+    @test r.status === :failed && occursin("task failed: x", r.error) && r.queue_name == "mail" && r.priority == 5
+    @test_throws ArgumentError enqueue(add_numbers, 1, 2; run_after = now() + Hour(1))
+
+    override_settings(TASKS = Dict("default" => Dict("backend" => :dummy))) do
+        empty!(dummy_results())
+        r = enqueue(add_numbers, 1, 1)
+        @test r.status === :ready && dummy_results() == [r] && r.return_value === nothing
+    end
+    override_settings(TASKS = Dict("default" => Dict("backend" => :dummy, "queues" => ["default"]))) do
+        @test_throws ArgumentError enqueue(failing_task, "y")              # not one of the backend's queues
+    end
+
+    old_apps = settings.INSTALLED_APPS
+    try
+        configure!(INSTALLED_APPS = vcat(Juango.default_installed_apps(), ["juango.tasks"]),
+                   TASKS = Dict("default" => Dict("backend" => :database)))
+        redirect_stdout(() -> migrate(verbose = false), devnull)
+        r1 = enqueue(add_numbers, 1, 2)
+        r2 = enqueue(failing_task, "z")                                   # priority 5: runs first
+        r3 = enqueue(add_numbers, 5, 5; run_after = now() + Hour(1))      # not yet
+        @test r1.status === :ready && get_result(r1.id).status === :ready
+        @test redirect_stderr(() -> db_worker(; stop_when_empty = true), devnull) == 2
+        @test Juango.refresh!(r1).status === :successful && r1.return_value == 3 && r1.finished_at !== nothing
+        g2 = get_result(r2.id)
+        @test g2.status === :failed && occursin("task failed: z", g2.error) && g2.started_at <= get_result(r1.id).started_at
+        @test get_result(r3.id).status === :ready && db_worker(; stop_when_empty = true) == 0
+        r4 = enqueue(add_numbers, 1, 1; queue_name = "other")
+        @test db_worker(; queues = ["default"], stop_when_empty = true) == 0 && db_worker(; queues = ["other"], max_tasks = 1) == 1
+    finally
+        configure!(INSTALLED_APPS = old_apps, TASKS = Dict("default" => Dict("backend" => :immediate)))
+    end
+end
