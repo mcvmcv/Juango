@@ -36,6 +36,38 @@
     mail_admins("Oops", "details")
     @test only(outbox).subject == "[Juango] Oops" && only(outbox).to == ["admin@x.io"]
 
+    # mail_managers and BrokenLinkEmailsMiddleware
+    override_settings(MANAGERS = [("Mgr", "mgr@x.io")], DEBUG = false, IGNORABLE_404_URLS = [r"\.php$"]) do
+        empty!(outbox)
+        @test mail_managers("Hey", "body") == 1 && only(outbox).to == ["mgr@x.io"]
+        mw = BrokenLinkEmailsMiddleware(req -> HttpResponseNotFound("nope"))
+        function r(path; referer = nothing, host = "example.com")
+            h = Dict("host" => host)
+            referer === nothing || (h["referer"] = referer)
+            mw(Request("GET", path; headers = h))
+        end
+        empty!(outbox)
+        r("/gone/"; referer = "http://example.com/page/")
+        @test only(outbox).subject == "[Juango] Broken INTERNAL link on example.com" &&
+              occursin("Requested URL: /gone/", only(outbox).body) && occursin("Referrer: http://example.com/page/", only(outbox).body)
+        empty!(outbox)
+        r("/gone/"; referer = "https://other.org/links")
+        @test only(outbox).subject == "[Juango] Broken link on example.com"
+        empty!(outbox)
+        r("/gone/")                                                     # no referer
+        r("/gone/"; referer = "https://google.com/search?q=x")          # search engine
+        r("/gone/"; referer = "/gone/")                                 # referer is the URL
+        r("/gone/"; referer = "/gone")                                  # APPEND_SLASH leftover
+        r("/wp-login.php"; referer = "http://example.com/x")            # ignorable
+        @test isempty(outbox)
+        override_settings(DEBUG = true) do
+            r("/gone/"; referer = "http://example.com/page/")
+        end
+        @test isempty(outbox)
+        @test BrokenLinkEmailsMiddleware(req -> HttpResponse("ok"))(Request("GET", "/x"; headers = Dict("referer" => "http://a/"))).status == 200
+        @test isempty(outbox)
+    end
+
     # 500 errors are mailed to ADMINS when DEBUG is off
     empty!(outbox)
     configure!(DEBUG = false)

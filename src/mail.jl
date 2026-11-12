@@ -167,6 +167,15 @@ function mail_admins(subject, message; html_message = nothing, fail_silently = f
     send!(m; fail_silently = fail_silently)
 end
 
+"Email the site managers (`settings.MANAGERS`, a list of `(name, email)`)."
+function mail_managers(subject, message; html_message = nothing, fail_silently = false)
+    isempty(settings.MANAGERS) && return 0
+    m = EmailMessage(settings.EMAIL_SUBJECT_PREFIX * subject, message; from_email = settings.SERVER_EMAIL,
+                     to = [a isa Tuple || a isa Pair ? last(a) : a for a in settings.MANAGERS])
+    html_message === nothing || attach_alternative!(m, html_message, "text/html")
+    send!(m; fail_silently = fail_silently)
+end
+
 # --- SMTP ---------------------------------------------------------------------------------------------------
 
 addr_only(s) = (m = match(r"<([^>]+)>", s); m === nothing ? strip(s) : m[1])

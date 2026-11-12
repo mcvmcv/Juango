@@ -61,6 +61,50 @@ function CommonMiddleware(get_response)
     end
 end
 
+"""
+    BrokenLinkEmailsMiddleware
+
+Emails `MANAGERS` when a page returns 404 and the request came from a link (it has a
+Referer), unless `DEBUG` is on. Links from this site are reported as "Broken INTERNAL link".
+Like Django it ignores requests without a referer, referers equal to the URL, `APPEND_SLASH`
+redirect leftovers, external referers with a query string (search engines), and paths
+matching a regex in `IGNORABLE_404_URLS`.
+"""
+function BrokenLinkEmailsMiddleware(get_response)
+    function (req::Request)
+        resp = get_response(req)
+        if resp.status == 404 && !settings.DEBUG
+            domain = get_host(req)
+            uri = req.path * (isempty(req.query_string) ? "" : "?" * req.query_string)
+            referer = get(req.headers, "referer", "")
+            if !ignorable_404(uri, domain, referer)
+                internal = is_internal_referer(domain, referer)
+                mail_managers((internal ? "Broken INTERNAL link on " : "Broken link on ") * domain,
+                              "Referrer: $referer\nRequested URL: $uri\n" *
+                              "User agent: $(get(req.headers, "user-agent", "<none>"))\n" *
+                              "IP address: $(get(req.meta, :remote_addr, ""))\n"; fail_silently = true)
+            end
+        end
+        resp
+    end
+end
+
+"Whether `referer` is a page of this site (`http(s)://domain/...`)."
+is_internal_referer(domain, referer) =
+    startswith(referer, "http://" * domain * "/") || startswith(referer, "https://" * domain * "/")
+
+function ignorable_404(uri, domain, referer)
+    isempty(referer) && return true
+    settings.APPEND_SLASH && endswith(uri, "/") && referer == uri[1:end-1] && return true
+    !is_internal_referer(domain, referer) && occursin('?', referer) && return true
+    m = match(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:)?(?://([^/?#]*))?([^?#]*)", referer)
+    if m !== nothing
+        netloc, p = something(m[1], ""), m[2]
+        (netloc == "" || netloc == domain) && p == uri && return true
+    end
+    any(pat -> occursin(pat isa Regex ? pat : Regex(string(pat)), uri), settings.IGNORABLE_404_URLS)
+end
+
 "Sets `req.user` from the session."
 function AuthenticationMiddleware(get_response)
     function (req::Request)

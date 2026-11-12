@@ -124,7 +124,7 @@ export Signal, connect!, disconnect!, receiver, send, send_robust, has_receivers
        post_delete, m2m_changed, request_started, request_finished, user_logged_in, user_logged_out, user_login_failed
 export cache, cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, get_or_set, cache_get_many,
        cache_set_many, incr, decr, incr_version, cache_page, CacheMiddleware, create_cache_table
-export EmailMessage, EmailMultiAlternatives, send!, send_mail, mail_admins, attach!, attach_alternative!, outbox,
+export EmailMessage, EmailMultiAlternatives, send!, send_mail, mail_admins, mail_managers, attach!, attach_alternative!, outbox,
        signing_dumps, signing_loads, sign_value, unsign_value, BadSignature, SignatureExpired,
        PasswordResetView, PasswordResetConfirmView, make_reset_token, check_reset_token
 export LogEntry, log_action!, ADDITION, CHANGE, DELETION
@@ -146,7 +146,7 @@ export flush!, inspectdb, dbshell_cmd
 export serialize, deserialize, dumpdata, loaddata, load_fixtures, natural_key, get_by_natural_key
 export is_secure, ContentSecurityPolicyMiddleware, CSP, csp_nonce, csp_override, csp_report_only_override, deploy_issues
 export never_cache, cache_control, vary_on_headers, vary_on_cookie, patch_cache_control!, condition, etag, last_modified,
-       ConditionalGetMiddleware, GZipMiddleware
+       ConditionalGetMiddleware, GZipMiddleware, BrokenLinkEmailsMiddleware
 export CheckConstraint, ExclusionConstraint, UniqueConstraint, GeneratedField, DB_DEFAULT, CompositePrimaryKey
 export Model, @model, @abstract_model, OneToOneField, Index, GinIndex, Field, ManyToManyField, add!, remove!, set!, clear!, base_objects, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
        FloatField, BooleanField, DateTimeField, DateField, ForeignKey, Q, QuerySet, objects,

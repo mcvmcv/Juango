@@ -35,6 +35,8 @@ function default_settings()
         :DEFAULT_FROM_EMAIL => "webmaster@localhost",
         :SERVER_EMAIL => "root@localhost",
         :ADMINS => Any[],
+        :MANAGERS => Any[],
+        :IGNORABLE_404_URLS => Any[],
         :PASSWORD_RESET_TIMEOUT => 60 * 60 * 24 * 3,
         :PASSWORD_MIN_LENGTH => 8,
         :CACHES => Dict("default" => Dict(:backend => :locmem)),
