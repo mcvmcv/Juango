@@ -261,6 +261,7 @@ to_response(r::HttpResponse) = r
 to_response(s::AbstractString) = HttpResponse(s)
 to_response(s::SafeString) = HttpResponse(s.s)
 to_response(x::Union{AbstractDict,NamedTuple,AbstractVector}) = JsonResponse(x)
+to_response(t::Task) = to_response(await_task(t))      # async views
 to_response(::Nothing) = error("The view returned `nothing` instead of an HttpResponse.")
 to_response(x) = error("The view returned a $(typeof(x)) instead of an HttpResponse.")
 

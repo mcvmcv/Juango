@@ -86,6 +86,7 @@ include("flatpages.jl")
 include("sites.jl")
 include("admindocs.jl")
 include("tasks.jl")
+include("async.jl")
 include("serializers.jl")
 include("dbtools.jl")
 include("staticfiles.jl")
@@ -136,6 +137,9 @@ export Media, Widget, MultiWidget, MultiValueField, SplitDateTimeField, Template
 export JavaScriptCatalog, JSONCatalog
 export Site, RequestSite, get_current_site, clear_site_cache!, Redirect, RedirectFallbackMiddleware
 export log!, log_enabled, MemoryHandler, LogRecord
+export run_async, sync_to_async, aget, acreate, acount, aexists, afirst, alast, acollect, aget_or_create,
+       aupdate_or_create, abulk_create, abulk_update, aaggregate, ain_bulk, aupdate!, adelete!, asave!, arefresh!,
+       aauthenticate, aiterator
 export rollback_after, capture_on_commit_callbacks, with_live_server, live_server_url, override_settings, RequestFactory, assert_contains, assert_not_contains, assert_redirects,
        assert_template_used, assert_template_not_used, assert_num_queries, assert_form_error
 export flush!, inspectdb, dbshell_cmd

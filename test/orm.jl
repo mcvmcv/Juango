@@ -136,6 +136,30 @@
     @test !Juango.in_atomic()
 end
 
+@testset "async API" begin
+    a = fetch(acreate(Author; name = "Async Ann"))
+    @test a isa Author && a.id !== nothing
+    t1, t2 = acount(filter(Author; name = "Async Ann")), aexists(filter(Author; name = "Nobody async"))
+    @test t1 isa Task && fetch(t1) == 1 && fetch(t2) == false
+    @test fetch(aget(Author; name = "Async Ann")) == a && fetch(afirst(filter(Author; name = "Async Ann"))) == a
+    @test [x.name for x in fetch(acollect(filter(Author; name = "Async Ann")))] == ["Async Ann"]
+    @test_throws DoesNotExist Juango.await_task(aget(Author; name = "Nobody async"))
+    o, created = fetch(aget_or_create(Author; name = "Async Bob"))
+    @test created && fetch(aupdate!(filter(Author; id = o.id); name = "Async Bobby")) == 1
+    @test fetch(arefresh!(o)).name == "Async Bobby"
+    @test [x.name for x in aiterator(filter(Author; name__startswith = "Async "); chunk_size = 1)] |> sort == ["Async Ann", "Async Bobby"]
+    # inside a transaction it runs in the calling task, so it sees uncommitted rows
+    rollback_after() do
+        create(Author; name = "Async Tx")
+        @test fetch(acount(filter(Author; name = "Async Tx"))) == 1
+        @test length(collect(aiterator(filter(Author; name = "Async Tx")))) == 1
+    end
+    @test fetch(adelete!(filter(Author; name__startswith = "Async "))) >= 2
+    add = sync_to_async((x, y) -> x + y)
+    @test fetch(add(2, 3)) == 5
+    @test Juango.to_response(run_async(() -> "from a task")).body == Vector{UInt8}("from a task")
+end
+
 @testset "relations: joins, select_related, prefetch_related" begin
     sel(qs) = Juango.select_sql(qs)[1]
     nq(f) = last(count_queries(f))
