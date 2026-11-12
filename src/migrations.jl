@@ -562,13 +562,19 @@ Apply migrations. With no arguments, applies every pending migration and then
 synchronises apps that have no migration files. `target` (with `app`, default
 `\"project\"`) migrates forwards or backwards to that migration; `\"zero\"` unapplies all.
 `fake=true` records migrations without running them. `sync=true` skips migration files and
-only synchronises tables for every model.
+only synchronises tables for every model. `database` picks one of `DATABASES` (default
+"default"); the routers' `allow_migrate` decides which apps' migrations really run there
+(the others are only recorded).
 """
-function migrate(; app = nothing, target = nothing, fake = false, sync = false, verbose = true)
+migrate(; database = nothing, kw...) = Juango.with_db(() -> migrate_here(; kw...), database)
+
+function migrate_here(; app = nothing, target = nothing, fake = false, sync = false, verbose = true)
     log(msg) = verbose && println(msg)
+    db = Juango.current_alias()
+    allowed(T) = Juango.migrate_allowed(db, modelmeta(T).app; model = T)
     if sync
         log("Synchronizing all models (migration files ignored):")
-        sync_models!(filter(Juango.model_in_use, all_models()); verbose = verbose) || log("  No changes.")
+        sync_models!(filter(T -> Juango.model_in_use(T) && allowed(T), all_models()); verbose = verbose) || log("  No changes.")
         return nothing
     end
     target !== nothing && app === nothing && (app = "project")
@@ -576,7 +582,7 @@ function migrate(; app = nothing, target = nothing, fake = false, sync = false, 
     check_conflicts(g)
     applied = applied_migrations()
     plan = migration_plan(g, applied; app = app, target = target)
-    unmigrated = [T for T in all_models() if Juango.model_in_use(T) && !(modelmeta(T).app in migrated_apps())]
+    unmigrated = [T for T in all_models() if Juango.model_in_use(T) && !(modelmeta(T).app in migrated_apps()) && allowed(T)]
     log("Operations to perform:")
     isempty(g.nodes) || log("  Apply all migrations: " * join(sort(unique(first.(collect(keys(g.nodes))))), ", "))
     isempty(unmigrated) || target !== nothing ||
@@ -584,14 +590,14 @@ function migrate(; app = nothing, target = nothing, fake = false, sync = false, 
     log("Running migrations:")
     isempty(plan) && log("  No migrations to apply.")
     for (k, back) in plan
-        apply!(g, k; backwards = back, fake = fake, log = log)
+        apply!(g, k; backwards = back, fake = fake || !Juango.migrate_allowed(db, k[1]), log = log)
     end
     if target === nothing && !isempty(unmigrated)
         log("Synchronizing apps without migrations:")
         sync_models!(unmigrated; verbose = verbose) || log("  No changes.")
     end
-    Juango.update_contenttypes!()
-    Juango.update_permissions!()
+    Juango.migrate_allowed(db, "contenttypes") && Juango.update_contenttypes!()
+    Juango.migrate_allowed(db, "auth") && Juango.update_permissions!()
     if verbose && target === nothing
         for a in migrated_apps()
             isempty(detect_changes(g, a; questioner = _ -> false)) && continue

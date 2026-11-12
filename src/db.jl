@@ -304,10 +304,6 @@ end
 # commits. SQLite keeps a single connection behind a lock (one writer at a time anyway).
 
 const DB_LOCK = ReentrantLock()
-const DB_BACKEND = Ref{Union{Nothing,DatabaseBackend}}(nothing)
-const DB_SETTING = Ref{Any}(nothing)
-const DB_CONN = Ref{Any}(nothing)        # the single connection of non-pooled backends
-const ATOMIC_DEPTH = Ref(0)              # transaction depth of non-pooled backends
 
 "Whether the backend uses a connection pool (otherwise one shared connection)."
 supports_pooling(::DatabaseBackend) = false
@@ -315,19 +311,6 @@ supports_pooling(::DatabaseBackend) = false
 connection_usable(::DatabaseBackend, conn) = true
 "A round trip to check a connection works (before reusing one that sat idle)."
 ping(::DatabaseBackend, conn) = true
-
-"The backend selected by `settings.DATABASE` (no connection is opened)."
-function backend()
-    lock(DB_LOCK) do
-        s = settings.DATABASE
-        if DB_BACKEND[] === nothing || !isequal(DB_SETTING[], s)
-            close_connection!()
-            DB_BACKEND[] = backend_from_setting(s)
-            DB_SETTING[] = s
-        end
-        DB_BACKEND[]::DatabaseBackend
-    end
-end
 
 mutable struct PooledConnection
     conn::Any
@@ -341,24 +324,138 @@ mutable struct ConnectionPool
     total::Int
     lock::ReentrantLock
 end
-const POOL = Ref{Union{Nothing,ConnectionPool}}(nothing)
 
 struct PoolTimeout <: Exception
     msg::String
 end
 Base.showerror(io::IO, e::PoolTimeout) = print(io, "PoolTimeout: ", e.msg)
 
+# --- databases by alias -------------------------------------------------------------------------
+#
+# `DATABASES = Dict("default" => ..., "replica" => ...)` names several databases; without it,
+# `DATABASE` is the "default" one. Each alias has its own backend, connection (or pool) and
+# transaction depth. Queries go to the task's current alias: `using_db("replica") do ... end`,
+# a queryset's `using_db(qs, "replica")`, the database an object was loaded from, or the
+# DATABASE_ROUTERS' choice, else "default".
+
+"Connection state of one database alias."
+mutable struct DatabaseState
+    alias::String
+    setting::Any
+    backend::DatabaseBackend
+    conn::Any                                  # the single connection of non-pooled backends
+    depth::Int                                 # transaction depth of non-pooled backends
+    pool::Union{Nothing,ConnectionPool}
+end
+const DB_STATES = Dict{String,DatabaseState}()
+
+"The configured databases: alias => setting (`DATABASES`, with `DATABASE` as \"default\")."
+function database_settings()
+    out = Dict{String,Any}()
+    d = get(settings, :DATABASES, nothing)
+    d === nothing || for (k, v) in pairs(d)
+        out[string(k)] = v
+    end
+    haskey(out, "default") || (out["default"] = settings.DATABASE)
+    out
+end
+
+"The task's current database alias."
+current_alias() = get(task_local_storage(), :juango_db_alias, "default")::String
+"Whether a `using_db(alias) do ... end` block chose the database for this task."
+db_pinned() = haskey(task_local_storage(), :juango_db_alias)
+
+"Run `f()` with `alias` as the current database (`nothing` leaves it as it is)."
+function with_db(f, alias)
+    alias === nothing && return f()
+    a = string(alias)
+    a == current_alias() && db_pinned() && return f()
+    task_local_storage(f, :juango_db_alias, a)
+end
+
+"""
+    using_db(alias) do ... end
+
+Run the block against database `alias` (a key of `DATABASES`): every query, save and
+transaction in it, unless a queryset or object says otherwise.
+"""
+using_db(f::Function, alias) = with_db(f, string(alias))
+
+# --- routers ---------------------------------------------------------------------------------
+
+"""
+Database routers, listed in `DATABASE_ROUTERS`, decide where queries go. A router is any
+value; define methods of these functions for its type, returning an alias, or `nothing` to
+leave the decision to the next router (and finally to "default"):
+
+    struct PrimaryReplica end
+    Juango.db_for_read(::PrimaryReplica, ::Type) = "replica"
+    Juango.db_for_write(::PrimaryReplica, ::Type) = "default"
+    Juango.allow_relation(::PrimaryReplica, a, b) = true
+    Juango.allow_migrate(::PrimaryReplica, db, app_label; model = nothing) = db == "default"
+
+    configure!(DATABASES = Dict("default" => "postgresql://...", "replica" => "postgresql://..."),
+               DATABASE_ROUTERS = [PrimaryReplica()])
+"""
+db_for_read(router, model) = nothing
+"See `db_for_read`."
+db_for_write(router, model) = nothing
+"Whether objects `a` and `b` may be related (`nothing`: no opinion). See `db_for_read`."
+allow_relation(router, a, b) = nothing
+"Whether migrations of `app_label` (or `model`) run on database `db` (`nothing`: no opinion). See `db_for_read`."
+allow_migrate(router, db, app_label; model = nothing) = nothing
+
+routers() = get(settings, :DATABASE_ROUTERS, Any[])
+function ask_routers(f, args...; kw...)
+    for r in routers()
+        a = f(r, args...; kw...)
+        a === nothing || return a
+    end
+    nothing
+end
+route_read(T) = string(something(ask_routers(db_for_read, T), "default"))
+route_write(T) = string(something(ask_routers(db_for_write, T), "default"))
+migrate_allowed(db, app; model = nothing) = something(ask_routers(allow_migrate, db, app; model = model), true)
+
+"""
+The database for an operation on model `T` when nothing more specific says: the enclosing
+`using_db` block, else the routers. `nothing` means "stay on the current database".
+"""
+routed_db(T, write::Bool) = db_pinned() || isempty(routers()) ? nothing : write ? route_write(T) : route_read(T)
+
+"The state of database `alias`, set up (no connection opened) on first use or after its setting changed."
+function db_state(alias::AbstractString = current_alias())
+    lock(DB_LOCK) do
+        confs = database_settings()
+        haskey(confs, alias) || throw(ImproperlyConfigured("no database '$alias' in DATABASES (have: $(join(sort(collect(keys(confs))), ", ")))"))
+        s = confs[alias]
+        st = get(DB_STATES, alias, nothing)
+        if st === nothing || !isequal(st.setting, s)
+            st === nothing || close_state!(st)
+            st = DB_STATES[alias] = DatabaseState(alias, s, backend_from_setting(s), nothing, 0, nothing)
+        end
+        st
+    end
+end
+
+"The backend of the current database (no connection is opened)."
+backend() = db_state().backend
+
 "Per-task database state for pooled backends: the connection a transaction holds, and its depth."
 mutable struct TaskDB
     conn::Union{Nothing,PooledConnection}
     depth::Int
 end
-task_db() = get!(() -> TaskDB(nothing, 0), task_local_storage(), :juango_db)::TaskDB
+function task_db(alias::AbstractString = current_alias())
+    d = get!(() -> Dict{String,TaskDB}(), task_local_storage(), :juango_db)::Dict{String,TaskDB}
+    get!(() -> TaskDB(nothing, 0), d, alias)
+end
 
 function pool(b::DatabaseBackend)
+    st = db_state()
     lock(DB_LOCK) do
-        (POOL[] === nothing || POOL[].backend !== b) && (POOL[] = ConnectionPool(b, PooledConnection[], 0, ReentrantLock()))
-        POOL[]
+        (st.pool === nothing || st.pool.backend !== b) && (st.pool = ConnectionPool(b, PooledConnection[], 0, ReentrantLock()))
+        st.pool
     end
 end
 
@@ -426,42 +523,54 @@ function checkin(b::DatabaseBackend, pc::PooledConnection)
     nothing
 end
 
-"Close every connection (a new one opens on the next query)."
-function close_connection!()
-    lock(DB_LOCK) do
-        if DB_CONN[] !== nothing && DB_BACKEND[] !== nothing
-            try
-                close_connection(DB_BACKEND[], DB_CONN[])
-            catch
-            end
+function close_state!(st::DatabaseState)
+    if st.conn !== nothing
+        try close_connection(st.backend, st.conn) catch end
+    end
+    st.conn = nothing
+    st.depth = 0
+    if st.pool !== nothing
+        p = st.pool
+        lock(p.lock) do
+            foreach(pc -> (try close_connection(p.backend, pc.conn) catch end), p.idle)
+            p.total -= length(p.idle)
+            empty!(p.idle)
         end
-        DB_CONN[] = nothing
-        ATOMIC_DEPTH[] = 0
-        if POOL[] !== nothing
-            p = POOL[]
-            lock(p.lock) do
-                foreach(pc -> (try close_connection(p.backend, pc.conn) catch end), p.idle)
-                p.total -= length(p.idle)
-                empty!(p.idle)
-            end
-            POOL[] = nothing
-        end
+        st.pool = nothing
     end
 end
-push!(SETTINGS_CHANGED_HOOKS, () -> (DB_BACKEND[] !== nothing && !isequal(DB_SETTING[], settings.DATABASE)) &&
-                                    (close_connection!(); DB_BACKEND[] = nothing))
 
-"Connection pool statistics: `(size, in_use, idle)`."
-pool_status() = (p = POOL[]; p === nothing ? (size = settings.DATABASE_POOL_SIZE, in_use = 0, idle = 0) :
-                 lock(() -> (size = settings.DATABASE_POOL_SIZE, in_use = p.total - length(p.idle), idle = length(p.idle)), p.lock))
+"Close every connection, of every database (a new one opens on the next query)."
+close_connection!() = lock(() -> foreach(close_state!, values(DB_STATES)), DB_LOCK)
+"Close the connections of one database alias."
+close_connection!(alias::AbstractString) = lock(() -> (st = get(DB_STATES, alias, nothing); st === nothing || close_state!(st)), DB_LOCK)
+
+push!(SETTINGS_CHANGED_HOOKS, function ()
+    lock(DB_LOCK) do
+        confs = database_settings()
+        for (a, st) in collect(DB_STATES)
+            isequal(get(confs, a, nothing), st.setting) && continue
+            close_state!(st)
+            delete!(DB_STATES, a)
+        end
+    end
+end)
+
+"Connection pool statistics of the current database: `(size, in_use, idle)`."
+function pool_status()
+    st = get(DB_STATES, current_alias(), nothing)
+    p = st === nothing ? nothing : st.pool
+    p === nothing ? (size = settings.DATABASE_POOL_SIZE, in_use = 0, idle = 0) :
+        lock(() -> (size = settings.DATABASE_POOL_SIZE, in_use = p.total - length(p.idle), idle = length(p.idle)), p.lock)
+end
 
 "The shared driver connection of a non-pooled backend (SQLite), opened on first use."
 function connection()
+    st = db_state()
     lock(DB_LOCK) do
-        b = backend()
-        supports_pooling(b) && error("connection() is for single-connection backends; pooled backends lend connections per statement")
-        DB_CONN[] === nothing && (DB_CONN[] = open_connection(b))
-        DB_CONN[]
+        supports_pooling(st.backend) && error("connection() is for single-connection backends; pooled backends lend connections per statement")
+        st.conn === nothing && (st.conn = open_connection(st.backend))
+        st.conn
     end
 end
 
@@ -512,7 +621,7 @@ as `nothing`.
 execute(sql::AbstractString, params = Any[]) = run_driver(driver_rows, sql, params)
 
 "Whether the current task is inside `atomic()`."
-in_atomic() = supports_pooling(backend()) ? task_db().depth > 0 : ATOMIC_DEPTH[] > 0
+in_atomic() = supports_pooling(backend()) ? task_db().depth > 0 : db_state().depth > 0
 
 "Run a statement and return the number of rows changed."
 execute_changes(sql::AbstractString, params = Any[]) = run_driver(driver_rowcount, sql, params)
@@ -523,7 +632,8 @@ execute_insert(sql::AbstractString, params = Any[]) = run_driver(driver_insert_i
 """
     atomic(f)
 
-Run `f()` inside a transaction (nested calls use savepoints). Any exception rolls
+Run `f()` inside a transaction (nested calls use savepoints) on the current database, or on
+`db` (an alias of `DATABASES`). Any exception rolls
 back the changes and is rethrown. On pooled backends the transaction keeps one
 connection for the current task; other tasks don't see its changes until it commits.
 
@@ -531,9 +641,11 @@ connection for the current task; other tasks don't see its changes until it comm
         save!(order); save!(invoice)
     end
 """
-function atomic(f)
-    b = backend()
-    supports_pooling(b) || return lock(() -> transaction(f, b, () -> ATOMIC_DEPTH[], d -> (ATOMIC_DEPTH[] = d)), DB_LOCK)
+function atomic(f; db = nothing)
+    db === nothing || return with_db(() -> atomic(f), db)
+    st0 = db_state()
+    b = st0.backend
+    supports_pooling(b) || return lock(() -> transaction(f, b, () -> st0.depth, d -> (st0.depth = d)), DB_LOCK)
     st = task_db()
     outer = st.depth == 0
     outer && (st.conn = checkout(b))

@@ -546,7 +546,7 @@ function load_deferred!(m::Model)
     T = typeof(m)
     data = getfield(m, :_data)
     data[:id] === nothing && throw(ArgumentError("$(nameof(T)) has no value for a deferred field and isn't saved"))
-    fresh = getfield(get(base_objects(T); id = data[:id]), :_data)
+    fresh = getfield(with_db(() -> get(base_objects(T); id = data[:id]), instance_db(m)), :_data)
     for (k, v) in fresh
         haskey(data, k) || (data[k] = v)
     end
@@ -571,7 +571,7 @@ function Base.getproperty(m::Model, s::Symbol)
         cache = getfield(m, :_cache)
         c = get(cache, s, nothing)
         (c !== nothing && getfield(c, :_data)[:id] == id) && return c
-        obj = get(base_objects(related_model(f)); id = id)
+        obj = with_db(() -> get(base_objects(related_model(f)); id = id), instance_db(m))
         cache[s] = obj
         return obj
     end
@@ -592,7 +592,7 @@ function Base.getproperty(m::Model, s::Symbol)
     end
     for (rn, M, rf) in reverse_relations(T)
         rn === s || continue
-        qs = filter(objects(M), Q(attname(rf) => data[:id]))
+        qs = chain(filter(objects(M), Q(attname(rf) => data[:id])); db = instance_db(m))
         if rf.one_to_one
             pre isa PrefetchedList && return isempty(pre.items) ? nothing : pre.items[1]
             return first(qs)
@@ -1117,10 +1117,30 @@ struct QuerySet{T<:Model}
     distinct_fields::Union{Nothing,Vector{String}} # distinct(): nothing = off, [] = DISTINCT, fields = DISTINCT ON
     for_update::Any                                # select_for_update options (a NamedTuple) or nothing
     combinator::Any                                # (op, querysets, all) for union/intersection/difference, or nothing
+    db::Union{Nothing,String}                      # using_db(qs, alias): the database to query
 end
 QuerySet{T}(where, order, limit, offset, isnone) where {T} =
     QuerySet{T}(where, order, limit, offset, isnone, Vector{Symbol}[], Prefetch[], nothing, nothing,
-                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing)
+                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing)
+
+"""
+    using_db(qs, "replica")
+
+The queryset, run against another database (a key of `DATABASES`). Objects it returns
+remember it: saving them and following their relations use the same database.
+"""
+using_db(qs::QuerySet, alias) = chain(qs; db = string(alias))
+using_db(::Type{T}, alias) where {T<:Model} = using_db(objects(T), alias)
+using_db(alias::Union{AbstractString,Symbol}) = qs -> using_db(qs, alias)
+
+"The database a queryset runs on (`nothing`: the current one)."
+query_db(qs::QuerySet{T}, write::Bool = false) where {T} = qs.db !== nothing ? qs.db : routed_db(T, write)
+"Run `f()` on the queryset's database."
+in_db(f, qs::QuerySet, write::Bool = false) = with_db(f, query_db(qs, write))
+
+"The database an object was loaded from or saved to (`nothing` if neither yet)."
+instance_db(m::Model) = get(getfield(m, :_cache), :__db, nothing)
+set_instance_db!(m::Model) = (getfield(m, :_cache)[:__db] = current_alias(); m)
 
 model_of(::QuerySet{T}) where {T} = T
 
@@ -1520,7 +1540,9 @@ function from_prefixed_row(::Type{T}, row, prefix) where {T<:Model}
 end
 
 "Execute the query and return a `Vector` of model instances."
-function fetch(qs::QuerySet{T}) where {T}
+fetch(qs::QuerySet) = in_db(() -> fetch_here(qs), qs)
+
+function fetch_here(qs::QuerySet{T}) where {T}
     qs.cache === nothing || return Vector{T}(qs.cache)
     qs.for_update === nothing || in_atomic() ||
         throw(TransactionManagementError("select_for_update() must be evaluated inside atomic()"))
@@ -1529,6 +1551,7 @@ function fetch(qs::QuerySet{T}) where {T}
     sql, ps, _, related = build_select(qs)
     rows = execute(sql, ps)
     objs = T[from_row(T, r) for r in rows]
+    foreach(set_instance_db!, objs)
     for (k, _) in qs.annotations, (o, r) in zip(objs, rows)
         getfield(o, :_data)[k] = get(r, k, nothing)
     end
@@ -1644,7 +1667,8 @@ function Base.iterate(::QuerySet, st)
 end
 
 "Number of matching rows (a `SELECT COUNT(*)`)."
-function Base.count(qs::QuerySet{T}) where {T}
+Base.count(qs::QuerySet) = in_db(() -> count_here(qs), qs)
+function count_here(qs::QuerySet{T}) where {T}
     qs.cache === nothing || return length(qs.cache)
     qs.isnone && return 0
     sql, ps = needs_wrapping(qs) ? select_sql(qs; ordered = false) : select_sql(qs; columns = pk_select(modelmeta(T).table, T), ordered = false)
@@ -1654,7 +1678,8 @@ Base.count(::Type{T}) where {T<:Model} = count(objects(T))
 Base.length(qs::QuerySet) = count(qs)
 
 "Whether any row matches."
-function exists(qs::QuerySet{T}) where {T}
+exists(qs::QuerySet) = in_db(() -> exists_here(qs), qs)
+function exists_here(qs::QuerySet{T}) where {T}
     qs.cache === nothing || return !isempty(qs.cache)
     qs.isnone && return false
     sql, ps = select_sql(chain(qs; limit = 1); columns = "1", ordered = false)
@@ -1840,13 +1865,15 @@ Run hand-written SQL (with `?` placeholders) and build model instances from the 
 rows must include `id`; fields missing from them are deferred, and extra columns become
 attributes, like annotations.
 """
-function raw(::Type{T}, sql::AbstractString, params = Any[]) where {T<:Model}
+raw(::Type{T}, sql::AbstractString, params = Any[]; db = nothing) where {T<:Model} =
+    with_db(() -> raw_here(T, sql, params), something(db, routed_db(T, false), Some(nothing)))
+function raw_here(::Type{T}, sql::AbstractString, params = Any[]) where {T<:Model}
     rows = execute(sql, collect(Any, params))
     known = Set{Symbol}([:id; [attname(f) for f in all_fields(T)]])
     out = T[]
     for r in rows
         is_composite(T) || haskey(r, :id) || throw(ArgumentError("raw(): the query must select the id column"))
-        o = from_row(T, r)
+        o = set_instance_db!(from_row(T, r))
         for (k, v) in r
             k in known || (getfield(o, :_data)[k] = v)
         end
@@ -1861,7 +1888,8 @@ end
 The database's query plan for the queryset (`EXPLAIN QUERY PLAN` on SQLite, `EXPLAIN` on
 PostgreSQL and MySQL).
 """
-function explain(qs::QuerySet)
+explain(qs::QuerySet) = in_db(() -> explain_here(qs), qs)
+function explain_here(qs::QuerySet)
     sql, ps = select_sql(qs)
     prefix = occursin("SQLite", vendor(backend())) ? "EXPLAIN QUERY PLAN " : "EXPLAIN "
     lines = String[]
@@ -1911,7 +1939,9 @@ or updated).
 - `update_conflicts = true` updates `update_fields` of the existing row instead; PostgreSQL
   and SQLite also need the `unique_fields` that conflict.
 """
-function bulk_create(objs::AbstractVector{T}; batch_size = nothing, ignore_conflicts = false,
+bulk_create(objs::AbstractVector{T}; db = nothing, kw...) where {T<:Model} =
+    with_db(() -> (bulk_create_here(objs; kw...); foreach(set_instance_db!, objs); objs), something(db, routed_db(T, true), Some(nothing)))
+function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_conflicts = false,
                      update_conflicts = false, update_fields = nothing, unique_fields = nothing) where {T<:Model}
     isempty(objs) && return objs
     table_parent(concrete_model(T)) === nothing ||
@@ -1994,7 +2024,10 @@ end
 Write these fields of many saved objects with a few UPDATE statements (no `save!`, no
 signals); returns the number of rows changed.
 """
-function bulk_update(objs::AbstractVector{T}, fields; batch_size = nothing) where {T<:Model}
+bulk_update(objs::AbstractVector{T}, fields; db = nothing, kw...) where {T<:Model} =
+    with_db(() -> bulk_update_here(objs, fields; kw...),
+            isempty(objs) ? db : write_db(first(objs), db))
+function bulk_update_here(objs::AbstractVector{T}, fields; batch_size = nothing) where {T<:Model}
     isempty(objs) && return 0
     names = Symbol[Symbol(f) for f in fields]
     isempty(names) && throw(ArgumentError("bulk_update needs at least one field"))
@@ -2097,7 +2130,7 @@ function combine(op, qs::QuerySet{T}, others; keep_all = false) where {T}
     vf = first(parts).values_fields
     all(p -> p.values_fields == vf, parts) || throw(ArgumentError("$op: the querysets must select the same fields"))
     QuerySet{T}(Q[], String[], nothing, 0, false, Vector{Symbol}[], copy(qs.prefetch), nothing, nothing,
-                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all))
+                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all), qs.db)
 end
 
 """
@@ -2145,7 +2178,8 @@ Base.get(::Type{T}, qargs::Q...; kw...) where {T<:Model} = get(objects(T), qargs
 Bulk SQL UPDATE of all matching rows; returns the number of rows changed.
 Does not call `save!` or touch `auto_now` fields.
 """
-function update!(qs::QuerySet{T}; kw...) where {T}
+update!(qs::QuerySet; kw...) = in_db(() -> update_here!(qs; kw...), qs, true)
+function update_here!(qs::QuerySet{T}; kw...) where {T}
     qs.isnone && return 0
     meta = modelmeta(T)
     sets, ps = String[], Any[]
@@ -2241,7 +2275,7 @@ end
 
 "Delete all matching rows (with `on_delete` handling for related objects). Returns the count."
 Base.delete!(qs::QuerySet{T}) where {T} =
-    atomic(() -> delete_ids!(T, row_keys(qs)))
+    in_db(() -> atomic(() -> delete_ids!(T, row_keys(qs))), qs, true)
 
 Base.show(io::IO, qs::QuerySet{T}) where {T} = print(io, "<QuerySet{", nameof(T), "}>")
 function Base.show(io::IO, ::MIME"text/plain", qs::QuerySet{T}) where {T}
@@ -2262,7 +2296,33 @@ tattr(qs::QuerySet, ::Val{:last}) = last(qs)
 INSERT (when `obj.id === nothing`) or UPDATE the object. Sets `auto_now` /
 `auto_now_add` timestamps.
 """
-function save!(obj::T) where {T<:Model}
+function save!(obj::T; db = nothing) where {T<:Model}
+    alias = write_db(obj, db)
+    with_db(alias) do
+        check_relations_db(obj)
+        save_here!(obj)
+        set_instance_db!(obj)
+    end
+end
+
+"Where to write an object: `db`, else the enclosing `using_db` block, else where it came from, else the routers."
+write_db(obj::Model, db) = db !== nothing ? db : db_pinned() ? nothing : something(instance_db(obj), routed_db(typeof(obj), true), Some(nothing))
+
+"Refuse to save an object whose related objects (already loaded) live in another database."
+function check_relations_db(obj::Model)
+    me = current_alias()
+    for (k, v) in getfield(obj, :_cache)
+        v isa Model || continue
+        other = instance_db(v)
+        (other === nothing || other == me) && continue
+        ok = ask_routers(allow_relation, obj, v)
+        ok === true && continue
+        throw(ArgumentError("$(nameof(typeof(obj))).$k is an object from database '$other'; this one is saved to '$me' " *
+                            "(a router's allow_relation can permit it)"))
+    end
+end
+
+function save_here!(obj::T) where {T<:Model}
     data = getfield(obj, :_data)
     ts = timezone_now()
     for f in all_fields(T)
@@ -2343,19 +2403,21 @@ function save_table!(M::Type, data, root::Bool, fresh::Bool = false)
 end
 
 "Delete the object (and cascade to related objects)."
-function Base.delete!(obj::T) where {T<:Model}
+function Base.delete!(obj::T; db = nothing) where {T<:Model}
     id = obj.id
     id === nothing && error("cannot delete an unsaved $(T)")
-    atomic(() -> delete_ids!(T, [id]))
+    with_db(() -> atomic(() -> delete_ids!(T, [id])), write_db(obj, db))
     getfield(obj, :_data)[:id] = nothing
     obj
 end
 
 "Reload field values from the database."
 function refresh!(obj::T) where {T<:Model}
-    fresh = get(base_objects(T); id = obj.id)
+    db = instance_db(obj)
+    fresh = with_db(() -> get(base_objects(T); id = obj.id), db)
     merge!(getfield(obj, :_data), getfield(fresh, :_data))
     empty!(getfield(obj, :_cache))
+    db === nothing || (getfield(obj, :_cache)[:__db] = db)
     obj
 end
 
@@ -2480,7 +2542,7 @@ function m2m_queryset(m::Model, f::Field, forward::Bool)
     id = getfield(m, :_data)[:id]
     step1, step2 = m2m_path(f, !forward)      # from the other model back to this instance
     qs = filter(objects(Other), Q(Symbol(step1, "__", step2) => id))
-    chain(qs; owner = M2MOwner(through_model(f), mine, other, id, forward))
+    chain(qs; owner = M2MOwner(through_model(f), mine, other, id, forward), db = instance_db(m))
 end
 
 function m2m_owner(qs::QuerySet)

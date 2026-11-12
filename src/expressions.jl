@@ -382,7 +382,8 @@ end
 Aggregate over the whole queryset: `aggregate(objects(Post); total = Sum(:views), n = Count())`.
 The positional form (`:count`, `:sum`, `:avg`, `:min`, `:max`) returns a single value.
 """
-function aggregate(qs::QuerySet{T}; kw...) where {T}
+aggregate(qs::QuerySet; kw...) = in_db(() -> aggregate_here(qs; kw...), qs)
+function aggregate_here(qs::QuerySet{T}; kw...) where {T}
     isempty(kw) && throw(ArgumentError("aggregate needs at least one name = Aggregate(...)"))
     c = SQLCompiler(T)
     sel, ps = String[], Any[]

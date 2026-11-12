@@ -23,7 +23,7 @@
 end
 Base.show(io::IO, ct::ContentType) = print(io, ct.app_label, " | ", ct.model)
 
-const CT_CACHE = Dict{Any,Any}()          # model type => ContentType, per database
+const CT_CACHE = Dict{Any,Any}()          # (database alias, model type) => ContentType
 const CT_LOCK = ReentrantLock()
 push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> empty!(CT_CACHE), CT_LOCK))
 
@@ -35,11 +35,12 @@ model's content type.
 """
 function get_for_model(T::Type)
     C = concrete_model(T)
-    ct = lock(() -> get(CT_CACHE, C, nothing), CT_LOCK)
+    key = (current_alias(), C)
+    ct = lock(() -> get(CT_CACHE, key, nothing), CT_LOCK)
     ct === nothing || return ct
     m = modelmeta(C)
     ct = first(get_or_create(ContentType; app_label = m.app, model = lowercase(m.name)))
-    lock(() -> get!(CT_CACHE, C, ct), CT_LOCK)
+    lock(() -> get!(CT_CACHE, key, ct), CT_LOCK)
 end
 get_for_model(obj::Model) = get_for_model(typeof(obj))
 

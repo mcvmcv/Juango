@@ -41,6 +41,7 @@ function default_settings()
         :CACHE_MIDDLEWARE_SECONDS => 600,
         :TEMPLATE_CACHE_CHECK_MTIME => true,
         :SESSION_ENGINE => :db,
+        :DATABASE_ROUTERS => Any[],
         :DATABASE_POOL_SIZE => 10,
         :DATABASE_POOL_TIMEOUT => 30,
         :CONN_MAX_AGE => 600,

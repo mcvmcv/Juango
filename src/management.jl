@@ -144,7 +144,8 @@ function cmd_migrate(args)
         isempty(ks) && return println("App '$app' has no migrations.")
         target = last(ks)[2]
     end
-    migrate(; app = app, target = target, fake = haskey(flags, "fake"), sync = haskey(flags, "sync"))
+    migrate(; app = app, target = target, fake = haskey(flags, "fake"), sync = haskey(flags, "sync"),
+            database = get(flags, "database", nothing))
 end
 
 # makemigrations [app...] [--app NAME] [--name NAME] [--empty] [--merge] [--dry-run] [--check] [--noinput]
@@ -188,7 +189,7 @@ end
 
 for (n, h, f) in (
     ("runserver", "Start the development server: runserver [host:]port [--cert cert.pem --key key.pem]", cmd_runserver),
-    ("migrate", "Apply migrations: migrate [app] [target|zero] [--fake] [--sync]", cmd_migrate),
+    ("migrate", "Apply migrations: migrate [app] [target|zero] [--fake] [--sync] [--database ALIAS]", cmd_migrate),
     ("makemigrations", "Write migrations for model changes (--name, --empty, --merge, --dry-run, --check, --noinput, --app)", cmd_makemigrations),
     ("showmigrations", "List migrations and whether they are applied", _ -> showmigrations()),
     ("sqlmigrate", "Print the SQL for a migration: sqlmigrate [app] <name> [--backwards]", cmd_sqlmigrate),

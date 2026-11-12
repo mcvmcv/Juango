@@ -469,6 +469,36 @@ PostgreSQL and MySQL use a connection pool, and SQLite uses one shared connectio
   - `CONN_HEALTH_CHECKS` (true): ping a connection that sat idle before reusing it, so connections dropped by a server restart are replaced.
 - **Monitoring.** `pool_status()` reports the pool's size and how many connections are in use and idle.
 
+#### Multiple databases
+
+```julia
+configure!(DATABASES = Dict("default" => "postgresql://localhost/app",
+                            "replica" => "postgresql://replica/app",
+                            "archive" => "archive.sqlite3"))
+migrate(database = "archive")                       # manage.jl migrate --database archive
+
+using_db(objects(Post), "replica")                  # one queryset
+save!(post; db = "archive")                         # one save
+using_db("archive") do                              # everything in the block
+    create(Post; title = "old")
+end
+atomic(db = "archive") do ... end                   # a transaction on that database
+```
+
+Without `DATABASES`, `DATABASE` is the "default" database. Each database has its own connections and transactions. An object remembers the database it was loaded from or saved to: saving it again, `refresh!` and following its relations use that database. Saving an object together with a related object from another database raises an error, unless a router allows the relation.
+
+Routers (`DATABASE_ROUTERS`) choose a database for each model. A router is any value whose type has methods of `Juango.db_for_read`, `db_for_write`, `allow_relation` and `allow_migrate`. Each returns an alias (or `true`/`false`), or `nothing` to leave the decision to the next router:
+
+```julia
+struct PrimaryReplica end
+Juango.db_for_read(::PrimaryReplica, ::Type) = "replica"
+Juango.db_for_write(::PrimaryReplica, ::Type) = "default"
+Juango.allow_migrate(::PrimaryReplica, db, app_label; model = nothing) = db == "default"
+configure!(DATABASE_ROUTERS = [PrimaryReplica()])
+```
+
+An explicit database (`using_db`, `db = ...`) beats a `using_db` block, which beats the object's own database, which beats the routers. Where `allow_migrate` says no, `migrate` records an app's migrations without running them.
+
 #### PostgreSQL
 
 PostgreSQL goes through [LibPQ.jl](https://github.com/JuliaDatabases/LibPQ.jl). LibPQ is an optional dependency, so SQLite-only projects never install it. To use Postgres:

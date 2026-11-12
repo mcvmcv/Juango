@@ -178,3 +178,67 @@ end
     end
     @test B.backend() isa (IS_POSTGRES ? B.PostgresBackend : IS_MYSQL ? B.MySQLBackend : B.SQLiteBackend)
 end
+
+# A router that keeps Topics in the "other" database and migrates only there.
+struct TopicsElsewhere end
+Juango.db_for_read(::TopicsElsewhere, ::Type{Topic}) = "other"
+Juango.db_for_write(::TopicsElsewhere, ::Type{Topic}) = "other"
+Juango.allow_migrate(::TopicsElsewhere, db, app; model = nothing) = app == "auth" ? db == "default" : nothing
+
+@testset "multiple databases" begin
+    other = joinpath(mktempdir(), "other.sqlite3")
+    old = get(settings, :DATABASES, nothing)
+    quiet(f) = redirect_stdout(f, devnull)
+    try
+        configure!(DATABASES = Dict("default" => settings.DATABASE, "other" => other))
+        quiet(() -> migrate(verbose = false))       # in-memory SQLite was reopened by the test above
+        quiet(() -> migrate(database = "other", verbose = false))
+        @test count(using_db(objects(Author), "other")) == 0
+        a = using_db("other") do
+            create(Author; name = "Elsewhere")
+        end
+        @test Juango.instance_db(a) == "other"
+        @test !exists(filter(Author; name = "Elsewhere")) && exists(using_db(filter(Author; name = "Elsewhere"), "other"))
+        # objects remember where they came from
+        o = first(using_db(filter(Author; name = "Elsewhere"), "other"))
+        o.email = "e@x.io"; save!(o)
+        @test get(using_db(Author, "other"); name = "Elsewhere").email == "e@x.io"
+        @test refresh!(o).email == "e@x.io" && Juango.instance_db(o) == "other"
+        # and their relations follow
+        art = using_db(() -> create(Article; title = "far", author = o), "other")
+        @test get(using_db(Article, "other"); id = art.id).author.name == "Elsewhere"
+        @test count(o.articles) == 1 && first(o.articles).title == "far"
+        # an explicit database for one save
+        save!(Author(; name = "Copied"); db = "other")
+        @test exists(using_db(filter(Author; name = "Copied"), "other")) && !exists(filter(Author; name = "Copied"))
+        @test update!(using_db(filter(Author; name = "Copied"), "other"); email = "c@x.io") == 1
+        @test aggregate(using_db(objects(Author), "other"); n = Count())[:n] == 2
+        @test length(raw(Author, "SELECT id, name FROM " * Juango.qname("author"); db = "other")) == 2
+        # relating objects of two databases is refused
+        mine = create(Author; name = "Local One")
+        far = get(using_db(Article, "other"); id = art.id)
+        far.author = mine
+        @test_throws ArgumentError save!(far)
+        # transactions are per database
+        @test_throws ErrorException atomic(db = "other") do
+            create(Author; name = "Rolled"); error("undo")
+        end
+        @test !exists(using_db(filter(Author; name = "Rolled"), "other"))
+        delete!(get(using_db(Author, "other"); name = "Copied"))
+        @test !exists(using_db(filter(Author; name = "Copied"), "other"))
+        # routers
+        configure!(DATABASE_ROUTERS = Any[TopicsElsewhere()])
+        t = create(Topic; name = "routed-topic")
+        @test Juango.instance_db(t) == "other" && exists(filter(Topic; name = "routed-topic"))
+        @test !exists(using_db(filter(Topic; name = "routed-topic"), "default"))
+        @test exists(filter(Author; name = "Local One"))                      # other models stay put
+        @test using_db(() -> exists(filter(Topic; name = "routed-topic")), "default") == false   # a block wins
+        @test !Juango.migrate_allowed("other", "auth") && Juango.migrate_allowed("default", "auth") &&
+              Juango.migrate_allowed("other", "project")
+        quiet(() -> migrate(database = "other", verbose = false))
+        @test_throws Juango.ImproperlyConfigured count(using_db(Author, "nope"))
+    finally
+        configure!(DATABASES = old, DATABASE_ROUTERS = Any[])
+        Juango.close_connection!("other")
+    end
+end
