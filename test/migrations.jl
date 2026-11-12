@@ -110,6 +110,50 @@ end
     end
 end
 
+@testset "migrations: database comments" begin
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("migcom" => dir))
+    quiet(f) = redirect_stdout(f, devnull)
+    b = Juango.backend()
+    col_comment() = b isa Juango.PostgresBackend ?
+        only(Juango.execute("SELECT col_description('mi_note'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'mi_note'::regclass AND attname = 'body')) AS c"))[:c] :
+        b isa Juango.MySQLBackend ?
+        only(Juango.execute("SELECT COLUMN_COMMENT AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mi_note' AND COLUMN_NAME = 'body'"))[:c] : nothing
+    tab_comment() = b isa Juango.PostgresBackend ? only(Juango.execute("SELECT obj_description('mi_note'::regclass, 'pg_class') AS c"))[:c] :
+        b isa Juango.MySQLBackend ?
+        only(Juango.execute("SELECT TABLE_COMMENT AS c FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mi_note'"))[:c] : nothing
+    try
+        @eval @model struct MiNote
+            body = TextField(db_comment = "The note's text")
+            Meta(table = "mi_note", app_label = "migcom", db_table_comment = "Notes, one per row")
+        end
+        src = read(only(quiet(() -> makemigrations(app = "migcom", questioner = _ -> false))), String)
+        @test occursin("comment = \"The note's text\"", src) && occursin("comment = \"Notes, one per row\"", src)
+        quiet(() -> migrate())
+        if !(b isa Juango.SQLiteBackend)
+            @test col_comment() == "The note's text" && tab_comment() == "Notes, one per row"
+        end
+        Juango.unregister_model!(MiNote)
+        @eval @model struct MiNote2
+            body = TextField(db_comment = "Changed")
+            Meta(table = "mi_note", name = "MiNote", app_label = "migcom")
+        end
+        src = read(only(quiet(() -> makemigrations(app = "migcom", questioner = _ -> false))), String)
+        @test occursin("AlterField(\"mi_note\"", src) && occursin("AlterModelTableComment(\"mi_note\", nothing)", src)
+        quiet(() -> migrate())
+        if !(b isa Juango.SQLiteBackend)
+            @test col_comment() == "Changed" && something(tab_comment(), "") == ""
+        end
+        @test isempty(quiet(() -> makemigrations(app = "migcom", questioner = _ -> false)))
+        quiet(() -> migrate(app = "migcom", target = "0001"))
+        b isa Juango.SQLiteBackend || @test tab_comment() == "Notes, one per row"
+        quiet(() -> migrate(app = "migcom", target = "zero"))
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "migcom", Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end
+
 @testset "migrations" begin
     M = Juango.Migrations
     dir = mktempdir()

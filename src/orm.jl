@@ -47,6 +47,7 @@ mutable struct Field
     db_default::Any     # value (or Now()) the database fills in when a new row leaves the field out
     generated::Any      # GeneratedField: (expression, persisted) computed by the database
     symmetrical::Bool   # ManyToManyField(:self): a relation in one direction is one in both
+    db_comment::Union{Nothing,String}   # a comment on the column in the database
 end
 
 "The value of a field with `db_default` until the row is saved and the database has filled it in."
@@ -62,7 +63,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                related_name = nothing, auto_now = false, auto_now_add = false, verbose_name = "",
                help_text = "", validators = Any[], widget = nothing, editable = true,
                db_index = false, required = nothing, label = nothing, through = nothing, one_to_one = false,
-               db_default = nothing, generated = nothing, symmetrical = false)
+               db_default = nothing, generated = nothing, symmetrical = false, db_comment = nothing)
     required === nothing || (blank = !required)
     label === nothing || (verbose_name = string(label))
     if auto_now || auto_now_add
@@ -74,7 +75,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           auto_now, auto_now_add, verbose_name isa AbstractString ? verbose_name : string(verbose_name),
           help_text isa AbstractString ? help_text : string(help_text), collect(Any, validators),
           widget isa Union{AbstractString,Symbol} ? Symbol(widget) : widget, editable, db_index, nothing, through, one_to_one,
-          db_default, generated, symmetrical)
+          db_default, generated, symmetrical, db_comment === nothing ? nothing : string(db_comment))
 end
 
 """

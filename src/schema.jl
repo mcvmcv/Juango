@@ -69,12 +69,14 @@ struct Column
     references::Union{Nothing,String}
     of::Union{Nothing,Symbol}        # arrays: element kind; foreign keys: :uuid when the target's pk is a UUID
     generated::Union{Nothing,GeneratedSpec}
+    comment::Union{Nothing,String}   # db_comment
 end
 Column(name, kind::Symbol; null = false, default = nothing, unique = false, index = false,
-       max_length = nothing, references = nothing, of = nothing, generated = nothing) =
+       max_length = nothing, references = nothing, of = nothing, generated = nothing, comment = nothing) =
     Column(string(name), kind, null, default, unique, index && !unique, max_length,
            references === nothing ? nothing : string(references), of === nothing ? nothing : Symbol(of),
-           generated === nothing || generated isa GeneratedSpec ? generated : GeneratedSpec(generated...))
+           generated === nothing || generated isa GeneratedSpec ? generated : GeneratedSpec(generated...),
+           comment === nothing ? nothing : string(comment))
 
 Base.:(==)(a::Column, b::Column) = all(isequal(getfield(a, f), getfield(b, f)) for f in fieldnames(Column))
 Base.hash(c::Column, h::UInt) = hash(c.name, hash(c.kind, h))
@@ -83,7 +85,8 @@ same_definition(a::Column, b::Column) = all(isequal(getfield(a, f), getfield(b, 
 "A copy of `c` with some attributes changed: `with_column(c; name=\"new\")`."
 function with_column(c::Column; name = c.name, kw...)
     attrs = merge((null = c.null, default = c.default, unique = c.unique, index = c.index,
-                   max_length = c.max_length, references = c.references, of = c.of, generated = c.generated), NamedTuple(kw))
+                   max_length = c.max_length, references = c.references, of = c.of, generated = c.generated,
+                   comment = c.comment), NamedTuple(kw))
     Column(name, c.kind; attrs...)
 end
 
@@ -153,13 +156,14 @@ mutable struct Table
     indexes::Vector{Index}                      # Meta(indexes=...), with names filled in
     constraints::Vector{Any}                    # ConstraintSpecs (constraints.jl), by name
     pk_columns::Vector{String}                  # pk = :composite: the primary key's columns
+    comment::Union{Nothing,String}              # Meta(db_table_comment = ...)
 end
 Table(name, app, model, columns, unique_together = Vector{String}[]; parent = nothing, pk = :auto, indexes = Index[], constraints = Any[],
-      pk_columns = String[]) =
+      pk_columns = String[], comment = nothing) =
     Table(name, app, model, columns, unique_together, parent === nothing ? nothing : string(parent), Symbol(pk), collect(Index, indexes),
-          sort(collect(Any, constraints); by = c -> c.name), collect(String, pk_columns))
+          sort(collect(Any, constraints); by = c -> c.name), collect(String, pk_columns), comment === nothing ? nothing : string(comment))
 Base.copy(t::Table) = Table(t.name, t.app, t.model, copy(t.columns), [copy(u) for u in t.unique_together],
-                            t.parent, t.pk, copy(t.indexes), copy(t.constraints), copy(t.pk_columns))
+                            t.parent, t.pk, copy(t.indexes), copy(t.constraints), copy(t.pk_columns), t.comment)
 normalize_unique(sets) = sort([collect(String, string.(u)) for u in sets])
 function getcolumn(t::Table, name)
     i = findfirst(c -> c.name == name, t.columns)
@@ -191,7 +195,7 @@ function column_state(f::Field)
          f.kind === :fk && pk_kind(related_model(f)) === :uuid ? :uuid : nothing
     Column(column(f), schema_kind(f.kind); null = f.null, default = d, unique = f.unique,
            index = f.db_index, max_length = schema_kind(f.kind) in (:string, :citext) || (f.kind === :array && f.related === :string) ? f.max_length : nothing,
-           references = ref, of = of, generated = gen)
+           references = ref, of = of, generated = gen, comment = f.db_comment)
 end
 
 "The column default for a field's `db_default`: a value, or SQL for `Now()`."
@@ -226,7 +230,8 @@ function table_state(T::Type)
     Table(m.table, m.app, m.name, [column_state(f) for f in m.fields],
           normalize_unique([[col(n) for n in u] for u in m.unique_together]);
           parent = P === nothing ? nothing : modelmeta(P).table, pk = pk, pk_columns = pkcols,
-          indexes = sort(idx; by = i -> i.name), constraints = Any[constraint_spec(T, c) for c in model_constraints(T)])
+          indexes = sort(idx; by = i -> i.name), constraints = Any[constraint_spec(T, c) for c in model_constraints(T)],
+          comment = get(m.extra, :db_table_comment, nothing))
 end
 
 "The schema the given models describe."
@@ -266,8 +271,17 @@ function column_sql(b::DatabaseBackend, c::Column; adding = false, inline_fk = i
     (d === nothing && adding && !c.null) && (d = backfill_value(c))
     d === nothing || (s *= " DEFAULT " * lit(b, d))
     (c.references !== nothing && inline_fk) && (s *= " REFERENCES $(quote_name(b, ref_table(c.references))) ($(quote_name(b, "id")))")
+    (c.comment !== nothing && b isa MySQLBackend) && (s *= " COMMENT " * lit(b, c.comment))
     s
 end
+
+"`COMMENT ON COLUMN` (PostgreSQL; MySQL puts comments in the column definition, SQLite has none)."
+column_comment_sql(b::DatabaseBackend, table, name, comment) = b isa PostgresBackend ?
+    ["COMMENT ON COLUMN $(quote_name(b, table)).$(quote_name(b, name)) IS " * lit(b, comment)] : String[]
+"The statement that sets (or with `nothing` removes) a table's comment."
+table_comment_sql(b::DatabaseBackend, table, comment) =
+    b isa PostgresBackend ? ["COMMENT ON TABLE $(quote_name(b, table)) IS " * lit(b, comment)] :
+    b isa MySQLBackend ? ["ALTER TABLE $(quote_name(b, table)) COMMENT = " * lit(b, something(comment, ""))] : String[]
 
 index_name(table, c::Column) = constraint_name(table, c.name, c.unique ? "uniq" : "idx")
 
@@ -314,7 +328,14 @@ function create_table_sql(b::DatabaseBackend, t::Table; if_not_exists = false)
     defs = [column_sql(b, c) for c in t.columns]
     t.pk === :composite ? push!(defs, "PRIMARY KEY (" * join([quote_name(b, x) for x in t.pk_columns], ", ") * ")") :
                           pushfirst!(defs, pk_column_sql(b, t))
-    push!(stmts, "CREATE TABLE $ine$(quote_name(b, t.name)) (" * join(vcat(defs, checks), ", ") * ")")
+    push!(stmts, "CREATE TABLE $ine$(quote_name(b, t.name)) (" * join(vcat(defs, checks), ", ") * ")" *
+                 (t.comment !== nothing && b isa MySQLBackend ? " COMMENT = " * lit(b, t.comment) : ""))
+    if b isa PostgresBackend
+        t.comment === nothing || append!(stmts, table_comment_sql(b, t.name, t.comment))
+        for c in t.columns
+            c.comment === nothing || append!(stmts, column_comment_sql(b, t.name, c.name, c.comment))
+        end
+    end
     for c in t.columns
         append!(stmts, index_sql(b, t.name, c; if_not_exists = if_not_exists))
     end
@@ -397,6 +418,7 @@ function add_column_sql(b::DatabaseBackend, t::Table, c::Column, deferred::Vecto
         push!(stmts, "ALTER TABLE $(quote_name(b, t.name)) ALTER COLUMN $(quote_name(b, c.name)) DROP DEFAULT")
     end
     append!(stmts, index_sql(b, t.name, c; if_not_exists = false))
+    c.comment === nothing || append!(stmts, column_comment_sql(b, t.name, c.name, c.comment))
     append!(deferred, fk_sql(b, t.name, c))
     stmts
 end
@@ -418,8 +440,9 @@ function rename_column_sql(b::DatabaseBackend, old::Table, new::Table, oldname, 
 end
 
 function alter_column_sql(b::DatabaseBackend, old::Table, new::Table, name, deferred::Vector{String})
-    can_alter_table(b) || return remake_table_sql(b, old, new)
     c0, c1 = getcolumn(old, name), getcolumn(new, name)
+    with_column(c0; comment = c1.comment) == c1 && return column_comment_sql(b, new.name, name, c1.comment)  # only the comment
+    can_alter_table(b) || return remake_table_sql(b, old, new)
     t, col = quote_name(b, new.name), quote_name(b, name)
     if c0.generated !== nothing || c1.generated !== nothing        # generated: drop and add it again
         return vcat(["ALTER TABLE $t DROP COLUMN $col"], add_column_sql(b, new, c1, deferred))
@@ -445,6 +468,7 @@ function alter_column_sql(b::DatabaseBackend, old::Table, new::Table, name, defe
     end
     (c0.unique, c0.index) != (c1.unique, c1.index) && append!(stmts, index_sql(b, new.name, c1; if_not_exists = false))
     (c0.references != c1.references) && append!(deferred, fk_sql(b, new.name, c1))
+    c0.comment == c1.comment || append!(stmts, column_comment_sql(b, new.name, name, c1.comment))
     stmts
 end
 
@@ -456,7 +480,7 @@ Columns are matched by name; new columns get their default or backfill value.
 function remake_table_sql(b::DatabaseBackend, old::Table, new::Table)
     # indexes come after the rename; CHECK constraints are part of the CREATE TABLE
     tmp = Table("new__" * new.name, new.app, new.model, new.columns; parent = new.parent, pk = new.pk,
-                constraints = filter(c -> c.kind === :check, new.constraints), pk_columns = new.pk_columns)
+                constraints = filter(c -> c.kind === :check, new.constraints), pk_columns = new.pk_columns, comment = new.comment)
     q(s) = quote_name(b, s)
     cols, exprs = new.pk === :composite ? (String[], String[]) : ([q("id")], [q("id")])
     for c in new.columns
