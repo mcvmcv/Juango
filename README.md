@@ -882,7 +882,7 @@ configure!(AUTH_USER_MODEL = "accounts.Member")     # or Member
 end
 ```
 
-`get_user_model()` returns it, and `create_user`, `authenticate`, sessions, permissions, password reset, the admin and `createsuperuser` all use it. Migrations record `ForeignKey(USER_MODEL)` references as swappable, so an app's migrations work whichever user model a project picks. Only the chosen user model has a table: Juango's `User` drops out of content types, permissions and reverse relations when it's swapped. Its `auth_user` table is still created by the auth app's migration, but stays unused.
+`get_user_model()` returns it, and `create_user`, `authenticate`, sessions, permissions, password reset, the admin and `createsuperuser` all use it. Migrations record `ForeignKey(USER_MODEL)` references as swappable, so an app's migrations work whichever user model a project picks. Only the chosen user model has a table: Juango's `User` drops out of content types, permissions and reverse relations when it's swapped. The auth app's migration then skips `auth_user` and its join tables, as Django does.
 
 #### Authentication backends
 
@@ -1345,7 +1345,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. Request limi
 
 - **Historical models are table-level.** In data migrations, `get_model` gives the table as it was (columns, not relations or methods), unlike Django's historical model classes.
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
-- **Composite primary keys, swappable user models and admin docs** have Django's limitations: no foreign keys to composite-key models, choose `AUTH_USER_MODEL` before the first `migrate` (the unused `auth_user` table is still created), and docstrings are shown as plain text.
+- **Composite primary keys, swappable user models and admin docs** have Django's limitations: no foreign keys to composite-key models, choose `AUTH_USER_MODEL` before the first `migrate`, and docstrings are shown as plain text.
 - **GZip and streaming.** `GZipMiddleware` doesn't compress streamed responses.
 - `runserver` is HTTP.jl's server. It speaks HTTP/1.1 and HTTP/2 (cleartext with prior knowledge, or negotiated over TLS), and serves HTTPS with `runserver 8443 --cert cert.pem --key key.pem` (or `runserver(...; certfile, keyfile)`). WebSockets need HTTP/1.1, which browsers use for them anyway. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and run `manage.jl check --deploy`.
 

@@ -857,6 +857,27 @@ end
     end
 end
 
+@model struct SwapMember <: AbstractUser
+    Meta(table = "swap_member", app_label = "project")
+end
+
+@testset "migrations: a swapped user model's tables aren't created" begin
+    sqls(; kw...) = join(filter(x -> x isa AbstractString, Juango.Migrations.migration_actions(
+        Juango.Migrations.build_graph(["auth", "contenttypes"]), ("auth", "0001_initial"); kw...)), "\n")
+    @test occursin("auth_user", sqls()) && occursin("auth_user_groups", sqls())
+    try
+        configure!(AUTH_USER_MODEL = SwapMember)
+        @test Juango.Migrations.swapped_tables() == Set(["auth_user", "auth_user_groups", "auth_user_user_permissions"])
+        for s in (sqls(), sqls(backwards = true))
+            @test occursin("auth_group", s) && !occursin("auth_user", s)
+        end
+        g = Juango.Migrations.build_graph(["auth", "contenttypes"])
+        @test haskey(Juango.Migrations.replay(g, keys(g.nodes)), "auth_user")      # still in the migration state
+    finally
+        configure!(AUTH_USER_MODEL = User)
+    end
+end
+
 @testset "pre_migrate and post_migrate signals" begin
     seen = Tuple{Symbol,String,Any}[]
     pre = (s; app_label, database, plan, apps, kw...) -> push!(seen, (:pre, app_label, (database, apps)))

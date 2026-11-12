@@ -572,6 +572,19 @@ record_unapplied!(k) = execute("DELETE FROM \"juango_migrations\" WHERE \"app\" 
 run_action(a::AbstractString) = execute(a)
 run_action(f::Function) = Base.invokelatest(f)   # defined in a migration file loaded after this code was compiled
 
+"""
+Tables of Juango's `User` (and its many-to-many join tables) when `AUTH_USER_MODEL` names
+another model: migrations keep them in their state but don't touch the database, as Django
+does for swappable models.
+"""
+function swapped_tables()
+    U = Juango.User
+    Juango.get_user_model() === U && return Set{String}()
+    t = Juango.modelmeta(U).table
+    Set{String}([t; [t * "_" * string(f.name) for f in Juango.modelmeta(U).m2m]])
+end
+skips_database(op::Operation, swapped) = !isempty(swapped) && hasfield(typeof(op), :table) && getfield(op, :table) in swapped
+
 "The SQL (and functions) a migration runs, without running it."
 function migration_actions(g::Graph, k; backwards = false)
     m = g.nodes[k]
@@ -582,12 +595,15 @@ function migration_actions(g::Graph, k; backwards = false)
     end
     deferred = String[]
     actions = Any[]
+    swapped = swapped_tables()
     if backwards
         for i in length(m.operations):-1:1
+            skips_database(m.operations[i], swapped) && continue
             append!(actions, Migrations.backwards(m.operations[i], b, states[i], states[i+1], deferred))
         end
     else
         for (i, op) in enumerate(m.operations)
+            skips_database(op, swapped) && continue
             append!(actions, forwards(op, b, states[i], states[i+1], deferred))
         end
     end
@@ -599,10 +615,12 @@ end
 function already_in_database(m::Migration)
     m.initial || return false
     b = backend()
-    tables = [op.table for op in m.operations if op isa CreateModel]
+    swapped = swapped_tables()
+    tables = [op.table for op in m.operations if op isa CreateModel && !(op.table in swapped)]
     isempty(tables) && return false
     all(t -> table_exists(b, t), tables) || return false
     for op in m.operations
+        skips_database(op, swapped) && continue
         if op isa CreateModel
             cols = Set(table_columns(b, op.table))
             all(c -> c.name in cols, op.columns) || return false
