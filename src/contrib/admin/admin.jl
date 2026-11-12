@@ -14,7 +14,7 @@ import ..Juango: Model, Field, Request, modelmeta, attname, label, findfield, re
                  SafeString, escape_html, render, NOTFOUND, tattr, urlencode, QueryDict, User, AbstractUser, LoginView,
                  make_password, set_unusable_password!, reverse_relations, Paginator, page, Http404,
                  ProtectedError, staff_member_required, message!, reverse_url, get_absolute_url, model_name,
-                 HttpResponse, LogEntry, log_action!, ADDITION, CHANGE, DELETION, get_for_model
+                 HttpResponse, LogEntry, log_action!, ADDITION, CHANGE, DELETION, get_for_model, management_form
 using Dates
 
 # --- options -----------------------------------------------------------------------------------

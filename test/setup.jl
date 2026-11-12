@@ -1,8 +1,13 @@
 # Shared setup for the test files: models, templates, URLs and the test database.
 # Each file includes it once: `@isdefined(TEST_SETUP_DONE) || include("setup.jl")`.
 using Test
-using Juango
+using Juango, Juango.Testing, Juango.GIS, Juango.Postgres
+# The tests cover the whole public API, so they use the public names that aren't exported too.
+for n in names(Juango)
+    Base.isexported(Juango, n) || n === :Juango || Core.eval(Main, :(using Juango: $n))
+end
 using Dates
+using UUIDs: UUID, uuid4
 const JSON = Juango.JSON
 
 # JUANGO_TEST_DATABASE picks the database: unset for in-memory SQLite, a SQLite path or

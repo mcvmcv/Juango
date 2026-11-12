@@ -18,13 +18,23 @@ Juango gives Julia the "batteries included" workflow from Django. If you know Dj
 | `django.contrib.admin` | `Admin.register!(Post; list_display=..., search_fields=...)` |
 | `manage.py makemigrations / migrate / showmigrations / sqlmigrate` | `manage.jl makemigrations / migrate / showmigrations / sqlmigrate` |
 | `manage.py runserver / createsuperuser` | `manage.jl runserver / createsuperuser` |
-| `django.test.Client` | `Client()` |
+| `django.test.Client` | `Client()` (from `using Juango.Testing`) |
+
+`using Juango` brings in the everyday API: settings, requests and responses, URLs, templates, models, fields, querysets and expressions, forms, views, auth, messages, signals, caching, mail and translations. The rest of the API is public but not exported: write `Juango.name`, or `using Juango: name`. Three areas have modules of their own that export their names, like Django's packages:
+
+```julia
+using Juango.Testing      # Client, RequestFactory, assertions, override_settings, outbox ...
+using Juango.GIS          # geometry fields and values, distances, GeoJSON and WKT
+using Juango.Postgres     # HStoreField, CICharField, full-text search, trigrams, ExclusionConstraint, GinIndex
+```
+
+`Juango.Admin` and `Juango.Migrations` are modules too. Functions you add methods to (`get_absolute_url`, `tattr`, `natural_key`, database routers, authentication backends) are public.
 
 ## Quick start
 
 ```julia
 julia> using Juango
-julia> startproject("mysite")
+julia> Juango.startproject("mysite")
 ```
 
 ```sh
@@ -103,16 +113,16 @@ end
 
 In tests inside `rollback_after`, `capture_on_commit_callbacks(f; execute = true)` returns (and runs) the callbacks `f` registered.
 
-Add your own lookups and transforms with `register_lookup` and `register_transform` (Django's `register_lookup`). They work in `filter`, `exclude` and `Q`, across relations, and transforms chain:
+Add your own lookups and transforms with `Juango.register_lookup` and `Juango.register_transform` (Django's `register_lookup`). They work in `filter`, `exclude` and `Q`, across relations, and transforms chain:
 
 ```julia
-register_lookup("notequal"; kinds = [:char, :text]) do lhs, rhs     # rhs is the value's placeholder
+Juango.register_lookup("notequal"; kinds = [:char, :text]) do lhs, rhs     # rhs is the value's placeholder
     "$lhs <> $rhs"
 end
-register_transform("lower"; kinds = [:char, :text]) do lhs
+Juango.register_transform("lower"; kinds = [:char, :text]) do lhs
     "LOWER($lhs)"
 end
-register_transform(lhs -> "CHAR_LENGTH($lhs)", "len"; kinds = [:char, :text], output = :int)
+Juango.register_transform(lhs -> "CHAR_LENGTH($lhs)", "len"; kinds = [:char, :text], output = :int)
 filter(Author; name__lower__startswith = "an", name__len__gte = 3, email__notequal = "")
 ```
 
@@ -234,6 +244,8 @@ There are `aget`, `acreate`, `acount`, `aexists`, `afirst`, `alast`, `acollect`,
 #### GIS (PostGIS)
 
 ```julia
+using Juango.GIS
+
 @model struct City
     name     = CharField(max_length = 100)
     location = PointField()                       # SRID 4326; also LineString/Polygon/Multi*/GeometryField
@@ -317,7 +329,7 @@ end
     comments = GenericRelation(:Comment)      # post.comments, filter(Post; comments__text = "x")
 end
 create(Comment; content_object = post, text = "Nice")
-get_for_model(Post), model_class(ct)          # ContentType <-> model
+Juango.get_for_model(Post), Juango.model_class(ct)   # ContentType <-> model
 ```
 
 - **Content types:** `migrate` fills the `ContentType` table, whose migration ships with Juango.
@@ -379,6 +391,9 @@ The admin supports composite-key models. Their URLs carry the key as `7,apple` (
 #### JSON, arrays, UUIDs, ranges and full-text search
 
 ```julia
+using UUIDs: uuid4
+using Juango.Postgres                                    # CICharField, GinIndex, SearchVector ...
+
 @model struct Event
     data   = JSONField(default = Dict)                  # jsonb on Postgres, JSON text on SQLite
     tags   = ArrayField(CharField(max_length = 20); default = Vector{String})
@@ -409,6 +424,8 @@ order_by(annotate(qs; rank = SearchRank(SearchVector(:title, :body), SearchQuery
 #### PostgreSQL extras
 
 ```julia
+using Juango.Postgres
+
 @model struct Booking
     room   = IntegerField()
     during = DateRangeField()
@@ -946,9 +963,9 @@ add!(editors.permissions, get(Permission; codename = "change_post"))
 add!(user.groups, editors)
 add!(user.user_permissions, get(Permission; codename = "publish_post"))
 
-has_perm(user, "project.change_post")            # "<app label>.<codename>"; perm_name(Post, :change) builds it
+has_perm(user, "project.change_post")            # "<app label>.<codename>"; Juango.perm_name(Post, :change) builds it
 has_perms(user, ["project.add_post", "project.change_post"])
-has_module_perms(user, "project")
+Juango.has_module_perms(user, "project")
 const edit_post = permission_required("project.change_post")(edit_post_view)   # login redirect, else 403
 ```
 
@@ -1000,7 +1017,7 @@ urlpatterns = [i18n_patterns(path("about/", about; name = "about")),   # /en/abo
 **In JavaScript.** Serve the active language's translations to the browser:
 
 ```julia
-path("jsi18n/", JavaScriptCatalog(); name = "jsi18n")      # JSONCatalog() for the same as JSON
+path("jsi18n/", Juango.JavaScriptCatalog(); name = "jsi18n")      # Juango.JSONCatalog() for the same as JSON
 ```
 
 ```html
@@ -1046,7 +1063,7 @@ configure!(LOGGING = Dict(
         "juango.db.backends" => Dict("handlers" => ["console"], "level" => "DEBUG", "propagate" => false)),
     "root" => Dict("handlers" => ["console"], "level" => "WARNING")))
 
-log!("shop.payments", :info, "charged"; amount = 10)     # your own loggers
+Juango.log!("shop.payments", :info, "charged"; amount = 10)     # your own loggers
 ```
 
 - **Loggers.** `juango.request` gets 5xx errors (with the exception) and 4xx warnings. `juango.db.backends` gets each SQL statement with its duration, at DEBUG level. `juango.security.*` gets CSRF failures and disallowed hosts. Records pass up the dotted names to the root, unless a logger has `"propagate" => false`.
@@ -1086,7 +1103,7 @@ send(order_placed, Order; order = o)                             # send_robust c
 cache_set("greeting", "hi"; timeout = 60)          # seconds; nothing = for ever, 0 = don't store
 cache_get("greeting", "default")
 get_or_set("stats", () -> expensive(); timeout = 300)
-incr("hits"); cache_add(k, v); cache_delete(k); cache_get_many(keys); incr_version("menu")
+Juango.incr("hits"); cache_add(k, v); cache_delete(k); cache_get_many(keys); Juango.incr_version("menu")
 const home = cache_page(home_view; timeout = 60)   # whole GET responses, keyed by URL
 ```
 
@@ -1163,9 +1180,9 @@ Simple pages such as "About" or "Terms" can live in the database and be edited i
 
 ```julia
 configure!(INSTALLED_APPS = [..., "juango.flatpages"],               # registers FlatPage in the admin
-           MIDDLEWARE = vcat(settings.MIDDLEWARE, [FlatpageFallbackMiddleware]))
+           MIDDLEWARE = vcat(settings.MIDDLEWARE, [Juango.FlatpageFallbackMiddleware]))
 # and/or serve them under a prefix:
-urlpatterns = [..., path("pages/", flatpage_urls())]                  # /pages/about/ shows the page with url "/about/"
+urlpatterns = [..., path("pages/", Juango.flatpage_urls())]                 # /pages/about/ shows the page with url "/about/"
 ```
 
 The fallback middleware turns any 404 into the flat page at that URL, if there is one. It also adds a missing trailing slash, as APPEND_SLASH does. A page renders its `template_name` (default `flatpages/default.html`) with `flatpage` in the context. The page's title and content are HTML from the admin and are inserted unescaped. Pages with `registration_required` send anonymous visitors to the login page. For menus, `{% load flatpages %}{% get_flatpages '/about/' for user as pages %}` lists pages, optionally under a URL prefix. Pages that need a login are included only for a logged-in `user`.
@@ -1223,7 +1240,7 @@ configure!(SECURE_CSP = Dict("default-src" => [CSP.SELF], "script-src" => [CSP.S
 
 ```julia
 never_cache(view)                                   # Cache-Control: max-age=0, no-cache, no-store, must-revalidate, private
-cache_control(view; max_age = 3600, public = true)  # any directives; patch_cache_control!(resp; ...) for a response
+cache_control(view; max_age = 3600, public = true)  # any directives; Juango.patch_cache_control!(resp; ...) for a response
 vary_on_headers(view, "Accept-Language")            # vary_on_cookie(view)
 etag(view, (req; id) -> string(get(Post; id).updated))
 last_modified(view, (req; id) -> get(Post; id).updated)
@@ -1272,6 +1289,8 @@ Add `"juango.admindocs"` to `INSTALLED_APPS` and `path("admin/doc/", admindocs_u
 ### Testing
 
 ```julia
+using Juango.Testing
+
 c = Client()
 r = get(c, "/posts/hello/")
 @test r.status == 200 && r.context["post"].title == "Hello" && r.templates == ["post.html"]
@@ -1325,13 +1344,13 @@ The `assert_*` functions return `true` or throw an `AssertionError` that says wh
 ### Fixtures and serialization
 
 ```julia
-s = serialize(:json, objects(Post); indent = 2)    # Django's format: [{"model": "blog.post", "pk": 1, "fields": {...}}]
-for d in deserialize(:json, s)                     # also :jsonl (one object per line), :yaml and :xml
+s = Juango.serialize(:json, objects(Post); indent = 2)    # Django's format: [{"model": "blog.post", "pk": 1, "fields": {...}}]
+for d in Juango.deserialize(:json, s)                     # also :jsonl (one object per line), :yaml and :xml
     save!(d)                                       # writes the row as it is, then its many-to-many values
 end
-dumpdata("blog"; output = "blog.json")             # manage.jl dumpdata blog --indent 2 --output blog.json (or .yaml, .xml)
-loaddata("blog.json")                              # manage.jl loaddata initial_data  (searches FIXTURE_DIRS
-load_fixtures("initial_data")                      #  and each app's fixtures/ folder); in tests
+Juango.dumpdata("blog"; output = "blog.json")      # manage.jl dumpdata blog --indent 2 --output blog.json (or .yaml, .xml)
+Juango.loaddata("blog.json")                       # manage.jl loaddata initial_data  (searches FIXTURE_DIRS
+Juango.load_fixtures("initial_data")               #  and each app's fixtures/ folder); in tests
 ```
 
 Fixture files from Django's `dumpdata` (JSON, JSONL, YAML or XML) load as they are; `loaddata` picks the format from the extension (`.json`, `.jsonl`, `.yaml`/`.yml`, `.xml`). YAML and XML need no extra packages: the YAML reader handles what fixtures use (block and flow collections, quoted, plain and block scalars, comments), but not anchors, aliases or tags. Foreign keys and many-to-many values are ids, or natural keys with `natural_foreign = true` (`--natural-foreign`) for models that define them:
