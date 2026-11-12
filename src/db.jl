@@ -338,6 +338,13 @@ Base.showerror(io::IO, e::PoolTimeout) = print(io, "PoolTimeout: ", e.msg)
 # a queryset's `using_db(qs, "replica")`, the database an object was loaded from, or the
 # DATABASE_ROUTERS' choice, else "default".
 
+"A callback registered with `on_commit`, at transaction depth `level`."
+struct CommitHook
+    level::Int
+    f::Any
+    robust::Bool
+end
+
 "Connection state of one database alias."
 mutable struct DatabaseState
     alias::String
@@ -346,7 +353,10 @@ mutable struct DatabaseState
     conn::Any                                  # the single connection of non-pooled backends
     depth::Int                                 # transaction depth of non-pooled backends
     pool::Union{Nothing,ConnectionPool}
+    hooks::Vector{CommitHook}                  # on_commit callbacks of non-pooled backends
 end
+DatabaseState(alias, setting, backend, conn, depth, pool) =
+    DatabaseState(alias, setting, backend, conn, depth, pool, CommitHook[])
 const DB_STATES = Dict{String,DatabaseState}()
 
 "The configured databases: alias => setting (`DATABASES`, with `DATABASE` as \"default\")."
@@ -445,7 +455,9 @@ backend() = db_state().backend
 mutable struct TaskDB
     conn::Union{Nothing,PooledConnection}
     depth::Int
+    hooks::Vector{CommitHook}
 end
+TaskDB(conn, depth) = TaskDB(conn, depth, CommitHook[])
 function task_db(alias::AbstractString = current_alias())
     d = get!(() -> Dict{String,TaskDB}(), task_local_storage(), :juango_db)::Dict{String,TaskDB}
     get!(() -> TaskDB(nothing, 0), d, alias)
@@ -626,7 +638,7 @@ as `nothing`.
 execute(sql::AbstractString, params = Any[]) = run_driver(driver_rows, sql, params)
 
 "Whether the current task is inside `atomic()`."
-in_atomic() = supports_pooling(backend()) ? task_db().depth > 0 : db_state().depth > 0
+in_atomic() = commit_holder().depth > 0
 
 "Run a statement and return the number of rows changed."
 execute_changes(sql::AbstractString, params = Any[]) = run_driver(driver_rowcount, sql, params)
@@ -650,12 +662,16 @@ function atomic(f; db = nothing)
     db === nothing || return with_db(() -> atomic(f), db)
     st0 = db_state()
     b = st0.backend
-    supports_pooling(b) || return lock(() -> transaction(f, b, () -> st0.depth, d -> (st0.depth = d)), DB_LOCK)
+    supports_pooling(b) || return lock(DB_LOCK) do
+        r = transaction(f, b, st0)
+        st0.depth == 0 && run_commit_hooks!(st0)
+        r
+    end
     st = task_db()
     outer = st.depth == 0
     outer && (st.conn = checkout(b))
-    try
-        transaction(f, b, () -> st.depth, d -> (st.depth = d))
+    r = try
+        transaction(f, b, st)
     finally
         if outer
             pc = st.conn
@@ -664,20 +680,24 @@ function atomic(f; db = nothing)
             pc === nothing || checkin(b, pc)
         end
     end
+    outer && run_commit_hooks!(st)
+    r
 end
 
-function transaction(@nospecialize(f), b, @nospecialize(getdepth), @nospecialize(setdepth))
-    depth = getdepth()
+# `h` is the DatabaseState (non-pooled) or TaskDB (pooled) holding the depth and hooks.
+function transaction(@nospecialize(f), b, h::Union{DatabaseState,TaskDB})
+    depth = h.depth
     sp = "juango_sp_$(depth)"
     execute(depth == 0 ? begin_sql(b) : savepoint_sql(b, sp))
-    setdepth(depth + 1)
+    h.depth = depth + 1
     try
         r = f()
-        setdepth(depth)
+        h.depth = depth
         execute(depth == 0 ? commit_sql(b) : release_savepoint_sql(b, sp))
         r
     catch
-        setdepth(depth)
+        h.depth = depth
+        filter!(k -> k.level <= depth, h.hooks)            # callbacks of the rolled-back block
         try
             execute(depth == 0 ? rollback_sql(b) : rollback_savepoint_sql(b, sp))
             depth == 0 || execute(release_savepoint_sql(b, sp))
@@ -685,6 +705,50 @@ function transaction(@nospecialize(f), b, @nospecialize(getdepth), @nospecialize
         end
         rethrow()
     end
+end
+
+commit_holder() = supports_pooling(backend()) ? task_db() : db_state()
+
+function run_commit_hooks!(h)
+    isempty(h.hooks) && return nothing
+    hooks = copy(h.hooks)
+    empty!(h.hooks)
+    foreach(run_hook, hooks)
+    nothing
+end
+
+function run_hook(k::CommitHook)
+    k.robust || return k.f()
+    try
+        k.f()
+    catch e
+        log!("juango.db.backends", :error, "on_commit callback failed: " * sprint(showerror, e))
+    end
+end
+
+"""
+    on_commit(f; robust = false, db = nothing)
+
+Run `f()` after the current transaction commits, like Django's `transaction.on_commit`:
+send mail or enqueue a task only once the data it depends on is saved. If the transaction
+(or the savepoint `f` was registered in) rolls back, `f` is dropped. Outside a transaction
+`f()` runs at once. With `robust = true` an exception from `f` is logged instead of
+propagating (and the remaining callbacks still run).
+
+    atomic() do
+        save!(order)
+        on_commit(() -> send_mail("Order received", ...))
+    end
+"""
+function on_commit(f; robust::Bool = false, db = nothing)
+    db === nothing || return with_db(() -> on_commit(f; robust = robust), db)
+    h = commit_holder()
+    if h.depth == 0
+        robust ? run_hook(CommitHook(0, f, true)) : f()
+    else
+        push!(h.hooks, CommitHook(h.depth, f, robust))
+    end
+    nothing
 end
 
 "Quote an identifier for the current backend."

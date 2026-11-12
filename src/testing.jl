@@ -35,6 +35,22 @@ function rollback_after(f)
 end
 
 """
+    capture_on_commit_callbacks(f; execute = false) -> (result, callbacks)
+
+Run `f()` and return the `on_commit` callbacks it registered (like Django's
+`captureOnCommitCallbacks`). Inside `rollback_after` the transaction never commits, so this
+is how a test checks or runs them; with `execute = true` they are called (and removed).
+"""
+function capture_on_commit_callbacks(f; execute::Bool = false)
+    h = commit_holder()
+    n = length(h.hooks)
+    r = f()
+    new = h.hooks[n+1:end]
+    execute && (resize!(h.hooks, n); foreach(run_hook, new))
+    r, Any[k.f for k in new]
+end
+
+"""
     override_settings(f; settings...)
 
 Run `f()` with some settings changed, and put them back afterwards (even if it throws).

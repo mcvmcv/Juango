@@ -95,6 +95,45 @@
     @test !exists(filter(Author; name = "Rollback"))
     atomic(() -> create(Author; name = "Committed"))
     @test exists(filter(Author; name = "Committed"))
+
+    # on_commit
+    ran = String[]
+    on_commit(() -> push!(ran, "now"))                                  # no transaction: at once
+    @test ran == ["now"]
+    atomic() do
+        on_commit(() -> push!(ran, "outer"))
+        @test ran == ["now"]
+        try
+            atomic() do
+                on_commit(() -> push!(ran, "dropped"))
+                error("inner fails")
+            end
+        catch
+        end
+        atomic(() -> on_commit(() -> push!(ran, "inner")))
+        @test ran == ["now"]
+    end
+    @test ran == ["now", "outer", "inner"]
+    try
+        atomic() do
+            on_commit(() -> push!(ran, "rolled back"))
+            error("fail")
+        end
+    catch
+    end
+    @test length(ran) == 3
+    atomic() do
+        on_commit(() -> error("boom"); robust = true)
+        on_commit(() -> push!(ran, "after robust"))
+    end
+    @test ran[end] == "after robust"
+    rollback_after() do
+        _, cbs = capture_on_commit_callbacks(execute = true) do
+            on_commit(() -> push!(ran, "captured"))
+        end
+        @test length(cbs) == 1 && ran[end] == "captured"
+    end
+    @test !Juango.in_atomic()
 end
 
 @testset "relations: joins, select_related, prefetch_related" begin
