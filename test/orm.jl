@@ -424,6 +424,37 @@ end
     @test_throws ArgumentError collect(annotate(exau; x = FilteredRelation(:articles; condition = Q(published = true))) |> filter(x__id = 1))
     @test_throws ArgumentError collect(annotate(exau; x = FilteredRelation(:articles; condition = Q(articles__author__name = "y"))) |> filter(x__id = 1))
 
+    # --- custom lookups and transforms ------------------------------------------------------------
+    try
+        register_lookup("notequal"; kinds = [:char, :text]) do lhs, rhs
+            "$lhs <> $rhs"
+        end
+        register_lookup("divisible_by"; kinds = :int, prepare = Int) do lhs, rhs
+            "MOD($lhs, $rhs) = 0"
+        end
+        register_transform("lower"; kinds = [:char, :text]) do lhs
+            "LOWER($lhs)"
+        end
+        register_transform("len"; kinds = [:char, :text], output = :int) do lhs
+            (Juango.backend() isa Juango.SQLiteBackend ? "LENGTH" : "CHAR_LENGTH") * "($lhs)"
+        end
+        @test titles(filter(exa; title__notequal = "ex-2")) == ["ex-1", "ex-3"]
+        @test titles(exclude(exa; title__notequal = "ex-2")) == ["ex-2"]
+        @test titles(filter(exa; views__divisible_by = 10)) == ["ex-1", "ex-2"]
+        @test_throws Juango.LookupError collect(filter(exa; views__notequal = 3))            # not for integers
+        @test sort([a.name for a in filter(exau; name__lower = "ex a")]) == ["Ex A"]
+        @test sort([a.name for a in filter(exau; name__lower__startswith = "ex ")]) == ["Ex A", "Ex B", "Ex C"]
+        @test [a.name for a in filter(exau; name__lower__len__gte = 5)] == []
+        @test length(collect(filter(exau; name__len = 4))) == 3
+        @test titles(filter(exa; title__len__divisible_by = 4)) == ["ex-1", "ex-2", "ex-3"]
+        @test count(filter(exa, Q(title__lower__notequal = "ex-1") | Q(views = 10))) == 3
+        @test titles(filter(exa; title__notequal = F(:title))) == []
+        @test titles(filter(exa; author__name__lower = "ex b")) == ["ex-3"]                 # through a relation
+    finally
+        foreach(Juango.unregister_lookup, ("notequal", "divisible_by", "lower", "len"))
+    end
+    @test_throws Juango.LookupError collect(filter(exau; name__lower = "x"))
+
     # --- values(): dict rows, relation paths, GROUP BY ------------------------------------------
     @test collect(values(order_by(exa, "title"), :title, :author__name)) ==
           [Dict(:title => "ex-1", :author__name => "Ex A"), Dict(:title => "ex-2", :author__name => "Ex A"),

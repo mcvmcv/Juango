@@ -795,6 +795,85 @@ const LOOKUPS = Set(["exact", "iexact", "contains", "icontains", "startswith", "
                      "has_any_keys", "search", "intersects", "within", "covers", "coveredby", "disjoint", "touches",
                      "crosses", "overlaps", "equals", "distance_lt", "distance_lte", "distance_gt", "distance_gte", "dwithin"])
 
+# --- custom lookups and transforms ---------------------------------------------------------------
+
+struct CustomLookup
+    kinds::Union{Nothing,Vector{Symbol}}   # field kinds it applies to (nothing: all)
+    sql::Any                               # (lhs, rhs) -> SQL
+    prepare::Any                           # value -> parameter
+end
+struct CustomTransform
+    kinds::Union{Nothing,Vector{Symbol}}
+    sql::Any                               # lhs -> SQL
+    output::Union{Nothing,Symbol}          # kind of the result (nothing: same as the input)
+end
+const CUSTOM_LOOKUPS = Dict{String,Vector{CustomLookup}}()
+const CUSTOM_TRANSFORMS = Dict{String,Vector{CustomTransform}}()
+
+kinds_vec(k) = k === nothing ? nothing : k isa Symbol ? [k] : Symbol[Symbol(x) for x in k]
+applies(x, kind) = x.kinds === nothing || kind !== nothing && kind in x.kinds
+function find_custom(d, name, kind)
+    v = get(d, name, nothing)
+    v === nothing && return nothing
+    for x in Iterators.reverse(v)              # the latest registration wins
+        applies(x, kind) && return x
+    end
+    nothing
+end
+
+"""
+    register_lookup(sql, name; kinds = nothing, prepare = identity)
+
+Add a lookup usable in `filter`, `exclude` and `Q` (Django's `register_lookup`). `sql(lhs, rhs)`
+returns the condition, given the column's SQL and the value's placeholder. `kinds` limits it
+to some field kinds (`:char`, `:text`, `:int`, ...); `prepare` converts the value first.
+A registered lookup takes precedence over a built-in one of the same name.
+
+    Juango.register_lookup("notequal"; kinds = [:char, :text]) do lhs, rhs
+        "\$lhs <> \$rhs"
+    end
+    filter(Author; name__notequal = "Ann")
+"""
+function register_lookup(sql, name::Union{AbstractString,Symbol}; kinds = nothing, prepare = identity)
+    push!(get!(Vector{CustomLookup}, CUSTOM_LOOKUPS, string(name)), CustomLookup(kinds_vec(kinds), sql, prepare))
+    nothing
+end
+
+"""
+    register_transform(sql, name; kinds = nothing, output = nothing)
+
+Add a transform: `field__name__lookup` applies `sql(lhs)` to the column before the lookup,
+and transforms chain (`name__lower__length__gte = 3`). `output` is the field kind of the
+result (`:int` for a length), which decides how values are converted and which custom
+lookups apply after it.
+
+    Juango.register_transform("lower"; kinds = [:char, :text]) do lhs
+        "LOWER(\$lhs)"
+    end
+    filter(Author; name__lower__startswith = "an")
+"""
+function register_transform(sql, name::Union{AbstractString,Symbol}; kinds = nothing, output = nothing)
+    push!(get!(Vector{CustomTransform}, CUSTOM_TRANSFORMS, string(name)),
+          CustomTransform(kinds_vec(kinds), sql, output === nothing ? nothing : Symbol(output)))
+    nothing
+end
+
+"Remove a lookup or transform registered under `name` (all registrations)."
+unregister_lookup(name) = (delete!(CUSTOM_LOOKUPS, string(name)); delete!(CUSTOM_TRANSFORMS, string(name)); nothing)
+
+is_lookup_name(s) = s in LOOKUPS || haskey(CUSTOM_LOOKUPS, s)
+
+"Apply registered transforms `names` to `col` of kind `kind`: `(sql, kind)`, or `nothing` if one doesn't apply."
+function apply_transforms(col::String, kind, names)
+    for n in names
+        t = find_custom(CUSTOM_TRANSFORMS, n, kind)
+        t === nothing && return nothing
+        col = t.sql(col)::AbstractString
+        t.output === nothing || (kind = t.output)
+    end
+    String(col), kind
+end
+
 
 struct LookupError <: Exception
     msg::String
@@ -950,12 +1029,13 @@ end
 function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nospecialize(value), negated::Bool)
     parts = split(string(key), "__")
     lookup = "exact"
-    (length(parts) > 1 && parts[end] in LOOKUPS) && (lookup = String(pop!(parts)))
+    (length(parts) > 1 && is_lookup_name(parts[end])) && (lookup = String(pop!(parts)))
     meta = modelmeta(T)
     fname = parts[1] == "pk" ? "id" : String(parts[1])
     rest = String.(parts[2:end])
     f = nothing
     colps = Any[]
+    kind = nothing                     # the compared value's field kind, for custom lookups
     if alias == c.base && is_filtered_relation(get(c.annotations, Symbol(fname), nothing))
         subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
         if negated
@@ -1082,6 +1162,9 @@ function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nos
             col, colps = tr
             lookup == "isnull" && f.kind === :json && return truthy(value) ? (col, colps) : ("NOT " * col, colps)
             f = nothing
+        elseif !isempty(rest) && (tr = apply_transforms(qcol(alias, column(f)), f.kind, rest)) !== nothing
+            col, kind = tr                  # registered transforms: name__lower__...
+            kind === f.kind || (f = nothing)
         elseif !isempty(rest)
             f.kind === :fk || throw(LookupError("'$fname' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
             if rest in (["id"], ["pk"])
@@ -1102,6 +1185,15 @@ function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nos
         end
     end
     conv(v) = v isa Model ? v.id : (f === nothing || f.kind === :fk ? dbparam(v) : to_db(f, v))
+    f === nothing || (kind = f.kind)
+    cl = isempty(CUSTOM_LOOKUPS) ? nothing : find_custom(CUSTOM_LOOKUPS, lookup, kind)
+    if cl !== nothing
+        if value isa Expression
+            vsql, vps = compile_expr(c, value)
+            return cl.sql(col, "(" * vsql * ")")::AbstractString, vcat(colps, vps)
+        end
+        return cl.sql(col, "?")::AbstractString, vcat(colps, Any[conv(cl.prepare(value))])
+    end
     if f !== nothing || lookup == "search"
         sl = special_lookup(c, something(f, Field(:text)), col, lookup, value)
         sl === nothing || return sl[1], vcat(colps, sl[2])
