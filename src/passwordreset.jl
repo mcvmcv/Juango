@@ -98,20 +98,75 @@ end
 function clean_form(f::Form, ::Val{:SetPasswordForm})
     p1, p2 = get(f.cleaned_data, :new_password1, nothing), get(f.cleaned_data, :new_password2, nothing)
     (p1 === nothing || p2 === nothing) && return
-    p1 == p2 || return add_error!(f, :new_password2, "The two password fields didn’t match.")
-    for msg in password_problems(p1)
-        add_error!(f, :new_password2, msg)
-    end
+    p1 == p2 || return add_error!(f, :new_password2, gettext("The two password fields didn’t match."))
 end
 
-"Basic password checks: at least `PASSWORD_MIN_LENGTH` characters, not entirely numeric."
-function password_problems(p)
-    out = String[]
-    length(p) < settings.PASSWORD_MIN_LENGTH &&
-        push!(out, "This password is too short. It must contain at least $(settings.PASSWORD_MIN_LENGTH) characters.")
-    all(isdigit, p) && push!(out, "This password is entirely numeric.")
-    out
+"The `AUTH_PASSWORD_VALIDATORS` messages for a password (see `validate_password`)."
+password_problems(p; user = nothing) = validate_password(p; user = user)
+
+"Run the password validators on a valid set-password form's new password, for `user`. Returns whether it passed."
+function check_new_password!(form::Form, user)
+    p = get(form.cleaned_data, :new_password1, nothing)
+    p === nothing && return false
+    for msg in validate_password(p; user = user)
+        add_error!(form, :new_password2, msg)
+    end
+    isempty(form.errors)
 end
+
+@form PasswordChangeForm begin
+    old_password = CharField(widget = :password, max_length = 4096, label = "Old password")
+    new_password1 = CharField(widget = :password, max_length = 4096, label = "New password")
+    new_password2 = CharField(widget = :password, max_length = 4096, label = "New password confirmation")
+end
+clean_form(f::Form, ::Val{:PasswordChangeForm}) = clean_form(f, Val(:SetPasswordForm))
+
+"""
+    update_session_auth_hash!(req, user)
+
+Keep the user logged in after changing their password (which otherwise ends their sessions):
+store the new password's hash in this session, under a new session key.
+"""
+function update_session_auth_hash!(req::Request, u::AbstractUser)
+    s = req.session
+    s isa Session || return
+    s.key === nothing || cycle_key!(s)
+    req.user isa AbstractUser && req.user.id == u.id && (s["_auth_user_hash"] = session_auth_hash(u))
+    nothing
+end
+
+"""
+    PasswordChangeView(; template = "registration/password_change_form.html", success_url = nothing)
+
+For a logged-in user: the old password and the new one twice (checked by
+`AUTH_PASSWORD_VALIDATORS`). On success the user stays logged in and goes to `success_url`
+(default: the `password_change_done` URL).
+"""
+function PasswordChangeView(; template = "registration/password_change_form.html", success_url = nothing)
+    login_required(name_view!(function (req::Request; kw...)
+        u = req.user
+        form = PasswordChangeForm(req.method == "POST" ? req.POST : nothing)
+        if req.method == "POST" && is_valid(form)
+            check_password(u, form.cleaned_data[:old_password]) ||
+                add_error!(form, :old_password, gettext("Your old password was entered incorrectly. Please enter it again."))
+            if isempty(form.errors) && check_new_password!(form, u)
+                set_password!(u, form.cleaned_data[:new_password1])
+                save!(u)
+                update_session_auth_hash!(req, u)
+                return HttpResponseRedirect(something(success_url, reverse_url("password_change_done")))
+            end
+        end
+        render(req, template, Dict("form" => form))
+    end, "PasswordChangeView"))
+end
+
+"""
+    PasswordChangeDoneView(; template = "registration/password_change_done.html")
+
+The page after a successful password change (logged-in users only).
+"""
+PasswordChangeDoneView(; template = "registration/password_change_done.html") =
+    login_required(template_page(template, "PasswordChangeDoneView"))
 
 """
     PasswordResetView(; template, email_template, subject_template, from_email=nothing)
@@ -157,7 +212,7 @@ function PasswordResetConfirmView(; template = "registration/password_reset_conf
             return render(req, template, Dict("validlink" => false, "form" => nothing))
         end
         form = SetPasswordForm(req.method == "POST" ? req.POST : nothing)
-        if req.method == "POST" && is_valid(form)
+        if req.method == "POST" && is_valid(form) && check_new_password!(form, u)
             set_password!(u, form.cleaned_data[:new_password1])
             save!(u)
             return HttpResponseRedirect(reverse_url("password_reset_complete"))

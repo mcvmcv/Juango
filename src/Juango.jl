@@ -20,6 +20,7 @@ import Serialization
 import TimeZones
 import HTTP
 import URIs
+import CodecZlib
 using PrecompileTools: @setup_workload, @compile_workload
 import Reseau
 using Reseau: TCP, TLS
@@ -57,6 +58,7 @@ include("migrations.jl")
 include("forms.jl")
 include("formsets.jl")
 include("sessions.jl")
+include("passwords.jl")
 include("auth.jl")
 include("contenttypes.jl")
 include("permissions.jl")
@@ -65,16 +67,21 @@ include("mail.jl")
 include("passwordreset.jl")
 include("messages.jl")
 include("middleware.jl")
+include("security.jl")
 include("views.jl")
 include("streaming.jl")
 include("sitemaps.jl")
 include("feeds.jl")
 include("cache.jl")
+include("httpcache.jl")
 include("handler.jl")
 include("server.jl")
 include("testclient.jl")
+include("testing.jl")
 include("admin.jl")
 include("flatpages.jl")
+include("serializers.jl")
+include("dbtools.jl")
 include("management.jl")
 
 # --- public API -------------------------------------------------------------
@@ -115,6 +122,13 @@ export LogEntry, log_action!, ADDITION, CHANGE, DELETION
 export Permission, Group, has_perm, has_perms, has_module_perms, get_all_permissions, permission_required, perm_name
 export ContentType, GenericForeignKey, GenericRelation, get_for_model, model_class
 export using_db
+export rollback_after, override_settings, RequestFactory, assert_contains, assert_not_contains, assert_redirects,
+       assert_template_used, assert_template_not_used, assert_num_queries, assert_form_error
+export flush!, inspectdb, dbshell_cmd
+export serialize, deserialize, dumpdata, loaddata, load_fixtures, natural_key, get_by_natural_key
+export is_secure, ContentSecurityPolicyMiddleware, CSP, csp_nonce, csp_override, csp_report_only_override, deploy_issues
+export never_cache, cache_control, vary_on_headers, vary_on_cookie, patch_cache_control!, condition, etag, last_modified,
+       ConditionalGetMiddleware, GZipMiddleware
 export CheckConstraint, UniqueConstraint, GeneratedField, DB_DEFAULT, CompositePrimaryKey
 export Model, @model, @abstract_model, OneToOneField, Index, GinIndex, Field, ManyToManyField, add!, remove!, set!, clear!, base_objects, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
        FloatField, BooleanField, DateTimeField, DateField, ForeignKey, Q, QuerySet, objects,
@@ -133,6 +147,9 @@ export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data, save_m2
        deleted_forms, ordered_forms
 # auth & sessions
 export AbstractUser, get_user_model, USER_MODEL, username_field, ModelBackend
+export PBKDF2Hasher, Argon2Hasher, BCryptSHA256Hasher, BCryptHasher, validate_password, MinimumLengthValidator,
+       NumericPasswordValidator, CommonPasswordValidator, UserAttributeSimilarityValidator, PasswordChangeView,
+       PasswordChangeDoneView, update_session_auth_hash!
 export User, AnonymousUser, authenticate, login!, logout!, create_user, create_superuser,
        set_password!, check_password, make_password, login_required, staff_member_required,
        is_authenticated

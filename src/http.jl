@@ -164,7 +164,6 @@ header(req::Request, name::AbstractString, default = nothing) = get(req.headers,
 json_body(req::Request) = JSON.parse(String(copy(req.body)))
 
 get_host(req::Request) = get(req.headers, "host", "testserver")
-is_secure(req::Request) = get(req.headers, "x-forwarded-proto", "") == "https"
 full_path(req::Request) = isempty(req.query_string) ? req.path : req.path * "?" * req.query_string
 build_absolute_uri(req::Request, loc = full_path(req)) =
     (is_secure(req) ? "https://" : "http://") * get_host(req) * loc

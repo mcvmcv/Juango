@@ -194,7 +194,9 @@ function table_state(T::Type)
 end
 
 "The schema the given models describe."
-models_state(models = all_models()) = SchemaState(modelmeta(T).table => table_state(T) for T in models if !modelmeta(T).proxy)
+models_state(models = all_models()) = SchemaState(modelmeta(T).table => table_state(T) for T in models if !modelmeta(T).proxy && is_managed(T))
+"Whether migrations create and change the model's table (`Meta(managed = false)` says no)."
+is_managed(T) = get(modelmeta(T).extra, :managed, true) !== false
 
 # --- DDL --------------------------------------------------------------------------------------
 
@@ -447,7 +449,7 @@ function sync_models!(models; verbose = true)
     atomic() do
         fks = String[]
         for T in models
-            modelmeta(T).proxy && continue
+            (modelmeta(T).proxy || !is_managed(T)) && continue
             t = table_state(T)
             if !table_exists(b, t.name)
                 stmts, f = create_table_sql(b, t; if_not_exists = true)

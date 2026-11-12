@@ -765,9 +765,15 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 
 - `User` model with PBKDF2-SHA256 password hashes in Django's format, so existing Django hashes verify.
 - `authenticate`, `login!`, `logout!`, `create_user`, `create_superuser`, `login_required`, `staff_member_required`.
-- Sessions are stored in the database (`req.session["k"] = v`). The session key rotates on login, and changing a password invalidates existing sessions.
+- Sessions (`req.session["k"] = v`) are stored where `SESSION_ENGINE` says: `:db` (default), `:cache`, `:cached_db`, `:file` (in `SESSION_FILE_PATH`) or `:signed_cookies` (the signed data itself in the cookie, so nothing on the server, but a session can't be revoked early). The session key rotates on login, and changing a password invalidates existing sessions. `clearsessions` removes expired database rows and files.
 - CSRF protection on POST/PUT/PATCH/DELETE: `{% csrf_token %}` or an `X-CSRFToken` header. Mark exceptions with `csrf_exempt(view)`.
 - One-time messages: `message!(req, :success, "Saved")`, rendered with `{% for m in messages %}`.
+
+#### Passwords
+
+- **Hashers.** `PASSWORD_HASHERS` (default `[PBKDF2Hasher()]`) lists the accepted hashers; the first hashes new passwords. `Argon2Hasher()`, `BCryptSHA256Hasher()` and `BCryptHasher()` are built in (pure Julia) and use Django's formats, so hashes move between the two frameworks. A password stored with an older hasher, or with weaker settings, is re-hashed when the user next logs in.
+- **Validators.** `AUTH_PASSWORD_VALIDATORS` (default: `MinimumLengthValidator()` and `NumericPasswordValidator()`) also offers `CommonPasswordValidator()` and `UserAttributeSimilarityValidator()`. `validate_password(pw; user)` returns the messages; the password reset, password change and `createsuperuser` use them. A validator of your own is any value with a method `Juango.password_error(v, password, user)` returning a message or `nothing`.
+- **Changing passwords.** `auth_urls()` includes `password_change/` and `password_change/done/` (`PasswordChangeView`, `PasswordChangeDoneView`). The user stays logged in; their other sessions end. Call `update_session_auth_hash!(req, user)` after changing a password in your own views.
 
 #### Custom user model
 
@@ -1021,7 +1027,49 @@ end
 configure!(MIDDLEWARE = [Juango.default_settings()[:MIDDLEWARE]..., Timing])
 ```
 
-The defaults are security headers, sessions, `APPEND_SLASH`, CSRF and authentication.
+The defaults are security headers, sessions, `APPEND_SLASH`, CSRF and authentication. Also available:
+
+- `GZipMiddleware` compresses responses of 200 bytes or more for clients that accept gzip, with random padding in the gzip header against BREACH (as Django does). Put it first. Streamed responses aren't compressed.
+- `ConditionalGetMiddleware` gives GET responses an `ETag` and answers `If-None-Match`/`If-Modified-Since` with 304 Not Modified.
+
+#### Security settings
+
+`SecurityMiddleware` (in the defaults) handles HTTPS and security headers:
+
+```julia
+configure!(SECURE_SSL_REDIRECT = true,                         # http:// -> https:// (SECURE_SSL_HOST, SECURE_REDIRECT_EXEMPT)
+           SECURE_HSTS_SECONDS = 31536000, SECURE_HSTS_INCLUDE_SUBDOMAINS = true, SECURE_HSTS_PRELOAD = false,
+           SECURE_PROXY_SSL_HEADER = ("X-Forwarded-Proto", "https"))   # behind a proxy that sets this header
+```
+
+It also sends `X-Content-Type-Options: nosniff`, `X-Frame-Options` (`X_FRAME_OPTIONS`, default `DENY`), `Referrer-Policy` (`SECURE_REFERRER_POLICY`) and `Cross-Origin-Opener-Policy` (`SECURE_CROSS_ORIGIN_OPENER_POLICY`). `is_secure(req)` is true for requests served over TLS, or when `SECURE_PROXY_SSL_HEADER` names a header the proxy sets. Set that only if the proxy always sets or strips the header.
+
+For a Content-Security-Policy, add `ContentSecurityPolicyMiddleware`:
+
+```julia
+configure!(SECURE_CSP = Dict("default-src" => [CSP.SELF], "script-src" => [CSP.SELF, CSP.NONCE],
+                             "upgrade-insecure-requests" => true),
+           SECURE_CSP_REPORT_ONLY = Dict("img-src" => [CSP.SELF, "data:"]))
+```
+
+```html
+<script nonce="{{ csp_nonce }}">...</script>
+```
+
+`CSP.NONCE` becomes the request's nonce, if a template used `csp_nonce`. `csp_override(view, policy)` changes the policy for one view (`nothing` sends none). `manage.jl check --deploy` lists settings that are unsafe in production.
+
+#### HTTP caching decorators
+
+```julia
+never_cache(view)                                   # Cache-Control: max-age=0, no-cache, no-store, must-revalidate, private
+cache_control(view; max_age = 3600, public = true)  # any directives; patch_cache_control!(resp; ...) for a response
+vary_on_headers(view, "Accept-Language")            # vary_on_cookie(view)
+etag(view, (req; id) -> string(get(Post; id).updated))
+last_modified(view, (req; id) -> get(Post; id).updated)
+condition(view; etag_func, last_modified_func)      # both
+```
+
+`etag`, `last_modified` and `condition` answer conditional requests without running the view: 304 for an unchanged GET or HEAD, 412 when an `If-Match` or `If-Unmodified-Since` precondition fails.
 
 ### Admin
 
@@ -1075,9 +1123,57 @@ r, n = count_queries(() -> get(c, "/posts/"))
 @test n <= 3
 ```
 
+**Helpers** for tests:
+
+```julia
+rollback_after() do                                  # undo every change at the end (like Django's TestCase)
+    create(Post; title = "draft")
+    override_settings(DEBUG = false) do              # settings changed just for this block
+        r = get(Client(), "/posts/")
+        @test assert_contains(r, "draft")            # also: count=, status=, html=true; assert_not_contains
+        @test assert_template_used(r, "posts/list.html")
+    end
+end
+@test assert_redirects(get(Client(), "/secret/"), "/accounts/login/?next=%2Fsecret%2F")
+@test assert_num_queries(() -> collect(select_related(objects(Post), :author)), 1)
+@test assert_form_error(form, :title, "This field is required.")
+
+req = get(RequestFactory(), "/posts/"; data = Dict("page" => 2))   # call a view directly, no middleware
+req.user = user
+resp = post_list(req)
+```
+
+The `assert_*` functions return `true` or throw an `AssertionError` that says what went wrong, so `@test assert_...` reports it. `load_fixtures(names...)` loads fixture files.
+
+### Fixtures and serialization
+
+```julia
+s = serialize(:json, objects(Post); indent = 2)    # Django's format: [{"model": "blog.post", "pk": 1, "fields": {...}}]
+for d in deserialize(:json, s)                     # :jsonl reads and writes one object per line
+    save!(d)                                       # writes the row as it is, then its many-to-many values
+end
+dumpdata("blog"; output = "blog.json")             # manage.jl dumpdata blog --indent 2 --output blog.json
+loaddata("blog.json")                              # manage.jl loaddata initial_data  (searches FIXTURE_DIRS
+load_fixtures("initial_data")                      #  and each app's fixtures/ folder); in tests
+```
+
+Fixture files from Django's `dumpdata --format json` load as they are. Foreign keys and many-to-many values are ids, or natural keys with `natural_foreign = true` (`--natural-foreign`) for models that define them:
+
+```julia
+Juango.natural_key(t::Tag) = (t.name,)
+Juango.get_by_natural_key(::Type{Tag}, name) = get(Tag; name = name)
+```
+
+`loaddata` runs in one transaction. Objects with a primary key replace the row with that key. YAML and XML aren't supported.
+
 ### Management commands
 
-`runserver [host:]port`, `makemigrations`, `migrate`, `showmigrations`, `sqlmigrate`, `createsuperuser`, `changepassword`, `showurls`, `sqlschema`, `check`, `clearsessions`, `help`. Add your own with `Juango.register_command!("name", "help", args -> ...)`.
+`runserver [host:]port`, `makemigrations`, `migrate`, `showmigrations`, `sqlmigrate`, `createsuperuser`, `changepassword`, `showurls`, `sqlschema`, `check`, `clearsessions`, `dumpdata`, `loaddata`, `flush`, `dbshell`, `inspectdb`, `squashmigrations`, `test`, `help`. Add your own with `Juango.register_command!("name", "help", args -> ...)`.
+
+- `inspectdb [table ...]` writes `@model` definitions for existing tables, with `Meta(managed = false)` so migrations leave those tables alone. Check the field types it guesses.
+- `flush` empties every table Juango manages (asks first, unless `--noinput`).
+- `dbshell` opens `sqlite3`, `psql` or `mysql` on the configured database.
+- `test` runs `test/runtests.jl`, or else each `tests/test*.jl`.
 
 ## Settings
 

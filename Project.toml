@@ -5,6 +5,7 @@ authors = ["Juango contributors"]
 
 [deps]
 Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
 DBInterface = "a10d1c49-ce27-4219-8d33-6db1a4562965"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
@@ -30,6 +31,7 @@ JuangoLibPQExt = "LibPQ"
 JuangoMySQLExt = "MySQL"
 
 [compat]
+CodecZlib = "0.7"
 DBInterface = "2"
 HTTP = "2.15"
 JSON = "1"

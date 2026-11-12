@@ -77,6 +77,11 @@ function cmd_createsuperuser(args)
             elseif isempty(p1)
                 println("Error: Blank passwords aren't allowed.")
             else
+                errs = validate_password(p1; user = (; username = username, email = email))
+                if !isempty(errs)
+                    foreach(e -> println(e), errs)
+                    lowercase(strip(prompt("Bypass password validation and create user anyway? [y/N]: "))) in ("y", "yes") || continue
+                end
                 password = p1
                 break
             end
@@ -98,7 +103,9 @@ function cmd_showurls(args)
 end
 
 function cmd_check(args)
+    _, flags = parse_flags(args)
     issues = String[]
+    haskey(flags, "deploy") && append!(issues, deploy_issues())
     settings.SECRET_KEY == default_settings()[:SECRET_KEY] && !settings.DEBUG &&
         push!(issues, "SECRET_KEY is the insecure default while DEBUG is false.")
     isempty(settings.ROOT_URLCONF) && push!(issues, "ROOT_URLCONF is empty.")
@@ -166,6 +173,54 @@ function cmd_makemigrations(args)
     paths
 end
 
+# dumpdata [app[.Model] ...] [--indent N] [--format json|jsonl] [--exclude a,b] [--natural-foreign] [--natural-primary] [--output FILE]
+function cmd_dumpdata(args)
+    pos, flags = parse_flags(args)
+    ind = get(flags, "indent", nothing)
+    s = dumpdata(pos...; format = Symbol(get(flags, "format", "json")), indent = ind === nothing ? nothing : parse(Int, ind),
+                 exclude = haskey(flags, "exclude") ? split(flags["exclude"], ',') : String[],
+                 natural_foreign = haskey(flags, "natural-foreign"), natural_primary = haskey(flags, "natural-primary"),
+                 output = get(flags, "output", nothing))
+    haskey(flags, "output") || print(s)
+end
+
+# flush [--noinput]
+function cmd_flush(args)
+    _, flags = parse_flags(args)
+    if !(haskey(flags, "noinput") || haskey(flags, "no-input"))
+        println("This will delete ALL data in the database \"$(vendor(backend()))\" and return each table to an empty state.")
+        lowercase(strip(prompt("Are you sure you want to do this? Type 'yes' to continue, or 'no' to cancel: "))) == "yes" ||
+            return println("Flush cancelled.")
+    end
+    n = flush!()
+    println("Emptied $n table(s).")
+end
+
+# test [file ...]: run the project's tests (test/runtests.jl, or tests/test_*.jl)
+function cmd_test(args)
+    pos, _ = parse_flags(args)
+    files = if !isempty(pos)
+        pos
+    elseif isfile(joinpath("test", "runtests.jl"))
+        [joinpath("test", "runtests.jl")]
+    else
+        sort([joinpath("tests", f) for f in (isdir("tests") ? readdir("tests") : String[]) if startswith(f, "test") && endswith(f, ".jl")])
+    end
+    isempty(files) && return println("No tests found (test/runtests.jl or tests/test_*.jl).")
+    for f in files
+        println("Running ", f)
+        Base.include(Main, abspath(f))
+    end
+end
+
+# loaddata fixture [fixture ...]
+function cmd_loaddata(args)
+    pos, _ = parse_flags(args)
+    isempty(pos) && error("usage: loaddata <fixture> [fixture ...]")
+    n = loaddata(pos...)
+    println("Installed $n object(s) from $(length(pos)) fixture(s)")
+end
+
 # squashmigrations app [start] stop [--name NAME] [--dry-run]
 function cmd_squashmigrations(args)
     pos, flags = parse_flags(args)
@@ -203,6 +258,12 @@ for (n, h, f) in (
     ("makemigrations", "Write migrations for model changes (--name, --empty, --merge, --dry-run, --check, --noinput, --app)", cmd_makemigrations),
     ("showmigrations", "List migrations and whether they are applied", _ -> showmigrations()),
     ("sqlmigrate", "Print the SQL for a migration: sqlmigrate [app] <name> [--backwards]", cmd_sqlmigrate),
+    ("flush", "Delete all data from the database: flush [--noinput]", cmd_flush),
+    ("dbshell", "Open the database's command-line client", _ -> run(dbshell_cmd())),
+    ("inspectdb", "Write models for existing tables: inspectdb [table ...]", args -> print(inspectdb(isempty(first(parse_flags(args))) ? nothing : first(parse_flags(args))))),
+    ("test", "Run the project's tests: test [file ...]", cmd_test),
+    ("dumpdata", "Write the database's objects as a fixture: dumpdata [app[.Model] ...] [--indent N] [--output FILE]", cmd_dumpdata),
+    ("loaddata", "Load fixtures: loaddata <name or file> ...", cmd_loaddata),
     ("squashmigrations", "Combine migrations into one: squashmigrations <app> [start] <stop> [--name NAME]", cmd_squashmigrations),
     ("createsuperuser", "Create an admin user (--username, --email, --password, --noinput)", cmd_createsuperuser),
     ("showurls", "List all URL patterns", cmd_showurls),
@@ -228,7 +289,7 @@ for (n, h, f) in (
     ("compilemessages", "Compile .po translation files into .mo", _ -> foreach(p -> println("compiled ", p), compilemessages())),
     ("createcachetable", "Create the table for database caches (CACHES backend :db)", _ -> foreach(create_cache_table, keys(settings.CACHES))),
     ("sqlschema", "Print the SQL schema for all models", _ -> println(schema_sql())),
-    ("check", "Inspect the project for common problems", cmd_check),
+    ("check", "Inspect the project for common problems: check [--deploy]", cmd_check),
     ("clearsessions", "Delete expired sessions", _ -> println("Deleted ", clear_expired_sessions!(), " expired sessions.")),
     ("changepassword", "Change a user's password: changepassword <username>", function (args)
         pos, flags = parse_flags(args)

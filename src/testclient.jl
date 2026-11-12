@@ -36,13 +36,12 @@ function store_cookies!(c::Client, resp::HttpResponse)
     end
 end
 
-"""
-    request(c::Client, method, path; data=nothing, json=nothing, headers=Dict(), follow=false)
-"""
-function request(c::Client, method::AbstractString, target::AbstractString; data = nothing, json = nothing,
-                 headers = Dict{String,String}(), follow = false, content_type = nothing, body = nothing)
+"A `Request` as a test client builds it (form data, JSON, files, headers and cookies)."
+function make_test_request(method::AbstractString, target::AbstractString; host = "testserver", default_headers = Dict{String,String}(),
+                           cookies = Dict{String,String}(), data = nothing, json = nothing, headers = Dict{String,String}(),
+                           content_type = nothing, body = nothing)
     method = uppercase(method)
-    hs = merge(Dict{String,String}("host" => c.host), c.default_headers,
+    hs = merge(Dict{String,String}("host" => host), default_headers,
                Dict{String,String}(lowercase(string(k)) => string(v) for (k, v) in pairs_of(headers)))
     payload = UInt8[]
     if json !== nothing
@@ -63,8 +62,18 @@ function request(c::Client, method::AbstractString, target::AbstractString; data
             hs["content-type"] = "application/x-www-form-urlencoded"
         end
     end
-    isempty(c.cookies) || (hs["cookie"] = join(["$k=$v" for (k, v) in c.cookies], "; "))
-    req = Request(method, target; headers = hs, body = payload)
+    isempty(cookies) || (hs["cookie"] = join(["$k=$v" for (k, v) in cookies], "; "))
+    Request(method, target; headers = hs, body = payload)
+end
+
+"""
+    request(c::Client, method, path; data=nothing, json=nothing, headers=Dict(), follow=false)
+"""
+function request(c::Client, method::AbstractString, target::AbstractString; data = nothing, json = nothing,
+                 headers = Dict{String,String}(), follow = false, content_type = nothing, body = nothing)
+    method = uppercase(method)
+    req = make_test_request(method, target; host = c.host, default_headers = c.default_headers, cookies = c.cookies,
+                            data = data, json = json, headers = headers, content_type = content_type, body = body)
     req.meta[:test_client] = true
     c.enforce_csrf || (req.meta[:dont_enforce_csrf] = true)
     resp = handle_request(req)

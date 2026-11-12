@@ -939,3 +939,65 @@ end
     @test_throws ArgumentError union(low, filter(Author; name = "x"))
     @test union(low) === low
 end
+
+# natural keys for the serialization tests
+Juango.natural_key(t::Topic) = (t.name,)
+Juango.get_by_natural_key(::Type{Topic}, name) = get(Topic; name = name)
+
+@testset "serializers, dumpdata and loaddata" begin
+    t1, t2 = create(Topic; name = "ser-one"), create(Topic; name = "ser-two")
+    e = create(Essay; title = "ser-essay"); add!(e.topics, t1, t2)
+    au = create(Author; name = "Ser Author", email = "s@x.io")
+    a = create(Article; title = "ser-art", body = "b", author = au, rating = 2.5)
+    s = serialize(:json, [a, e]; indent = 2)
+    d = JSON.parse(s)
+    @test d[1]["model"] == "project.article" && d[1]["pk"] == a.id && d[1]["fields"]["author"] == au.id
+    @test d[1]["fields"]["rating"] == 2.5 && startswith(d[1]["fields"]["created"], string(year(a.created)))
+    @test sort(d[2]["fields"]["topics"]) == sort([t1.id, t2.id]) && occursin("\n", s)
+    @test serialize(:json, [a]; fields = [:title]) |> JSON.parse |> only |> x -> collect(keys(x["fields"])) == ["title"]
+
+    # round trip: delete, then load back with the same ids and relations
+    objs = deserialize(:json, s)
+    @test length(objs) == 2 && objs[1].object isa Article && objs[1].object.id == a.id
+    aid, eid, acreated = a.id, e.id, a.created
+    delete!(a); delete!(e)
+    foreach(save!, objs)
+    a2, e2 = get(Article; id = aid), get(Essay; id = eid)
+    @test a2.title == "ser-art" && a2.author.name == "Ser Author" && a2.rating == 2.5 && a2.created == acreated
+    @test sort([t.name for t in e2.topics]) == ["ser-one", "ser-two"]
+    @test create(Article; title = "after-load", author = au).id > aid           # the id sequence moved past them
+
+    # natural foreign keys: topics by name
+    s = serialize(:json, [e2]; natural_foreign = true)
+    @test sort(JSON.parse(s)[1]["fields"]["topics"]) == [["ser-one"], ["ser-two"]]
+    remove!(e2.topics, t2)
+    foreach(save!, deserialize(:json, s))
+    @test count(get(Essay; id = eid).topics) == 2
+
+    # dumpdata / loaddata
+    dir = mktempdir()
+    out = joinpath(dir, "topics.json")
+    txt = dumpdata("project.Topic"; indent = 2, output = out)
+    @test isfile(out) && occursin("ser-two", txt) && all(x -> x["model"] == "project.topic", JSON.parse(txt))
+    rows = JSON.parse(dumpdata("project"; exclude = ["project.article", "project.essay"]))
+    models = unique(x["model"] for x in rows)
+    @test "project.author" in models && !("project.article" in models)
+    @test findfirst(==("project.topic"), models) !== nothing
+    update!(filter(Topic; name = "ser-one"); name = "renamed")
+    write(joinpath(dir, "extra.jsonl"), serialize(:jsonl, [Topic(; name = "from-fixture")]))
+    configure!(FIXTURE_DIRS = [dir])
+    try
+        @test loaddata(out) == count(objects(Topic)) - 0              # every topic, back as dumped
+        @test exists(filter(Topic; name = "ser-one")) && !exists(filter(Topic; name = "renamed"))
+        @test load_fixtures("extra") == 1 && exists(filter(Topic; name = "from-fixture"))
+        @test_throws ArgumentError loaddata("no-such-fixture")
+    finally
+        configure!(FIXTURE_DIRS = String[])
+    end
+    # a bad object rolls the whole load back
+    bad = joinpath(dir, "bad.json")
+    write(bad, """[{"model": "project.topic", "pk": null, "fields": {"name": "rolled-back"}},
+                   {"model": "project.nosuchmodel", "pk": 1, "fields": {}}]""")
+    @test_throws Exception loaddata(bad)
+    @test !exists(filter(Topic; name = "rolled-back"))
+end

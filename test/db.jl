@@ -242,3 +242,54 @@ Juango.allow_migrate(::TopicsElsewhere, db, app; model = nothing) = app == "auth
         Juango.close_connection!("other")
     end
 end
+
+@testset "inspectdb, dbshell, managed = false, test command, flush" begin
+    quiet(f) = redirect_stdout(f, devnull)
+    quiet(() -> migrate(verbose = false))
+    create(Topic; name = "inspected")
+    code = inspectdb(["topic", "article"])
+    # SQLite stores every string as TEXT, so there the length is unknown
+    @test occursin("@model struct Topic", code) && occursin(IS_POSTGRES || IS_MYSQL ? "name = CharField(max_length = 30)" : "name = TextField()", code)
+    @test occursin("Meta(table = \"topic\", app_label = \"project\", managed = false)", code)
+    @test occursin("author = ForeignKey(:Author; on_delete = :DO_NOTHING)", code)
+    @test occursin("rating = FloatField(null = true, blank = true)", code)
+    @test_throws ArgumentError inspectdb(["no_such_table"])
+    @test "topic" in Juango.introspect_tables() && !("juango_migrations" in Juango.introspect_tables())
+    # the generated models work against the existing tables
+    m = Module(:Inspected)
+    Core.eval(m, :(using Juango))
+    try
+        Base.include_string(m, replace(code, "@model struct Article" => "@model struct InspArticle",
+                                       "@model struct Topic" => "@model struct InspTopic",
+                                       "ForeignKey(:Author" => "ForeignKey(Juango.get_model(\"project.Author\")"))
+        T = getfield(m, :InspTopic)
+        @test count(objects(T)) == count(objects(Topic)) && exists(filter(T; name = "inspected"))
+        @test isempty(Juango.models_state([T])) && !Juango.is_managed(T)          # migrations ignore it
+    finally
+        foreach(Juango.unregister_model!, filter(T -> parentmodule(T) === m, Juango.all_models()))
+    end
+    # managed = false: migrations leave the table alone
+    @eval @model struct UnmanagedThing
+        label = CharField(max_length = 10)
+        Meta(table = "um_thing", managed = false)
+    end
+    try
+        quiet(() -> migrate(verbose = false))
+        @test !Juango.table_exists(Juango.backend(), "um_thing") && !haskey(Juango.models_state(), "um_thing")
+    finally
+        Juango.unregister_model!(UnmanagedThing)
+    end
+    # dbshell
+    @test first(dbshell_cmd().exec) == (IS_POSTGRES ? "psql" : IS_MYSQL ? "mysql" : "sqlite3")
+    # test command
+    proj = mktempdir()
+    mkpath(joinpath(proj, "tests"))
+    marker = joinpath(proj, "ran.txt")
+    write(joinpath(proj, "tests", "test_one.jl"), "write($(repr(marker)), \"ok\")")
+    cd(() -> quiet(() -> Juango.cmd_test(String[])), proj)
+    @test read(marker, String) == "ok"
+    # flush empties every table (and puts the content types back)
+    n = flush!()
+    @test n > 5 && count(objects(Topic)) == 0 && count(objects(Author)) == 0 && count(objects(ContentType)) > 0
+    @test create(Topic; name = "after flush").id >= 1
+end

@@ -1,4 +1,12 @@
-# Sessions (database-backed) --------------------------------------------------------------------
+# Sessions --------------------------------------------------------------------------------------
+#
+# SESSION_ENGINE picks where session data lives:
+#   :db (default)      a row per session (sessions.SessionRecord)
+#   :cache             the default cache only (fast; sessions vanish with the cache)
+#   :cached_db         the cache in front of the database
+#   :file              a file per session in SESSION_FILE_PATH
+#   :signed_cookies    the data itself, signed, in the cookie (no server storage; keep it small,
+#                      and note a session can't be revoked before it expires)
 
 @model struct SessionRecord
     session_key = CharField(max_length = 40, unique = true)
@@ -35,14 +43,42 @@ session_expiry() = timezone_now() + Second(settings.SESSION_COOKIE_AGE)
 session_cache_key(k) = "juango.session:" * k
 cache_sessions() = settings.SESSION_ENGINE in (:cache, :cached_db)
 db_sessions() = settings.SESSION_ENGINE in (:db, :cached_db)
+file_sessions() = settings.SESSION_ENGINE === :file
+cookie_sessions() = settings.SESSION_ENGINE === :signed_cookies
+
+const SESSION_SALT = "juango.sessions.signed_cookies"
+"The directory of `:file` sessions (`SESSION_FILE_PATH`, default a `juango-sessions` folder in the temp directory)."
+session_dir() = something(settings.SESSION_FILE_PATH, joinpath(tempdir(), "juango-sessions"))
+"The file of a `:file` session; `nothing` for a key that isn't one Juango makes (no path tricks)."
+session_file(key) = occursin(r"^[A-Za-z0-9]{20,64}$", key) ? joinpath(session_dir(), "juangosess" * key) : nothing
+
+function load_file_session(key)
+    f = session_file(key)
+    (f === nothing || !isfile(f)) && return Session()
+    d = try JSON.parse(read(f, String)) catch; nothing end
+    (d isa AbstractDict && get(d, "expire", 0) > time()) || return Session()
+    Session(String(key), plainjson(get(d, "data", Dict{String,Any}())), false, false)
+end
+
+function save_file_session!(s::Session)
+    dir = session_dir()
+    mkpath(dir)
+    f = session_file(s.key)
+    tmp = f * ".tmp" * random_string(6)
+    write(tmp, JSON.json(Dict("expire" => time() + settings.SESSION_COOKIE_AGE, "data" => s.data)))
+    mv(tmp, f; force = true)                     # atomic: readers never see half a file
+end
 
 """
-Load a session. `SESSION_ENGINE` chooses the store: `:db` (the default), `:cache` (the
-default cache only; fast, but sessions vanish with the cache) or `:cached_db` (cache in
-front of the database).
+Load a session from the store `SESSION_ENGINE` picks (see the top of sessions.jl).
 """
 function load_session(key::Union{Nothing,AbstractString})
     key === nothing && return Session()
+    if cookie_sessions()
+        data = try signing_loads(key; salt = SESSION_SALT, max_age = settings.SESSION_COOKIE_AGE) catch; nothing end
+        return data isa AbstractDict ? Session(String(key), plainjson(data), false, false) : Session()
+    end
+    file_sessions() && return load_file_session(key)
     if cache_sessions()
         d = cache_get(session_cache_key(key))
         d === nothing || return Session(String(key), d, false, false)
@@ -60,8 +96,18 @@ function load_session(key::Union{Nothing,AbstractString})
 end
 
 function save_session!(s::Session)
+    if cookie_sessions()
+        s.key = signing_dumps(s.data; salt = SESSION_SALT)      # the cookie value is the data
+        s.modified = false
+        return s
+    end
     if s.key === nothing
         s.key = random_string(32)
+    end
+    if file_sessions()
+        save_file_session!(s)
+        s.modified = false
+        return s
     end
     cache_sessions() && cache_set(session_cache_key(s.key), s.data; timeout = settings.SESSION_COOKIE_AGE)
     db_sessions() || (s.modified = false; return s)
@@ -96,7 +142,30 @@ end
 function drop_session(key)
     cache_sessions() && cache_delete(session_cache_key(key))
     db_sessions() && delete!(filter(objects(SessionRecord); session_key = key))
+    if file_sessions()
+        f = session_file(key)
+        f === nothing || rm(f; force = true)
+    end
 end
 
-"Remove expired session rows (the `clearsessions` command)."
-clear_expired_sessions!() = delete!(filter(objects(SessionRecord); expire_date__lt = timezone_now()))
+"""
+Remove expired sessions (the `clearsessions` command) and return how many: rows for `:db`
+and `:cached_db`, files for `:file`. Cache and signed-cookie sessions expire by themselves.
+"""
+function clear_expired_sessions!()
+    db_sessions() && return delete!(filter(objects(SessionRecord); expire_date__lt = timezone_now()))
+    file_sessions() || return 0
+    dir = session_dir()
+    isdir(dir) || return 0
+    n = 0
+    for name in readdir(dir)
+        startswith(name, "juangosess") || continue
+        f = joinpath(dir, name)
+        d = try JSON.parse(read(f, String)) catch; nothing end
+        if !(d isa AbstractDict) || get(d, "expire", 0) <= time()
+            rm(f; force = true)
+            n += 1
+        end
+    end
+    n
+end

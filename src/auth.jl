@@ -98,46 +98,22 @@ Base.show(io::IO, ::AnonymousUser) = print(io, "AnonymousUser")
 is_authenticated(u) = u isa AbstractUser
 is_authenticated(req::Request) = req.user isa AbstractUser
 
-# --- password hashing (PBKDF2-SHA256, Django-compatible format) ------------------------------
-
-function pbkdf2_sha256(password::AbstractVector{UInt8}, salt::AbstractVector{UInt8}, iterations::Int)
-    password = Vector{UInt8}(password)
-    u = hmac_sha256(password, vcat(salt, UInt8[0, 0, 0, 1]))
-    t = copy(u)
-    for _ in 2:iterations
-        u = hmac_sha256(password, u)
-        t .⊻= u
-    end
-    t
-end
+# Password hashing and validation live in passwords.jl.
 
 """
-    make_password(raw) -> String
+    check_password(user, raw) -> Bool
 
-Hash a password as `pbkdf2_sha256\$iterations\$salt\$hash` (the same format
-Django uses, so hashes are interchangeable).
+Whether `raw` is the user's password. A password stored with an older hasher (or weaker
+settings than the first of `PASSWORD_HASHERS`) is re-hashed and saved.
 """
-function make_password(raw::AbstractString; iterations = settings.PASSWORD_ITERATIONS, salt = random_string(22))
-    dk = pbkdf2_sha256(codeunits(raw), codeunits(salt), iterations)
-    "pbkdf2_sha256\$$iterations\$$salt\$$(base64encode(dk))"
-end
-
-"Check a raw password against an encoded hash (or a `User`)."
-function check_password(raw::AbstractString, encoded::AbstractString)
-    parts = split(encoded, '$')
-    (length(parts) == 4 && parts[1] == "pbkdf2_sha256") || return false
-    iters = tryparse(Int, parts[2])
-    iters === nothing && return false
-    dk = pbkdf2_sha256(codeunits(raw), codeunits(parts[3]), iters)
-    consteq(base64encode(dk), parts[4])
-end
-check_password(u::AbstractUser, raw::AbstractString) = check_password(raw, u.password)
+check_password(u::AbstractUser, raw::AbstractString) =
+    check_password(raw, u.password; setter = r -> (u.id === nothing ? set_password!(u, r) : (set_password!(u, r); save!(u))))
 
 "Set (hash) a user's password. Call `save!(user)` afterwards."
 set_password!(u::AbstractUser, raw::AbstractString) = (u.password = make_password(raw); u)
 "Mark the password as unusable."
 set_unusable_password!(u::AbstractUser) = (u.password = "!" * random_string(40); u)
-has_usable_password(u::AbstractUser) = startswith(u.password, "pbkdf2_sha256\$")
+has_usable_password(u::AbstractUser) = !startswith(u.password, "!") && identify_hasher(u.password) !== nothing
 
 "Create and save a regular user of the `AUTH_USER_MODEL` (`username` fills its `username_field`)."
 function create_user(username::AbstractString, password = nothing; kw...)
@@ -365,6 +341,8 @@ URL patterns for logging in and out and resetting passwords: `path(\"accounts/\"
 auth_urls() = (require_app("auth", "auth_urls()"); include_urls([
     path("login/", LoginView(); name = "login"),
     path("logout/", LogoutView(); name = "logout"),
+    path("password_change/", PasswordChangeView(); name = "password_change"),
+    path("password_change/done/", PasswordChangeDoneView(); name = "password_change_done"),
     path("password_reset/", PasswordResetView(); name = "password_reset"),
     path("password_reset/done/", template_page("registration/password_reset_done.html", "PasswordResetDoneView"); name = "password_reset_done"),
     path("reset/<str:uidb64>/<str:token>/", PasswordResetConfirmView(); name = "password_reset_confirm"),

@@ -91,9 +91,10 @@ is_disconnect(e) = e isa Union{Base.IOError,EOFError,HTTP.WebSockets.WebSocketEr
 Stream handler for `HTTP.listen`: like `http_handler`, plus streaming responses sent as they
 are produced and WebSocket handshakes for `websocket` views.
 """
-function stream_handler(stream::HTTP.Stream)
+function stream_handler(stream::HTTP.Stream; secure::Bool = false)
     hreq = HTTP.startread(stream)
     req = from_http(hreq, remote_ip(stream); body = read(stream))
+    secure && (req.meta[:secure] = true)       # served over TLS
     upgrade = HTTP.WebSockets.isupgrade(hreq)
     upgrade && (req.meta[:websocket_upgrade] = true)
     # HTTP.jl runs connections on the :interactive thread pool; views run on the :default pool so
@@ -153,7 +154,7 @@ function runserver(host::AbstractString = "127.0.0.1", port::Integer = 8000; blo
         config = TLS.Config(; cert_file = string(certfile), key_file = string(keyfile),
                               alpn_protocols = ["h2", "http/1.1"])
         addr = (occursin(':', host) ? "[$host]" : host) * ":$port"
-        HTTP.listen!(stream_handler, TLS.listen("tcp", addr, config))
+        HTTP.listen!(s -> stream_handler(s; secure = true), TLS.listen("tcp", addr, config))
     end
     block || return server
     try

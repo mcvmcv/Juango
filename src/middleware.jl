@@ -13,16 +13,7 @@
 #
 #     configure!(MIDDLEWARE = [Juango.default_settings()[:MIDDLEWARE]..., TimingMiddleware])
 
-"Adds a few security headers."
-function SecurityMiddleware(get_response)
-    function (req::Request)
-        resp = get_response(req)
-        hasheader(resp, "X-Content-Type-Options") || setheader!(resp, "X-Content-Type-Options", "nosniff")
-        hasheader(resp, "X-Frame-Options") || setheader!(resp, "X-Frame-Options", "DENY")
-        hasheader(resp, "Referrer-Policy") || setheader!(resp, "Referrer-Policy", "same-origin")
-        resp
-    end
-end
+# SecurityMiddleware: see security.jl
 
 "Loads `req.session` from the session cookie and saves it after the view runs."
 function SessionMiddleware(get_response)

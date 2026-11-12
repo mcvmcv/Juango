@@ -581,3 +581,181 @@ end
         Juango.execute("DELETE FROM " * Juango.qname("juango_flatpage"))
     end
 end
+
+@testset "caching headers, conditional requests and gzip" begin
+    rq(method = "GET"; kw...) = Request(method, "/x/"; headers = Dict{String,String}(string(k) => v for (k, v) in kw))
+    body(req) = HttpResponse("hello")
+    # Cache-Control and Vary
+    r = never_cache(body)(rq())
+    cc = Juango.parse_cache_control(getheader(r, "Cache-Control"))
+    @test all(haskey(cc, k) for k in ("no-cache", "no-store", "must-revalidate", "private")) && cc["max-age"] == "0" && Juango.hasheader(r, "Expires")
+    r = cache_control(body; max_age = 600, public = true)(rq())
+    @test getheader(r, "Cache-Control") == "max-age=600, public"
+    r = cache_control(; private = true)(cache_control(body; max_age = 600, public = true))(rq())
+    @test getheader(r, "Cache-Control") == "max-age=600, private"
+    patch_cache_control!(r; max_age = 60)
+    @test occursin("max-age=60", getheader(r, "Cache-Control"))
+    patch_cache_control!(r; max_age = 900)                   # the smaller max-age wins
+    @test occursin("max-age=60", getheader(r, "Cache-Control"))
+    @test getheader(vary_on_cookie(vary_on_headers(body, "Accept-Language"))(rq()), "Vary") == "Accept-Language, Cookie"
+
+    # etag / last_modified / condition
+    changed = DateTime(2024, 5, 1, 12, 0, 0)
+    calls = Ref(0)
+    v = condition((req; kw...) -> (calls[] += 1; HttpResponse("page")); etag_func = (req; kw...) -> "v1",
+                  last_modified_func = (req; kw...) -> changed)
+    r = v(rq())
+    @test r.status == 200 && getheader(r, "ETag") == "\"v1\"" && getheader(r, "Last-Modified") == "Wed, 01 May 2024 12:00:00 GMT"
+    @test v(rq(; var"if-none-match" = "\"v1\"")).status == 304 && v(rq(; var"if-none-match" = "W/\"v1\", \"v0\"")).status == 304
+    @test v(rq(; var"if-none-match" = "\"v2\"")).status == 200
+    @test v(rq(; var"if-modified-since" = "Wed, 01 May 2024 12:00:00 GMT")).status == 304
+    @test v(rq(; var"if-modified-since" = "Wed, 01 May 2024 11:59:59 GMT")).status == 200
+    @test v(rq("POST"; var"if-match" = "\"v0\"")).status == 412 && v(rq("POST"; var"if-match" = "\"v1\"")).status == 200
+    @test v(rq("PUT"; var"if-unmodified-since" = "Tue, 30 Apr 2024 00:00:00 GMT")).status == 412
+    @test v(rq("POST"; var"if-none-match" = "*")).status == 412
+    n = calls[]
+    v(rq(; var"if-none-match" = "\"v1\""))
+    @test calls[] == n                                        # a 304 doesn't run the view
+    @test etag(body, (req; kw...) -> "abc")(rq(; var"if-none-match" = "\"abc\"")).status == 304
+    @test last_modified(body, (req; kw...) -> changed)(rq()).status == 200
+
+    # ConditionalGetMiddleware
+    cg = ConditionalGetMiddleware(req -> HttpResponse("content"))
+    r = cg(rq())
+    e = getheader(r, "ETag")
+    @test r.status == 200 && startswith(e, "\"")
+    r2 = cg(rq(; var"if-none-match" = e))
+    @test r2.status == 304 && isempty(r2.body) && getheader(r2, "ETag") == e
+    @test cg(rq("POST"; var"if-none-match" = e)).status == 200          # only GET/HEAD
+    @test cg(rq(; var"if-none-match" = "\"other\"")).status == 200
+
+    # GZipMiddleware
+    long = repeat("compress me please ", 50)
+    gz = GZipMiddleware(req -> (r = HttpResponse(long); setheader!(r, "ETag", "\"x\""); r))
+    r = gz(rq(; var"accept-encoding" = "gzip, deflate"))
+    @test getheader(r, "Content-Encoding") == "gzip" && length(r.body) < length(long)
+    @test String(Juango.CodecZlib.transcode(Juango.CodecZlib.GzipDecompressor, r.body)) == long
+    @test getheader(r, "Vary") == "Accept-Encoding" && getheader(r, "ETag") == "W/\"x\""
+    sizes = Set(length(gz(rq(; var"accept-encoding" = "gzip")).body) for _ in 1:10)
+    @test length(sizes) > 1                                     # random padding against BREACH
+    @test !Juango.hasheader(gz(rq()), "Content-Encoding")              # client doesn't accept gzip
+    @test !Juango.hasheader(GZipMiddleware(req -> HttpResponse("short"))(rq(; var"accept-encoding" = "gzip")), "Content-Encoding")
+    @test !Juango.hasheader(GZipMiddleware(req -> StreamingHttpResponse([long]))(rq(; var"accept-encoding" = "gzip")), "Content-Encoding")
+    @test Juango.crc32(Vector{UInt8}(codeunits("123456789"))) == 0xcbf43926
+    # through the whole stack
+    old = settings.MIDDLEWARE
+    try
+        configure!(MIDDLEWARE = vcat(Any[GZipMiddleware, ConditionalGetMiddleware], old))
+        c = Client()
+        r = get(c, "/articles/"; headers = Dict("Accept-Encoding" => "gzip"))
+        @test r.status == 200 && (length(r.body) < 200 || getheader(r, "Content-Encoding") == "gzip")
+    finally
+        configure!(MIDDLEWARE = old)
+    end
+end
+
+@testset "security: HTTPS, HSTS, Content-Security-Policy, check --deploy" begin
+    rq(path = "/x/"; kw...) = Request("GET", path; headers = Dict{String,String}("host" => "example.com", (string(k) => v for (k, v) in kw)...))
+    ok(req) = HttpResponse("ok")
+    old = Dict(k => getproperty(settings, k) for k in (:SECURE_PROXY_SSL_HEADER, :SECURE_SSL_REDIRECT, :SECURE_HSTS_SECONDS,
+               :SECURE_HSTS_INCLUDE_SUBDOMAINS, :SECURE_HSTS_PRELOAD, :SECURE_REDIRECT_EXEMPT, :SECURE_SSL_HOST,
+               :SECURE_CSP, :SECURE_CSP_REPORT_ONLY, :ALLOWED_HOSTS, :MIDDLEWARE))
+    try
+        configure!(ALLOWED_HOSTS = ["example.com", "testserver"])
+        # X-Forwarded-Proto counts only when SECURE_PROXY_SSL_HEADER says so
+        @test !is_secure(rq(; var"x-forwarded-proto" = "https"))
+        configure!(SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https"))
+        @test is_secure(rq(; var"x-forwarded-proto" = "https")) && !is_secure(rq(; var"x-forwarded-proto" = "http"))
+        mw = Juango.SecurityMiddleware(ok)
+        @test !Juango.hasheader(mw(rq()), "Strict-Transport-Security")
+        configure!(SECURE_HSTS_SECONDS = 3600, SECURE_HSTS_INCLUDE_SUBDOMAINS = true, SECURE_HSTS_PRELOAD = true)
+        r = mw(rq(; var"x-forwarded-proto" = "https"))
+        @test getheader(r, "Strict-Transport-Security") == "max-age=3600; includeSubDomains; preload"
+        @test getheader(r, "X-Content-Type-Options") == "nosniff" && getheader(r, "X-Frame-Options") == "DENY" &&
+              getheader(r, "Cross-Origin-Opener-Policy") == "same-origin"
+        @test !Juango.hasheader(mw(rq()), "Strict-Transport-Security")              # only over HTTPS
+        # redirecting to HTTPS
+        configure!(SECURE_SSL_REDIRECT = true, SECURE_REDIRECT_EXEMPT = ["^health/"])
+        r = mw(Request("GET", "/a/?q=1"; headers = Dict("host" => "example.com")))
+        @test r.status == 301 && getheader(r, "Location") == "https://example.com/a/?q=1"
+        @test mw(rq("/health/")).status == 200 && mw(rq(; var"x-forwarded-proto" = "https")).status == 200
+        configure!(SECURE_SSL_HOST = "secure.example.com")
+        @test getheader(mw(rq()), "Location") == "https://secure.example.com/x/"
+        configure!(SECURE_SSL_REDIRECT = false)
+
+        # Content-Security-Policy with a nonce
+        configure!(SECURE_CSP = Dict("default-src" => [CSP.SELF], "script-src" => [CSP.SELF, CSP.NONCE],
+                                     "upgrade-insecure-requests" => true),
+                   SECURE_CSP_REPORT_ONLY = Dict("img-src" => "'self' data:"))
+        csp = ContentSecurityPolicyMiddleware
+        r = csp(ok)(rq())
+        @test getheader(r, "Content-Security-Policy") == "default-src 'self'; script-src 'self'; upgrade-insecure-requests"
+        @test getheader(r, "Content-Security-Policy-Report-Only") == "img-src 'self' data:"
+        page = (req) -> render(req, Template("<script nonce=\"{{ csp_nonce }}\">x()</script>"), Dict{String,Any}())
+        req = rq()
+        r = csp(page)(req)
+        n = csp_nonce(req)
+        @test occursin("nonce=\"$n\"", text(r)) && occursin("script-src 'self' 'nonce-$n'", getheader(r, "Content-Security-Policy"))
+        @test csp_nonce(rq()) != n
+        r = csp(csp_override(ok, nothing))(rq())
+        @test !Juango.hasheader(r, "Content-Security-Policy") && Juango.hasheader(r, "Content-Security-Policy-Report-Only")
+        r = csp(csp_override(ok, Dict("default-src" => [CSP.NONE])))(rq())
+        @test getheader(r, "Content-Security-Policy") == "default-src 'none'"
+
+        # check --deploy
+        configure!(SECURE_CSP = Dict{String,Any}(), SECURE_HSTS_SECONDS = 0)
+        issues = deploy_issues()
+        @test any(occursin("SECURE_HSTS_SECONDS", i) for i in issues) && any(occursin("SESSION_COOKIE_SECURE", i) for i in issues)
+        @test any(occursin("DEBUG", i) for i in issues) == settings.DEBUG
+    finally
+        configure!(; old...)
+    end
+end
+
+@testset "testing helpers" begin
+    # rollback_after undoes everything, including what requests did
+    before = count(objects(Topic))
+    v = rollback_after() do
+        create(Topic; name = "rolled-1")
+        @test count(objects(Topic)) == before + 1
+        rollback_after(() -> create(Topic; name = "rolled-inner"))      # nested: a savepoint
+        @test !exists(filter(Topic; name = "rolled-inner"))
+        :done
+    end
+    @test v === :done && count(objects(Topic)) == before
+    @test_throws ErrorException rollback_after(() -> error("boom"))
+
+    # override_settings
+    old = settings.APPEND_SLASH
+    override_settings(APPEND_SLASH = !old, BRAND_NEW_SETTING = 3) do
+        @test settings.APPEND_SLASH == !old && settings.BRAND_NEW_SETTING == 3
+    end
+    @test settings.APPEND_SLASH == old && !haskey(Juango.SETTINGS, :BRAND_NEW_SETTING)
+    @test_throws ErrorException override_settings(() -> error("x"); APPEND_SLASH = !old)
+    @test settings.APPEND_SLASH == old
+
+    # RequestFactory: a request for calling a view directly
+    rf = RequestFactory()
+    req = get(rf, "/articles/"; data = Dict("page" => "2"))
+    @test req.method == "GET" && req.GET["page"] == "2" && req.user isa AnonymousUser && req.resolver_match !== nothing
+    req = post(rf, "/contact/", Dict("name" => "Ann"))
+    @test req.POST["name"] == "Ann"
+    @test text(whoami(get(rf, "/whoami/"))) == "anon"
+
+    # assertions
+    c = Client()
+    r = get(c, "/whoami/")
+    @test assert_contains(r, "anon") && assert_contains(r, "anon"; count = 1) && assert_not_contains(r, "user:")
+    @test_throws AssertionError assert_contains(r, "missing")
+    @test_throws AssertionError assert_contains(r, "anon"; status = 404)
+    @test assert_template_used(r, "whoami.html") && assert_template_not_used(r, "base.html")
+    @test_throws AssertionError assert_template_used(r, "other.html")
+    r = get(c, "/secret/")
+    @test assert_redirects(r, settings.LOGIN_URL * "?next=%2Fsecret%2F") && assert_redirects(r, settings.LOGIN_URL * "?next=%2Fsecret%2F"; client = c)
+    @test_throws AssertionError assert_redirects(r, "/elsewhere/")
+    @test assert_num_queries(() -> count(objects(Topic)), 1)
+    @test_throws AssertionError assert_num_queries(() -> nothing, 1)
+    f = ModelForm(Topic; data = Dict("name" => ""))
+    @test assert_form_error(f, :name, "This field is required.") && assert_form_error(f, nothing, String[])
+    @test_throws AssertionError assert_form_error(f, :name, [])
+end

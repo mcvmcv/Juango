@@ -725,3 +725,116 @@ Juango.username_field(::Type{Member}) = :email
     end
     @test get_user_model() === User && Admin.is_registered(User) && Juango.model_in_use(User)
 end
+
+@testset "password hashers, validators and password change" begin
+    # the algorithms against published test vectors
+    @test bytes2hex(Juango.blake2b(Vector{UInt8}(codeunits("abc")))) ==
+          "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923"
+    tag = Juango.argon2id(fill(0x01, 32), fill(0x02, 16); t = 3, m = 32, p = 4, len = 32, secret = fill(0x03, 8), ad = fill(0x04, 12))
+    @test bytes2hex(tag) == "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"     # RFC 9106, 5.3
+    @test Juango.bcrypt("U*U", "CCCCCCCCCCCCCCCCCCCCC.", 5)[4:end] == "\$05\$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW"
+    @test Juango.bcrypt("", "DCq7YPn5Rq63x1Lad4cll.", 6)[4:end] == "\$06\$DCq7YPn5Rq63x1Lad4cll.TV4S6ytwfsfvkgY8jIucDrjc8deX1s."
+
+    small = Any[Argon2Hasher(time_cost = 1, memory_cost = 64, parallelism = 2), BCryptSHA256Hasher(rounds = 4),
+                BCryptHasher(rounds = 4), PBKDF2Hasher(iterations = 1000)]
+    for h in small
+        e = make_password("s3cret-pass"; hasher = h)
+        @test startswith(e, Juango.algorithm(h) * "\$")
+        configure!(PASSWORD_HASHERS = small)
+        @test check_password("s3cret-pass", e) && !check_password("wrong", e)
+    end
+    @test occursin(r"^argon2\$argon2id\$v=19\$m=64,t=1,p=2\$[A-Za-z0-9+/]+\$[A-Za-z0-9+/]+$", make_password("x"; hasher = small[1]))
+    @test occursin(r"^bcrypt_sha256\$\$2b\$04\$[./A-Za-z0-9]{53}$", make_password("x"; hasher = small[2]))
+
+    # a password stored by an older hasher is upgraded at the next login
+    configure!(PASSWORD_HASHERS = Any[PBKDF2Hasher(iterations = 1000)])
+    u = create_user("hasheruser", "first-pass-123")
+    @test startswith(u.password, "pbkdf2_sha256\$1000\$")
+    configure!(PASSWORD_HASHERS = small)
+    @test authenticate("hasheruser", "first-pass-123") !== nothing
+    @test startswith(get(User; id = u.id).password, "argon2\$") && Juango.has_usable_password(get(User; id = u.id))
+    configure!(PASSWORD_HASHERS = Any[Argon2Hasher(time_cost = 2, memory_cost = 64, parallelism = 2)])
+    @test authenticate("hasheruser", "first-pass-123") !== nothing
+    @test occursin("t=2", get(User; id = u.id).password)                 # stronger settings re-hash too
+    configure!(PASSWORD_HASHERS = Any[PBKDF2Hasher()])
+    @test authenticate("hasheruser", "first-pass-123") === nothing        # argon2 isn't accepted any more
+
+    # validators
+    configure!(PASSWORD_HASHERS = Any[PBKDF2Hasher(iterations = 1000)])
+    @test validate_password("short") == ["This password is too short. It must contain at least 8 characters."]
+    @test validate_password("12345678") == ["This password is entirely numeric."] && isempty(validate_password("a good long one"))
+    all4 = Any[MinimumLengthValidator(min_length = 6), CommonPasswordValidator(), NumericPasswordValidator(),
+               UserAttributeSimilarityValidator()]
+    try
+        configure!(AUTH_PASSWORD_VALIDATORS = all4)
+        @test validate_password("Password123") == ["This password is too common."]
+        person = (username = "alicewonder", first_name = "", last_name = "", email = "alice@example.com")
+        @test validate_password("alicewonder1"; user = person) == ["The password is too similar to the username."]
+        @test validate_password("Alice12"; user = person) == ["The password is too similar to the email."]
+        @test isempty(validate_password("tangerine-kayak-77"; user = person))
+        @test Juango.similarity("abcd", "bcde") ≈ 0.75 && Juango.similarity("", "") == 1.0
+    finally
+        configure!(AUTH_PASSWORD_VALIDATORS = Any[MinimumLengthValidator(), NumericPasswordValidator()])
+    end
+
+    # changing the password keeps this session and ends the others
+    pu = create_user("changer", "old-password-1")
+    c, other = Client(), Client()
+    force_login!(c, pu); force_login!(other, pu)
+    @test get(c, "/accounts/password_change/").status == 200
+    @test get(Client(), "/accounts/password_change/").status == 302              # login required
+    r = post(c, "/accounts/password_change/", Dict("old_password" => "nope", "new_password1" => "new-password-2", "new_password2" => "new-password-2"))
+    @test r.status == 200 && occursin("Your old password was entered incorrectly", text(r))
+    r = post(c, "/accounts/password_change/", Dict("old_password" => "old-password-1", "new_password1" => "123", "new_password2" => "123"))
+    @test r.status == 200 && occursin("too short", text(r)) && occursin("entirely numeric", text(r))
+    r = post(c, "/accounts/password_change/", Dict("old_password" => "old-password-1", "new_password1" => "new-password-2", "new_password2" => "other"))
+    @test occursin("didn’t match", text(r))
+    r = post(c, "/accounts/password_change/", Dict("old_password" => "old-password-1", "new_password1" => "new-password-2", "new_password2" => "new-password-2"))
+    @test r.status == 302 && getheader(r, "Location") == "/accounts/password_change/done/"
+    @test occursin("Password change successful", text(get(c, "/accounts/password_change/done/")))
+    @test text(get(c, "/whoami/")) == "user:changer" && text(get(other, "/whoami/")) == "anon"
+    @test authenticate("changer", "new-password-2") !== nothing && authenticate("changer", "old-password-1") === nothing
+end
+
+@testset "file and signed-cookie sessions" begin
+    sdir = mktempdir()
+    try
+        configure!(SESSION_ENGINE = :file, SESSION_FILE_PATH = sdir)
+        s = Juango.Session(); s["cart"] = [1, 2]
+        Juango.save_session!(s)
+        @test isfile(joinpath(sdir, "juangosess" * s.key)) && Juango.load_session(s.key)["cart"] == [1, 2]
+        @test isempty(Juango.load_session("../../etc/passwd")) && isempty(Juango.load_session("nosuchsessionkey00000000"))
+        old = s.key
+        Juango.cycle_key!(s); Juango.save_session!(s)
+        @test !isfile(joinpath(sdir, "juangosess" * old)) && Juango.load_session(s.key)["cart"] == [1, 2]
+        # an expired file is ignored and removed by clearsessions
+        write(joinpath(sdir, "juangosess" * "a"^32), JSON.json(Dict("expire" => time() - 1, "data" => Dict("x" => 1))))
+        @test isempty(Juango.load_session("a"^32)) && Juango.clear_expired_sessions!() == 1
+        @test isfile(joinpath(sdir, "juangosess" * s.key))
+        c = Client()
+        force_login!(c, root_user())
+        @test get(c, "/admin/").status == 200 && length(readdir(sdir)) == 2
+        k = s.key
+        Juango.flush!(s)
+        @test !isfile(joinpath(sdir, "juangosess" * k))
+
+        configure!(SESSION_ENGINE = :signed_cookies)
+        s = Juango.Session(); s["n"] = 7
+        Juango.save_session!(s)
+        @test Juango.load_session(s.key)["n"] == 7
+        tampered = s.key[1:end-1] * (s.key[end] == 'A' ? "B" : "A")
+        @test isempty(Juango.load_session(tampered))
+        @test Juango.clear_expired_sessions!() == 0
+        c = Client()
+        force_login!(c, root_user())
+        @test get(c, "/admin/").status == 200
+        r = post(c, "/accounts/logout/")                         # the cookie is all there is
+        @test get(c, "/admin/").status == 302
+        c2 = Client()
+        post(c2, "/accounts/login/", Dict("username" => "root", "password" => "rootpw"))
+        @test text(get(c2, "/whoami/")) == "user:root"
+        @test !exists(filter(Juango.SessionRecord; session_key = c2.cookies[settings.SESSION_COOKIE_NAME]))
+    finally
+        configure!(SESSION_ENGINE = :db, SESSION_FILE_PATH = nothing)
+    end
+end
