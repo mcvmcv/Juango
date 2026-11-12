@@ -862,7 +862,7 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 #### Passwords
 
 - **Hashers.** `PASSWORD_HASHERS` (default `[PBKDF2Hasher()]`) lists the accepted hashers; the first hashes new passwords. `Argon2Hasher()`, `BCryptSHA256Hasher()` and `BCryptHasher()` are built in (pure Julia) and use Django's formats, so hashes move between the two frameworks. A password stored with an older hasher, or with weaker settings, is re-hashed when the user next logs in.
-- **Validators.** `AUTH_PASSWORD_VALIDATORS` (default: `MinimumLengthValidator()` and `NumericPasswordValidator()`) also offers `CommonPasswordValidator()` and `UserAttributeSimilarityValidator()`. `validate_password(pw; user)` returns the messages; the password reset, password change and `createsuperuser` use them. A validator of your own is any value with a method `Juango.password_error(v, password, user)` returning a message or `nothing`.
+- **Validators.** `AUTH_PASSWORD_VALIDATORS` (default: `MinimumLengthValidator()` and `NumericPasswordValidator()`) also offers `CommonPasswordValidator()` (Django's list of 20,000 common passwords, or `path = "file"`, plain or `.gz`) and `UserAttributeSimilarityValidator()`. `validate_password(pw; user)` returns the messages; the password reset, password change and `createsuperuser` use them. A validator of your own is any value with a method `Juango.password_error(v, password, user)` returning a message or `nothing`.
 - **Changing passwords.** `auth_urls()` includes `password_change/` and `password_change/done/` (`PasswordChangeView`, `PasswordChangeDoneView`). The user stays logged in; their other sessions end. Call `update_session_auth_hash!(req, user)` after changing a password in your own views.
 
 #### Custom user model
@@ -1345,7 +1345,6 @@ Set them with `configure!(...)` and read them with `settings.NAME`. Request limi
 
 - **Historical models are table-level.** In data migrations, `get_model` gives the table as it was (columns, not relations or methods), unlike Django's historical model classes.
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
-- **The common-password list is shorter than Django's** (pass your own file to `CommonPasswordValidator`).
 - **Composite primary keys, swappable user models and admin docs** have Django's limitations: no foreign keys to composite-key models, choose `AUTH_USER_MODEL` before the first `migrate` (the unused `auth_user` table is still created), and docstrings are shown as plain text.
 - **GZip and streaming.** `GZipMiddleware` doesn't compress streamed responses.
 - `runserver` is HTTP.jl's server. It speaks HTTP/1.1 and HTTP/2 (cleartext with prior knowledge, or negotiated over TLS), and serves HTTPS with `runserver 8443 --cert cert.pem --key key.pem` (or `runserver(...; certfile, keyfile)`). WebSockets need HTTP/1.1, which browsers use for them anyway. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and run `manage.jl check --deploy`.

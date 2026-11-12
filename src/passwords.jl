@@ -508,15 +508,24 @@ end
 struct NumericPasswordValidator end
 password_error(::NumericPasswordValidator, p, user) = all(isdigit, p) ? gettext("This password is entirely numeric.") : nothing
 
-"Not one of a list of common passwords (Juango's own list, or a file with one per line)."
+"""
+Not one of a list of common passwords: Django's list of 20,000 (shipped gzipped), or
+`CommonPasswordValidator(path = "file")` with one password per line (`.gz` files too).
+"""
 Base.@kwdef struct CommonPasswordValidator
     path::Union{Nothing,String} = nothing
 end
 const COMMON_PASSWORDS = Dict{Any,Set{String}}()
+const COMMON_PASSWORDS_LOCK = ReentrantLock()
 function common_passwords(path)
-    get!(COMMON_PASSWORDS, path) do
-        file = something(path, joinpath(@__DIR__, "data", "common-passwords.txt"))
-        Set(lowercase(strip(l)) for l in eachline(file) if !isempty(strip(l)))
+    lock(COMMON_PASSWORDS_LOCK) do
+        get!(COMMON_PASSWORDS, path) do
+            file = something(path, joinpath(@__DIR__, "data", "common-passwords.txt.gz"))
+            open(file) do io
+                src = endswith(file, ".gz") ? CodecZlib.GzipDecompressorStream(io) : io
+                Set(lowercase(strip(l)) for l in eachline(src) if !isempty(strip(l)))
+            end
+        end
     end
 end
 password_error(v::CommonPasswordValidator, p, user) =

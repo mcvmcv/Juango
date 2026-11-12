@@ -800,6 +800,11 @@ end
     try
         configure!(AUTH_PASSWORD_VALIDATORS = all4)
         @test validate_password("Password123") == ["This password is too common."]
+        @test validate_password("Crescent") == ["This password is too common."]     # deep in Django's 20,000
+        @test length(Juango.common_passwords(nothing)) > 19000
+        gz = joinpath(mktempdir(), "mine.txt.gz")
+        open(io -> write(io, transcode(Juango.CodecZlib.GzipCompressor, "Hunter2Hunter\n")), gz, "w")
+        @test Juango.password_error(CommonPasswordValidator(path = gz), "hunter2hunter", nothing) !== nothing
         person = (username = "alicewonder", first_name = "", last_name = "", email = "alice@example.com")
         @test validate_password("alicewonder1"; user = person) == ["The password is too similar to the username."]
         @test validate_password("Alice12"; user = person) == ["The password is too similar to the email."]
