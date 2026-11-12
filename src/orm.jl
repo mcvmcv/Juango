@@ -829,12 +829,13 @@ mutable struct SQLCompiler
     uses_aggregate::Bool        # set when a condition refers to an aggregate annotation (-> HAVING)
     outer::Union{Nothing,SQLCompiler}   # the enclosing query, for OuterRef
     uses_window::Bool           # set when a condition refers to a window annotation (-> wrapping query)
+    join_params::Vector{Any}    # parameters in JOIN ... ON clauses (FilteredRelation conditions)
 end
 function SQLCompiler(@nospecialize(T::Type); outer = nothing)
     table = modelmeta(T).table
     counter = outer === nothing ? Ref(0) : outer.counter
     c = SQLCompiler(T, table, table, String[], Dict{Any,String}(), Set{String}(), counter, false, 0,
-                    Dict{Symbol,Any}(), false, outer, false)
+                    Dict{Symbol,Any}(), false, outer, false, Any[])
     outer === nothing || (c.base = new_alias!(c))   # subqueries alias their table: no clash with the outer one
     c
 end
@@ -851,6 +852,69 @@ function join!(c::SQLCompiler, parent, key, table, childcol, parentcol; left::Bo
     on = "$(qcol(a, childcol)) = $(qcol(parent, parentcol))" * (extra_on === nothing ? "" : " AND " * extra_on(a))
     push!(c.joins, " $(left ? "LEFT OUTER" : "INNER") JOIN $(qname(table)) $(qname(a)) ON $on")
     c.aliases[key] = a
+end
+
+"Strip `prefix__` from the lookups of a FilteredRelation condition."
+function strip_relation(q::Q, prefix::AbstractString, rel::AbstractString)
+    kids = Any[]
+    for ch in q.children
+        if ch isa Q
+            push!(kids, strip_relation(ch, prefix, rel))
+        elseif ch isa Pair
+            k = string(ch.first)
+            startswith(k, prefix) ||
+                throw(ArgumentError("FilteredRelation condition '$k' must start with the relation name '$rel'"))
+            push!(kids, Symbol(chopprefix(k, prefix)) => ch.second)
+        else
+            throw(ArgumentError("FilteredRelation conditions must be lookups, not $(typeof(ch))"))
+        end
+    end
+    Q(q.connector, kids, q.negated)
+end
+
+"""
+The relation of FilteredRelation annotation `name` on `T`: `(model, related column, base column)`,
+joined as related.col = base.col.
+"""
+function filtered_target(T::Type, fr)
+    rel = fr.relation
+    occursin("__", rel) && throw(ArgumentError("FilteredRelation('$rel'): nested relations are not supported"))
+    f = findfield(modelmeta(T), Symbol(rel))
+    if f !== nothing
+        f.kind === :fk || throw(ArgumentError("FilteredRelation('$rel'): '$rel' is not a relation of $T"))
+        modelmeta(f.model).table == modelmeta(T).table ||
+            throw(ArgumentError("FilteredRelation('$rel'): relations inherited from a parent model are not supported"))
+        return related_model(f), "id", column(f), false
+    end
+    find_m2m(T, rel) === nothing ||
+        throw(ArgumentError("FilteredRelation('$rel'): many-to-many relations are not supported; filter the through model"))
+    r = find_reverse(T, rel)
+    r === nothing && throw(lookup_error(T, rel))
+    _, M, rf = r
+    M, column(rf), "id", true
+end
+
+"""
+Join FilteredRelation annotation `name` (once per query) and return `(alias, model)`. The
+condition goes in the ON clause, so rows of the base model without a match survive
+(LEFT JOIN) and aggregates see only matching related rows.
+"""
+function filtered_join!(c::SQLCompiler, alias, @nospecialize(T::Type), name::Symbol)
+    key = (alias, :__filtered, name)
+    fr = c.annotations[name]::FilteredRelation
+    M, childcol, parentcol, reverse = filtered_target(T, fr)
+    reverse && c.scope !== :expr && c.scope != 0 && (c.distinct = true)
+    haskey(c.aliases, key) && return c.aliases[key], M
+    a = new_alias!(c)
+    njoins = length(c.joins)
+    csql, cps = compile_q(c, a, M, strip_relation(fr.condition, fr.relation * "__", fr.relation), false)
+    length(c.joins) == njoins ||
+        throw(ArgumentError("FilteredRelation('$(fr.relation)'): the condition may only use $(nameof(M))'s own fields"))
+    push!(c.leftjoined, a)
+    push!(c.joins, " LEFT OUTER JOIN $(qname(modelmeta(M).table)) $(qname(a)) ON $(qcol(a, childcol)) = $(qcol(alias, parentcol)) AND $csql")
+    append!(c.join_params, cps)
+    c.aliases[key] = a
+    a, M
 end
 
 """
@@ -892,7 +956,21 @@ function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nos
     rest = String.(parts[2:end])
     f = nothing
     colps = Any[]
-    if alias == c.base && isempty(rest) && haskey(c.annotations, Symbol(fname)) && contains_window(c.annotations[Symbol(fname)])
+    if alias == c.base && is_filtered_relation(get(c.annotations, Symbol(fname), nothing))
+        subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
+        if negated
+            # exclude(): no matching related row, as an EXISTS over the filtered relation
+            fr = c.annotations[Symbol(fname)]::FilteredRelation
+            M, childcol, parentcol, _ = filtered_target(T, fr)
+            a = new_alias!(c)
+            csql, cps = compile_q(c, a, M, strip_relation(fr.condition, fr.relation * "__", fr.relation), false)
+            sql, ps = compile_lookup(c, a, M, subkey, value, negated)
+            return ("EXISTS (SELECT 1 FROM $(qname(modelmeta(M).table)) $(qname(a)) WHERE $(qcol(a, childcol)) = $(qcol(alias, parentcol)) AND $csql AND $sql)",
+                    vcat(cps, ps))
+        end
+        a, M = filtered_join!(c, alias, T, Symbol(fname))
+        return compile_lookup(c, a, M, subkey, value, negated)
+    elseif alias == c.base && isempty(rest) && haskey(c.annotations, Symbol(fname)) && contains_window(c.annotations[Symbol(fname)])
         # Window functions can't appear in WHERE: the query is wrapped and this compares the column.
         c.uses_window = true
         col = qname(fname)
@@ -1304,13 +1382,17 @@ function order_clause(c::SQLCompiler, order::Vector{String})
     for o in order
         o == "?" && (push!(parts, random_function(backend())); continue)
         desc = startswith(o, "-")
-        if haskey(c.annotations, Symbol(lstrip(o, '-')))
+        if haskey(c.annotations, Symbol(lstrip(o, '-'))) && !is_filtered_relation(c.annotations[Symbol(lstrip(o, '-'))])
             push!(parts, qname(lstrip(o, '-')) * (desc ? " DESC" : " ASC"))
             continue
         end
         segs = split(lstrip(o, '-'), "__")
         alias, M = c.base, T
-        for s in segs[1:end-1]     # follow forward FKs: order_by("author__name")
+        for (i, s) in enumerate(segs[1:end-1])     # follow forward FKs: order_by("author__name")
+            if i == 1 && is_filtered_relation(get(c.annotations, Symbol(s), nothing))
+                alias, M = filtered_join!(c, alias, M, Symbol(s))
+                continue
+            end
             f = findfield(modelmeta(M), Symbol(s))
             (f !== nothing && f.kind === :fk) || throw(LookupError("cannot order $T by '$o': '$s' is not a foreign key of $M"))
             alias = field_alias!(c, alias, M, f)
@@ -1449,6 +1531,7 @@ function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = 
     pre_ann = copy(sel)            # the select list without annotations (for a wrapping query)
     ann_sel, ann_ps = String[], Any[]
     for (k, v) in qs.annotations
+        is_filtered_relation(v) && continue
         sql, p = compile_expr(c, v)
         push!(ann_sel, "$sql AS $(qname(string(k)))")
         append!(ann_ps, p)
@@ -1508,12 +1591,12 @@ function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = 
         outer_sel = idonly ? pk_select(c.base, T) : columns !== nothing ? columns : "*"
         sql = "SELECT $outer_sel FROM ($inner) AS $(qname(c.base)) WHERE " * join(oparts, " AND ") *
               o * limit_offset_sql(backend(), qs.limit, qs.offset)
-        return sql, vcat(inner_ps, wps, hps, ops), c, related
+        return sql, vcat(inner_ps, c.join_params, wps, hps, ops), c, related
     end
     if qs.for_update !== nothing && columns === nothing && !idonly && qs.values_fields === nothing
         sql *= for_update_sql(backend(), qs.for_update, c, related)
     end
-    sql, vcat(sel_ps, wps, hps), c, related
+    sql, vcat(sel_ps, c.join_params, wps, hps), c, related
 end
 
 "The `FOR UPDATE ...` clause of `select_for_update` (nothing on SQLite, which locks the whole database)."
@@ -1600,7 +1683,8 @@ function fetch_here(qs::QuerySet{T}) where {T}
     rows = execute(sql, ps)
     objs = T[from_row(T, r) for r in rows]
     foreach(set_instance_db!, objs)
-    for (k, _) in qs.annotations, (o, r) in zip(objs, rows)
+    for (k, v) in qs.annotations, (o, r) in zip(objs, rows)
+        is_filtered_relation(v) && continue
         getfield(o, :_data)[k] = get(r, k, nothing)
     end
     if !isempty(related)
@@ -1641,8 +1725,8 @@ function fetch_values(qs::QuerySet{T}) where {T}
             v = get(r, k, nothing)
             d[k] = haskey(convs, k) ? from_db(convs[k], v) : v
         end
-        for (k, _) in qs.annotations
-            d[k] = get(r, k, nothing)
+        for (k, v) in qs.annotations
+            is_filtered_relation(v) || (d[k] = get(r, k, nothing))
         end
         push!(out, d)
     end

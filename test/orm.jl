@@ -408,6 +408,22 @@ end
     @test [(r.n, r.mx) for r in rows] == [(2, 30), (1, 5), (0, nothing)]
     @test [a.name for a in annotate(exau; n = Count(:articles)) |> filter(n = 0)] == ["Ex C"]
 
+    # --- FilteredRelation ----------------------------------------------------------------------
+    pubrel = annotate(exau; pub = FilteredRelation(:articles; condition = Q(articles__published = true)))
+    rows = collect(order_by(annotate(pubrel; n = Count(:pub), v = Sum(:pub__views)), "name"))
+    @test [(r.n, r.v) for r in rows] == [(1, 10), (1, 5), (0, nothing)]
+    @test occursin(r"LEFT OUTER JOIN \S+ \S+ ON .* AND", sel(annotate(pubrel; n = Count(:pub))))
+    @test sort([a.name for a in filter(pubrel; pub__views__gte = 5)]) == ["Ex A", "Ex B"]
+    @test isempty(filter(pubrel; pub__title = "ex-2"))                     # ex-2 isn't published
+    @test [a.name for a in filter(pubrel; pub__isnull = true)] == ["Ex C"]
+    @test sort([a.name for a in exclude(pubrel; pub__views = 10)]) == ["Ex B", "Ex C"]
+    @test aggregate(pubrel; n = Count(:pub))[:n] == 2
+    @test values_list(order_by(filter(pubrel; pub__isnull = false), "pub__views"), :name; flat = true) == ["Ex B", "Ex A"]
+    viewed = annotate(exa; who = FilteredRelation(:author; condition = Q(author__name = "Ex A")))
+    @test titles(filter(viewed; who__isnull = false)) == ["ex-1", "ex-2"]
+    @test_throws ArgumentError collect(annotate(exau; x = FilteredRelation(:articles; condition = Q(published = true))) |> filter(x__id = 1))
+    @test_throws ArgumentError collect(annotate(exau; x = FilteredRelation(:articles; condition = Q(articles__author__name = "y"))) |> filter(x__id = 1))
+
     # --- values(): dict rows, relation paths, GROUP BY ------------------------------------------
     @test collect(values(order_by(exa, "title"), :title, :author__name)) ==
           [Dict(:title => "ex-1", :author__name => "Ex A"), Dict(:title => "ex-2", :author__name => "Ex A"),

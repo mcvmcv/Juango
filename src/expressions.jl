@@ -27,7 +27,30 @@ struct CombinedExpression <: Expression
     rhs::Expression
 end
 
+"""
+    FilteredRelation(relation; condition = Q())
+
+A relation joined with an extra condition in its ON clause, for `annotate`:
+
+    qs = annotate(Author; approved = FilteredRelation(:post; condition = Q(post__status = "p")))
+    filter(qs; approved__title__contains = "Julia")       # authors with a matching published post
+    annotate(qs; n = Count(:approved))                   # count only published posts
+
+The relation is a forward foreign key or a reverse relation of the model (one level). The
+condition's lookups start with the relation's name and use only the related model's own
+fields.
+"""
+struct FilteredRelation
+    relation::String
+    condition::Q
+end
+FilteredRelation(relation; condition::Q = Q()) = FilteredRelation(string(relation), condition)
+
+"Whether an annotation is a `FilteredRelation` (a join, not a selected value)."
+is_filtered_relation(x) = x isa FilteredRelation
+
 "Turn a function argument into an expression: names are field references, the rest literals."
+ref(x::FilteredRelation) = x
 ref(x::Expression) = x
 ref(x::Union{Symbol,AbstractString}) = F(string(x))
 ref(x) = Value(x)
@@ -174,6 +197,11 @@ function resolve_path(c::SQLCompiler, alias, @nospecialize(T::Type), path::Abstr
             last_ || throw(LookupError("'id' is not a relation in '$path'"))
             return qcol(alias, "id"), nothing
         end
+        if i == 1 && alias == c.base && is_filtered_relation(get(c.annotations, Symbol(s), nothing))
+            alias, T = filtered_join!(c, alias, T, Symbol(s))
+            last_ && return qcol(alias, "id"), nothing
+            continue
+        end
         f = findfield(modelmeta(T), Symbol(s))
         if f !== nothing
             alias = field_alias!(c, alias, T, f)
@@ -219,7 +247,7 @@ value_sql(b, v) = ("?", Any[v])
 compile_expr(c::SQLCompiler, e::Value) = value_sql(backend(), e.value)
 
 function compile_expr(c::SQLCompiler, e::F)
-    if !occursin("__", e.name) && haskey(c.annotations, Symbol(e.name))
+    if !occursin("__", e.name) && haskey(c.annotations, Symbol(e.name)) && !is_filtered_relation(c.annotations[Symbol(e.name)])
         a = c.annotations[Symbol(e.name)]
         contains_aggregate(a) && (c.uses_aggregate = true)
         sql, ps = compile_expr(c, a)
@@ -391,6 +419,9 @@ aggregate(qs::QuerySet; kw...) = in_db(() -> aggregate_here(qs; kw...), qs)
 function aggregate_here(qs::QuerySet{T}; kw...) where {T}
     isempty(kw) && throw(ArgumentError("aggregate needs at least one name = Aggregate(...)"))
     c = SQLCompiler(T)
+    for (k, v) in qs.annotations
+        is_filtered_relation(v) && (c.annotations[k] = v)
+    end
     sel, ps = String[], Any[]
     for (k, v) in kw
         sql, p = compile_expr(c, ref(v))
@@ -399,7 +430,7 @@ function aggregate_here(qs::QuerySet{T}; kw...) where {T}
     end
     sub, sps = select_sql(qs; columns = pk_select(c.table, T), ordered = false)
     row = execute("SELECT $(join(sel, ", ")) FROM $(qname(c.table))$(join(c.joins)) WHERE $(pk_ref(c.base, T)) IN ($(in_subquery(backend(), sub)))",
-                  vcat(ps, sps))[1]
+                  vcat(ps, c.join_params, sps))[1]
     Dict{Symbol,Any}(k => row[k] for k in keys(kw))
 end
 function aggregate(qs::QuerySet, func::Symbol, field::Symbol)
