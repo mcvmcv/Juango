@@ -213,8 +213,9 @@ const CRC32_TABLE = let t = Vector{UInt32}(undef, 256)
     end
     t
 end
-function crc32(data::AbstractVector{UInt8})
-    c = 0xffffffff
+"CRC-32 of `data`; pass the previous result as `crc` to continue over several chunks."
+function crc32(data::AbstractVector{UInt8}, crc::UInt32 = 0x00000000)
+    c = ~crc
     @inbounds for b in data
         c = CRC32_TABLE[((c ⊻ b) & 0xff) + 1] ⊻ (c >> 8)
     end
@@ -229,33 +230,91 @@ A gzip file of `data`. Its header carries a file name of 1 to `max_random_bytes`
 letters, so the compressed length varies ("Heal the Breach", as Django does against BREACH).
 """
 function gzip_compress(data::AbstractVector{UInt8}; max_random_bytes::Integer = 100)
+    vcat(gzip_header(max_random_bytes), transcode(CodecZlib.DeflateCompressor, Vector{UInt8}(data)),
+         le32bytes(crc32(data)), le32bytes(UInt32(length(data) % 2^32)))
+end
+function gzip_header(max_random_bytes::Integer)
     head = UInt8[0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff]
     if max_random_bytes > 0
         head[4] = 0x08                                   # FNAME
         n = rand(RandomDevice(), 1:max_random_bytes)
         append!(head, UInt8.(rand(RandomDevice(), [UInt8('a'):UInt8('z'); UInt8('A'):UInt8('Z')], n)), UInt8[0])
     end
-    vcat(head, transcode(CodecZlib.DeflateCompressor, Vector{UInt8}(data)), le32bytes(crc32(data)), le32bytes(UInt32(length(data) % 2^32)))
+    head
 end
+
+"Run raw deflate over `data` with `flush` (sync flush or finish) and return what zlib produced."
+function deflate_chunk!(z::CodecZlib.ZStream, data::Vector{UInt8}, buf::Vector{UInt8}, flush::Cint)
+    out = UInt8[]
+    GC.@preserve data buf begin
+        z.next_in = pointer(data)
+        z.avail_in = length(data)
+        while true
+            z.next_out = pointer(buf)
+            z.avail_out = length(buf)
+            code = CodecZlib.deflate!(z, flush)
+            code in (CodecZlib.Z_OK, CodecZlib.Z_STREAM_END, CodecZlib.Z_BUF_ERROR) || error("zlib deflate failed ($code)")
+            append!(out, view(buf, 1:length(buf)-Int(z.avail_out)))
+            (flush == CodecZlib.Z_FINISH ? code == CodecZlib.Z_STREAM_END : z.avail_out != 0) && break
+        end
+    end
+    out
+end
+
+"""
+    gzip_stream(body::StreamBody; max_random_bytes = 100) -> StreamBody
+
+A streaming body compressed as one gzip file, chunk by chunk: each chunk is flushed
+(`Z_SYNC_FLUSH`), so it still goes out as soon as the view produces it.
+"""
+function gzip_stream(sb::StreamBody; max_random_bytes::Integer = 100)
+    StreamBody(Pair{Symbol,Any}[]) do io
+        z = CodecZlib.ZStream()
+        code = CodecZlib.deflate_init!(z, CodecZlib.Z_DEFAULT_COMPRESSION, -15)     # raw deflate: our own header
+        code == CodecZlib.Z_OK || error("zlib deflateInit failed ($code)")
+        buf = Vector{UInt8}(undef, 16 * 1024)
+        crc, len = 0x00000000, UInt32(0)
+        try
+            write(io, gzip_header(max_random_bytes))
+            each_chunk(sb) do b
+                crc = crc32(b, crc)
+                len += length(b) % UInt32
+                out = deflate_chunk!(z, b, buf, CodecZlib.Z_SYNC_FLUSH)
+                isempty(out) || write(io, out)
+            end
+            write(io, vcat(deflate_chunk!(z, UInt8[], buf, CodecZlib.Z_FINISH), le32bytes(crc), le32bytes(len)))
+        finally
+            CodecZlib.deflate_end!(z)
+        end
+    end
+end
+
 
 """
     GZipMiddleware
 
-Compress responses for clients that accept gzip: bodies of at least 200 bytes that aren't
-compressed already or streamed. Adds `Vary: Accept-Encoding` and makes a strong ETag weak.
+Compress responses for clients that accept gzip: bodies of at least 200 bytes, and streaming
+responses chunk by chunk, unless they are compressed already. Adds `Vary: Accept-Encoding`
+and makes a strong ETag weak.
 """
 function GZipMiddleware(get_response)
     function (req::Request)
         resp = get_response(req)
         patch_vary!(resp, "Accept-Encoding")
-        is_streaming(resp) && return resp
-        (length(resp.body) < 200 || hasheader(resp, "Content-Encoding")) && return resp
+        (hasheader(resp, "Content-Encoding") || resp.status == 206) && return resp     # not a byte range either
+        streaming = is_streaming(resp)
+        streaming || length(resp.body) >= 200 || return resp
         occursin(r"\bgzip\b"i, header(req, "accept-encoding", "")) || return resp
-        z = gzip_compress(resp.body)
-        length(z) >= length(resp.body) && return resp
-        resp.body = z
+        if streaming
+            resp.stream = gzip_stream(resp.stream)
+            filter!(h -> !header_eq(h.first, "Content-Length"), resp.headers)
+        else
+            z = gzip_compress(resp.body)
+            length(z) >= length(resp.body) && return resp
+            resp.body = z
+            hasheader(resp, "Content-Length") && setheader!(resp, "Content-Length", string(length(z)))
+        end
         setheader!(resp, "Content-Encoding", "gzip")
-        hasheader(resp, "Content-Length") && setheader!(resp, "Content-Length", string(length(z)))
         e = getheader(resp, "ETag")
         e === nothing || startswith(e, "W/") || setheader!(resp, "ETag", "W/" * e)
         resp

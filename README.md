@@ -1174,7 +1174,7 @@ configure!(MIDDLEWARE = [Juango.default_settings()[:MIDDLEWARE]..., Timing])
 
 The defaults are security headers, sessions, `APPEND_SLASH`, CSRF and authentication. Also available:
 
-- `GZipMiddleware` compresses responses of 200 bytes or more for clients that accept gzip, with random padding in the gzip header against BREACH (as Django does). Put it first. Streamed responses aren't compressed.
+- `GZipMiddleware` compresses responses of 200 bytes or more for clients that accept gzip, with random padding in the gzip header against BREACH (as Django does). Put it first. Streaming responses are compressed chunk by chunk, each chunk flushed so it still goes out at once.
 - `BrokenLinkEmailsMiddleware` emails `MANAGERS` (via `mail_managers`) when a page linked from somewhere returns 404, unless `DEBUG` is on. Links from your own site are reported as broken internal links. Like Django it ignores requests without a referer, search engines, and paths matching `IGNORABLE_404_URLS` regexes.
 - `ConditionalGetMiddleware` gives GET responses an `ETag` and answers `If-None-Match`/`If-Modified-Since` with 304 Not Modified.
 
@@ -1346,7 +1346,6 @@ Set them with `configure!(...)` and read them with `settings.NAME`. Request limi
 - **Historical models are table-level.** In data migrations, `get_model` gives the table as it was (columns, not relations or methods), unlike Django's historical model classes.
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
 - **Composite primary keys, swappable user models and admin docs** have Django's limitations: no foreign keys to composite-key models, choose `AUTH_USER_MODEL` before the first `migrate`, and docstrings are shown as plain text.
-- **GZip and streaming.** `GZipMiddleware` doesn't compress streamed responses.
 - `runserver` is HTTP.jl's server. It speaks HTTP/1.1 and HTTP/2 (cleartext with prior knowledge, or negotiated over TLS), and serves HTTPS with `runserver 8443 --cert cert.pem --key key.pem` (or `runserver(...; certfile, keyfile)`). WebSockets need HTTP/1.1, which browsers use for them anyway. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and run `manage.jl check --deploy`.
 
 ## Layout

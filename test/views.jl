@@ -701,7 +701,18 @@ end
     @test length(sizes) > 1                                     # random padding against BREACH
     @test !Juango.hasheader(gz(rq()), "Content-Encoding")              # client doesn't accept gzip
     @test !Juango.hasheader(GZipMiddleware(req -> HttpResponse("short"))(rq(; var"accept-encoding" = "gzip")), "Content-Encoding")
-    @test !Juango.hasheader(GZipMiddleware(req -> StreamingHttpResponse([long]))(rq(; var"accept-encoding" = "gzip")), "Content-Encoding")
+    # streaming responses: one gzip file, a compressed chunk for each chunk of the view
+    chunks = ["chunk $i " * repeat("data ", 40) for i in 1:5]
+    sr = GZipMiddleware(req -> (r = StreamingHttpResponse(chunks); setheader!(r, "Content-Length", "999"); r))(rq(; var"accept-encoding" = "gzip"))
+    @test getheader(sr, "Content-Encoding") == "gzip" && !Juango.hasheader(sr, "Content-Length") && Juango.is_streaming(sr)
+    sent = Vector{UInt8}[]
+    Juango.each_chunk(b -> push!(sent, b), sr.stream)
+    @test length(sent) == 2 + length(chunks)                    # header, one per chunk, then the trailer
+    @test String(Juango.CodecZlib.transcode(Juango.CodecZlib.GzipDecompressor, reduce(vcat, sent))) == join(chunks)
+    fr = GZipMiddleware(req -> StreamingHttpResponse(io -> foreach(c -> write(io, c), chunks)))(rq(; var"accept-encoding" = "gzip"))
+    @test String(Juango.CodecZlib.transcode(Juango.CodecZlib.GzipDecompressor, Vector{UInt8}(codeunits(text(fr))))) == join(chunks)
+    @test !Juango.hasheader(GZipMiddleware(req -> StreamingHttpResponse([long]))(rq()), "Content-Encoding")
+    @test Juango.crc32(UInt8[0x35, 0x36, 0x37, 0x38, 0x39], Juango.crc32(UInt8[0x31, 0x32, 0x33, 0x34])) == 0xcbf43926
     @test Juango.crc32(Vector{UInt8}(codeunits("123456789"))) == 0xcbf43926
     # through the whole stack
     old = settings.MIDDLEWARE
