@@ -114,6 +114,7 @@ function column_type(::DatabaseBackend, kind::Symbol, max_length)
     kind === :datetime && return settings.USE_TZ ? "TIMESTAMP WITH TIME ZONE" : "TIMESTAMP"
     kind === :date && return "DATE"
     kind === :json && return "JSONB"
+    kind === :hstore && return "HSTORE"
     kind === :uuid && return "UUID"
     kind === :citext && return "CITEXT"
     kind === :intrange && return "INT8RANGE"

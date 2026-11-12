@@ -1155,12 +1155,12 @@ function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nos
             c.distinct = true
             return compile_lookup(c, a, M, subkey, value, negated)
         end
-        if !isempty(rest) && f.kind in (:json, :array)
+        if !isempty(rest) && f.kind in (:json, :hstore, :array)
             # data__owner__name (JSON key path), tags__len, tags__0
             tr = transform_column(f, qcol(alias, column(f)), rest, lookup, value)
             tr === nothing && throw(LookupError("unsupported lookup '$(join(rest, "__"))' on $(f.kind) field '$fname'"))
             col, colps = tr
-            lookup == "isnull" && f.kind === :json && return truthy(value) ? (col, colps) : ("NOT " * col, colps)
+            lookup == "isnull" && f.kind in (:json, :hstore) && return truthy(value) ? (col, colps) : ("NOT " * col, colps)
             f = nothing
         elseif !isempty(rest) && (tr = apply_transforms(qcol(alias, column(f)), f.kind, rest)) !== nothing
             col, kind = tr                  # registered transforms: name__lower__...

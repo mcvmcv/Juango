@@ -281,6 +281,8 @@ function compile_expr(c::SQLCompiler, e::Func)
     n === :cast && return "CAST($(sqls[1]) AS $(cast_type(b, e.args[2] === :string ? :text : e.args[2])))", ps
     n === :now && return "?", Any[timezone_now()]     # Julia's clock and local time, like the DateTimes Juango stores
     n === :extract && return extract_sql(b, e.args[2], sqls[1]), ps
+    n in (:similarity, :word_similarity, :strict_word_similarity, :unaccent) &&
+        return uppercase(string(n)) * "(" * join(sqls, ", ") * ")", ps
     throw(ArgumentError("unknown function $n"))
 end
 

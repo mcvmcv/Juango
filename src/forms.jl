@@ -183,7 +183,7 @@ function to_julia(fld::Field, raw)
     elseif k === :date
         v = tryparse(Date, s, dateformat"yyyy-mm-dd")
         return v, v === nothing ? gettext("Enter a valid date.") : nothing
-    elseif k === :json
+    elseif k === :json || k === :hstore
         v = try
             plainjson(JSON.parse(s))
         catch
@@ -433,7 +433,7 @@ function display_value(bf::BoundField)
     v === nothing && (v = fld.default isa NoDefault ? nothing : (fld.default isa Function ? fld.default() : fld.default))
     fld.kind === :m2m && return v === nothing ? Any[] : collect(v)
     v === nothing && return v
-    fld.kind === :json && return JSON.json(json_scalar_tree(v))
+    fld.kind in (:json, :hstore) && return JSON.json(json_scalar_tree(v))
     fld.kind === :array && return join(string.(v), ", ")
     v isa ValueRange && return string(something(v.lower, ""), ", ", something(v.upper, ""))
     v isa Model && return v.id
@@ -504,7 +504,7 @@ function widget_html(bf::BoundField)
         end
         print(io, "</select>")
         return String(take!(io))
-    elseif (fld.kind in (:text, :json) && widget_kind(fld.widget) === nothing) || widget_kind(fld.widget) === :textarea
+    elseif (fld.kind in (:text, :json, :hstore) && widget_kind(fld.widget) === nothing) || widget_kind(fld.widget) === :textarea
         return "<textarea$attrs cols=\"40\" rows=\"10\">" * escape_html(display_string(val)) * "</textarea>"
     end
     t = input_type(fld)

@@ -31,6 +31,15 @@ function ArrayField(base::Field; kw...)
     f
 end
 
+"""
+    HStoreField(; kw...)
+
+A string-to-string map (`Dict("color" => "red", "size" => nothing)`): PostgreSQL's `hstore`
+(the extension is created with the table), JSON elsewhere. Lookups: `has_key`, `has_keys`,
+`has_any_keys`, `contains`, `contained_by`, exact matches and keys (`attrs__color = "red"`).
+"""
+HStoreField(; kw...) = Field(:hstore; kw...)
+
 "A UUID (`using UUIDs: uuid4` for `default = uuid4`): `uuid` on PostgreSQL, text on SQLite."
 UUIDField(; kw...) = Field(:uuid; kw...)
 
@@ -110,6 +119,7 @@ function to_db(f::Field, v)
     k = f.kind
     k === :datetime && return dbparam(to_utc_naive(v))
     k === :json && return JSON.json(json_scalar_tree(v))
+    k === :hstore && return encode_hstore(backend(), v)
     k === :array && return encode_array(backend(), v)
     k in RANGE_KINDS && return encode_range(backend(), v)
     k === :uuid && return string(v)
@@ -121,6 +131,77 @@ json_scalar_tree(v::AbstractVector) = Any[json_scalar_tree(x) for x in v]
 json_scalar_tree(v) = json_scalar(v)
 
 # --- decoding values -----------------------------------------------------------------------------
+
+# --- hstore ---------------------------------------------------------------------------------------
+
+const HStoreDict = Dict{String,Union{Nothing,String}}
+
+"A map as an hstore value: string keys, string or `nothing` values."
+hstore_dict(d) = HStoreDict(string(k) => (v === nothing ? nothing : string(v)) for (k, v) in d)
+
+function hstore_quote(io::IO, s::AbstractString)
+    print(io, '"')
+    for ch in s
+        (ch == '"' || ch == '\\') && print(io, '\\')
+        print(io, ch)
+    end
+    print(io, '"')
+end
+
+"An hstore literal (`\"a\"=>\"1\", \"b\"=>NULL`) on PostgreSQL, JSON elsewhere."
+function encode_hstore(b::DatabaseBackend, d)
+    b isa PostgresBackend || return JSON.json(hstore_dict(d))
+    io = IOBuffer()
+    first_ = true
+    for (k, v) in d
+        first_ || print(io, ", ")
+        first_ = false
+        hstore_quote(io, string(k))
+        print(io, "=>")
+        v === nothing ? print(io, "NULL") : hstore_quote(io, string(v))
+    end
+    String(take!(io))
+end
+
+"Parse an hstore literal (or the JSON object other databases store)."
+function decode_hstore(v)
+    v isa AbstractDict && return hstore_dict(v)
+    s = String(v)
+    startswith(lstrip(s), "{") && return hstore_dict(JSON.parse(s))
+    out = HStoreDict()
+    i, n = firstindex(s), lastindex(s)
+    function token()
+        while i <= n && isspace(s[i]); i = nextind(s, i); end
+        if s[i] == '"'
+            buf = IOBuffer()
+            i = nextind(s, i)
+            while s[i] != '"'
+                s[i] == '\\' && (i = nextind(s, i))
+                print(buf, s[i])
+                i = nextind(s, i)
+            end
+            i = nextind(s, i)
+            return String(take!(buf))
+        end
+        j = i
+        while j <= n && !(s[j] in (',', '=')) && !isspace(s[j]); j = nextind(s, j); end
+        t = s[i:prevind(s, j)]
+        i = j
+        uppercase(t) == "NULL" ? nothing : t
+    end
+    while i <= n
+        while i <= n && (isspace(s[i]) || s[i] == ','); i = nextind(s, i); end
+        i > n && break
+        k = token()
+        while s[i] != '>'; i = nextind(s, i); end
+        i = nextind(s, i)
+        out[string(k)] = token()
+    end
+    out
+end
+
+hstore_has_keys_sql(col, ks, all_::Bool) =
+    "$(all_ ? "exists_all" : "exists_any")($col, CAST(? AS TEXT[]))", Any[pg_array_literal(string.(ks))]
 
 "Parse a PostgreSQL array literal (`{a,\"b c\",NULL}`) into strings/`nothing`."
 function parse_pg_array(s::AbstractString)
@@ -186,6 +267,7 @@ end
 function from_db_extra(f::Field, v)
     k = f.kind
     k === :json && return v isa AbstractString ? plainjson(JSON.parse(v)) : plainjson(v)
+    k === :hstore && return decode_hstore(v)
     k === :array && return decode_array(f, v)
     k in RANGE_KINDS && return decode_range(f, v)
     k === :uuid && return v isa UUID ? v : UUID(string(v))
@@ -240,7 +322,15 @@ function special_lookup(c::SQLCompiler, f::Field, col, lookup, @nospecialize(val
         return spatial_lookup(f, col, lookup, value)
     elseif lookup == "search"
         return search_sql(b, col, value)
-    elseif k === :json
+    elseif k === :hstore && b isa PostgresBackend
+        lookup == "exact" && value !== nothing && return "$col = CAST(? AS hstore)", Any[encode_hstore(b, value)]
+        lookup == "contains" && return "$col @> CAST(? AS hstore)", Any[encode_hstore(b, value)]
+        lookup == "contained_by" && return "$col <@ CAST(? AS hstore)", Any[encode_hstore(b, value)]
+        lookup == "has_key" && return "exist($col, ?)", Any[string(value)]
+        lookup == "has_keys" && return hstore_has_keys_sql(col, value, true)
+        lookup == "has_any_keys" && return hstore_has_keys_sql(col, value, false)
+    elseif k === :json || k === :hstore
+        k === :hstore && value isa AbstractDict && (value = hstore_dict(value))
         lookup == "exact" && value !== nothing && return json_exact_sql(b, col, value)
         lookup == "contains" && return json_contains_sql(b, col, value)
         lookup == "contained_by" && return json_contained_by_sql(b, col, value)
@@ -265,7 +355,12 @@ Returns `(sql, params)` or `nothing`.
 """
 function transform_column(f::Field, col, rest::Vector{String}, lookup, @nospecialize(value))
     b = backend()
-    if f.kind === :json && !isempty(rest)
+    if f.kind === :hstore && b isa PostgresBackend && !isempty(rest)
+        length(rest) == 1 || return nothing
+        lookup == "isnull" && return "($col -> ?) IS NULL", Any[rest[1]]
+        return "($col -> ?)", Any[rest[1]]
+    end
+    if (f.kind === :json || f.kind === :hstore) && !isempty(rest)
         lookup == "isnull" && return json_key_isnull_sql(b, col, rest)
         nums = value isa Number && !(value isa Bool) || value isa AbstractVector && !isempty(value) &&
                all(x -> x isa Number && !(x isa Bool), value) || value isa Tuple
@@ -345,3 +440,27 @@ function compile_expr(c::SQLCompiler, e::SearchRank)
     q, qps = compile_expr(c, e.query)
     "ts_rank($v, $q)", vcat(vps, qps)
 end
+
+# --- trigram similarity and unaccent (PostgreSQL: pg_trgm, unaccent) ---------------------------------
+#
+# Install the extensions in a migration with `TrigramExtension()` / `UnaccentExtension()`.
+
+const TEXT_KINDS = vcat(collect(STRING_KINDS), :citext)
+
+register_lookup((lhs, rhs) -> "$lhs % $rhs", "trigram_similar"; kinds = TEXT_KINDS)
+register_lookup((lhs, rhs) -> "$rhs <% $lhs", "trigram_word_similar"; kinds = TEXT_KINDS)
+register_lookup((lhs, rhs) -> "$rhs <<% $lhs", "trigram_strict_word_similar"; kinds = TEXT_KINDS)
+register_transform(lhs -> "UNACCENT($lhs)", "unaccent"; kinds = TEXT_KINDS)
+
+"`SIMILARITY(field, text)`: trigram similarity from 0 to 1 (PostgreSQL `pg_trgm`)."
+TrigramSimilarity(x, text) = Func(:similarity, [ref(x), lit_expr(text)])
+"`WORD_SIMILARITY(text, field)` (PostgreSQL `pg_trgm`)."
+TrigramWordSimilarity(text, x) = Func(:word_similarity, [lit_expr(text), ref(x)])
+"`STRICT_WORD_SIMILARITY(text, field)` (PostgreSQL `pg_trgm`)."
+TrigramStrictWordSimilarity(text, x) = Func(:strict_word_similarity, [lit_expr(text), ref(x)])
+"`field <-> text`: trigram distance, 1 - similarity (PostgreSQL `pg_trgm`)."
+TrigramDistance(x, text) = CombinedExpression("<->", ref(x), lit_expr(text))
+"`text <<-> field`: trigram word distance (PostgreSQL `pg_trgm`)."
+TrigramWordDistance(text, x) = CombinedExpression("<<->", lit_expr(text), ref(x))
+"`UNACCENT(field)`: text without accents (PostgreSQL `unaccent`)."
+Unaccent(x) = Func(:unaccent, [ref(x)])

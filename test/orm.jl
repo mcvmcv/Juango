@@ -797,6 +797,55 @@ end
     @test only(st_["gadget"].indexes).method === :gin
 end
 
+@testset "hstore, exclusion constraints, trigram, unaccent" begin
+    pg = Juango.backend() isa Juango.PostgresBackend
+    s1 = create(Shelf; attrs = Dict("color" => "red", "size" => "L", "gift" => nothing), label = "Café crème")
+    s2 = create(Shelf; attrs = Dict("color" => "blue"), label = "Cafe noir")
+    s3 = create(Shelf; label = "Tea")
+    shelves = filter(Shelf; id__in = [s1.id, s2.id, s3.id])
+    labels(qs) = sort([x.label for x in qs])
+    @test get(Shelf; id = s1.id).attrs == Dict("color" => "red", "size" => "L", "gift" => nothing)
+    @test get(Shelf; id = s3.id).attrs == Dict()
+    @test labels(filter(shelves; attrs__color = "red")) == ["Café crème"]
+    @test labels(filter(shelves; attrs__has_key = "color")) == ["Cafe noir", "Café crème"]
+    @test labels(filter(shelves; attrs__has_keys = ["color", "size"])) == ["Café crème"]
+    @test labels(filter(shelves; attrs__has_any_keys = ["size", "nope"])) == ["Café crème"]
+    @test labels(filter(shelves; attrs__contains = Dict("color" => "blue"))) == ["Cafe noir"]
+    Juango.backend() isa Juango.SQLiteBackend ||                      # SQLite's JSON has no contained_by
+        @test labels(filter(shelves; attrs__contained_by = Dict("color" => "blue", "x" => "y"))) == ["Cafe noir", "Tea"]
+    @test labels(filter(shelves; attrs = Dict("color" => "blue"))) == ["Cafe noir"]
+    @test Juango.decode_hstore("\"a\"=>\"1\", \"q\\\"x\"=>NULL") == Dict("a" => "1", "q\"x" => nothing)
+    @test Juango.decode_hstore(Juango.encode_hstore(Juango.PostgresBackend(""), Dict("k\\" => "v\"", "n" => nothing))) ==
+          Dict("k\\" => "v\"", "n" => nothing)
+
+    spec = Juango.constraint_spec(Reservation, only(Juango.model_constraints(Reservation)))
+    @test Juango.constraint_code(spec) == "ConstraintSpec(:exclusion, \"reservation_no_overlap\"; expressions = [(\"during\", \"&&\")], " *
+                                           "condition = Q(:AND, Any[:cancelled => false], false), index_type = \"gist\")"
+    create(Reservation; room = 1, during = ValueRange(Date(2025, 1, 1), Date(2025, 1, 5)))
+    create(Reservation; room = 1, during = ValueRange(Date(2025, 1, 5), Date(2025, 1, 8)))       # touching is fine
+    create(Reservation; room = 1, during = ValueRange(Date(2025, 1, 2), Date(2025, 1, 3)), cancelled = true)
+    clash = Reservation(room = 2, during = ValueRange(Date(2025, 1, 3), Date(2025, 1, 4)))
+    if pg
+        @test_throws IntegrityError save!(clash)
+        @test full_clean(clash)[:__all__] == ["Constraint “reservation_no_overlap” is violated."]
+        @test !isempty(Juango.Migrations.forwards(Juango.Migrations.HStoreExtension(), Juango.backend(), nothing, nothing, []))
+        Juango.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        Juango.execute("CREATE EXTENSION IF NOT EXISTS unaccent")
+        @test labels(filter(shelves; label__unaccent = "Cafe creme")) == ["Café crème"]
+        @test labels(filter(shelves; label__unaccent__icontains = "cafe")) == ["Cafe noir", "Café crème"]
+        @test labels(filter(shelves; label__trigram_similar = "Cafe noire")) == ["Cafe noir"]
+        @test labels(filter(shelves; label__trigram_word_similar = "noir")) == ["Cafe noir"]
+        r = collect(order_by(annotate(shelves; sim = TrigramSimilarity(:label, "Cafe noir")), "-sim"))
+        @test r[1].label == "Cafe noir" && r[1].sim ≈ 1.0
+        r = collect(order_by(annotate(shelves; d = TrigramDistance(:label, "Tea")), "d"))
+        @test r[1].label == "Tea" && r[1].d ≈ 0.0
+        @test only(values_list(filter(shelves; id = s1.id) |> annotate(u = Unaccent(:label)), :u; flat = true)) == "Cafe creme"
+    else
+        save!(clash)                                               # other databases skip the constraint
+        @test isempty(Juango.Migrations.forwards(Juango.Migrations.HStoreExtension(), Juango.backend(), nothing, nothing, []))
+    end
+end
+
 @testset "GIS" begin
     # geometry values: WKT, EWKT, WKB and GeoJSON (no database needed)
     p = Point(174.7762, -41.2865)

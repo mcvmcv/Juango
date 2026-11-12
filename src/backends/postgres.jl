@@ -74,6 +74,7 @@ foreign_key_names(::PostgresBackend, table, col) =
         WHERE con.contype = 'f' AND ns.nspname = current_schema() AND rel.relname = ? AND att.attname = ?""", [table, col])]
 
 column_prereqs(::PostgresBackend, kind::Symbol) = kind === :citext ? ["CREATE EXTENSION IF NOT EXISTS citext"] :
+    kind === :hstore ? ["CREATE EXTENSION IF NOT EXISTS hstore"] :
     kind === :geometry ? ["CREATE EXTENSION IF NOT EXISTS postgis"] : String[]
 
 table_exists(::PostgresBackend, table) =

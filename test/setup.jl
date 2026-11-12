@@ -200,6 +200,17 @@ end
     body = TextField(blank = true)
     Meta(indexes = [GinIndex(:data)])
 end
+@model struct Shelf
+    attrs = HStoreField(default = Dict, blank = true)
+    label = CharField(max_length = 40, blank = true)
+end
+@model struct Reservation
+    room = IntegerField()
+    during = DateRangeField()
+    cancelled = BooleanField(default = false)
+    Meta(constraints = [ExclusionConstraint(name = "reservation_no_overlap", expressions = [(:during, "&&")],
+                                            condition = Q(cancelled = false))])
+end
 @model struct Ticket
     name = CharField(max_length = 20)
     Meta(pk = :uuid)

@@ -183,7 +183,7 @@ function column_state(f::Field)
     f.db_default === nothing || (d = db_default_value(f.db_default))
     gen = f.generated === nothing ? nothing : GeneratedSpec(expr_to_columns(f.model, f.generated[1]), f.generated[2])
     gen === nothing || (d = nothing)
-    d !== nothing && f.kind in (:json, :array, :intrange, :daterange, :datetimerange, :uuid) && (d = nothing)  # set by Julia, not the DB
+    d !== nothing && f.kind in (:json, :hstore, :array, :intrange, :daterange, :datetimerange, :uuid) && (d = nothing)  # set by Julia, not the DB
     ref = f.kind !== :fk ? nothing : f.related === :__user_model__ ? "__user_model__" : modelmeta(related_model(f)).table
     f.kind === :fk && is_composite(related_model(f)) &&
         throw(ArgumentError("$(nameof(f.model)).$(f.name): foreign keys to $(nameof(related_model(f))) aren't supported (it has a composite primary key)"))
@@ -326,6 +326,7 @@ function create_table_sql(b::DatabaseBackend, t::Table; if_not_exists = false)
     end
     for c in t.constraints
         c.kind === :unique && append!(stmts, unique_constraint_sql(b, t.name, c; if_not_exists = if_not_exists))
+        c.kind === :exclusion && append!(stmts, exclusion_sql(b, t.name, c; if_not_exists = if_not_exists))
     end
     fks = String[s for c in t.columns for s in fk_sql(b, t.name, c)]
     (t.parent !== nothing && !inline_foreign_keys(b)) && push!(fks, foreign_key_sql(b, t.name, "id", t.parent))

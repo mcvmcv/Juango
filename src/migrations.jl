@@ -26,6 +26,7 @@ using ..Juango: Column, Table, Index, ConstraintSpec, Q, F, Value, CombinedExpre
 
 export Migration, CreateModel, DeleteModel, RenameModel, AddField, RemoveField, AlterField, RenameField,
        AlterUniqueTogether, AddIndex, RemoveIndex, AddConstraint, RemoveConstraint, RunSQL, RunJulia, Column, Index,
+       CreateExtension, HStoreExtension, TrigramExtension, UnaccentExtension, BtreeGistExtension, BtreeGinExtension, CITextExtension,
        ConstraintSpec, Q, F, Value, CombinedExpression, Func, get_model, objects, save!, create, update!
 
 # --- operations ---------------------------------------------------------------------------------
@@ -125,6 +126,32 @@ struct RenameField <: Operation
     old::String
     new::String
 end
+
+"""
+    CreateExtension(name)
+
+Install a PostgreSQL extension (`CREATE EXTENSION IF NOT EXISTS`); a no-op on other
+databases. Reversing it drops the extension. `HStoreExtension()`, `TrigramExtension()`,
+`UnaccentExtension()`, `BtreeGistExtension()`, `BtreeGinExtension()` and `CITextExtension()`
+name the common ones.
+"""
+struct CreateExtension <: Operation
+    name::String
+end
+CreateExtension(name::Symbol) = CreateExtension(string(name))
+HStoreExtension() = CreateExtension("hstore")
+TrigramExtension() = CreateExtension("pg_trgm")
+UnaccentExtension() = CreateExtension("unaccent")
+BtreeGistExtension() = CreateExtension("btree_gist")
+BtreeGinExtension() = CreateExtension("btree_gin")
+CITextExtension() = CreateExtension("citext")
+state_forwards!(::CreateExtension, st, app) = st
+forwards(op::CreateExtension, b, from, to, deferred) =
+    b isa Juango.PostgresBackend ? ["CREATE EXTENSION IF NOT EXISTS " * quote_name(b, op.name)] : String[]
+backwards(op::CreateExtension, b, from, to, deferred) =
+    b isa Juango.PostgresBackend ? ["DROP EXTENSION IF EXISTS " * quote_name(b, op.name)] : String[]
+describe(op::CreateExtension) = "Create extension $(op.name)"
+op_code(op::CreateExtension) = "CreateExtension($(jl(op.name)))"
 
 """
     RunSQL(forward, backward=nothing)

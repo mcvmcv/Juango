@@ -113,7 +113,7 @@ export GeometryField, PointField, LineStringField, PolygonField, MultiPointField
        geojson, from_geojson, wkt, ewkt, parse_wkt, parse_wkb
 export FileField, ImageField, UploadedFile, FieldFile, FileSystemStorage, FileExtensionValidator, MaxFileSizeValidator,
        save_file, delete_file, image_size, default_storage
-export JSONField, ArrayField, UUIDField, CICharField, IntegerRangeField, DateRangeField, DateTimeRangeField,
+export JSONField, HStoreField, TrigramSimilarity, TrigramWordSimilarity, TrigramStrictWordSimilarity, TrigramDistance, TrigramWordDistance, Unaccent, ArrayField, UUIDField, CICharField, IntegerRangeField, DateRangeField, DateTimeRangeField,
        ValueRange, SearchVector, SearchQuery, SearchRank, uuid4, UUID
 export gettext, ngettext, pgettext, npgettext, gettext_lazy, ngettext_lazy, pgettext_lazy, @t_str, get_language,
        activate!, deactivate!, with_language, LocaleMiddleware, i18n_patterns, set_language, i18n_urls, number_format,
@@ -147,7 +147,7 @@ export serialize, deserialize, dumpdata, loaddata, load_fixtures, natural_key, g
 export is_secure, ContentSecurityPolicyMiddleware, CSP, csp_nonce, csp_override, csp_report_only_override, deploy_issues
 export never_cache, cache_control, vary_on_headers, vary_on_cookie, patch_cache_control!, condition, etag, last_modified,
        ConditionalGetMiddleware, GZipMiddleware
-export CheckConstraint, UniqueConstraint, GeneratedField, DB_DEFAULT, CompositePrimaryKey
+export CheckConstraint, ExclusionConstraint, UniqueConstraint, GeneratedField, DB_DEFAULT, CompositePrimaryKey
 export Model, @model, @abstract_model, OneToOneField, Index, GinIndex, Field, ManyToManyField, add!, remove!, set!, clear!, base_objects, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
        FloatField, BooleanField, DateTimeField, DateField, ForeignKey, Q, QuerySet, objects,
        exclude, order_by, exists, values_list, update!, create, get_or_create, update_or_create,

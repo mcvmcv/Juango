@@ -60,6 +60,32 @@ function UniqueConstraint(expressions...; fields = Symbol[], name, condition = n
                      violation_error_message === nothing ? nothing : string(violation_error_message))
 end
 
+"""
+    ExclusionConstraint(; name, expressions, index_type = :gist, condition = nothing, violation_error_message = nothing)
+
+PostgreSQL's `EXCLUDE` constraint: no two rows may match each other on all the
+`(field, operator)` pairs, e.g. no overlapping bookings of one room:
+
+    ExclusionConstraint(name = "no_double_booking",
+                        expressions = [(:room, "="), (:during, "&&")])
+
+(`=` on a non-range column inside a GiST index needs `BtreeGistExtension()` in a migration.)
+Other databases skip it. `full_clean` checks it on PostgreSQL when the operators are `=` and `&&`.
+"""
+struct ExclusionConstraint <: Constraint
+    name::String
+    expressions::Vector{Tuple{Symbol,String}}
+    index_type::Symbol
+    condition::Union{Nothing,Q}
+    violation_error_message::Union{Nothing,String}
+end
+function ExclusionConstraint(; name, expressions, index_type = :gist, condition = nothing, violation_error_message = nothing)
+    isempty(expressions) && throw(ArgumentError("ExclusionConstraint '$name' needs expressions"))
+    Symbol(index_type) in (:gist, :spgist) || throw(ArgumentError("ExclusionConstraint index_type must be :gist or :spgist"))
+    ExclusionConstraint(string(name), Tuple{Symbol,String}[(Symbol(f), string(op)) for (f, op) in expressions],
+                        Symbol(index_type), condition, violation_error_message === nothing ? nothing : string(violation_error_message))
+end
+
 model_constraints(T) = collect(Constraint, get(modelmeta(T).extra, :constraints, Constraint[]))
 
 # --- the schema snapshot -------------------------------------------------------------------------
@@ -69,15 +95,16 @@ A constraint in a table snapshot (and in migration files): field names already t
 column names, so it no longer depends on the model code.
 """
 struct ConstraintSpec
-    kind::Symbol                              # :check or :unique
+    kind::Symbol                              # :check, :unique or :exclusion
     name::String
     columns::Vector{String}                   # unique: the columns
-    expressions::Vector{Tuple{String,String}} # unique: (function, column); function "" = the column itself
+    expressions::Vector{Tuple{String,String}} # unique: (function, column), function "" = the column; exclusion: (column, operator)
     condition::Union{Nothing,Q}               # over column names
+    index_type::String                        # exclusion: "gist" or "spgist"
 end
-ConstraintSpec(kind, name; columns = String[], expressions = Tuple{String,String}[], condition = nothing) =
+ConstraintSpec(kind, name; columns = String[], expressions = Tuple{String,String}[], condition = nothing, index_type = "") =
     ConstraintSpec(Symbol(kind), string(name), collect(String, columns),
-                   Tuple{String,String}[(string(a), string(b)) for (a, b) in expressions], condition)
+                   Tuple{String,String}[(string(a), string(b)) for (a, b) in expressions], condition, string(index_type))
 Base.:(==)(a::ConstraintSpec, b::ConstraintSpec) = constraint_code(a) == constraint_code(b)
 Base.hash(c::ConstraintSpec, h::UInt) = hash(constraint_code(c), h)
 
@@ -133,6 +160,12 @@ function constraint_spec(T, c::UniqueConstraint)
                    condition = c.condition === nothing ? nothing : condition_to_columns(T, c.condition))
 end
 
+function constraint_spec(T, c::ExclusionConstraint)
+    ConstraintSpec(:exclusion, c.name; expressions = [(constraint_column(T, f), op) for (f, op) in c.expressions],
+                   condition = c.condition === nothing ? nothing : condition_to_columns(T, c.condition),
+                   index_type = string(c.index_type))
+end
+
 # --- code for migration files ----------------------------------------------------------------------
 
 value_code(v::Union{Integer,AbstractFloat,Bool,AbstractString,Nothing,Symbol}) = repr(v)
@@ -151,6 +184,7 @@ function constraint_code(c::ConstraintSpec)
     isempty(c.columns) || (s *= "; columns = $(repr(c.columns))")
     isempty(c.expressions) || (s *= (occursin(";", s) ? ", " : "; ") * "expressions = [" * join(["($(repr(a)), $(repr(b)))" for (a, b) in c.expressions], ", ") * "]")
     c.condition === nothing || (s *= (occursin(";", s) ? ", " : "; ") * "condition = " * q_code(c.condition))
+    isempty(c.index_type) || (s *= (occursin(";", s) ? ", " : "; ") * "index_type = " * repr(c.index_type))
     s * ")"
 end
 
@@ -216,15 +250,29 @@ function unique_constraint_sql(b::DatabaseBackend, table, c::ConstraintSpec; if_
      join(keys_, ", ") * ")" * (c.condition === nothing ? "" : " WHERE " * condition_sql(b, c.condition))]
 end
 
+"The `ALTER TABLE ... ADD CONSTRAINT ... EXCLUDE` of an ExclusionConstraint (PostgreSQL only)."
+function exclusion_sql(b::DatabaseBackend, table, c::ConstraintSpec; if_not_exists = false)
+    b isa PostgresBackend || return String[]
+    sql = "ALTER TABLE $(quote_name(b, table)) ADD CONSTRAINT $(quote_name(b, c.name)) EXCLUDE USING $(c.index_type) (" *
+          join(["$(quote_name(b, col)) WITH $op" for (col, op) in c.expressions], ", ") * ")" *
+          (c.condition === nothing ? "" : " WHERE (" * condition_sql(b, c.condition) * ")")
+    if_not_exists || return [sql]
+    ["DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = " * lit(b, c.name) *
+     ") THEN " * sql * "; END IF; END \$\$"]
+end
+
 "Statements that add a constraint to an existing table (`to` is the table with it)."
 function add_constraint_sql(b::DatabaseBackend, from::Table, to::Table, c::ConstraintSpec)
     c.kind === :unique && return unique_constraint_sql(b, to.name, c)
+    c.kind === :exclusion && return exclusion_sql(b, to.name, c)
     can_alter_table(b) || return remake_table_sql(b, from, to)
     ["ALTER TABLE $(quote_name(b, to.name)) ADD " * check_clause(b, c)]
 end
 
 "Statements that drop a constraint (`to` is the table without it)."
 function remove_constraint_sql(b::DatabaseBackend, from::Table, to::Table, c::ConstraintSpec)
+    c.kind === :exclusion && return b isa PostgresBackend ?
+        ["ALTER TABLE $(quote_name(b, from.name)) DROP CONSTRAINT $(quote_name(b, c.name))"] : String[]
     if c.kind === :unique
         isempty(unique_constraint_sql(b, from.name, c)) && return String[]
         return [drop_index_stmt(b, from.name, c.name)]
@@ -287,6 +335,11 @@ function condition_fields(q::Q, out = Set{String}())
 end
 
 constraint_fields(c::CheckConstraint) = condition_fields(c.condition)
+function constraint_fields(c::ExclusionConstraint)
+    s = Set{String}(string(f) for (f, _) in c.expressions)
+    c.condition === nothing || condition_fields(c.condition, s)
+    s
+end
 function constraint_fields(c::UniqueConstraint)
     s = Set{String}(string.(c.fields))
     for e in c.expressions
@@ -313,6 +366,20 @@ function constraint_errors(::Type{T}, values, id) where {T<:Model}
         if c isa CheckConstraint
             condition_value(T, c.condition, get_) === false || continue
             push!(errs, something(c.violation_error_message, interpolate(gettext("Constraint “%(name)s” is violated."), Dict("name" => c.name))))
+        elseif c isa ExclusionConstraint
+            # enforced by PostgreSQL only; checked with a query when the operators have lookups
+            backend() isa PostgresBackend && all(x -> x[2] in ("=", "&&"), c.expressions) || continue
+            c.condition === nothing || condition_value(T, c.condition, get_) === true || continue
+            lookups = Pair{Symbol,Any}[]
+            for (f, op) in c.expressions
+                v = get_(f); v === nothing && @goto next
+                push!(lookups, Symbol(f, op == "=" ? "" : "__overlap") => v)
+            end
+            qs = filter(base_objects(T), Q(:AND, Any[lookups...], false))
+            c.condition === nothing || (qs = filter(qs, c.condition))
+            id === nothing || (qs = filter(qs, !Q(id = id)))
+            exists(qs) && push!(errs, something(c.violation_error_message,
+                                               interpolate(gettext("Constraint “%(name)s” is violated."), Dict("name" => c.name))))
         else
             c.condition === nothing || condition_value(T, c.condition, get_) === true || continue
             lookups = Pair{Symbol,Any}[]
