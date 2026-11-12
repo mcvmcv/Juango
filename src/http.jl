@@ -132,7 +132,21 @@ Base.isempty(d::FileDict) = isempty(d.data)
 Base.length(d::FileDict) = length(d.data)
 getlist(d::FileDict, k) = get(d.data, string(k), UploadedFile[])
 
-Base.getproperty(r::Request, s::Symbol) = s === :FILES ? get(getfield(r, :meta), :FILES, FileDict()) : getfield(r, s)
+"`req.user` before it is needed: AuthenticationMiddleware sets this, and the first read of `req.user` looks the user up."
+struct LazyUser end
+const LAZY_USER = LazyUser()
+
+function Base.getproperty(r::Request, s::Symbol)
+    s === :FILES && return get(getfield(r, :meta), :FILES, FileDict())
+    if s === :user
+        u = getfield(r, :user)
+        u isa LazyUser || return u
+        u = get_user(r)
+        setfield!(r, :user, u)
+        return u
+    end
+    getfield(r, s)
+end
 Base.propertynames(r::Request, private::Bool = false) = (fieldnames(Request)..., :FILES)
 
 "Parse a multipart body: fields into `req.POST`, files into `req.FILES`."

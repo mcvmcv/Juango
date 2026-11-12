@@ -19,7 +19,7 @@
 function SessionMiddleware(get_response)
     function (req::Request)
         name = settings.SESSION_COOKIE_NAME
-        req.session = load_session(get(req.COOKIES, name, nothing))
+        req.session = lazy_session(get(req.COOKIES, name, nothing))
         resp = get_response(req)
         s = req.session
         if s isa Session
@@ -105,10 +105,10 @@ function ignorable_404(uri, domain, referer)
     any(pat -> occursin(pat isa Regex ? pat : Regex(string(pat)), uri), settings.IGNORABLE_404_URLS)
 end
 
-"Sets `req.user` from the session."
+"Sets `req.user` from the session, lazily: the user is looked up when `req.user` is first read."
 function AuthenticationMiddleware(get_response)
     function (req::Request)
-        req.user = get_user(req)
+        req.user = LAZY_USER
         get_response(req)
     end
 end
@@ -219,7 +219,9 @@ end
 # --- context processors --------------------------------------------------------------------------
 
 cp_request(req) = Dict("request" => req)
-cp_auth(req) = (u = something(req.user, AnonymousUser()); Dict("user" => u, "perms" => PermWrapper(u)))
+# lazy, so templates that don't use `user`/`perms` don't load the user
+cp_auth(req) = Dict{String,Any}("user" => LazyValue(() -> something(req.user, AnonymousUser())),
+                                "perms" => LazyValue(() -> PermWrapper(something(req.user, AnonymousUser()))))
 """
 The `csrf_token` of a template context: the token is only created (and the CSRF cookie only
 set) when a template actually uses it, as with Django's lazy token, so pages without forms

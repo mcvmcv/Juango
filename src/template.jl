@@ -241,9 +241,20 @@ end
 Context(d::Dict{String,Any} = Dict{String,Any}(); request = nothing) =
     Context([d], true, Dict{Symbol,Any}(), request)
 
+"""
+A context value computed when a template first uses it (and then kept), e.g. the auth
+context processor's `user`, so pages that don't show it don't load it.
+"""
+struct LazyValue
+    f::Any
+end
+
 function lookup(ctx::Context, name::AbstractString)
     for d in Iterators.reverse(ctx.stack)
-        haskey(d, name) && return d[name]
+        v = get(d, name, NOTFOUND)
+        v === NOTFOUND && continue
+        v isa LazyValue && (v = d[name] = v.f())
+        return v
     end
     UNDEF
 end
