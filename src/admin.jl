@@ -128,7 +128,6 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    autocomplete_fields = Symbol[], list_editable = Symbol[], date_hierarchy = nothing, save_as = false,
                    add_form = nothing)
     modelmeta(T)  # validates T is a model
-    Juango.is_composite(T) && throw(ArgumentError("the admin doesn't support $(nameof(T)): it has a composite primary key"))
     slug = model_name(T)
     acts = AdminAction[to_action(a) for a in actions]
     delete_action && pushfirst!(acts, action(delete_selected; description = "Delete selected $(modelmeta(T).verbose_name_plural)",
@@ -329,7 +328,7 @@ function delete_selected(ma::ModelAdmin, req::Request, qs)
     if get(req.POST, "post", "") != "yes"
         ctx = base_context(req, gettext("Are you sure?"))
         merge!(ctx, Dict{String,Any}("opts" => opts(ma), "objects" => objs, "action" => "delete_selected",
-                                     "ids" => [string(o.id) for o in objs], "deleting" => true))
+                                     "ids" => [Juango.pk_string(o) for o in objs], "deleting" => true))
         return render(req, "admin/action_confirmation.html", ctx)
     end
     try
@@ -380,7 +379,7 @@ function run_action(req, ma::ModelAdmin)
         message!(req, :warning, "Items must be selected in order to perform actions on them. No items have been changed.")
         return nothing
     end
-    qs = filter(admin_queryset(ma, req); id__in = ids)
+    qs = filter(admin_queryset(ma, req); pk__in = ids)
     if a.confirm && get(req.POST, "post", "") != "yes"
         ctx = base_context(req, gettext("Are you sure?"))
         merge!(ctx, Dict{String,Any}("opts" => opts(ma), "objects" => collect(qs), "action" => a.name,
@@ -463,8 +462,8 @@ function changelist(req::Request; model)
             end
         end
         hidden = fs === nothing ? "" : Juango.widget_html(forms[k][:id])
-        push!(rows, Dict{String,Any}("id" => o.id, "cells" => cells, "hidden" => SafeString(hidden),
-                                     "url" => reverse_url("admin:change"; model = ma.slug, id = o.id)))
+        push!(rows, Dict{String,Any}("id" => Juango.pk_string(o), "cells" => cells, "hidden" => SafeString(hidden),
+                                     "url" => reverse_url("admin:change"; model = ma.slug, id = Juango.pk_string(o))))
     end
     ctx = base_context(req, interpolate(can(req, ma, :change) ? gettext("Select %(model)s to change") : gettext("Select %(model)s to view"),
                                         Dict("model" => meta.verbose_name)))
@@ -503,14 +502,14 @@ readonly_row(ma, obj, name) = (f = findfield(modelmeta(ma.model), name);
                      "value" => f === nothing ? format_value(obj === nothing ? nothing : getproperty(obj, name)) : readonly_value(obj, f)))
 
 "The change form as groups of rows (fieldsets), each row a bound field or a read-only value."
-function form_groups(ma::ModelAdmin, form, obj, editable)
+function form_groups(ma::ModelAdmin, form, obj, editable; locked = Symbol[])
     row(name) = if editable && any(f -> f.name === name, form.fields)
         Dict{String,Any}("readonly" => false, "field" => form[name])
     else
         readonly_row(ma, obj, name)
     end
     layout = isempty(ma.fieldsets) ?
-        ["" => vcat([f.name for f in form.fields], ma.readonly_fields)] : ma.fieldsets
+        ["" => vcat(locked, [f.name for f in form.fields], ma.readonly_fields)] : ma.fieldsets
     [Dict{String,Any}("name" => name, "rows" => [row(n) for n in names]) for (name, names) in layout]
 end
 
@@ -571,8 +570,10 @@ function change_form(req::Request, ma::ModelAdmin, obj)
     req.method == "POST" && !editable && require_perm(req, ma, :change)
     data = req.method == "POST" ? req.POST : nothing
     custom_add = adding && ma.add_form !== nothing
+    locked = adding || !Juango.is_composite(T) ? Symbol[] : Symbol[f.name for f in Juango.pk_fields(T)]   # a key can't change
     form = configure_widgets!(ma, custom_add ? ma.add_form(data, req.FILES) :
-                                  Juango.ModelForm(T; data = data, files = req.FILES, instance = obj, fields = admin_fields(ma)))
+                                  Juango.ModelForm(T; data = data, files = req.FILES, instance = obj,
+                                                   fields = filter(!in(locked), admin_fields(ma))))
     pfs = custom_add ? Symbol[] : ma.password_fields
     inlines = save_as_new || custom_add ? Any[] : inline_formsets(ma, req, obj, data)
     if req.method == "POST" && is_valid(form) && all(x -> is_valid(x[2]), inlines)
@@ -598,7 +599,7 @@ function change_form(req::Request, ma::ModelAdmin, obj)
         verb = adding ? "added" : "changed"
         if haskey(req.POST, "_continue") || save_as_new || custom_add
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may edit it again below.")
-            return Juango.HttpResponseRedirect(reverse_url("admin:change"; model = ma.slug, id = o.id))
+            return Juango.HttpResponseRedirect(reverse_url("admin:change"; model = ma.slug, id = Juango.pk_string(o)))
         elseif haskey(req.POST, "_addanother")
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may add another $(meta.verbose_name) below.")
             return Juango.HttpResponseRedirect(reverse_url("admin:add"; model = ma.slug))
@@ -619,12 +620,12 @@ function change_form(req::Request, ma::ModelAdmin, obj)
         "editable" => editable, "can_delete" => !adding && can(req, ma, :delete), "can_add" => can(req, ma, :add),
         "opts" => opts(ma), "form" => form, "object" => obj, "adding" => adding, "readonly" => auto_readonly,
         "groups" => custom_add ? [Dict{String,Any}("name" => "", "rows" => [Dict{String,Any}("readonly" => false, "field" => form[f.name]) for f in form.fields])] :
-                    form_groups(ma, form, obj, editable),
+                    form_groups(ma, form, obj, editable; locked = locked),
         "inlines" => editable ? [inline_context(ia, fs) for (ia, fs) in inlines] : Any[],
         "prepopulated" => Juango.JSON.json(prepop), "save_as" => ma.save_as && !adding && can(req, ma, :add),
         "password_fields" => [Dict("name" => string(pf), "label" => uppercasefirst(string(pf))) for pf in pfs],
         "view_on_site" => adding ? nothing : get_absolute_url(obj),
-        "history_url" => adding ? nothing : reverse_url("admin:history"; model = ma.slug, id = obj.id)))
+        "history_url" => adding ? nothing : reverse_url("admin:history"; model = ma.slug, id = Juango.pk_string(obj))))
     render(req, "admin/change_form.html", ctx)
 end
 
@@ -633,7 +634,7 @@ add_view(req::Request; model) = change_form(req, get_admin(model), nothing)
 function admin_object(ma::ModelAdmin, req, id)
     pk = Juango.parse_pk(ma.model, id)
     pk === nothing && throw(Http404("No $(modelmeta(ma.model).verbose_name) with id '$id'"))
-    Juango.get_object_or_404(admin_queryset(ma, req); id = pk)
+    Juango.get_object_or_404(admin_queryset(ma, req); pk = pk)
 end
 
 change_view(req::Request; model, id) = (ma = get_admin(model); change_form(req, ma, admin_object(ma, req, id)))
@@ -678,7 +679,7 @@ function history_view(req::Request; model, id)
     ma = get_admin(model)
     require_perm(req, ma, :view, :change)
     obj = admin_object(ma, req, id)
-    entries = collect(select_related(order_by(filter(LogEntry; content_type = get_for_model(ma.model), object_id = string(obj.id)),
+    entries = collect(select_related(order_by(filter(LogEntry; content_type = get_for_model(ma.model), object_id = Juango.pk_string(obj)),
                                               "action_time", "id"), :user))
     ctx = base_context(req, interpolate(gettext("Change history: %(object)s"), Dict("object" => obj)))
     merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "entries" => entries))
@@ -693,7 +694,7 @@ function autocomplete_view(req::Request; model)
     term = strip(get(req.GET, "term", ""))
     qs = admin_queryset(ma, req)
     isempty(term) || (qs = filter(qs, reduce(|, [Q(Symbol(f, "__icontains") => term) for f in ma.search_fields])))
-    Dict("results" => [Dict("id" => string(o.id), "text" => string(o)) for o in qs[1:20]])
+    Dict("results" => [Dict("id" => Juango.pk_string(o), "text" => string(o)) for o in qs[1:20]])
 end
 
 """

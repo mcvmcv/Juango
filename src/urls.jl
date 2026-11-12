@@ -286,7 +286,7 @@ function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLC
             c = CONVERTERS[conv]
             s = string(c.to_url(isempty(args) ? kw[pn] : args[i]))
             occursin(c.full, s) || (ok = false; break)
-            print(io, e.pieces[i], conv == "path" ? join(urlquote.(split(s, '/')), '/') : urlquote(s))
+            print(io, e.pieces[i], conv == "path" ? join(path_quote.(split(s, '/')), '/') : path_quote(s))
         end
         ok || continue
         print(io, e.pieces[end])

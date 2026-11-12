@@ -117,6 +117,17 @@ function slugify(s)
 end
 
 urlquote(s) = URIs.escapeuri(string(s))
+"Escape a URL path segment as Django's `reverse` does: RFC 3986 sub-delimiters, `:`, `@` and `~` stay as they are."
+function path_quote(s::AbstractString)
+    safe(c) = isascii(c) && (isletter(c) || isdigit(c) || c in "-._~!\$&'()*+,;=:@")
+    all(safe, s) && return String(s)
+    io = IOBuffer()
+    for b in codeunits(s)
+        c = Char(b)
+        b < 0x80 && safe(c) ? write(io, b) : print(io, '%', uppercase(string(b; base = 16, pad = 2)))
+    end
+    String(take!(io))
+end
 urlunquote(s) = URIs.unescapeuri(replace(string(s), '+' => ' '))
 
 "Encode a dict / pairs as `application/x-www-form-urlencoded`."

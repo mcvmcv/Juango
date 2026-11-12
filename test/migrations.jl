@@ -675,7 +675,7 @@ end
             order = IntegerField()
             product = CharField(max_length = 10)
             qty = IntegerField(default = 1)
-            author = ForeignKey(Author, on_delete = :CASCADE, null = true)
+            author = ForeignKey(Author, on_delete = :CASCADE, null = true, blank = true)
             Meta(table = "cp_line", app_label = "migcomp", pk = CompositePrimaryKey(:order, :product))
         end
         p1 = only(quiet(() -> makemigrations(app = "migcomp", questioner = _ -> false)))
@@ -717,8 +717,64 @@ end
         # deleting the author cascades to its lines
         delete!(au)
         @test !exists(filter(CpLine; pk = (1, "apple")))
+        # ForeignObject: a relation through (order, product) to the composite key
+        @eval @model struct CpShip
+            order = IntegerField()
+            product = CharField(max_length = 10)
+            note = CharField(max_length = 20, blank = true)
+            line = ForeignObject(CpLine; from_fields = (:order, :product), related_name = :ships)
+            Meta(table = "cp_ship", app_label = "migcomp")
+        end
+        quiet(() -> makemigrations(app = "migcomp", questioner = _ -> false))
+        quiet(() -> migrate())
+        @test Set(Juango.table_columns(Juango.backend(), "cp_ship")) == Set(["id", "order", "product", "note"])
+        l1 = create(CpLine; order = 7, product = "fig", qty = 4)
+        l2 = create(CpLine; order = 7, product = "lime", qty = 1)
+        s1 = create(CpShip; line = l1, note = "first")
+        s2 = create(CpShip; order = 7, product = "fig", note = "second")
+        s3 = create(CpShip; order = 8, product = "none", note = "dangling")
+        @test s1.order == 7 && s1.product == "fig" && get(CpShip; id = s2.id).line.qty == 4 && s3.line === nothing
+        s2.line = l2; save!(s2)
+        @test get(CpShip; id = s2.id).product == "lime"
+        @test [x.note for x in l1.ships] == ["first"] && count(l2.ships) == 1
+        @test [x.note for x in order_by(filter(CpShip; line__qty__gt = 2), "id")] == ["first"]
+        @test count(filter(CpShip; line__isnull = true)) == 0 && count(filter(CpShip; line__isnull = false)) == 3
+        @test [x.note for x in filter(CpShip; line = l2)] == ["second"]
+        @test sort([x.note for x in exclude(objects(CpShip), Q(line__qty__gt = 2))]) == ["dangling", "second"]
+        @test [x.product for x in filter(CpLine; ships__note = "second")] == ["lime"]
+        @test count(filter(CpLine; order = 7, ships__isnull = true)) == 0
+        @test Set(x.product for x in exclude(filter(CpLine; order = 7), Q(ships__note = "first"))) == Set(["lime"])
+        delete!(l1)                                              # on_delete = :CASCADE
+        @test !exists(filter(CpShip; id = s1.id)) && exists(filter(CpShip; id = s2.id))
+
+        # the admin: the key in URLs ("7,lime"), read-only on the change form
+        Admin.register!(CpLine)
+        try
+            c = Client()
+            force_login!(c, root_user())
+            r = get(c, "/admin/cpline/")
+            @test r.status == 200 && occursin("/admin/cpline/7,lime/change/", text(r))
+            r = get(c, "/admin/cpline/7,lime/change/")
+            @test r.status == 200 && !occursin("name=\"order\"", text(r)) && occursin("name=\"qty\"", text(r))
+            r = post(c, "/admin/cpline/7,lime/change/", Dict("qty" => "11"))
+            @test r.status == 302 && get(CpLine; pk = (7, "lime")).qty == 11
+            @test get(c, "/admin/cpline/7,nope/change/").status == 404 && get(c, "/admin/cpline/x/change/").status == 404
+            @test get(c, "/admin/cpline/7,lime/history/").status == 200
+            r = post(c, "/admin/cpline/add/", Dict("order" => "9", "product" => "a,b/c", "qty" => "2"))
+            @test r.status == 302 && exists(filter(CpLine; pk = (9, "a,b/c")))
+            @test Juango.pk_string(get(CpLine; pk = (9, "a,b/c"))) == "9,a_2Cb_2Fc"
+            @test Juango.parse_pk(CpLine, "9,a_2Cb_2Fc") == (9, "a,b/c")
+            @test get(c, "/admin/cpline/9,a_2Cb_2Fc/change/").status == 200
+            r = post(c, "/admin/cpline/", Dict("action" => "delete_selected", "_selected_action" => "9,a_2Cb_2Fc", "post" => "yes"))
+            @test !exists(filter(CpLine; pk = (9, "a,b/c")))
+            r = post(c, "/admin/cpline/7,lime/delete/", Dict("post" => "yes"))
+            @test r.status == 302 && !exists(filter(CpLine; pk = (7, "lime"))) && !exists(filter(CpShip; id = s2.id))
+        finally
+            Admin.unregister!(CpLine)
+        end
+        Juango.unregister_model!(CpShip)
+
         # what isn't supported says so
-        @test_throws ArgumentError Admin.register!(CpLine)
         @test_throws Juango.LookupError collect(filter(CpLine; pk__gt = (1, "a")))
         @eval @model struct CpNote
             line = ForeignKey(CpLine, on_delete = :CASCADE)

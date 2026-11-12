@@ -359,7 +359,22 @@ line = get(OrderLine; pk = (order.id, "apple"))     # line.pk == (order.id, "app
 filter(OrderLine; pk__in = [(1, "apple"), (1, "pear")])
 ```
 
-As in Django, other models can't point a ForeignKey or many-to-many field at such a model, it can't use multi-table inheritance, and the admin doesn't support it. Saving with a changed key field writes a new row.
+Saving with a changed key field writes a new row. As in Django, it can't use multi-table inheritance, and a plain `ForeignKey` or many-to-many field can't point at it: other models point at it with a `ForeignObject`, a relation through fields they already have (Django's multi-column relation):
+
+```julia
+@model struct Shipment
+    order = ForeignKey(Order, on_delete = :CASCADE)
+    product = CharField(max_length = 20)
+    line = ForeignObject(OrderLine; from_fields = (:order, :product), related_name = :shipments)
+end
+s.line; s.line = other_line            # read it, or set order_id and product together
+line.shipments                         # the reverse queryset
+filter(Shipment; line__qty__gt = 2); filter(OrderLine; shipments__id = 3)
+```
+
+`to_fields` defaults to the target's primary key, so a `ForeignObject` can point at any model. Deleting the target applies `on_delete` (`:CASCADE` by default, `:SET_NULL`, `:PROTECT`, `:DO_NOTHING`). There is no database constraint, and the relation isn't a form field: forms edit the fields it is made of.
+
+The admin supports composite-key models. Their URLs carry the key as `7,apple` (each part escaped as Django's admin does, so a comma inside a value becomes `_2C`; `pk_string(obj)` and `parse_pk(Model, s)` convert). The key fields can be filled in when adding and are read-only afterwards.
 
 #### JSON, arrays, UUIDs, ranges and full-text search
 
@@ -1344,7 +1359,7 @@ Set them with `configure!(...)` and read them with `settings.NAME`. Request limi
 ## Differences from Django (current limitations)
 
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
-- **Composite primary keys, swappable user models and admin docs** have Django's limitations: no foreign keys to composite-key models, choose `AUTH_USER_MODEL` before the first `migrate`, and docstrings are shown as plain text.
+- **Swappable user models and admin docs** have Django's limitations: choose `AUTH_USER_MODEL` before the first `migrate`, and docstrings are shown as plain text.
 - `runserver` is HTTP.jl's server. It speaks HTTP/1.1 and HTTP/2 (cleartext with prior knowledge, or negotiated over TLS), and serves HTTPS with `runserver 8443 --cert cert.pem --key key.pem` (or `runserver(...; certfile, keyfile)`). WebSockets need HTTP/1.1, which browsers use for them anyway. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and run `manage.jl check --deploy`.
 
 ## Layout

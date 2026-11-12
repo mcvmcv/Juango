@@ -371,14 +371,14 @@ function register_model!(T::Type, fields::Vector, meta::NamedTuple = NamedTuple(
     end
     fs = Field[]
     m2m = Field[]
-    gfks, grels = Field[], Field[]
+    gfks, grels, fobjs = Field[], Field[], Field[]
     for (name, f) in fields
         f isa Field || error("$T.$name must be a field (CharField(...), ForeignKey(...), ...)")
         f = deepcopy(f)
         f.name = name
         f.model = T
         name in (:id, :pk) && error("$T: '$name' is reserved for the automatic primary key")
-        push!(f.kind === :m2m ? m2m : f.kind === :gfk ? gfks : f.kind === :grel ? grels : fs, f)
+        push!(f.kind === :m2m ? m2m : f.kind === :gfk ? gfks : f.kind === :grel ? grels : f.kind === :fobj ? fobjs : fs, f)
     end
     name = string(get(meta, :name, nameof(T)))
     vname = get(meta, :verbose_name, lowercase(replace(name, r"(?<=[a-z])(?=[A-Z])" => " ")))
@@ -394,6 +394,7 @@ function register_model!(T::Type, fields::Vector, meta::NamedTuple = NamedTuple(
                                               :unique_together, :_parent, :proxy))))
     isempty(gfks) || (m.extra[:generic_fks] = gfks)
     isempty(grels) || (m.extra[:generic_relations] = grels)
+    isempty(fobjs) || (m.extra[:foreign_objects] = fobjs)
     proxy && (m.fields = modelmeta(parent).fields; m.m2m = modelmeta(parent).m2m)
     MODEL_REGISTRY[T] = m
     filter!(x -> !(x === T || modelmeta_or_nothing(x) === nothing ||
@@ -559,6 +560,9 @@ function construct(::Type{T}; kwargs...) where {T<:Model}
     for g in generic_fks(T)
         haskey(kw, g.name) && set_generic!(obj, g, pop!(kw, g.name))
     end
+    for g in foreign_objects(T)
+        haskey(kw, g.name) && set_fobj!(obj, g, pop!(kw, g.name))
+    end
     isempty(kw) || throw(ArgumentError("$T got unexpected field(s): $(join(keys(kw), ", "))"))
     obj
 end
@@ -629,6 +633,13 @@ function Base.getproperty(m::Model, s::Symbol)
     pre = get(cache, s, NOTFOUND)
     g = find_generic(generic_fks(T), s)
     g === nothing || return get_generic(m, g)
+    g = find_generic(foreign_objects(T), s)
+    g === nothing || return get_fobj(m, g)
+    r = find_reverse_fobj(T, s)
+    if r !== nothing
+        qs = fobj_queryset(m, r[2], r[3])
+        return pre isa PrefetchedList ? chain(qs; cache = pre.items) : qs
+    end
     g = find_generic(generic_relations(T), s)
     if g !== nothing
         qs = generic_queryset(m, g)
@@ -667,6 +678,8 @@ function Base.setproperty!(m::Model, s::Symbol, v)
     s === :pk && (s = :id)
     g = find_generic(generic_fks(typeof(m)), s)
     g === nothing || return set_generic!(m, g, v)
+    g = find_generic(foreign_objects(typeof(m)), s)
+    g === nothing || return set_fobj!(m, g, v)
     f = findfield(modelmeta(typeof(m)), s)
     if f !== nothing && f.kind === :fk && s === f.name
         if v === nothing
@@ -696,7 +709,8 @@ function Base.propertynames(m::Model, private::Bool = false)
     append!(names, [r[1] for r in reverse_relations(typeof(m)) if !startswith(string(r[1]), "+")])
     append!(names, first.(m2m_relations(typeof(m))))
     append!(names, child_accessor.(child_models(typeof(m))))
-    append!(names, [g.name for g in vcat(generic_fks(typeof(m)), generic_relations(typeof(m)))])
+    append!(names, [g.name for g in vcat(generic_fks(typeof(m)), generic_relations(typeof(m)), foreign_objects(typeof(m)))])
+    append!(names, first.(reverse_foreign_objects(typeof(m))))
     table_parent(typeof(m)) === nothing || push!(names, parent_accessor(typeof(m)))
     Tuple(names)
 end
@@ -722,6 +736,7 @@ function tattr(m::Model, ::Val{:get_absolute_url})
     u === nothing ? NOTFOUND : u
 end
 tattr(m::Model, ::Val{:verbose_name}) = modelmeta(typeof(m)).verbose_name
+tattr(m::Model, ::Val{:pk_string}) = pk_string(m)
 
 # --- (de)serialisation ------------------------------------------------------------------
 
@@ -780,12 +795,44 @@ function composite_pk(T::Type, data)
     any(isnothing, vals) ? nothing : Tuple(vals)
 end
 
-"Parse a primary key from text (URLs, form values); `nothing` if it isn't one."
+"""
+Parse a primary key from text (URLs, form values); `nothing` if it isn't one. A composite
+key is its parts as `pk_string` writes them: `"3,7"`.
+"""
 function parse_pk(T::Type, s)
     s isa Integer && return pk_kind(T) === :auto ? s : nothing
     s isa UUID && return s
-    pk_kind(T) === :uuid ? tryparse(UUID, string(s)) : tryparse(Int, string(s))
+    s isa Tuple && return s
+    k = pk_kind(T)
+    k === :composite && return parse_composite_pk(T, string(s))
+    k === :uuid ? tryparse(UUID, string(s)) : tryparse(Int, string(s))
 end
+function parse_composite_pk(T::Type, s::AbstractString)
+    fs = pk_fields(T)
+    bits = split(s, ',')
+    length(bits) == length(fs) || return nothing
+    vals = Any[]
+    for (f, b) in zip(fs, bits)
+        b = unquote_pk(b)
+        v = f.kind === :fk ? parse_pk(related_model(f), b) : f.kind === :int ? tryparse(Int, b) :
+            f.kind === :uuid ? tryparse(UUID, b) : f.kind === :date ? tryparse(Date, b) : String(b)
+        v === nothing && return nothing
+        push!(vals, v)
+    end
+    Tuple(vals)
+end
+
+"""
+    pk_string(obj) -> String
+
+An object's primary key as text for URLs: the id, or a composite key's parts joined with
+commas (each escaped as Django's admin does: `,` becomes `_2C`).
+"""
+pk_string(m::Model) = (pk = m.pk; pk isa Tuple ? join((quote_pk(string(x)) for x in pk), ",") : string(pk))
+const PK_QUOTE_CHARS = Set(":/_#?;@&=+\$,\"[]<>%\n\\")
+quote_pk(s::AbstractString) = any(in(PK_QUOTE_CHARS), s) ?
+    join(c in PK_QUOTE_CHARS ? "_" * uppercase(string(UInt8(c); base = 16, pad = 2)) : string(c) for c in s) : s
+unquote_pk(s::AbstractString) = occursin('_', s) ? replace(s, r"_([0-9A-F]{2})" => m -> string(Char(parse(UInt8, m[2:3]; base = 16)))) : String(s)
 
 """
 How a model's fields map to row keys: `(field, row key, attribute name)` per field. Inherited
@@ -1155,6 +1202,12 @@ function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nos
             end
             a = join!(c, alias, (alias, child_accessor(Cm)), modelmeta(Cm).table, "id", "id"; left = true)
             return compile_lookup(c, a, Cm, subkey, value, negated)
+        end
+        if f === nothing && (g = find_generic(foreign_objects(T), fname)) !== nothing
+            return compile_fobj_lookup(c, alias, g, related_model(g), rest, lookup, value, negated, false, (alias, g.name))
+        end
+        if f === nothing && (r = find_reverse_fobj(T, fname)) !== nothing
+            return compile_fobj_lookup(c, alias, r[3], r[2], rest, lookup, value, negated, true, (alias, r[1], c.scope))
         end
         if f === nothing && (g = find_generic(generic_relations(T), fname)) !== nothing
             # post.comments (GenericRelation): join on object id AND content type
@@ -2499,6 +2552,7 @@ Base.showerror(io::IO, e::ProtectedError) = print(io, "ProtectedError: ", e.msg)
 function delete_ids!(T::Type, ids::Vector)
     isempty(ids) && return 0
     T = concrete_model(T)
+    delete_fobj_refs!(T, ids)
     is_composite(T) && return delete_composite!(T, ids)
     for g in generic_relations(T)    # objects pointing here through a GenericForeignKey
         M = related_model(g)
@@ -2536,7 +2590,7 @@ end
 "The primary keys of a queryset's rows: ids, or tuples for a composite key."
 row_keys(qs::QuerySet{T}) where {T} = is_composite(T) ? Any[o.pk for o in fetch(qs)] : values_list(qs, :id; flat = true)
 
-"Delete rows of a model with a composite primary key (nothing can refer to them)."
+"Delete rows of a model with a composite primary key (only ForeignObjects can refer to them; see `delete_fobj_refs!`)."
 function delete_composite!(T::Type, keys::Vector)
     signal = has_receivers(pre_delete, T) || has_receivers(post_delete, T)
     doomed = signal ? fetch(filter(base_objects(T); pk__in = keys)) : T[]

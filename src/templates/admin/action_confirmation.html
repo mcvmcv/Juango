@@ -7,7 +7,7 @@
 {% else %}
 <p>{{ description }}: are you sure? These {{ opts.verbose_name_plural }} are affected:</p>
 {% endif %}
-<ul>{% for o in objects %}<li>{{ opts.verbose_name|capfirst }}: <a href="{% url 'admin:change' model=opts.slug id=o.id %}">{{ o }}</a></li>{% endfor %}</ul>
+<ul>{% for o in objects %}<li>{{ opts.verbose_name|capfirst }}: <a href="{% url 'admin:change' model=opts.slug id=o.pk_string %}">{{ o }}</a></li>{% endfor %}</ul>
 <form method="post">
   {% csrf_token %}
   {% for id in ids %}<input type="hidden" name="_selected_action" value="{{ id }}">{% endfor %}

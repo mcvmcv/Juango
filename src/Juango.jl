@@ -48,6 +48,7 @@ include("timezones.jl")
 include("humanize.jl")
 include("orm.jl")
 include("expressions.jl")
+include("foreignobject.jl")
 include("fields_extra.jl")
 include("gis.jl")
 include("files.jl")
@@ -130,6 +131,7 @@ export EmailMessage, EmailMultiAlternatives, send!, send_mail, mail_admins, mail
        PasswordResetView, PasswordResetConfirmView, make_reset_token, check_reset_token
 export LogEntry, log_action!, ADDITION, CHANGE, DELETION
 export Permission, Group, has_perm, has_perms, has_module_perms, get_all_permissions, permission_required, perm_name
+export ForeignObject
 export ContentType, GenericForeignKey, GenericRelation, get_for_model, model_class
 export using_db
 export @background, background, TaskDef, TaskResult, enqueue, get_result, db_worker, dummy_results

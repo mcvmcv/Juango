@@ -1,5 +1,5 @@
 {% extends "admin/base.html" %}
-{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a> › <a href="{% url 'admin:changelist' model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › <a href="{% url 'admin:change' model=opts.slug id=object.id %}">{{ object }}</a> › History</div>{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a> › <a href="{% url 'admin:changelist' model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › <a href="{% url 'admin:change' model=opts.slug id=object.pk_string %}">{{ object }}</a> › History</div>{% endblock %}
 {% block content %}
 <h1 class="page">{{ title }}</h1>
 <div class="module">

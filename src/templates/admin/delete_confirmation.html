@@ -1,5 +1,5 @@
 {% extends "admin/base.html" %}
-{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a> › <a href="{% url 'admin:changelist' model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › <a href="{% url 'admin:change' model=opts.slug id=object.id %}">{{ object }}</a> › Delete</div>{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a> › <a href="{% url 'admin:changelist' model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › <a href="{% url 'admin:change' model=opts.slug id=object.pk_string %}">{{ object }}</a> › Delete</div>{% endblock %}
 {% block content %}
 <h1 class="page">{% translate "Are you sure?" %}</h1>
 <p>Are you sure you want to delete the {{ opts.verbose_name }} “{{ object }}”?</p>
@@ -10,6 +10,6 @@
 <form method="post">
   {% csrf_token %}
   <input type="submit" class="button danger" value="{% translate "Yes, I’m sure" %}">
-  <a class="button secondary" href="{% url 'admin:change' model=opts.slug id=object.id %}">{% translate "No, take me back" %}</a>
+  <a class="button secondary" href="{% url 'admin:change' model=opts.slug id=object.pk_string %}">{% translate "No, take me back" %}</a>
 </form>
 {% endblock %}

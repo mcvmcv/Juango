@@ -190,7 +190,7 @@ function column_state(f::Field)
     d !== nothing && f.kind in (:json, :hstore, :array, :intrange, :daterange, :datetimerange, :uuid) && (d = nothing)  # set by Julia, not the DB
     ref = f.kind !== :fk ? nothing : f.related === :__user_model__ ? "__user_model__" : modelmeta(related_model(f)).table
     f.kind === :fk && is_composite(related_model(f)) &&
-        throw(ArgumentError("$(nameof(f.model)).$(f.name): foreign keys to $(nameof(related_model(f))) aren't supported (it has a composite primary key)"))
+        throw(ArgumentError("$(nameof(f.model)).$(f.name): foreign keys to $(nameof(related_model(f))) has a composite primary key; point at it with ForeignObject(...; from_fields = ...)"))
     of = f.kind === :array ? f.related : f.kind === :geometry ? geo_of(f) :
          f.kind === :fk && pk_kind(related_model(f)) === :uuid ? :uuid : nothing
     Column(column(f), schema_kind(f.kind); null = f.null, default = d, unique = f.unique,
