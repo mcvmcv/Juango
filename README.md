@@ -483,7 +483,7 @@ Migration(
   end)
   ```
 
-  Historical models work on columns (`p.author_id`), and support `objects`, `filter`/`get`/`count` with simple lookups, `create`, `save!`, `update!(Model, (; lookups...); values...)` and `delete!`.
+  Historical models support `objects`, `filter`/`get`/`count` with column lookups, `create`, `save!`, `update!(Model, (; lookups...); values...)` and `delete!`. Rows have their columns (`p.author_id`) and relations as they were then: foreign keys (`p.author`, and `p.author = a`), many-to-many fields with an auto-created join table (`p.tags`, with `add!`, `remove!` and `clear!`), and reverse accessors named `<model>_set` (`a.post_set`, which also takes `filter`, `count` and `create`). Historical states don't keep `related_name` or methods.
 - **Squashing.** `squashmigrations blog 0004` (or `manage.jl squashmigrations blog 0004`) writes one migration that replaces 0001 to 0004. Tables created in the range become a single `CreateModel`. Databases that applied all or none of the originals use it, the rest keep the originals. When every database has moved past it, delete the old files and the `replaces` line. Ranges with `RunSQL`/`RunJulia` are refused.
 - **Transactions.** Each migration runs in a transaction. If it fails, nothing is applied.
 - **SQLite.** SQLite can't alter or drop columns in place, so those changes rebuild the table: create a copy, move the rows, then swap. On Postgres they are ordinary `ALTER TABLE` statements.
@@ -1343,7 +1343,6 @@ Set them with `configure!(...)` and read them with `settings.NAME`. Request limi
 
 ## Differences from Django (current limitations)
 
-- **Historical models are table-level.** In data migrations, `get_model` gives the table as it was (columns, not relations or methods), unlike Django's historical model classes.
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
 - **Composite primary keys, swappable user models and admin docs** have Django's limitations: no foreign keys to composite-key models, choose `AUTH_USER_MODEL` before the first `migrate`, and docstrings are shown as plain text.
 - `runserver` is HTTP.jl's server. It speaks HTTP/1.1 and HTTP/2 (cleartext with prior knowledge, or negotiated over TLS), and serves HTTPS with `runserver 8443 --cert cert.pem --key key.pem` (or `runserver(...; certfile, keyfile)`). WebSockets need HTTP/1.1, which browsers use for them anyway. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and run `manage.jl check --deploy`.

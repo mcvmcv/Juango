@@ -878,6 +878,32 @@ end
     end
 end
 
+@testset "historical models: relations" begin
+    g = Juango.Migrations.build_graph()
+    apps = Juango.HistoricalApps(Juango.Migrations.replay(g, keys(g.nodes)))
+    U, G, P = get_model(apps, "auth", "User"), get_model(apps, "auth", "Group"), get_model(apps, "auth", "Permission")
+    u = create_user("histuser", "hist-pw-123")
+    create(Group; name = "hist-group")
+    hu, hg = get(U; username = "histuser"), get(G; name = "hist-group")
+    add!(hu.groups, hg); add!(hu.groups, hg.id)                  # many-to-many, added once
+    @test [x.name for x in hu.groups] == ["hist-group"] && count(hu.groups) == 1
+    @test [x.username for x in hg.user_set] == ["histuser"]       # its reverse
+    @test [x.name for x in get(User; id = u.id).groups] == ["hist-group"]
+    remove!(hu.groups, hg)
+    @test count(hu.groups) == 0
+    add!(hg.user_set, hu); clear!(hg.user_set)
+    @test isempty(collect(hu.groups))
+    p = first(objects(P))
+    ct = p.content_type                                           # forward foreign key
+    @test ct.id == p.content_type_id && ct.model isa String
+    @test p.id in [x.id for x in ct.permission_set] && count(ct.permission_set) == count(P; content_type_id = ct.id)
+    @test length(filter(ct.permission_set; codename = p.codename)) == 1
+    p.content_type = ct
+    @test p.content_type_id == ct.id
+    @test_throws ArgumentError hu.nope_set
+    @test_throws ArgumentError hu.nope
+end
+
 @testset "pre_migrate and post_migrate signals" begin
     seen = Tuple{Symbol,String,Any}[]
     pre = (s; app_label, database, plan, apps, kw...) -> push!(seen, (:pre, app_label, (database, apps)))
