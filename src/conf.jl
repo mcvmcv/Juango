@@ -35,6 +35,9 @@ function default_settings()
         :DEFAULT_FROM_EMAIL => "webmaster@localhost",
         :SERVER_EMAIL => "root@localhost",
         :ADMINS => Any[],
+        :DATA_UPLOAD_MAX_MEMORY_SIZE => 2_621_440,     # bytes of a non-multipart body (nothing: no limit)
+        :DATA_UPLOAD_MAX_NUMBER_FIELDS => 1000,        # GET + POST parameters (nothing: no limit)
+        :FILE_UPLOAD_MAX_SIZE => 100 * 1024 * 1024,    # bytes of a multipart (file upload) body (nothing: no limit)
         :MANAGERS => Any[],
         :IGNORABLE_404_URLS => Any[],
         :PASSWORD_RESET_TIMEOUT => 60 * 60 * 24 * 3,
@@ -133,10 +136,13 @@ struct SettingsProxy end
 const settings = SettingsProxy()
 
 function Base.getproperty(::SettingsProxy, k::Symbol)
-    isempty(SETTINGS) && merge!(SETTINGS, default_settings())
-    haskey(SETTINGS, k) || throw(KeyError("setting $k is not defined"))
-    SETTINGS[k]
+    v = get(SETTINGS, k, NO_SETTING)
+    v === NO_SETTING || return v
+    isempty(SETTINGS) && (merge!(SETTINGS, default_settings()); return getproperty(settings, k))
+    throw(KeyError("setting $k is not defined"))
 end
+struct NoSetting end
+const NO_SETTING = NoSetting()
 Base.propertynames(::SettingsProxy) = Tuple(keys(SETTINGS))
 Base.get(::SettingsProxy, k::Symbol, default) = get(SETTINGS, k, default)
 Base.show(io::IO, ::SettingsProxy) = print(io, "Juango.settings(", length(SETTINGS), " values)")

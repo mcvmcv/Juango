@@ -192,7 +192,7 @@ function HttpResponse(content = ""; status::Integer = 200,
                       content_type = "text/html; charset=utf-8", headers = Pair{String,String}[])
     body = content isa AbstractVector{UInt8} ? Vector{UInt8}(content) : Vector{UInt8}(codeunits(string(content)))
     hs = Pair{String,String}[string(k) => string(v) for (k, v) in headers]
-    any(h -> lowercase(h.first) == "content-type", hs) || pushfirst!(hs, "Content-Type" => content_type)
+    any(h -> header_eq(h.first, "content-type"), hs) || pushfirst!(hs, "Content-Type" => content_type)
     HttpResponse(Int(status), hs, body, String[], nothing, String[], nothing)
 end
 
@@ -202,15 +202,26 @@ Base.String(r::HttpResponse) = text(r)
 Base.show(io::IO, r::HttpResponse) =
     print(io, "<HttpResponse status=", r.status, " ", repr(something(getheader(r, "Content-Type"), "")), ">")
 
+"Whether two header names are equal ignoring ASCII case (without allocating)."
+function header_eq(a::AbstractString, b::AbstractString)
+    ca, cb = codeunits(a), codeunits(b)
+    length(ca) == length(cb) || return false
+    @inbounds for i in eachindex(ca)
+        x, y = ca[i], cb[i]
+        x == y && continue
+        (x | 0x20) == (y | 0x20) && UInt8('a') <= (x | 0x20) <= UInt8('z') || return false
+    end
+    true
+end
+
 function getheader(r::HttpResponse, name::AbstractString, default = nothing)
-    n = lowercase(name)
     for (k, v) in r.headers
-        lowercase(k) == n && return v
+        header_eq(k, name) && return v
     end
     default
 end
 function setheader!(r::HttpResponse, name::AbstractString, value)
-    filter!(h -> lowercase(h.first) != lowercase(name), r.headers)
+    filter!(h -> !header_eq(h.first, name), r.headers)
     push!(r.headers, string(name) => string(value))
     r
 end

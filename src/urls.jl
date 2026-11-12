@@ -10,7 +10,9 @@ struct Converter
     regex::String
     to_julia::Function
     to_url::Function
+    full::Regex             # ^regex$, compiled once (checks values when reversing)
 end
+Converter(regex::AbstractString, to_julia, to_url) = Converter(String(regex), to_julia, to_url, Regex("^(?:" * regex * ")\$"))
 
 const CONVERTERS = Dict{String,Converter}(
     "str" => Converter("[^/]+", identity, string),
@@ -218,6 +220,17 @@ end
 struct ReverseEntry
     route::String                       # full route with <conv:name> placeholders
     params::Vector{Tuple{Symbol,String}}
+    pieces::Vector{String}              # the literal text around the parameters (length(params) + 1)
+end
+function ReverseEntry(route::AbstractString, params)
+    pieces = String[]
+    last = 1
+    for m in eachmatch(ROUTE_PARAM, route)
+        push!(pieces, route[last:prevind(route, m.offset)])
+        last = m.offset + ncodeunits(m.match)
+    end
+    push!(pieces, route[last:end])
+    ReverseEntry(String(route), params, pieces)
 end
 
 const REVERSE_CACHE = IdDict{Any,Dict{String,Vector{ReverseEntry}}}()
@@ -262,26 +275,22 @@ function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLC
     entries === nothing && throw(NoReverseMatch("'$name' is not a valid view name"))
     kw = Dict{Symbol,Any}(kwargs)
     for e in Iterators.reverse(entries)
-        values = Dict{Symbol,Any}()
         if !isempty(args)
             length(args) == length(e.params) || continue
-            for (i, (pn, _)) in enumerate(e.params)
-                values[pn] = args[i]
-            end
         else
-            Set(keys(kw)) == Set(first.(e.params)) || continue
-            values = kw
+            (length(kw) == length(e.params) && all(p -> haskey(kw, p[1]), e.params)) || continue
         end
-        url = e.route
+        io = IOBuffer()
         ok = true
-        for (pn, conv) in e.params
+        for (i, (pn, conv)) in enumerate(e.params)
             c = CONVERTERS[conv]
-            s = c.to_url(values[pn])
-            occursin(Regex("^" * c.regex * "\$"), s) || (ok = false; break)
-            s = conv == "path" ? join(urlquote.(split(s, '/')), '/') : urlquote(s)
-            url = replace(url, Regex("<(?:" * conv * ":)?" * string(pn) * ">") => s; count = 1)
+            s = string(c.to_url(isempty(args) ? kw[pn] : args[i]))
+            occursin(c.full, s) || (ok = false; break)
+            print(io, e.pieces[i], conv == "path" ? join(urlquote.(split(s, '/')), '/') : urlquote(s))
         end
         ok || continue
+        print(io, e.pieces[end])
+        url = String(take!(io))
         if occursin("\0lang", url)
             lang = something(supported_language(get_language()), default_language())
             url = replace(url, LANG_ALWAYS => lang * "/", LANG_OPTIONAL => lang == default_language() ? "" : lang * "/")

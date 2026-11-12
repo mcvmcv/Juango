@@ -49,13 +49,20 @@ function dispatch(req::Request)
     end
 end
 
+"The middleware chain around `dispatch`, built once per MIDDLEWARE setting (like Django, middleware is instantiated once)."
 function build_handler()
+    mws = settings.MIDDLEWARE
+    c = HANDLER_CACHE[]
+    c !== nothing && c[1] === mws && return c[2]
     h = dispatch
-    for mw in Iterators.reverse(settings.MIDDLEWARE)
+    for mw in Iterators.reverse(mws)
         h = mw(h)
     end
+    HANDLER_CACHE[] = (mws, h)
     h
 end
+const HANDLER_CACHE = Ref{Any}(nothing)
+push!(SETTINGS_CHANGED_HOOKS, () -> (HANDLER_CACHE[] = nothing))
 
 """
     handle_request(req::Request) -> HttpResponse
@@ -70,6 +77,17 @@ function handle_request(req::Request)
     resp
 end
 
+"Whether the request has more parameters than `DATA_UPLOAD_MAX_NUMBER_FIELDS` (Django's TooManyFieldsSent)."
+function too_many_fields(req::Request)
+    limit = get(settings, :DATA_UPLOAD_MAX_NUMBER_FIELDS, nothing)
+    limit === nothing && return false
+    n = 0
+    for q in (req.GET, req.POST), v in values(q.data)
+        n += length(v)
+    end
+    n > limit
+end
+
 "Set while a `with_live_server(; static = true)` block runs: static files are served even without DEBUG."
 const LIVE_SERVER_STATIC = Ref(false)
 
@@ -81,6 +99,7 @@ function handle_request_inner(req::Request)
         if (settings.DEBUG || LIVE_SERVER_STATIC[]) && startswith(req.path, settings.STATIC_URL) && !isempty(static_dirs())
             return serve_static(req)
         end
+        too_many_fields(req) && throw(BadRequest("The number of GET/POST parameters exceeded DATA_UPLOAD_MAX_NUMBER_FIELDS."))
         host_allowed(req) || (log!("juango.security.DisallowedHost", :warning, "Invalid HTTP_HOST header: '$(get_host(req))'"; request = req);
                               throw(BadRequest("Invalid HTTP_HOST header: '$(get_host(req))'. You may need to add it to ALLOWED_HOSTS.")))
         req.resolver_match = resolve(req.path)

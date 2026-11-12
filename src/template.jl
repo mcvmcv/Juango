@@ -108,17 +108,53 @@ function split_contents(s::AbstractString)
     parts
 end
 
+# --- filters registry -----------------------------------------------------------------
+
+struct TemplateFilter
+    fn::Function
+    is_safe::Bool
+    needs_autoescape::Bool
+end
+
+const FILTERS = Dict{String,TemplateFilter}()
+
+"""
+    register_filter!(name, f; is_safe=false, needs_autoescape=false)
+
+Register a template filter. `f(value, arg)` receives `arg === nothing` when no
+argument was given. With `needs_autoescape=true`, `f(value, arg, autoescape)`.
+
+    register_filter!("shout", (v, _) -> uppercase(string(v)) * "!")
+"""
+function register_filter!(name, f; is_safe = false, needs_autoescape = false)
+    FILTERS[string(name)] = TemplateFilter(f, is_safe, needs_autoescape)
+    clear_template_cache!()          # parsed templates hold the filters they use
+    nothing
+end
+
 # --- expressions ----------------------------------------------------------------------
 
 struct Literal
     value::Any
 end
+"""
+A variable path `a.b.0`. The attribute steps are prepared when the template is parsed: their
+Symbol, a `Val` instance for `tattr`, and the index for numeric steps (-1 otherwise).
+"""
 struct Variable
     parts::Vector{String}
+    syms::Vector{Symbol}
+    vals::Vector{Any}
+    idx::Vector{Int}
+end
+function Variable(parts::AbstractVector{<:AbstractString})
+    ps = String[String(p) for p in parts]
+    syms = Symbol[Symbol(p) for p in ps]
+    Variable(ps, syms, Any[Val(s) for s in syms], Int[all(isdigit, p) && !isempty(p) ? parse(Int, p) + 1 : -1 for p in ps])
 end
 struct FilterExpr
     base::Union{Literal,Variable}
-    filters::Vector{Tuple{String,Any}}   # (name, nothing | Literal | Variable)
+    filters::Vector{Tuple{TemplateFilter,Any}}   # (filter, nothing | Literal | Variable)
 end
 
 function parse_operand(s::AbstractString)
@@ -166,7 +202,7 @@ function parse_filter_expr(s::AbstractString)
     s = strip(s)
     tok, i = read_operand(s, 1)
     base = parse_operand(tok)
-    filters = Tuple{String,Any}[]
+    filters = Tuple{TemplateFilter,Any}[]
     n = ncodeunits(s)
     while true
         while i <= n && isspace(s[i])
@@ -181,14 +217,15 @@ function parse_filter_expr(s::AbstractString)
         end
         name = s[i:prevind(s, j)]
         isempty(name) && throw(TemplateSyntaxError("missing filter name in '$s'"))
-        haskey(FILTERS, name) || throw(TemplateSyntaxError("invalid filter: '$name'"))
+        filt = get(FILTERS, name, nothing)
+        filt === nothing && throw(TemplateSyntaxError("invalid filter: '$name'"))
         i = j
         arg = nothing
         if i <= n && s[i] == ':'
             tok, i = read_operand(s, nextind(s, i))
             arg = parse_operand(tok)
         end
-        push!(filters, (String(name), arg))
+        push!(filters, (filt, arg))
     end
     FilterExpr(base, filters)
 end
@@ -225,18 +262,20 @@ end
 
 "Attribute/key/index lookup used by `{{ a.b.c }}`."
 function getattr(obj, part::AbstractString)
+    sym = Symbol(part)
+    getattr(obj, part, sym, Val(sym), all(isdigit, part) && !isempty(part) ? parse(Int, part) + 1 : -1)
+end
+# `sym`, `val` (Val(sym)) and `idx` (1-based index, or -1) are prepared at parse time (Variable).
+function getattr(obj, part::AbstractString, sym::Symbol, val, idx::Int)
     (obj === nothing || obj === UNDEF) && return UNDEF
     if obj isa AbstractDict
         haskey(obj, part) && return obj[part]
-        sk = Symbol(part)
-        haskey(obj, sk) && return obj[sk]
+        haskey(obj, sym) && return obj[sym]
     end
-    sym = Symbol(part)
-    r = tattr(obj, Val(sym))
+    r = tattr(obj, val)
     r === NOTFOUND || return r
-    if all(isdigit, part) && (obj isa AbstractVector || obj isa Tuple)
-        i = parse(Int, part) + 1
-        return checkbounds(Bool, obj, i) ? obj[i] : UNDEF
+    if idx > 0 && (obj isa AbstractVector || obj isa Tuple)
+        return checkbounds(Bool, obj, idx) ? obj[idx] : UNDEF
     end
     if obj isa AbstractDict
         part == "items" && return collect(pairs(obj))
@@ -254,8 +293,8 @@ end
 
 function resolve_var(v::Variable, ctx::Context)
     val = lookup(ctx, v.parts[1])
-    for p in @view v.parts[2:end]
-        val = getattr(val, p)
+    for i in 2:length(v.parts)
+        val = getattr(val, v.parts[i], v.syms[i], v.vals[i], v.idx[i])
         val === UNDEF && break
     end
     val
@@ -265,8 +304,7 @@ resolve_var(l::Literal, ::Context) = l.value
 function eval_fe(fe::FilterExpr, ctx::Context)
     val = resolve_var(fe.base, ctx)
     val === UNDEF && (val = nothing)
-    for (name, arg) in fe.filters
-        f = FILTERS[name]
+    for (f, arg) in fe.filters
         a = arg === nothing ? nothing : resolve_var(arg, ctx)
         a === UNDEF && (a = nothing)
         was_safe = val isa SafeString
@@ -381,10 +419,7 @@ Base.show(io::IO, t::Template) = print(io, "<Template ", repr(t.name), ">")
 # --- rendering ------------------------------------------------------------------------
 
 render!(io::IO, n::TextNode, ::Context) = write(io, n.s)
-function render!(io::IO, n::VarNode, ctx::Context)
-    v = eval_fe(n.fe, ctx)
-    write(io, ctx.autoescape ? conditional_escape(v) : display_string(v))
-end
+render!(io::IO, n::VarNode, ctx::Context) = write_value(io, eval_fe(n.fe, ctx), ctx.autoescape)
 function render_nodes(io::IO, nodes::Vector{Node}, ctx::Context)
     for n in nodes
         render!(io, n, ctx)
@@ -430,7 +465,6 @@ end
 const BUILTIN_TEMPLATE_DIR = joinpath(@__DIR__, "templates")
 const TEMPLATE_CACHE = Dict{String,Tuple{Float64,Template}}()
 const TEMPLATE_LOCK = ReentrantLock()
-push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> empty!(TEMPLATE_CACHE), TEMPLATE_LOCK))
 
 "Where templates are looked up: TEMPLATE_DIRS, each installed app's `templates/` (APP_DIRS), Juango's own."
 template_dirs() = vcat(String[abspath(d) for d in settings.TEMPLATE_DIRS], app_dirs("templates"), [BUILTIN_TEMPLATE_DIR])
@@ -455,6 +489,8 @@ Templates are cached and reloaded automatically when the file changes. With
 isn't checked again.
 """
 const TEMPLATE_BY_NAME = Dict{String,Any}()
+clear_template_cache!() = lock(() -> (empty!(TEMPLATE_CACHE); empty!(TEMPLATE_BY_NAME); nothing), TEMPLATE_LOCK)
+push!(SETTINGS_CHANGED_HOOKS, clear_template_cache!)
 function get_template(name::AbstractString)
     occursin('#', name) && return partial_template(name)         # "page.html#partial"
     if !settings.TEMPLATE_CACHE_CHECK_MTIME
@@ -503,9 +539,11 @@ struct CondValue <: Cond
     fe::FilterExpr
 end
 struct CondOp <: Cond
-    op::String
+    op::Symbol
     args::Vector{Cond}
 end
+CondOp(op::AbstractString, args) = CondOp(Symbol(op), args)
+const OP_NOT_IN, OP_IS_NOT = Symbol("not in"), Symbol("is not")
 
 mutable struct CondParser
     toks::Vector{String}
@@ -597,24 +635,24 @@ function eval_cond(c::CondValue, ctx)
 end
 function eval_cond(c::CondOp, ctx)
     op = c.op
-    op == "not" && return !truthy(eval_cond(c.args[1], ctx))
-    op == "and" && return truthy(eval_cond(c.args[1], ctx)) && truthy(eval_cond(c.args[2], ctx))
-    op == "or" && return truthy(eval_cond(c.args[1], ctx)) || truthy(eval_cond(c.args[2], ctx))
+    op === :not && return !truthy(eval_cond(c.args[1], ctx))
+    op === :and && return truthy(eval_cond(c.args[1], ctx)) && truthy(eval_cond(c.args[2], ctx))
+    op === :or && return truthy(eval_cond(c.args[1], ctx)) || truthy(eval_cond(c.args[2], ctx))
     a = eval_cond(c.args[1], ctx)
     b = eval_cond(c.args[2], ctx)
-    op == "==" && return value_eq(a, b)
-    op == "!=" && return !value_eq(a, b)
-    op == "in" && return value_in(a, b)
-    op == "not in" && return !value_in(a, b)
-    op == "is" && return a === b
-    op == "is not" && return a !== b
+    op === :(==) && return value_eq(a, b)
+    op === :(!=) && return !value_eq(a, b)
+    op === :in && return value_in(a, b)
+    op === OP_NOT_IN && return !value_in(a, b)
+    op === :is && return a === b
+    op === OP_IS_NOT && return a !== b
     a isa SafeString && (a = a.s)
     b isa SafeString && (b = b.s)
     try
-        op == "<" && return a < b
-        op == ">" && return a > b
-        op == "<=" && return a <= b
-        op == ">=" && return a >= b
+        op === :< && return a < b
+        op === :> && return a > b
+        op === :<= && return a <= b
+        op === :>= && return a >= b
     catch
         return false
     end
@@ -689,6 +727,26 @@ to_iterable(x::AbstractString) = collect(x)
 to_iterable(x::SafeString) = collect(x.s)
 to_iterable(x) = collect(x)
 
+"""
+`forloop` inside `{% for %}`: `counter`, `counter0`, `revcounter`, `revcounter0`, `first`,
+`last`, `length` and `parentloop`. One object per loop, updated in place each iteration (as
+Django updates its dict).
+"""
+mutable struct ForLoop
+    counter::Int
+    counter0::Int
+    revcounter::Int
+    revcounter0::Int
+    first::Bool
+    last::Bool
+    length::Int
+    parentloop::Any
+end
+function tattr(l::ForLoop, ::Val{S}) where {S}
+    S in (:counter, :counter0, :revcounter, :revcounter0, :first, :last, :length, :parentloop) ? getfield(l, S) : NOTFOUND
+end
+Base.getindex(l::ForLoop, k::AbstractString) = getfield(l, Symbol(k))     # forloop["counter"], as with the old Dict
+
 function render!(io::IO, n::ForNode, ctx::Context)
     raw = eval_fe(n.iterable, ctx)
     items = if raw isa AbstractDict
@@ -703,12 +761,12 @@ function render!(io::IO, n::ForNode, ctx::Context)
     end
     parent = lookup(ctx, "forloop")
     len = length(items)
+    loop = ForLoop(0, 0, 0, 0, false, false, len, parent === UNDEF ? nothing : parent)
     with_scope(ctx) do
+        ctx["forloop"] = loop
         for (i, item) in enumerate(items)
-            ctx["forloop"] = Dict{String,Any}(
-                "counter" => i, "counter0" => i - 1, "revcounter" => len - i + 1,
-                "revcounter0" => len - i, "first" => i == 1, "last" => i == len,
-                "length" => len, "parentloop" => parent === UNDEF ? nothing : parent)
+            loop.counter, loop.counter0, loop.revcounter, loop.revcounter0 = i, i - 1, len - i + 1, len - i
+            loop.first, loop.last = i == 1, i == len
             if length(n.loopvars) == 1
                 ctx[n.loopvars[1]] = item
             else
@@ -1066,25 +1124,6 @@ end
 # Built-in filters
 # ======================================================================================
 
-struct TemplateFilter
-    fn::Function
-    is_safe::Bool
-    needs_autoescape::Bool
-end
-
-const FILTERS = Dict{String,TemplateFilter}()
-
-"""
-    register_filter!(name, f; is_safe=false, needs_autoescape=false)
-
-Register a template filter. `f(value, arg)` receives `arg === nothing` when no
-argument was given. With `needs_autoescape=true`, `f(value, arg, autoescape)`.
-
-    register_filter!("shout", (v, _) -> uppercase(string(v)) * "!")
-"""
-register_filter!(name, f; is_safe = false, needs_autoescape = false) =
-    (FILTERS[string(name)] = TemplateFilter(f, is_safe, needs_autoescape); nothing)
-
 str(x) = display_string(x)
 tonum(x::Number) = x
 tonum(x) = (s = str(x); something(tryparse(Int, s), tryparse(Float64, s), 0))
@@ -1193,7 +1232,7 @@ let F = register_filter!
     F("default", (v, a) -> truthy(v) ? v : a)
     F("default_if_none", (v, a) -> v === nothing ? a : v)
     F("safe", (v, _) -> SafeString(str(v)))
-    F("escape", (v, _) -> SafeString(escape_html(str(v))))
+    F("escape", (v, _) -> SafeString(conditional_escape(v)))     # already-safe text isn't escaped twice
     F("force_escape", (v, _) -> SafeString(escape_html(str(v))))
     F("striptags", (v, _) -> replace(str(v), r"<[^>]*>" => ""))
     F("truncatechars", (v, a) -> (s = str(v); n = tonum(a); length(s) <= n ? s : first(s, max(n - 1, 0)) * "…"); is_safe = true)

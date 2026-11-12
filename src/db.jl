@@ -261,39 +261,46 @@ Rewrite `?` placeholders as `placeholder(b, i)`, leaving `?` inside '…' string
 """
 function rewrite_placeholders(b::DatabaseBackend, sql::AbstractString)
     placeholder(b, 1) == "?" && return String(sql)
-    io = IOBuffer()
+    s = String(sql)
+    occursin('?', s) || return s
+    # The characters that matter (quotes, comments, ?) are ASCII, so scan bytes and copy runs.
+    cu = codeunits(s)
+    len = length(cu)
+    io = IOBuffer(; sizehint = len + 16)
     n = 0
-    quote_char = nothing
-    chars = collect(sql)
+    start = 1                       # first byte not yet copied
     i = 1
-    while i <= length(chars)
-        c = chars[i]
-        if quote_char !== nothing
-            print(io, c)
-            c == quote_char && (quote_char = nothing)   # doubled quotes re-enter on the next char
-        elseif c in ('\'', '"', '`')
-            quote_char = c
-            print(io, c)
-        elseif c == '-' && i < length(chars) && chars[i+1] == '-'
-            j = something(findnext(==('\n'), chars, i), length(chars))
-            print(io, String(chars[i:j]))
-            i = j
-        elseif c == '/' && i < length(chars) && chars[i+1] == '*'
-            j = 0
-            for k in i+2:length(chars)-1
-                chars[k] == '*' && chars[k+1] == '/' && (j = k + 1; break)
+    @inbounds while i <= len
+        c = cu[i]
+        if c == UInt8('\'') || c == UInt8('"') || c == UInt8('`')
+            j = i + 1                # skip to the closing quote (a doubled quote re-enters next round)
+            while j <= len && cu[j] != c
+                j += 1
             end
-            j == 0 && (j = length(chars))
-            print(io, String(chars[i:j]))
-            i = j
-        elseif c == '?'
+            i = j + 1
+        elseif c == UInt8('-') && i < len && cu[i+1] == UInt8('-')
+            j = i + 2
+            while j <= len && cu[j] != UInt8('\n')
+                j += 1
+            end
+            i = j + 1
+        elseif c == UInt8('/') && i < len && cu[i+1] == UInt8('*')
+            j = i + 2
+            while j < len && !(cu[j] == UInt8('*') && cu[j+1] == UInt8('/'))
+                j += 1
+            end
+            i = j + 2
+        elseif c == UInt8('?')
+            write(io, view(cu, start:i-1))
             n += 1
             print(io, placeholder(b, n))
+            i += 1
+            start = i
         else
-            print(io, c)
+            i += 1
         end
-        i += 1
     end
+    start <= len && write(io, view(cu, start:len))
     String(take!(io))
 end
 

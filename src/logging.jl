@@ -128,7 +128,10 @@ struct LoggingConfig
     handlers::Dict{String,HandlerConf}
     loggers::Dict{String,LoggerConf}
     root::LoggerConf
+    levels::Dict{String,Int}          # effective level per logger name, filled in on first use
+    lock::ReentrantLock
 end
+LoggingConfig(handlers, loggers, root) = LoggingConfig(handlers, loggers, root, Dict{String,Int}(), ReentrantLock())
 
 default_logging() = Dict(
     "handlers" => Dict("julia" => Dict("class" => "julia", "level" => "ERROR"),
@@ -187,8 +190,17 @@ function logger_chain(cfg::LoggingConfig, name::AbstractString)
     out
 end
 
-"The level a logger lets through: its own, or its nearest configured ancestor's."
-effective_level(cfg::LoggingConfig, name) = something((c.level for c in logger_chain(cfg, name) if c.level !== nothing)..., 30)
+"The level a logger lets through: its own, or its nearest configured ancestor's (memoized: checked for every SQL statement)."
+function effective_level(cfg::LoggingConfig, name::AbstractString)
+    lock(cfg.lock) do
+        get!(cfg.levels, name) do
+            for c in logger_chain(cfg, name)
+                c.level === nothing || return c.level
+            end
+            30
+        end
+    end
+end
 
 "Whether a record of `level` from logger `name` would be handled (to skip building costly messages)."
 log_enabled(name::AbstractString, level) = log_level(level) >= effective_level(logging_config(), name)

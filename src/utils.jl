@@ -25,10 +25,40 @@ mark_safe(s) = SafeString(string(s))
 
 const HTML_ESCAPES = ('&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;", '\'' => "&#x27;")
 
-"Escape `&`, `<`, `>`, quotes for safe inclusion in HTML."
-escape_html(s::AbstractString) = replace(s, HTML_ESCAPES...)
+@inline needs_html_escape(b::UInt8) = b == UInt8('&') || b == UInt8('<') || b == UInt8('>') || b == UInt8('"') || b == UInt8('\'')
+@inline html_entity(b::UInt8) = b == UInt8('&') ? "&amp;" : b == UInt8('<') ? "&lt;" : b == UInt8('>') ? "&gt;" :
+                                b == UInt8('"') ? "&quot;" : "&#x27;"
+
+"""
+    escape_html(s) -> String
+    escape_html(io, s)
+
+Escape `&`, `<`, `>` and quotes for safe inclusion in HTML. The two-argument form writes
+straight to `io` (the template engine uses it, so rendering doesn't build extra strings).
+"""
+escape_html(s::AbstractString) = escape_html(String(s))
+function escape_html(s::String)
+    any(needs_html_escape, codeunits(s)) || return s        # the common case: nothing to escape
+    io = IOBuffer(; sizehint = ncodeunits(s) + 32)
+    escape_html(io, s)
+    String(take!(io))
+end
 escape_html(s::SafeString) = escape_html(s.s)
 escape_html(x) = escape_html(string(x))
+escape_html(io::IO, s::AbstractString) = escape_html(io, String(s))
+function escape_html(io::IO, s::String)
+    cu = codeunits(s)
+    start = 1
+    @inbounds for i in eachindex(cu)
+        b = cu[i]
+        needs_html_escape(b) || continue
+        i > start && write(io, view(cu, start:i-1))
+        write(io, html_entity(b))
+        start = i + 1
+    end
+    start <= length(cu) && write(io, view(cu, start:length(cu)))
+    nothing
+end
 
 """
     __html__(x)
@@ -42,12 +72,20 @@ __html__(x::SafeString) = x.s
 "Escape `x` unless it is already safe. Returns a `String`."
 conditional_escape(x) = (h = __html__(x); h === nothing ? escape_html(display_string(x)) : h)
 
+"Write `x` to `io` as template output: escaped unless it is safe (or `autoescape` is off)."
+function write_value(io::IO, x, autoescape::Bool)
+    x isa Union{Integer,AbstractFloat} && !(x isa Bool) && return (print(io, display_string(x)); nothing)
+    autoescape || return (write(io, display_string(x)); nothing)
+    h = __html__(x)
+    h === nothing ? escape_html(io, display_string(x)) : write(io, h)
+    nothing
+end
+
 "How values are turned into text in templates."
 display_string(::Nothing) = ""
 display_string(x::AbstractString) = String(x)
 display_string(x::SafeString) = x.s
 display_string(x::DateTime) = Dates.format(x, "yyyy-mm-dd HH:MM:SS")
-display_string(x::AbstractFloat) = isinteger(x) && abs(x) < 1e15 ? string(x) : string(x)
 display_string(x) = string(x)
 
 const ALNUM = collect("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
@@ -57,9 +95,11 @@ const SECURE_RNG = Random.RandomDevice()
 random_string(n::Integer = 32) = String(rand(SECURE_RNG, ALNUM, n))
 
 "Constant-time comparison of two strings/byte vectors."
+consteq_bytes(x::AbstractVector{UInt8}) = x
+consteq_bytes(x::AbstractString) = codeunits(String(x))
+consteq_bytes(x) = codeunits(string(x))
 function consteq(a, b)
-    a = Vector{UInt8}(codeunits(string(a)))
-    b = Vector{UInt8}(codeunits(string(b)))
+    a, b = consteq_bytes(a), consteq_bytes(b)
     length(a) == length(b) || return false
     r = UInt8(0)
     @inbounds for i in eachindex(a)

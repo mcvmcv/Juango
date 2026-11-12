@@ -30,7 +30,7 @@ end
 function render!(io::IO, n::IfChangedNode, ctx::Context)
     state = get!(Dict{UInt,Any}, ctx.render_ctx, :ifchanged)
     loop = lookup(ctx, "forloop")
-    first_iteration = loop isa AbstractDict && get(loop, "first", false)
+    first_iteration = loop isa ForLoop && loop.first
     rendered = isempty(n.exprs) ? render_nodes(n.body, ctx) : nothing
     current = isempty(n.exprs) ? rendered : Any[eval_fe(fe, ctx) for fe in n.exprs]
     k = objectid(n)

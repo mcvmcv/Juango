@@ -59,7 +59,7 @@ function write_response(stream::HTTP.Stream, req::Request, resp::HttpResponse)
     HTTP.setstatus(stream, resp.status)
     out = stream.response.headers
     for (k, v) in resp.headers
-        lowercase(k) == "transfer-encoding" && continue      # HTTP.jl frames the body itself
+        header_eq(k, "transfer-encoding") && continue      # HTTP.jl frames the body itself
         HTTP.appendheader(out, k, v)
     end
     for c in resp.cookies
@@ -87,13 +87,57 @@ end
 is_disconnect(e) = e isa Union{Base.IOError,EOFError,HTTP.WebSockets.WebSocketError} ||
                    (e isa Exception && occursin(r"closed|reset|broken pipe"i, sprint(showerror, e)))
 
+"A request header from HTTP.jl's request (case-insensitive), or `default`."
+function hreq_header(hreq, name, default = "")
+    for (k, v) in hreq.headers
+        header_eq(k, name) && return v
+    end
+    default
+end
+
+"""
+The most bytes a request body may have: `FILE_UPLOAD_MAX_SIZE` for multipart uploads,
+`DATA_UPLOAD_MAX_MEMORY_SIZE` otherwise (`nothing` means no limit).
+"""
+body_limit(hreq) = startswith(lowercase(hreq_header(hreq, "Content-Type")), "multipart/") ?
+    get(settings, :FILE_UPLOAD_MAX_SIZE, nothing) : get(settings, :DATA_UPLOAD_MAX_MEMORY_SIZE, nothing)
+
+"Read the body, or return `nothing` as soon as it is longer than `limit`."
+function read_body(stream, hreq, limit)
+    limit === nothing && return read(stream)
+    cl = tryparse(Int, hreq_header(hreq, "Content-Length"))
+    cl !== nothing && cl > limit && return nothing          # refuse without reading it
+    out = IOBuffer()
+    chunk = Vector{UInt8}(undef, 64 * 1024)
+    while true
+        n = readbytes!(stream, chunk, length(chunk))
+        n == 0 && break
+        write(out, view(chunk, 1:n))
+        position(out) > limit && return nothing
+    end
+    take!(out)
+end
+
 """
 Stream handler for `HTTP.listen`: like `http_handler`, plus streaming responses sent as they
 are produced and WebSocket handshakes for `websocket` views.
 """
 function stream_handler(stream::HTTP.Stream; secure::Bool = false)
     hreq = HTTP.startread(stream)
-    req = from_http(hreq, remote_ip(stream); body = read(stream))
+    body = read_body(stream, hreq, body_limit(hreq))
+    if body === nothing             # Django's RequestDataTooBig
+        log!("juango.security.RequestDataTooBig", :warning, "Request body too big: $(hreq.target)")
+        msg = Vector{UInt8}("<h1>Bad Request (400)</h1><p>Request body exceeded the size limit.</p>")
+        HTTP.setstatus(stream, 400)
+        out = stream.response.headers
+        HTTP.appendheader(out, "Content-Type", "text/html; charset=utf-8")
+        HTTP.appendheader(out, "Content-Length", string(length(msg)))
+        hreq.proto_major < 2 && HTTP.appendheader(out, "Connection", "close")    # the unread body is left behind
+        HTTP.startwrite(stream)
+        write(stream, msg)
+        return nothing
+    end
+    req = from_http(hreq, remote_ip(stream); body = body)
     secure && (req.meta[:secure] = true)       # served over TLS
     upgrade = HTTP.WebSockets.isupgrade(hreq)
     upgrade && (req.meta[:websocket_upgrade] = true)

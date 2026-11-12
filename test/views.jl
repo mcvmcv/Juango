@@ -265,6 +265,29 @@ end
     end
 end
 
+@testset "lazy CSRF token" begin
+    c = Client()
+    r = get(c, "/articles/")                    # renders a template with the request, no {% csrf_token %}
+    @test r.status == 200 && !any(x -> startswith(x, "csrftoken="), r.cookies)
+end
+
+@testset "request size limits" begin
+    override_settings(DATA_UPLOAD_MAX_MEMORY_SIZE = 1000, DATA_UPLOAD_MAX_NUMBER_FIELDS = 5) do
+        with_live_server() do s
+            post_(body; ct = "application/x-www-form-urlencoded") =
+                Juango.HTTP.post(s.url * "/articles/", ["Content-Type" => ct], body; status_exception = false)
+            @test post_("a=" * "x"^2000).status == 400                                   # body too big
+            @test occursin("size limit", String(post_("a=" * "x"^2000).body))
+            r = post_(join(["f$i=1" for i in 1:6], "&"))                                  # too many fields
+            @test r.status == 400
+            @test Juango.HTTP.get(s.url * "/articles/"; status_exception = false).status == 200   # still serving
+        end
+    end
+    c = Client()
+    @test get(c, "/articles/?" * join(["q$i=1" for i in 1:1001], "&")).status == 400
+    @test get(c, "/articles/?q=1").status == 200
+end
+
 @testset "server roundtrip" begin
     port = let s = Juango.Sockets.listen(Juango.Sockets.localhost, 0)       # a free port
         p = Int(Juango.Sockets.getsockname(s)[2]); close(s); p

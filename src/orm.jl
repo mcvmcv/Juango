@@ -48,6 +48,23 @@ mutable struct Field
     generated::Any      # GeneratedField: (expression, persisted) computed by the database
     symmetrical::Bool   # ManyToManyField(:self): a relation in one direction is one in both
     db_comment::Union{Nothing,String}   # a comment on the column in the database
+    att::Symbol         # attname for the name in `attfor` (see `attname`)
+    col::String         # string(att): the column name
+    attfor::Symbol      # the name `att` and `col` were worked out for
+end
+
+# `attname`/`column` are looked up constantly (row loading, attribute access, SQL), so they're
+# stored rather than rebuilt each time, and worked out again when the field's name changes.
+# (A `setproperty!` method on Field would do it eagerly, but extending Base.setproperty!
+# invalidates a large amount of compiled code.)
+field_att(kind::Symbol, name::Symbol) = kind === :fk ? Symbol(name, :_id) : name
+function refresh_att!(f)
+    name = getfield(f, :name)
+    a = field_att(getfield(f, :kind), name)
+    setfield!(f, :att, a)
+    setfield!(f, :col, string(a))
+    setfield!(f, :attfor, name)
+    a
 end
 
 "The value of a field with `db_default` until the row is saved and the database has filled it in."
@@ -75,7 +92,8 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           auto_now, auto_now_add, verbose_name isa AbstractString ? verbose_name : string(verbose_name),
           help_text isa AbstractString ? help_text : string(help_text), collect(Any, validators),
           widget isa Union{AbstractString,Symbol} ? Symbol(widget) : widget, editable, db_index, nothing, through, one_to_one,
-          db_default, generated, symmetrical, db_comment === nothing ? nothing : string(db_comment))
+          db_default, generated, symmetrical, db_comment === nothing ? nothing : string(db_comment),
+          field_att(kind, :_), string(field_att(kind, :_)), :_)
 end
 
 """
@@ -151,8 +169,9 @@ end
 const STRING_KINDS = (:char, :text, :email, :slug, :url)
 
 "Attribute name under which the raw value is stored (`author_id` for a FK)."
-attname(f::Field) = f.kind === :fk ? Symbol(f.name, :_id) : f.name
-column(f::Field) = string(attname(f))
+attname(f::Field) = getfield(f, :attfor) === getfield(f, :name) ? getfield(f, :att) : refresh_att!(f)
+"The field's column name (`string(attname(f))`)."
+column(f::Field) = (attname(f); getfield(f, :col))
 label(f::Field) = isempty(f.verbose_name) ? gettext(uppercasefirst(replace(string(f.name), '_' => ' '))) : String(f.verbose_name)
 
 mutable struct ModelMeta
@@ -174,6 +193,17 @@ end
 const MODEL_REGISTRY = Dict{Any,ModelMeta}()
 const MODEL_LIST = Any[]
 
+# Relations between models (reverse foreign keys, many-to-many, multi-table children) are
+# found by scanning every registered model. They change only when models are registered or
+# the settings change (INSTALLED_APPS, AUTH_USER_MODEL), so the results are cached. The
+# cached vectors are shared: callers must not modify them.
+const RELATION_CACHE = Dict{Tuple{Symbol,Any},Any}()
+const RELATION_LOCK = ReentrantLock()
+invalidate_relations!() = (lock(() -> empty!(RELATION_CACHE), RELATION_LOCK); nothing)
+push!(SETTINGS_CHANGED_HOOKS, invalidate_relations!)
+cached_relations(f, kind::Symbol, @nospecialize(T)) =
+    lock(() -> get!(() -> f(T), RELATION_CACHE, (kind, T)), RELATION_LOCK)
+
 """
 App a model belongs to for migrations: `Meta(app_label=...)`, else `\"juango\"` for Juango's
 built-in models, the label of the `App` whose module defines it, or `\"project\"`.
@@ -184,6 +214,7 @@ default_app_label(T) = parentmodule(T) === (@__MODULE__) ? "juango" : something(
 function unregister_model!(T::Type)
     delete!(MODEL_REGISTRY, T)
     filter!(x -> x !== T, MODEL_LIST)
+    invalidate_relations!()
     nothing
 end
 
@@ -287,7 +318,9 @@ end
 "`T`, its proxy target and its multi-table ancestors: every model whose rows `T`'s rows also are."
 lineage(T::Type) = unique(vcat([T, concrete_model(T)], ancestors(T)))
 "Multi-table children of `T` (models whose table extends `T`'s)."
-child_models(T::Type) = [C for C in MODEL_LIST if (m = modelmeta(C); !m.proxy && m.parent === concrete_model(T))]
+child_models(T::Type) = cached_relations(:children, T) do T
+    Any[C for C in MODEL_LIST if (m = modelmeta(C); !m.proxy && m.parent === concrete_model(T))]
+end
 "All fields of `T` including inherited multi-table fields, ancestors' first."
 function all_fields(T::Type)
     C = concrete_model(T)
@@ -366,6 +399,7 @@ function register_model!(T::Type, fields::Vector, meta::NamedTuple = NamedTuple(
     filter!(x -> !(x === T || modelmeta_or_nothing(x) === nothing ||
                    modelmeta(x).name == name && parentmodule(x) == parentmodule(T)), MODEL_LIST)
     push!(MODEL_LIST, T)
+    invalidate_relations!()
     for f in m2m
         f.through === nothing && (f.through = make_through_model(T, m, f))
     end
@@ -433,7 +467,8 @@ reverse_name(fk::Field) = fk.related_name !== nothing ? fk.related_name :
     fk.one_to_one ? Symbol(lowercase(modelmeta(fk.model).name)) : Symbol(lowercase(modelmeta(fk.model).name), :_set)
 
 "Many-to-many relations reachable from `T`: (name, field, forward::Bool)."
-function m2m_relations(T::Type)
+m2m_relations(T::Type) = cached_relations(compute_m2m_relations, :m2m, T)
+function compute_m2m_relations(T::Type)
     out = Tuple{Symbol,Field,Bool}[]
     for f in modelmeta(T).m2m
         push!(out, (f.name, f, true))
@@ -529,7 +564,8 @@ function construct(::Type{T}; kwargs...) where {T<:Model}
 end
 
 "Reverse FK relations pointing at model `T`: Vector of (name, Model, Field)."
-function reverse_relations(T::Type)
+reverse_relations(T::Type) = cached_relations(compute_reverse_relations, :reverse, T)
+function compute_reverse_relations(T::Type)
     out = Tuple{Symbol,Any,Field}[]
     lin = lineage(T)
     for M in MODEL_LIST
@@ -751,19 +787,33 @@ function parse_pk(T::Type, s)
     pk_kind(T) === :uuid ? tryparse(UUID, string(s)) : tryparse(Int, string(s))
 end
 
-function from_row(::Type{T}, row::Dict{Symbol,Any}) where {T<:Model}
-    composite = is_composite(T)
-    obj = T(Dict{Symbol,Any}(:id => composite ? nothing : pk_value(T, row[:id])), Dict{Symbol,Any}())
-    data = getfield(obj, :_data)
+"""
+How a model's fields map to row keys: `(field, row key, attribute name)` per field. Inherited
+multi-table fields are labelled per table (`__place__name`). Work it out once per query and
+pass it to `from_row` for every row.
+"""
+function row_plan(@nospecialize(T::Type))
     mytable = modelmeta(T).table
+    plan = Tuple{Field,Symbol,Symbol}[]
     for f in all_fields(T)
         t = modelmeta(f.model).table
-        key = t == mytable ? attname(f) : Symbol("__", t, "__", column(f))   # inherited: labelled per table
-        haskey(row, key) || continue             # deferred (only/defer, raw): loaded on first access
-        data[attname(f)] = from_db(f, row[key])
+        push!(plan, (f, t == mytable ? attname(f) : Symbol("__", t, "__", column(f)), attname(f)))
+    end
+    plan
+end
+
+function from_row(::Type{T}, row::Dict{Symbol,Any}, plan = row_plan(T)) where {T<:Model}
+    composite = is_composite(T)
+    data = Dict{Symbol,Any}()
+    sizehint!(data, length(plan) + 1)
+    data[:id] = composite ? nothing : pk_value(T, row[:id])
+    for (f, key, att) in plan
+        v = get(row, key, NOTFOUND)
+        v === NOTFOUND && continue               # deferred (only/defer, raw): loaded on first access
+        data[att] = from_db(f, v)
     end
     composite && (data[:id] = composite_pk(T, data))
-    obj
+    T(data, Dict{Symbol,Any}())
 end
 
 # --- Q objects & lookups -------------------------------------------------------------------
@@ -1203,6 +1253,8 @@ function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nos
     sql, isempty(colps) ? ps : vcat(colps, ps)
 end
 
+const COMPARISON_OPS = Dict("exact" => "=", "ne" => "!=", "gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=")
+
 function lookup_condition(c::SQLCompiler, col, lookup, @nospecialize(value), @nospecialize(conv))
     if value isa SearchQuery && lookup == "exact"
         q, qps = compile_expr(c, value)
@@ -1210,9 +1262,8 @@ function lookup_condition(c::SQLCompiler, col, lookup, @nospecialize(value), @no
     end
     if value isa Expression && lookup in ("exact", "ne", "gt", "gte", "lt", "lte", "iexact")
         vsql, vps = compile_expr(c, value)
-        op = Dict("exact" => "=", "ne" => "!=", "gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=")
         lookup == "iexact" && return ("LOWER($col) = LOWER($vsql)", vps)
-        return ("$col $(op[lookup]) ($vsql)", vps)
+        return ("$col $(COMPARISON_OPS[lookup]) ($vsql)", vps)
     end
     if lookup == "exact"
         value === nothing && return ("$col IS NULL", Any[])
@@ -1223,8 +1274,7 @@ function lookup_condition(c::SQLCompiler, col, lookup, @nospecialize(value), @no
     elseif lookup in ("iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith")
         return lookup_sql(backend(), Val(Symbol(lookup)), col, value)
     elseif lookup in ("gt", "gte", "lt", "lte")
-        op = Dict("gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=")[lookup]
-        return ("$col $op ?", Any[conv(value)])
+        return ("$col $(COMPARISON_OPS[lookup]) ?", Any[conv(value)])
     elseif lookup == "in"
         if value isa QuerySet
             sql, ps = value.values_fields === nothing ? subquery_sql(c, value; columns = nothing, idonly = true) :
@@ -1774,7 +1824,8 @@ function fetch_here(qs::QuerySet{T}) where {T}
     qs.isnone && return T[]
     sql, ps, _, related = build_select(qs)
     rows = execute(sql, ps)
-    objs = T[from_row(T, r) for r in rows]
+    plan = row_plan(T)
+    objs = T[from_row(T, r, plan) for r in rows]
     foreach(set_instance_db!, objs)
     for (k, v) in qs.annotations, (o, r) in zip(objs, rows)
         is_filtered_relation(v) && continue
@@ -2096,9 +2147,10 @@ function raw_here(::Type{T}, sql::AbstractString, params = Any[]) where {T<:Mode
     rows = execute(sql, collect(Any, params))
     known = Set{Symbol}([:id; [attname(f) for f in all_fields(T)]])
     out = T[]
+    plan = row_plan(T)
     for r in rows
         is_composite(T) || haskey(r, :id) || throw(ArgumentError("raw(): the query must select the id column"))
-        o = set_instance_db!(from_row(T, r))
+        o = set_instance_db!(from_row(T, r, plan))
         for (k, v) in r
             k in known || (getfield(o, :_data)[k] = v)
         end

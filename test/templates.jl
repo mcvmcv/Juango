@@ -190,3 +190,18 @@ end
     @test out[3:7] == ["a minute ago", "14 minutes ago", "an hour ago", "5 hours ago", "3 days ago"]
     @test out[8] in ("10 minutes from now", "9 minutes from now") && out[9] == "2 days from now"
 end
+
+@testset "escaping and lookups" begin
+    @test Juango.escape_html("plain") === "plain"
+    @test Juango.escape_html("<a href=\"x\">&'</a>") == "&lt;a href=&quot;x&quot;&gt;&amp;&#x27;&lt;/a&gt;"
+    @test sprint(io -> Juango.escape_html(io, "é<b>")) == "é&lt;b&gt;"
+    @test tr("{{ s|escape }}", Dict("s" => mark_safe("<b>"))) == "<b>"                     # not escaped twice
+    @test tr("{{ s|force_escape }}", Dict("s" => mark_safe("<b>"))) == "&lt;b&gt;"
+    @test tr("{{ n }} {{ f }} {{ b }}", Dict("n" => 3, "f" => 1.5, "b" => true)) == "3 1.5 true"
+    @test tr("{% for x in xs %}{{ forloop.counter }}/{{ forloop.revcounter0 }}{% if forloop.last %}.{% endif %}{% endfor %}",
+             Dict("xs" => [1, 2])) == "1/12/0."
+    @test tr("{% for x in xs %}{% for y in xs %}{{ forloop.parentloop.counter }}{{ forloop.counter }} {% endfor %}{% endfor %}",
+             Dict("xs" => [1, 2])) == "11 12 21 22 "
+    @test tr("{{ d.items.0.value }} {{ v.1 }} {{ v.9 }}", Dict("d" => Dict("k" => "val"), "v" => [10, 20])) == "val 20 "
+    @test Juango.header_eq("Content-Type", "content-type") && !Juango.header_eq("a[", "a{") && !Juango.header_eq("ab", "abc")
+end

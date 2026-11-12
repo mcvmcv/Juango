@@ -220,7 +220,18 @@ end
 
 cp_request(req) = Dict("request" => req)
 cp_auth(req) = (u = something(req.user, AnonymousUser()); Dict("user" => u, "perms" => PermWrapper(u)))
-cp_csrf(req) = Dict("csrf_token" => get_csrf_token(req))
+"""
+The `csrf_token` of a template context: the token is only created (and the CSRF cookie only
+set) when a template actually uses it, as with Django's lazy token, so pages without forms
+stay cacheable.
+"""
+struct LazyCsrfToken
+    req::Request
+end
+display_string(t::LazyCsrfToken) = get_csrf_token(t.req)
+Base.string(t::LazyCsrfToken) = get_csrf_token(t.req)
+Base.print(io::IO, t::LazyCsrfToken) = print(io, get_csrf_token(t.req))
+cp_csrf(req) = Dict("csrf_token" => LazyCsrfToken(req))
 cp_messages(req) = Dict("messages" => LazyMessages(req, nothing))
 cp_static(req) = Dict("STATIC_URL" => settings.STATIC_URL, "DEBUG" => settings.DEBUG)
 

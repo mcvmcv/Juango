@@ -25,7 +25,8 @@ end
 mutable struct LocMemCache <: CacheBackend
     conf::CacheConfig
     store::Dict{String,Tuple{Any,Union{Nothing,Float64}}}     # key => (value, expires)
-    order::Vector{String}                                   # least recently used first
+    stamps::Dict{String,Int}                                # key => last use (a counter), for LRU culling
+    clock::Int
     max_entries::Int
     lock::ReentrantLock
 end
@@ -58,7 +59,7 @@ function make_cache(d)
     t = opt(d, :timeout, 300)
     conf = CacheConfig(t === nothing ? nothing : Float64(t), string(opt(d, :key_prefix, "")), Int(opt(d, :version, 1)))
     b = Symbol(opt(d, :backend, :locmem))
-    b === :locmem && return LocMemCache(conf, Dict{String,Tuple{Any,Union{Nothing,Float64}}}(), String[], Int(opt(d, :max_entries, 300)), ReentrantLock())
+    b === :locmem && return LocMemCache(conf, Dict{String,Tuple{Any,Union{Nothing,Float64}}}(), Dict{String,Int}(), 0, Int(opt(d, :max_entries, 300)), ReentrantLock())
     b === :dummy && return DummyCache(conf)
     b === :db && return DatabaseCache(conf, string(opt(d, :location, "juango_cache")))
     if b === :redis
@@ -94,30 +95,37 @@ expiry(c::CacheBackend, timeout) = (t = timeout === :default ? c.conf.timeout : 
 
 # --- backend primitives: raw_get(c, k) -> (found, value); raw_set(c, k, v, expires); raw_delete(c, k); raw_clear(c) ---
 
+touch!(c::LocMemCache, k) = (c.clock += 1; c.stamps[k] = c.clock)
 function raw_get(c::LocMemCache, k)
     lock(c.lock) do
-        haskey(c.store, k) || return (false, nothing)
-        v, exp = c.store[k]
+        e = get(c.store, k, nothing)
+        e === nothing && return (false, nothing)
+        v, exp = e
         if exp !== nothing && exp <= time()
-            delete!(c.store, k); filter!(!=(k), c.order)
+            delete!(c.store, k); delete!(c.stamps, k)
             return (false, nothing)
         end
-        filter!(!=(k), c.order); push!(c.order, k)
+        touch!(c, k)
         (true, deepcopy(v))
     end
 end
 function raw_set(c::LocMemCache, k, v, exp)
     lock(c.lock) do
-        haskey(c.store, k) && filter!(!=(k), c.order)
-        while length(c.order) >= c.max_entries                   # evict least recently used
-            delete!(c.store, popfirst!(c.order))
+        if !haskey(c.store, k) && length(c.store) >= c.max_entries
+            # full: drop the least recently used third at once (Django culls the same way),
+            # so the occasional sort is the only O(n) work
+            n = max(1, length(c.store) ÷ 3)
+            for (old, _) in partialsort!(collect(c.stamps), 1:n; by = last)
+                delete!(c.store, old); delete!(c.stamps, old)
+            end
         end
         c.store[k] = (deepcopy(v), exp)
-        push!(c.order, k)
+        touch!(c, k)
+        nothing
     end
 end
-raw_delete(c::LocMemCache, k) = lock(() -> (filter!(!=(k), c.order); pop!(c.store, k, nothing) !== nothing), c.lock)
-raw_clear(c::LocMemCache) = lock(() -> (empty!(c.store); empty!(c.order)), c.lock)
+raw_delete(c::LocMemCache, k) = lock(() -> (delete!(c.stamps, k); pop!(c.store, k, nothing) !== nothing), c.lock)
+raw_clear(c::LocMemCache) = lock(() -> (empty!(c.store); empty!(c.stamps); nothing), c.lock)
 
 raw_get(::DummyCache, k) = (false, nothing)
 raw_set(::DummyCache, k, v, exp) = nothing
