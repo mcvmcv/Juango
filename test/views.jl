@@ -265,6 +265,24 @@ end
     end
 end
 
+@testset "lazy session and user" begin
+    anon, logged = Client(), Client()
+    force_login!(logged, create_user("lazyuser", "lazy-pass-123"))
+    get(anon, "/articles/"); get(logged, "/articles/")                         # warm up
+    _, n_anon = count_queries(() -> get(anon, "/articles/"))
+    _, n_logged = count_queries(() -> get(logged, "/articles/"))
+    @test n_logged == n_anon                       # the view never uses them: no session or user query
+    @test text(get(logged, "/whoami/")) == "user:lazyuser"       # loaded on first use
+    _, n_who = count_queries(() -> get(logged, "/whoami/"))
+    @test n_who >= 2                                # session, then user
+    s = Juango.lazy_session("nonexistent-key")
+    @test !Juango.session_loaded(s) && s.key === nothing && Juango.session_loaded(s) && isempty(s)
+    req = Request("GET", "/"); req.user = Juango.LAZY_USER
+    @test req.user isa AnonymousUser               # no session: anonymous
+    ctx = Juango.Context(Dict{String,Any}("u" => Juango.LazyValue(() -> "computed")))
+    @test Juango.lookup(ctx, "u") == "computed" && ctx.stack[1]["u"] == "computed"
+end
+
 @testset "lazy CSRF token" begin
     c = Client()
     r = get(c, "/articles/")                    # renders a template with the request, no {% csrf_token %}

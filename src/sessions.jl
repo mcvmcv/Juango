@@ -18,14 +18,44 @@ end
 """
 Per-visitor key/value storage, available as `req.session`. Values must be
 JSON-serialisable. Behaves like a `Dict{String,Any}`.
+
+`SessionMiddleware` gives each request a session that isn't loaded yet: the store is only
+read when the view first uses its data or key (like Django's SessionStore), so requests
+that never touch the session cost no query.
 """
 mutable struct Session <: AbstractDict{String,Any}
     key::Union{Nothing,String}
     data::Dict{String,Any}
     modified::Bool
     flushed::Bool
+    loaded::Bool
+    pending::Union{Nothing,String}      # the cookie value to load from, until loaded
 end
+Session(key, data, modified, flushed) = Session(key, data, modified, flushed, true, nothing)
 Session() = Session(nothing, Dict{String,Any}(), false, false)
+
+"A session for the cookie value `key`, loaded from the store on first use."
+lazy_session(key) = key === nothing ? Session() : Session(nothing, Dict{String,Any}(), false, false, false, String(key))
+"Whether the session has been read from its store (or never needed to be)."
+session_loaded(s::Session) = getfield(s, :loaded)
+
+function ensure_loaded!(s::Session)
+    getfield(s, :loaded) && return s
+    setfield!(s, :loaded, true)
+    r = load_session(getfield(s, :pending))
+    setfield!(s, :key, getfield(r, :key))
+    setfield!(s, :data, getfield(r, :data))
+    setfield!(s, :pending, nothing)
+    s
+end
+function Base.getproperty(s::Session, f::Symbol)
+    (f === :data || f === :key) && ensure_loaded!(s)
+    getfield(s, f)
+end
+function Base.setproperty!(s::Session, f::Symbol, v)
+    (f === :data || f === :key) && ensure_loaded!(s)
+    setfield!(s, f, convert(fieldtype(Session, f), v))
+end
 
 Base.getindex(s::Session, k::AbstractString) = s.data[k]
 Base.get(s::Session, k::AbstractString, default) = get(s.data, k, default)
