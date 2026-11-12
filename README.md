@@ -92,6 +92,30 @@ end
 
 Lookups: `exact iexact contains icontains startswith istartswith endswith iendswith gt gte lt lte in isnull range year month day ne`, across relations (`author__name__iexact`) in both directions.
 
+`on_commit(f)` runs `f()` once the current transaction commits, and drops it if the transaction (or the savepoint it was registered in) rolls back. Outside a transaction `f()` runs at once. Use it to send mail or enqueue a task only when the data it needs is saved:
+
+```julia
+atomic() do
+    save!(order)
+    on_commit(() -> send_mail("Order received", ...))     # robust = true logs an error instead of raising
+end
+```
+
+In tests inside `rollback_after`, `capture_on_commit_callbacks(f; execute = true)` returns (and runs) the callbacks `f` registered.
+
+Add your own lookups and transforms with `register_lookup` and `register_transform` (Django's `register_lookup`). They work in `filter`, `exclude` and `Q`, across relations, and transforms chain:
+
+```julia
+register_lookup("notequal"; kinds = [:char, :text]) do lhs, rhs     # rhs is the value's placeholder
+    "$lhs <> $rhs"
+end
+register_transform("lower"; kinds = [:char, :text]) do lhs
+    "LOWER($lhs)"
+end
+register_transform(lhs -> "CHAR_LENGTH($lhs)", "len"; kinds = [:char, :text], output = :int)
+filter(Author; name__lower__startswith = "an", name__len__gte = 3, email__notequal = "")
+```
+
 Lookups across relations compile to JOINs, following Django's rules:
 
 - **Forward foreign keys** join once per path. The join is INNER when the column is NOT NULL and LEFT OUTER when it is nullable, so `Q(author__name="Ann") | Q(title="x")` still finds posts without an author.
@@ -189,7 +213,23 @@ values_list(objects(Post), :title, :author__name)               # tuples; flat=t
   - `annotate(objects(Author); latest = Subquery(values(order_by(filter(Post; author=OuterRef(:id)), "-created"), :title)[1:1]))`
   - `filter(objects(Author), Exists(filter(Post; author=OuterRef(:id))))`, negated with `!Exists(...)`
 - **Window functions:** `annotate(qs; rank = Window(RowNumber(); partition_by=[:author], order_by=["-views"]))`, also with `Rank`, `DenseRank`, `Lag`, `Lead` and aggregates over a window. You can order and filter by them: `filter(qs; rank = 1)` wraps the query, because SQL can't filter on a window function directly. Plain conditions in the same queryset apply before the window is computed, as in Django.
+- **`FilteredRelation`:** join a relation with an extra condition in the JOIN's `ON` clause, so authors without a match are kept and aggregates see only matching rows. It works with forward and reverse relations, one level deep:
+  - `qs = annotate(Author; pub = FilteredRelation(:posts; condition = Q(posts__published = true)))`
+  - `annotate(qs; n = Count(:pub))`, `filter(qs; pub__title__contains = "Julia")`, `exclude(qs; pub__views = 0)`, `order_by(qs, "pub__views")`
 - **`values()` is lazy.** It returns a queryset whose rows are `Dict`s. Aggregates in `annotate` after `values(:field)` group by that field. As in Django, combining aggregates over two different reverse relations multiplies rows, so use `distinct=true`.
+
+#### Async
+
+Views already run as tasks on a thread pool, so blocking database calls don't hold up the server. For starting work and collecting it later, or running queries side by side, Juango has Django's async names. Each returns a `Task`:
+
+```julia
+t1, t2 = acount(Post), afirst(filter(Comment; approved = false))
+n, c = fetch(t1), fetch(t2)
+post = fetch(acreate(Post; title = "x"))
+for p in aiterator(objects(Post)) ... end            # rows fetched by a background task
+```
+
+There are `aget`, `acreate`, `acount`, `aexists`, `afirst`, `alast`, `acollect`, `aget_or_create`, `aupdate_or_create`, `abulk_create`, `abulk_update`, `aaggregate`, `ain_bulk`, `aupdate!`, `adelete!`, `asave!`, `arefresh!` and `aauthenticate`, plus `run_async(f)` and `sync_to_async(f)` for your own functions. The task runs with the caller's database alias, language and time zone. Inside `atomic()` the work runs at once in the calling task instead, so it's part of the transaction. A view may return a `Task`, and the handler waits for it.
 
 #### GIS (PostGIS)
 
@@ -347,7 +387,27 @@ order_by(annotate(qs; rank = SearchRank(SearchVector(:title, :body), SearchQuery
 - **Ranges:** values are `ValueRange(lower, upper; bounds = "[)")`. Integer and date ranges are stored in canonical `[)` form, as Postgres does.
 - **UUID primary keys:** `Meta(pk = :uuid)` makes `id` a UUID created by Juango. Foreign keys to such a model use UUID columns, and the admin accepts UUIDs in URLs.
 - **Indexes:** `Meta(indexes = [...])` adds named indexes, and migrations track them with `AddIndex`/`RemoveIndex`. GIN indexes apply on Postgres only.
-- **Postgres extension:** `CICharField` creates the `citext` extension the first time a table needs it.
+- **Postgres extension:** `CICharField` creates the `citext` extension the first time a table needs it (and `HStoreField` the `hstore` one).
+- **Partial and expression indexes:** `Index(:handle; name = "...", unique = true, condition = Q(active = true))` indexes only the rows that match, `Index(Lower(:email); name = "...")` indexes an expression, and on Postgres `include = [:field]` and `opclasses = ["varchar_pattern_ops"]` are supported. MySQL/MariaDB skip partial and expression indexes.
+- **Comments:** `TextField(db_comment = "...")` and `Meta(db_table_comment = "...")` become database comments on Postgres and MySQL/MariaDB (SQLite has none). Migrations track them.
+
+#### PostgreSQL extras
+
+```julia
+@model struct Booking
+    room   = IntegerField()
+    during = DateRangeField()
+    attrs  = HStoreField(default = Dict)                 # hstore on Postgres, JSON elsewhere
+    Meta(constraints = [ExclusionConstraint(name = "no_overlap",
+                                            expressions = [(:room, "="), (:during, "&&")])])
+end
+filter(Booking; attrs__color = "red", attrs__has_key = "size", attrs__contains = Dict("x" => "1"))
+filter(Post; title__trigram_similar = "julai", title__unaccent__icontains = "cafe")
+order_by(annotate(Post; sim = TrigramSimilarity(:title, "julia")), "-sim")    # also TrigramDistance, Unaccent
+```
+
+- `ExclusionConstraint` (GiST or SP-GiST, with an optional `condition`) is enforced by Postgres only. `full_clean` checks it there when the operators are `=` and `&&`. `=` on a plain column inside GiST needs the `btree_gist` extension.
+- The trigram lookups and expressions need `pg_trgm`, and `unaccent` needs the `unaccent` extension. Create extensions in a migration with `CreateExtension("name")` or `HStoreExtension()`, `TrigramExtension()`, `UnaccentExtension()`, `BtreeGistExtension()`, `BtreeGinExtension()`, `CITextExtension()`. These operations do nothing on other databases.
 
 Computed attributes for templates (and `obj.name` in Julia) use `tattr`:
 
@@ -773,7 +833,16 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 ```
 
 - **Uploads.** `req.FILES` holds the uploads (`getlist` for `multiple` inputs). Each is an `UploadedFile` with a name, content type, size and bytes.
-- **Storage.** Files go through a storage: `FileSystemStorage` by default, or set `DEFAULT_FILE_STORAGE` for another. It provides `save_file`, `read`, `delete_file`, `url`, `size` and `path`.
+- **Storage.** Files go through a storage, `FileSystemStorage` by default. The `STORAGES` setting names storages, as in Django:
+  ```julia
+  configure!(STORAGES = Dict(
+      "default"     => Dict(:BACKEND => FileSystemStorage, :OPTIONS => Dict(:location => "/srv/media")),
+      "staticfiles" => Dict(:BACKEND => :manifest),          # or :static
+      "scratch"     => Dict(:BACKEND => InMemoryStorage)))   # keeps files in memory, handy in tests
+  storages("scratch")                                    # the instance
+  FileField(storage = "scratch")                         # a field can name one
+  ```
+  A backend is a `Storage` value, a type or function called with the `OPTIONS`, or `:filesystem`/`:memory`. A storage implements `save_file`, `read`, `exists`, `size`, `delete_file` and `url`, and optionally `path` and `listdir`, so other backends (a cloud bucket, say) plug in the same way. `DEFAULT_FILE_STORAGE` still works when `STORAGES` has no `"default"`.
 - **Safe file names.** Names are sanitised, can't escape `MEDIA_ROOT`, and never overwrite: an existing name gets a random suffix.
 - **Images.** `ImageField` accepts PNG, GIF, JPEG and WebP. Juango reads the size itself, so no image library is needed.
 - **Forms and admin.** Forms show the current file with a "Clear" checkbox when the field is optional, and the admin handles uploads.
@@ -786,7 +855,8 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 - `User` model with PBKDF2-SHA256 password hashes in Django's format, so existing Django hashes verify.
 - `authenticate`, `login!`, `logout!`, `create_user`, `create_superuser`, `login_required`, `staff_member_required`.
 - Sessions (`req.session["k"] = v`) are stored where `SESSION_ENGINE` says: `:db` (default), `:cache`, `:cached_db`, `:file` (in `SESSION_FILE_PATH`) or `:signed_cookies` (the signed data itself in the cookie, so nothing on the server, but a session can't be revoked early). The session key rotates on login, and changing a password invalidates existing sessions. `clearsessions` removes expired database rows and files.
-- CSRF protection on POST/PUT/PATCH/DELETE: `{% csrf_token %}` or an `X-CSRFToken` header. Mark exceptions with `csrf_exempt(view)`.
+- CSRF protection on POST/PUT/PATCH/DELETE: `{% csrf_token %}` or an `X-CSRFToken` header. Mark exceptions with `csrf_exempt(view)`. The token (and its cookie) is only created when a page uses it.
+- Forms: `AuthenticationForm`, `UserCreationForm` (username, two passwords checked against `AUTH_PASSWORD_VALIDATORS`; `save!` hashes the password), `UserChangeForm` (every field but the password; `Juango.password_summary(user)` describes the stored hash safely), `PasswordChangeForm`, `SetPasswordForm`. The admin's "add user" page uses `UserCreationForm`, then opens the user's change page.
 - One-time messages: `message!(req, :success, "Saved")`, rendered with `{% for m in messages %}`.
 
 #### Passwords
@@ -990,6 +1060,7 @@ send(order_placed, Order; order = o)                             # send_robust c
   - `m2m_changed` (`action`, `instance`, `model`, `pk_set`, `reverse`; the sender is the join model)
   - `request_started` and `request_finished`
   - `user_logged_in`, `user_logged_out` and `user_login_failed` (without the password)
+  - `pre_migrate` and `post_migrate`, once per app around `migrate` (the sender is the app label; `app_label`, `database`, `plan`, and `apps` for historical models). Juango's content types, permissions and default site are created by `post_migrate` receivers for "contenttypes", "auth" and "sites", which run before other apps'.
 - **Filtering.** `sender` limits a receiver to one model (or other sender). `dispatch_uid` identifies a receiver for `disconnect!`.
 - **What doesn't send.** Bulk `update!` doesn't send `pre_save`/`post_save`, as in Django.
 - **When to use them.** To change a model's own behaviour, overriding `save!` (as the blog example does) is usually clearer. Signals are for code that lives elsewhere, such as caches, search indexes and notifications.
@@ -1104,6 +1175,7 @@ configure!(MIDDLEWARE = [Juango.default_settings()[:MIDDLEWARE]..., Timing])
 The defaults are security headers, sessions, `APPEND_SLASH`, CSRF and authentication. Also available:
 
 - `GZipMiddleware` compresses responses of 200 bytes or more for clients that accept gzip, with random padding in the gzip header against BREACH (as Django does). Put it first. Streamed responses aren't compressed.
+- `BrokenLinkEmailsMiddleware` emails `MANAGERS` (via `mail_managers`) when a page linked from somewhere returns 404, unless `DEBUG` is on. Links from your own site are reported as broken internal links. Like Django it ignores requests without a referer, search engines, and paths matching `IGNORABLE_404_URLS` regexes.
 - `ConditionalGetMiddleware` gives GET responses an `ETag` and answers `If-None-Match`/`If-Modified-Since` with 304 Not Modified.
 
 #### Security settings
@@ -1194,6 +1266,14 @@ r = post(c, "/posts/new/", Dict("title" => "X", ...); follow=true)
 
 The client keeps cookies, skips CSRF unless you pass `Client(enforce_csrf=true)`, and never opens a socket.
 
+For browser automation or any real HTTP client, `with_live_server` runs the app on a free port for the block (Django's `LiveServerTestCase`). It serves static files even with `DEBUG` off, and allows its host for the block. The server answers in other tasks, so on Postgres and MySQL it only sees committed data: create test data outside `rollback_after`.
+
+```julia
+with_live_server() do s
+    r = HTTP.get(s.url * "/posts/")              # also live_server_url()
+end
+```
+
 To catch N+1 queries, `count_queries` runs a function and counts the SQL statements it executed:
 
 ```julia
@@ -1259,7 +1339,7 @@ Juango.get_by_natural_key(::Type{Tag}, name) = get(Tag; name = name)
 
 ## Settings
 
-Set them with `configure!(...)` and read them with `settings.NAME`. The main ones: `DEBUG`, `SECRET_KEY`, `DATABASE` (a SQLite path, `":memory:"`, a `scheme://` URL, or a backend instance), `INSTALLED_APPS`, `APP_DIRS`, `ROOT_URLCONF`, `TEMPLATE_DIRS`, `STATIC_URL`, `STATIC_DIRS`, `STATIC_ROOT`, `ALLOWED_HOSTS`, `MIDDLEWARE`, `CONTEXT_PROCESSORS`, `LOGIN_URL`, `LOGIN_REDIRECT_URL`, `APPEND_SLASH`, `SESSION_COOKIE_AGE`, `PASSWORD_ITERATIONS`, `SQL_DEBUG`. Any extra keyword becomes a custom setting.
+Set them with `configure!(...)` and read them with `settings.NAME`. Request limits, as in Django: `DATA_UPLOAD_MAX_MEMORY_SIZE` (2.5 MB, for bodies that aren't file uploads), `DATA_UPLOAD_MAX_NUMBER_FIELDS` (1000 GET and POST parameters) and Juango's `FILE_UPLOAD_MAX_SIZE` (100 MB, for multipart uploads, which Juango holds in memory). A request over a limit gets 400 Bad Request; `nothing` turns a limit off. The main ones: `DEBUG`, `SECRET_KEY`, `DATABASE` (a SQLite path, `":memory:"`, a `scheme://` URL, or a backend instance), `INSTALLED_APPS`, `APP_DIRS`, `ROOT_URLCONF`, `TEMPLATE_DIRS`, `STATIC_URL`, `STATIC_DIRS`, `STATIC_ROOT`, `ALLOWED_HOSTS`, `MIDDLEWARE`, `CONTEXT_PROCESSORS`, `LOGIN_URL`, `LOGIN_REDIRECT_URL`, `APPEND_SLASH`, `SESSION_COOKIE_AGE`, `PASSWORD_ITERATIONS`, `SQL_DEBUG`. Any extra keyword becomes a custom setting.
 
 ## Differences from Django (current limitations)
 
