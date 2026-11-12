@@ -64,13 +64,17 @@ end
 
 function admindocs_tags(req::Request; kw...)
     rows = [Dict{String,Any}("name" => n, "doc" => docstring(f)) for (n, f) in sort!(collect(TAGS); by = first)]
-    libs = [Dict{String,Any}("library" => l.name, "tags" => sort(collect(keys(l.tags)))) for l in sort!(collect(values(TAG_LIBRARIES)); by = l -> l.name)]
+    libs = [Dict{String,Any}("library" => l.name, "tags" => sort!(collect(keys(l.tags))), "filters" => sort!(collect(keys(l.filters))))
+            for l in sort!(collect(values(TAG_LIBRARIES)); by = l -> l.name)]
     doc_page(req, "admin_doc/template_tag_index.html", "Template tags", Dict("tags" => rows, "libraries" => libs))
 end
 
 function admindocs_filters(req::Request; kw...)
     rows = [Dict{String,Any}("name" => n, "doc" => docstring(f.fn)) for (n, f) in sort!(collect(FILTERS); by = first)]
-    doc_page(req, "admin_doc/template_filter_index.html", "Template filters", Dict("filters" => rows))
+    libs = [Dict{String,Any}("library" => l.name,
+                             "filters" => [Dict{String,Any}("name" => n, "doc" => docstring(f.fn)) for (n, f) in sort!(collect(l.filters); by = first)])
+            for l in sort!(collect(values(TAG_LIBRARIES)); by = l -> l.name) if !isempty(l.filters)]
+    doc_page(req, "admin_doc/template_filter_index.html", "Template filters", Dict("filters" => rows, "libraries" => libs))
 end
 
 const ADMINDOCS_APP = App("admindocs"; name = "juango.admindocs", verbose_name = "Administrative Documentation", requires = ["admin"])

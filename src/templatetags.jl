@@ -11,7 +11,7 @@
 #     end
 #     filter!(lib, "cents", (v, _) -> round(Int, 100v))
 #
-#     {% load shop_tags %}{% price item.cost currency="£" %} {% price 3 as p %}{{ p }} {% cart_summary %}
+#     {% load shop_tags %}{% price item.cost currency="£" %} {% price 3 as p %}{{ p }} {% cart_summary %} {{ x|cents }}
 
 # --- ifchanged ---
 
@@ -287,18 +287,19 @@ end
 
 # --- custom tag libraries ---
 
-"A set of custom tags (and filters) that templates load with `{% load name %}`."
+"A set of custom tags and filters that templates load with `{% load name %}`."
 struct TagLibrary
     name::String
     tags::Dict{String,Function}
+    filters::Dict{String,TemplateFilter}
 end
 const TAG_LIBRARIES = Dict{String,TagLibrary}()
-"Libraries that `{% load %}` accepts without defining anything (their tags are always available)."
+"Built-in library names: their tags are always available, so `{% load %}` only adds their filters (if any)."
 const BUILTIN_LIBRARIES = Set(["static", "i18n", "l10n", "tz", "cache", "humanize", "admin_urls", "admin_list", "admin_modify"])
 
 "`TagLibrary(\"name\")`: create (or replace) the library loaded by `{% load name %}`."
 function TagLibrary(name::AbstractString)
-    lib = TagLibrary(String(name), Dict{String,Function}())
+    lib = TagLibrary(String(name), Dict{String,Function}(), Dict{String,TemplateFilter}())
     TAG_LIBRARIES[lib.name] = lib
     lib
 end
@@ -307,8 +308,17 @@ end
 tag!(lib::TagLibrary, name, f) = (lib.tags[string(name)] = f; lib)
 tag!(f::Function, lib::TagLibrary, name) = tag!(lib, name, f)
 
-"Register a filter that comes with the library (filters are global: `{% load %}` is only needed for tags)."
-Base.filter!(lib::TagLibrary, name, f; kw...) = (register_filter!(name, f; kw...); lib)
+"""
+    filter!(lib, name, f; is_safe=false, needs_autoescape=false)
+
+Register a filter that comes with the library: templates use it after `{% load lib %}`
+(or `{% load name from lib %}`). Global filters are registered with `register_filter!`.
+"""
+function Base.filter!(lib::TagLibrary, name, f; is_safe = false, needs_autoescape = false)
+    lib.filters[string(name)] = TemplateFilter(f, is_safe, needs_autoescape)
+    clear_template_cache!()
+    lib
+end
 Base.filter!(f::Function, lib::TagLibrary, name; kw...) = filter!(lib, name, f; kw...)
 
 "Arguments of a simple/inclusion tag: positional and `name=value`, then an optional `as var`."
@@ -385,27 +395,43 @@ function inclusion_tag!(f::Function, lib::TagLibrary, name, template; takes_cont
     end)
 end
 
-"`{% load lib1 lib2 %}` or `{% load tag1 tag2 from lib %}`: make a library's tags available in this template."
+"`{% load lib1 lib2 %}` or `{% load name1 name2 from lib %}`: make a library's tags and filters available in this template."
 function load_libraries!(p::Parser, t::Token)
     bits = split_contents(t.contents)[2:end]
     tags = get!(Dict{String,Function}, p.extra, :tags)
+    filters = LOADED_FILTERS[]
     lib(name) = haskey(TAG_LIBRARIES, name) ? TAG_LIBRARIES[name] : name in BUILTIN_LIBRARIES ? nothing :
         throw(TemplateSyntaxError("'$name' is not a registered tag library. Known: " *
-                                  join(sort(vcat(collect(keys(TAG_LIBRARIES)), collect(BUILTIN_LIBRARIES))), ", ")))
+                                  join(sort!(collect(union(keys(TAG_LIBRARIES), BUILTIN_LIBRARIES))), ", ")))
     if length(bits) >= 3 && bits[end-1] == "from"
-        l = lib(bits[end])
+        libname = bits[end]
+        l = lib(libname)
         for name in bits[1:end-2]
-            l === nothing && continue
-            haskey(l.tags, name) || throw(TemplateSyntaxError("'$name' is not a tag in library '$(bits[end])'"))
-            tags[name] = l.tags[name]
+            if l !== nothing && haskey(l.tags, name)
+                tags[name] = l.tags[name]
+            elseif l !== nothing && haskey(l.filters, name)
+                filters[name] = l.filters[name]
+            elseif !(libname in BUILTIN_LIBRARIES && haskey(TAGS, name))    # built-in tags are always loaded
+                throw(TemplateSyntaxError("'$name' is not a tag or filter in library '$libname'"))
+            end
         end
     else
         for name in bits
             l = lib(name)
-            l === nothing || merge!(tags, l.tags)
+            l === nothing && continue
+            merge!(tags, l.tags)
+            merge!(filters, l.filters)
         end
     end
     nothing
+end
+
+"For an unknown filter: which library would provide it."
+function load_hint(name::AbstractString)
+    for l in values(TAG_LIBRARIES)
+        haskey(l.filters, name) && return ". Did you forget {% load $(l.name) %}?"
+    end
+    ""
 end
 
 for (name, f) in ("ifchanged" => tag_ifchanged, "regroup" => tag_regroup, "widthratio" => tag_widthratio,

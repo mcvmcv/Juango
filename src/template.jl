@@ -117,6 +117,8 @@ struct TemplateFilter
 end
 
 const FILTERS = Dict{String,TemplateFilter}()
+"Filters that `{% load %}` made available in the template being parsed (library filters)."
+const LOADED_FILTERS = Base.ScopedValues.ScopedValue(Dict{String,TemplateFilter}())
 
 """
     register_filter!(name, f; is_safe=false, needs_autoescape=false)
@@ -217,8 +219,9 @@ function parse_filter_expr(s::AbstractString)
         end
         name = s[i:prevind(s, j)]
         isempty(name) && throw(TemplateSyntaxError("missing filter name in '$s'"))
-        filt = get(FILTERS, name, nothing)
-        filt === nothing && throw(TemplateSyntaxError("invalid filter: '$name'"))
+        filt = get(LOADED_FILTERS[], name, nothing)
+        filt === nothing && (filt = get(FILTERS, name, nothing))
+        filt === nothing && throw(TemplateSyntaxError("invalid filter: '$name'" * load_hint(name)))
         i = j
         arg = nothing
         if i <= n && s[i] == ':'
@@ -421,7 +424,8 @@ end
 
 function Template(src::AbstractString; name = "<string>", origin = nothing)
     p = Parser(tokenize(src), 1, name, nothing, Dict{Symbol,Any}(:origin => origin, :source => src))
-    nodes, _ = parse_nodes(p)
+    # {% load %} adds library filters for this template only (not for templates it includes or extends)
+    nodes, _ = Base.ScopedValues.with(() -> parse_nodes(p), LOADED_FILTERS => Dict{String,TemplateFilter}())
     Template(name, nodes, origin)
 end
 

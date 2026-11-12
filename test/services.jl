@@ -549,7 +549,7 @@ end
             @test tr("{% language 'de' %}{% translate 'Save' %}{% endlanguage %} {% translate 'Hello' %}") == "Speichern Bonjour"
         end
         @test tr("{% blocktranslate trimmed %}\n  Hello\n{% endblocktranslate %}") == "Hello"
-        @test tr("{{ x|localize }}", Dict("x" => 1234.5)) == "1234.5" && with_language(() -> tr("{{ x|localize }}", Dict("x" => 1234.5)), "de") == "1234,5"
+        @test tr("{% load l10n %}{{ x|localize }}", Dict("x" => 1234.5)) == "1234.5" && with_language(() -> tr("{% load l10n %}{{ x|localize }}", Dict("x" => 1234.5)), "de") == "1234,5"
         @test number_format(1234567.891; decimals = 2, lang = "de", grouping = true) == "1.234.567,89"
         @test number_format(-1234; lang = "en", grouping = true) == "-1,234"
 
@@ -647,8 +647,8 @@ end
         @test tr("{{ t|date:\"Y-m-d H:i T\" }}", ctx) == "2024-06-01 12:00 NZST"
         @test with_timezone(() -> tr("{{ t|date:\"H:i e O\" }}", ctx), "Asia/Tokyo") == "09:00 Asia/Tokyo +0900"
         @test tr("{% timezone \"Europe/London\" %}{{ t|date:\"H:i T\" }}{% endtimezone %} {{ t|date:\"H:i\" }}", ctx) == "01:00 BST 12:00"
-        @test tr("{% localtime off %}{{ t|date:\"H:i\" }}{% endlocaltime %} {{ t|utc|date:\"H:i e\" }}", ctx) == "00:00 00:00 UTC"
-        @test tr("{{ t|timezone:\"Asia/Tokyo\"|date:\"H:i\" }}", ctx) == "09:00"
+        @test tr("{% load tz %}{% localtime off %}{{ t|date:\"H:i\" }}{% endlocaltime %} {{ t|utc|date:\"H:i e\" }}", ctx) == "00:00 00:00 UTC"
+        @test tr("{% load timezone from tz %}{{ t|timezone:\"Asia/Tokyo\"|date:\"H:i\" }}", ctx) == "09:00"
         @test Juango.timesince(timezone_now() - Dates.Hour(3)) == "3 hours"
         @test make_naive(TZ.ZonedDateTime(2024, 6, 1, 0, utc)) == DateTime(2024, 6, 1, 12)
         @test make_aware(DateTime(2024, 6, 1, 12)) == TZ.ZonedDateTime(2024, 6, 1, 12, akl)

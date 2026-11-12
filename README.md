@@ -733,16 +733,16 @@ simple_tag!(price, lib, "price")                       # {% price item.cost curr
 inclusion_tag!(lib, "cart", "shop/cart.html"; takes_context = true) do ctx
     Dict("items" => ctx["cart"].items)                 # {% cart %} renders shop/cart.html with this
 end
-filter!((v, _) -> round(Int, 100v), lib, "cents")      # library filters are available everywhere
+filter!((v, _) -> round(Int, 100v), lib, "cents")      # {% load shop %}{{ x|cents }}
 ```
 
-`{% load price from shop %}` loads single tags. `tag!(lib, name, (parser, token) -> node)` adds a full custom tag, and so does `register_tag!` for every template.
+`{% load price cents from shop %}` loads single tags or filters. As in Django, `{% load %}` applies to the template it's in, not to the templates it includes or extends. `tag!(lib, name, (parser, token) -> node)` adds a full custom tag, and so does `register_tag!` for every template.
 
 Output is HTML-escaped unless you mark it safe (`mark_safe`, `|safe`). A syntax error names the template file and line, and in DEBUG the error page shows the lines around it.
 
 #### humanize
 
-`{% load humanize %}` (the filters are always available) adds `intcomma` (`1,234,567`, with the active language's separator), `intword` (`1.2 million`), `apnumber` (`four`), `ordinal` (`22nd`), `naturalday` (`today`, `yesterday`, `tomorrow`, else the date) and `naturaltime` (`3 minutes ago`, `an hour from now`).
+`{% load humanize %}` adds `intcomma` (`1,234,567`, with the active language's separator), `intword` (`1.2 million`), `apnumber` (`four`), `ordinal` (`22nd`), `naturalday` (`today`, `yesterday`, `tomorrow`, else the date) and `naturaltime` (`3 minutes ago`, `an hour from now`).
 
 ### Forms
 
@@ -971,7 +971,7 @@ urlpatterns = [i18n_patterns(path("about/", about; name = "about")),   # /en/abo
 {% load i18n %}
 {% translate "Welcome" %}  {% translate "May" context "month name" as m %}
 {% blocktranslate count n=comments|length %}{{ n }} comment{% plural %}{{ n }} comments{% endblocktranslate %}
-{% get_current_language as LANGUAGE_CODE %}  {% language "de" %}...{% endlanguage %}  {{ price|localize }}
+{% get_current_language as LANGUAGE_CODE %}  {% language "de" %}...{% endlanguage %}  {% load l10n %}{{ price|localize }}
 ```
 
 - **Catalogues** are standard gettext files at `locale/<lang>/LC_MESSAGES/juango.po`, editable in Poedit, Weblate and similar tools.
@@ -1007,7 +1007,7 @@ make_aware(DateTime(2024, 6, 1, 9)); make_naive(z); localtime(z)
 
 ```
 {{ post.created }}  {{ post.created|date:"H:i T" }}      {# in the current time zone #}
-{% timezone "Asia/Tokyo" %}...{% endtimezone %}  {{ t|utc }}  {{ t|timezone:"America/New_York" }}  {% localtime off %}
+{% timezone "Asia/Tokyo" %}...{% endtimezone %}  {% load tz %}{{ t|utc }}  {{ t|timezone:"America/New_York" }}  {% localtime off %}
 ```
 
 - **Storage.** With `USE_TZ`, datetimes are stored in UTC: `TIMESTAMP WITH TIME ZONE` on PostgreSQL, and UTC on SQLite and MySQL. The ORM returns aware `ZonedDateTime`s (TimeZones.jl).
@@ -1345,7 +1345,6 @@ Set them with `configure!(...)` and read them with `settings.NAME`. Request limi
 
 - **Historical models are table-level.** In data migrations, `get_model` gives the table as it was (columns, not relations or methods), unlike Django's historical model classes.
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
-- **Templates load filters globally.** `{% load %}` is needed only for tags; every filter (humanize's too) is always available.
 - **Fixtures are JSON or JSONL**, not YAML or XML. The common-password list is shorter than Django's (pass your own file to `CommonPasswordValidator`).
 - **Composite primary keys, swappable user models and admin docs** have Django's limitations: no foreign keys to composite-key models, choose `AUTH_USER_MODEL` before the first `migrate` (the unused `auth_user` table is still created), and docstrings are shown as plain text.
 - **GZip and streaming.** `GZipMiddleware` doesn't compress streamed responses.

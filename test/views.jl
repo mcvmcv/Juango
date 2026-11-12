@@ -924,6 +924,7 @@ function documented_view(req) HttpResponse("doc") end
         r = get(c, "/admin/doc/views/")
         @test occursin("/documented/", text(r)) && occursin("An essay about a topic", text(r))
         @test occursin("id=\"for\"", text(get(c, "/admin/doc/tags/"))) && occursin("id=\"upper\"", text(get(c, "/admin/doc/filters/")))
+        @test occursin("load humanize", text(get(c, "/admin/doc/filters/"))) && occursin("id=\"humanize-intcomma\"", text(get(c, "/admin/doc/filters/")))
     finally
         configure!(INSTALLED_APPS = old_apps, ROOT_URLCONF = old_urls)
     end

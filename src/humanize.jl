@@ -114,9 +114,11 @@ function naturaltime(v)
     interpolate(future ? gettext("%(delta)s from now") : gettext("%(delta)s ago"), Dict("delta" => phrase))
 end
 
-register_filter!("intcomma", (v, _) -> intcomma(v))
-register_filter!("intword", (v, _) -> intword(v))
-register_filter!("apnumber", (v, _) -> apnumber(v))
-register_filter!("ordinal", (v, _) -> ordinal(v))
-register_filter!("naturalday", (v, a) -> naturalday(v, a))
-register_filter!("naturaltime", (v, _) -> naturaltime(v))
+"`{% load humanize %}`: intcomma, intword, apnumber, ordinal, naturalday, naturaltime."
+const HUMANIZE_LIBRARY = TagLibrary("humanize")
+filter!(HUMANIZE_LIBRARY, "intcomma", (v, _) -> intcomma(v))
+filter!(HUMANIZE_LIBRARY, "intword", (v, _) -> intword(v))
+filter!(HUMANIZE_LIBRARY, "apnumber", (v, _) -> apnumber(v))
+filter!(HUMANIZE_LIBRARY, "ordinal", (v, _) -> ordinal(v))
+filter!(HUMANIZE_LIBRARY, "naturalday", (v, a) -> naturalday(v, a))
+filter!(HUMANIZE_LIBRARY, "naturaltime", (v, _) -> naturaltime(v))

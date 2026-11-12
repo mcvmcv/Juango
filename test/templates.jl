@@ -142,7 +142,16 @@ end
     @test tr("{% load greet from testtags %}{% greet 'Z' %}") == "Hello Z!"
     @test_throws TemplateSyntaxError Template("{% load rule2 from testtags %}")
     @test_throws TemplateSyntaxError Template("{% load nolib %}")
-    @test tr("{% load static i18n %}{{ 'x'|huh }}") == "x?"
+    @test tr("{% load static testtags %}{{ 'x'|huh }}") == "x?"
+    @test tr("{% load huh from testtags %}{{ 'x'|huh }}") == "x?"
+    # library filters need {% load %}, in each template (an included template loads its own)
+    err = try Template("{{ 'x'|huh }}"); "" catch e; sprint(showerror, e) end
+    @test occursin("invalid filter: 'huh'", err) && occursin("{% load testtags %}", err)
+    @test_throws TemplateSyntaxError Template("{{ 5|intcomma }}")
+    write(joinpath(TPL, "inc_huh.html"), "{{ 'y'|huh }}")
+    @test_throws TemplateSyntaxError tr("{% load testtags %}{% include 'inc_huh.html' %}")
+    @test tr("{% load i18n %}{% load trans from i18n %}{% load intcomma from humanize %}{{ 1234|intcomma }}") == "1,234"
+    @test_throws TemplateSyntaxError Template("{% load nope from humanize %}")
 
     # where syntax errors are
     write(joinpath(TPL, "bad_syntax.html"), "line one\n{% if x %}\n{% for %}\n{% endif %}")

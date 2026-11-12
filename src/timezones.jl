@@ -7,7 +7,7 @@
 # the one activated for the request (`activate_timezone!`, `TimezoneMiddleware`), else TIME_ZONE.
 # Naive DateTimes given to the ORM are taken to be in the current time zone.
 #
-#     {% timezone "Asia/Tokyo" %}{{ event.start }}{% endtimezone %}   {{ event.start|utc }}
+#     {% timezone "Asia/Tokyo" %}{{ event.start }}{% endtimezone %}   {% load tz %}{{ event.start|utc }}
 #     manage.jl convert_naive_datetimes        # existing naive data -> UTC, when switching USE_TZ on
 
 const UTC_TZ = TimeZones.tz"UTC"
@@ -118,9 +118,11 @@ end
 todatetime(p::PinnedTime) = DateTime(p.z)
 display_string(p::PinnedTime) = format_date(p, get_format().datetime)
 pin(v, tz) = v isa TimeZones.ZonedDateTime ? PinnedTime(TimeZones.astimezone(v, tz)) : v isa PinnedTime ? PinnedTime(TimeZones.astimezone(v.z, tz)) : v
-register_filter!("localtime", (v, _) -> pin(v, get_current_timezone()))
-register_filter!("utc", (v, _) -> pin(v, UTC_TZ))
-register_filter!("timezone", (v, a) -> pin(v, TimeZones.TimeZone(string(a))))
+"`{% load tz %}`: the localtime, utc and timezone filters (the tz tags are always available)."
+const TZ_LIBRARY = TagLibrary("tz")
+filter!(TZ_LIBRARY, "localtime", (v, _) -> pin(v, get_current_timezone()))
+filter!(TZ_LIBRARY, "utc", (v, _) -> pin(v, UTC_TZ))
+filter!(TZ_LIBRARY, "timezone", (v, a) -> pin(v, TimeZones.TimeZone(string(a))))
 
 """
 Activates the time zone stored in the session under `\"juango_timezone\"` (set it from a

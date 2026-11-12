@@ -656,8 +656,9 @@ for (name, f) in ("translate" => tag_translate, "trans" => tag_translate, "block
                   "language" => tag_language)
     register_tag!(name, f)
 end
-register_filter!("localize", (v, _) -> localize(v))
-register_filter!("language_name", (v, _) -> language_name(string(v)))
+# Library filters ({% load l10n %}, {% load i18n %}); the i18n tags are always available
+const L10N_LIBRARY = filter!(TagLibrary("l10n"), "localize", (v, _) -> localize(v))
+const I18N_LIBRARY = filter!(TagLibrary("i18n"), "language_name", (v, _) -> language_name(string(v)))
 
 # --- makemessages / compilemessages ---------------------------------------------------------------------------------
 

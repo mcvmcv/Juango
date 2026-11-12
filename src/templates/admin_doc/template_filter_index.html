@@ -2,4 +2,7 @@
 {% block content %}<h1 class="page">Template filters</h1>
 <div class="module"><h2>Filters</h2><table><tbody>
 {% for f in filters %}<tr><th id="{{ f.name }}">{{ f.name }}</th><td>{% if f.doc %}<pre class="doc">{{ f.doc }}</pre>{% endif %}</td></tr>{% endfor %}
-</tbody></table></div>{% endblock %}
+</tbody></table></div>
+{% for l in libraries %}<div class="module"><h2>{% templatetag openblock %} load {{ l.library }} {% templatetag closeblock %}</h2><table><tbody>
+{% for f in l.filters %}<tr><th id="{{ l.library }}-{{ f.name }}">{{ f.name }}</th><td>{% if f.doc %}<pre class="doc">{{ f.doc }}</pre>{% endif %}</td></tr>{% endfor %}
+</tbody></table></div>{% endfor %}{% endblock %}
