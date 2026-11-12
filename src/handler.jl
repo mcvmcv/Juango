@@ -70,12 +70,15 @@ function handle_request(req::Request)
     resp
 end
 
+"Set while a `with_live_server(; static = true)` block runs: static files are served even without DEBUG."
+const LIVE_SERVER_STATIC = Ref(false)
+
 function handle_request_inner(req::Request)
     try
         if settings.DEBUG && !isempty(string(settings.MEDIA_ROOT)) && startswith(req.path, settings.MEDIA_URL)
             return serve_media(req)
         end
-        if settings.DEBUG && startswith(req.path, settings.STATIC_URL) && !isempty(static_dirs())
+        if (settings.DEBUG || LIVE_SERVER_STATIC[]) && startswith(req.path, settings.STATIC_URL) && !isempty(static_dirs())
             return serve_static(req)
         end
         host_allowed(req) || (log!("juango.security.DisallowedHost", :warning, "Invalid HTTP_HOST header: '$(get_host(req))'"; request = req);

@@ -51,6 +51,65 @@ function capture_on_commit_callbacks(f; execute::Bool = false)
 end
 
 """
+A running live test server (see `with_live_server`): `url` is `http://host:port`.
+"""
+struct LiveServer
+    url::String
+    host::String
+    port::Int
+    server::Any
+end
+Base.show(io::IO, s::LiveServer) = print(io, "LiveServer(", s.url, ")")
+
+const LIVE_SERVER_URL = Ref{Union{Nothing,String}}(nothing)
+
+"A free TCP port on `host` (the OS picks one)."
+function free_port(host = "127.0.0.1")
+    s = Sockets.listen(Sockets.getaddrinfo(host), 0)
+    port = Int(Sockets.getsockname(s)[2])
+    close(s)
+    port
+end
+
+"""
+    with_live_server(f; host = "127.0.0.1", port = 0, static = true)
+
+Run the app on a real HTTP server for the duration of `f(server)`, like Django's
+`LiveServerTestCase`, for browser automation or any external HTTP client. `port = 0` picks a
+free port; `server.url` (also `live_server_url()`) is the address. With `static = true`
+static files are served even when `DEBUG` is off (`StaticLiveServerTestCase`), and `host` is
+added to `ALLOWED_HOSTS` for the block.
+
+The server answers requests in other tasks, so on PostgreSQL and MySQL it sees only
+committed data: create test data outside `rollback_after` (and clean up afterwards).
+
+    with_live_server() do s
+        r = HTTP.get(s.url * "/articles/")
+        @test r.status == 200
+    end
+"""
+function with_live_server(f; host::AbstractString = "127.0.0.1", port::Integer = 0, static::Bool = true)
+    port == 0 && (port = free_port(host))
+    hosts = settings.ALLOWED_HOSTS
+    extra = "*" in hosts || host in hosts ? nothing : vcat(hosts, String[host])
+    server = runserver(host, port; block = false, quiet = true)
+    url = "http://" * (occursin(':', host) ? "[$host]" : host) * ":$port"
+    old_static, old_url = LIVE_SERVER_STATIC[], LIVE_SERVER_URL[]
+    LIVE_SERVER_STATIC[] = static
+    LIVE_SERVER_URL[] = url
+    try
+        extra === nothing ? f(LiveServer(url, host, port, server)) :
+            override_settings(() -> f(LiveServer(url, host, port, server)); ALLOWED_HOSTS = extra)
+    finally
+        LIVE_SERVER_STATIC[], LIVE_SERVER_URL[] = old_static, old_url
+        close(server)
+    end
+end
+
+"The address of the running `with_live_server` server (`nothing` outside one)."
+live_server_url() = LIVE_SERVER_URL[]
+
+"""
     override_settings(f; settings...)
 
 Run `f()` with some settings changed, and put them back afterwards (even if it throws).

@@ -136,7 +136,7 @@ export Media, Widget, MultiWidget, MultiValueField, SplitDateTimeField, Template
 export JavaScriptCatalog, JSONCatalog
 export Site, RequestSite, get_current_site, clear_site_cache!, Redirect, RedirectFallbackMiddleware
 export log!, log_enabled, MemoryHandler, LogRecord
-export rollback_after, capture_on_commit_callbacks, override_settings, RequestFactory, assert_contains, assert_not_contains, assert_redirects,
+export rollback_after, capture_on_commit_callbacks, with_live_server, live_server_url, override_settings, RequestFactory, assert_contains, assert_not_contains, assert_redirects,
        assert_template_used, assert_template_not_used, assert_num_queries, assert_form_error
 export flush!, inspectdb, dbshell_cmd
 export serialize, deserialize, dumpdata, loaddata, load_fixtures, natural_key, get_by_natural_key

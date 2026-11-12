@@ -245,6 +245,26 @@ end
     end
 end
 
+@testset "live test server" begin
+    sdir = mktempdir()
+    write(joinpath(sdir, "live.css"), "body{}")
+    @test live_server_url() === nothing
+    override_settings(STATIC_DIRS = [sdir], DEBUG = false, ALLOWED_HOSTS = ["example.com"]) do
+        with_live_server() do s
+            @test startswith(s.url, "http://127.0.0.1:") && live_server_url() == s.url
+            @test "127.0.0.1" in Juango.settings.ALLOWED_HOSTS                    # added for the block
+            r = Juango.HTTP.get(s.url * "/articles/"; status_exception = false)
+            @test r.status == 200
+            r = Juango.HTTP.get(s.url * "/static/live.css"; status_exception = false)
+            @test r.status == 200 && String(r.body) == "body{}"                     # static without DEBUG
+        end
+        @test live_server_url() === nothing && Juango.settings.ALLOWED_HOSTS == ["example.com"]
+        with_live_server(static = false) do s
+            @test Juango.HTTP.get(s.url * "/static/live.css"; status_exception = false).status == 404
+        end
+    end
+end
+
 @testset "server roundtrip" begin
     port = let s = Juango.Sockets.listen(Juango.Sockets.localhost, 0)       # a free port
         p = Int(Juango.Sockets.getsockname(s)[2]); close(s); p
