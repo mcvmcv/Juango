@@ -606,7 +606,7 @@ SQLite stores booleans as 0/1 and timestamps as ISO-8601 text. The ORM converts 
 
 Write raw SQL with `?` placeholders: `Juango.execute("SELECT * FROM post WHERE id = ?", [1])`. Each backend rewrites `?` into its own placeholder style. Constraint violations raise `IntegrityError` on every backend.
 
-To add a backend, subtype `Juango.DatabaseBackend`, implement the driver methods, override any dialect methods that differ from standard SQL, and call `register_backend!("scheme", url -> MyBackend(url))`. The interface is documented at the top of `src/db.jl`. `src/backends/sqlite.jl` and `src/backends/postgres.jl` (with its driver in `ext/JuangoLibPQExt.jl`) are the two implementations.
+To add a backend, subtype `Juango.DatabaseBackend`, implement the driver methods, override any dialect methods that differ from standard SQL, and call `register_backend!("scheme", url -> MyBackend(url))`. The interface is documented at the top of `src/db/connection.jl`. The implementations are in `src/db/backends/`, with the PostgreSQL and MySQL drivers in `ext/`.
 
 Run the test suite against another database with `JUANGO_TEST_DATABASE`:
 
@@ -995,7 +995,7 @@ urlpatterns = [i18n_patterns(path("about/", about; name = "about")),   # /en/abo
   - Juango reads `.po` files directly too, so compiling is optional.
 - **Language selection.** `LocaleMiddleware` picks the language from the URL prefix, then the `juango_language` cookie, then `Accept-Language`, then `LANGUAGE_CODE`. It also sets `Content-Language`. Under `i18n_patterns`, a URL without a prefix redirects to the right language, and `reverse_url` adds the active prefix (`prefix_default_language = false` leaves the default language unprefixed).
 - **Formats.** Dates use translated month and day names, and the `date` filter's default format follows the language. `localize` and `number_format` use the language's decimal separator, and thousands separators too with `USE_THOUSAND_SEPARATOR`.
-- **Built-in German.** The admin's interface and validation messages are translatable, and Juango ships a German translation (`src/locale/de`). Other languages fall back to English until someone adds a catalogue.
+- **Built-in German.** The admin's interface and validation messages are translatable, and Juango ships a German translation (`src/assets/locale/de`). Other languages fall back to English until someone adds a catalogue.
 
 **In JavaScript.** Serve the active language's translations to the browser:
 
@@ -1366,24 +1366,25 @@ Set them with `configure!(...)` and read them with `settings.NAME`. Request limi
 
 ```
 src/
-  Juango.jl      module & exports        orm.jl       models, QuerySet, Q
-  schema.jl      schema snapshots, DDL   migrations.jl  makemigrations, migrate
-  migrations/    built-in app's migrations
-  conf.jl        settings                forms.jl     Form, ModelForm, widgets
-  http.jl        Request/HttpResponse    sessions.jl  DB-backed sessions
-  urls.jl        path/resolve/reverse    auth.jl      User, hashing, login views
-  template.jl    template language       middleware.jl  middleware, CSRF
-  templatetags.jl  more tags & filters, tag libraries, partials
-  db.jl          backend interface       views.jl     shortcuts, generic views
-  backends/      sqlite.jl, postgres.jl  ext/         LibPQ driver (optional)
-  handler.jl     request pipeline        admin.jl     the admin
-  server.jl      HTTP server             management.jl  CLI, startproject
-  streaming.jl   streaming, SSE, WebSockets
-  apps.jl        App, INSTALLED_APPS
-  sitemaps.jl    Sitemap, sitemap_urls   feeds.jl     Feed (RSS, Atom)
-  flatpages.jl   FlatPage, fallback middleware
-  testclient.jl  test Client             templates/   built-in admin templates
-test/            setup.jl + one file per area   examples/blog/  complete example app
+  Juango.jl     the module: includes, in dependency order
+  api.jl        the public API: exports, public names, Juango.Testing / GIS / Postgres
+  core/         settings, utils, apps, signals, signing, logging, cache, mail, files,
+                async helpers, management commands
+  http/         Request and responses, URLs, middleware, security, views, streaming,
+                HTTP caching, the request handler and server
+  template/     the template engine (engine, tags, filters), tag libraries, humanize
+  i18n/         translations, time zones, the JavaScript catalog
+  db/           connection.jl (the backend interface), backends/, orm/ (fields, models,
+                lookups, SQL compiler, QuerySet, bulk operations, instances, many-to-many),
+                expressions, schema, constraints, migrations/, fixtures, database tools
+  forms/        forms, formsets, media and widgets
+  contrib/      auth/, admin/, sessions, messages, contenttypes, flatpages, sites,
+                sitemaps, feeds, tasks, staticfiles, gis
+  testing/      the test client and testing helpers for your own apps
+  assets/       built-in templates, translations, migrations and data
+ext/            database drivers loaded on demand (LibPQ, MySQL)
+test/           Juango's own test suite: setup.jl + one file per area
+examples/blog/  a complete example app
 ```
 
 Run the tests with `julia --project -e 'using Pkg; Pkg.test()'`. The files run in four groups, one process per group and two groups at a time (`JUANGO_TEST_JOBS` changes that); the whole suite takes about four minutes on SQLite, five on Postgres or MariaDB, and needs about 2 GB of memory. Run one part with `julia --project=test test/orm.jl`; the parts are `templates`, `orm`, `forms`, `views`, `admin`, `services`, `db` and `migrations`. `JUANGO_TEST_DATABASE` picks the database: unset for in-memory SQLite, or a `postgresql://` or `mysql://` URL.

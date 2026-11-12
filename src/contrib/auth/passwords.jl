@@ -520,7 +520,7 @@ const COMMON_PASSWORDS_LOCK = ReentrantLock()
 function common_passwords(path)
     lock(COMMON_PASSWORDS_LOCK) do
         get!(COMMON_PASSWORDS, path) do
-            file = something(path, joinpath(@__DIR__, "data", "common-passwords.txt.gz"))
+            file = something(path, joinpath(ASSETS_DIR, "data", "common-passwords.txt.gz"))
             open(file) do io
                 src = endswith(file, ".gz") ? CodecZlib.GzipDecompressorStream(io) : io
                 Set(lowercase(strip(l)) for l in eachline(src) if !isempty(strip(l)))

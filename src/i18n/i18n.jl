@@ -249,7 +249,7 @@ end
 "`\"pt_BR\"` -> `\"pt-br\"` (the language code used in URLs and headers)."
 to_language(locale) = lowercase(replace(string(locale), '_' => '-'))
 
-const BUILTIN_LOCALE_DIR = joinpath(@__DIR__, "locale")
+const BUILTIN_LOCALE_DIR = joinpath(ASSETS_DIR, "locale")
 const CATALOGS = Dict{String,Catalog}()
 const CATALOG_LOCK = ReentrantLock()
 push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> empty!(CATALOGS), CATALOG_LOCK))
