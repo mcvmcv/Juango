@@ -140,6 +140,9 @@ copy_state(s::SchemaState) = SchemaState(k => copy(v) for (k, v) in s)
 
 schema_kind(kind::Symbol) = kind in STRING_KINDS || kind in (:file, :image) ? :string : kind
 
+"The table a column references: `\"__user_model__\"` (a `ForeignKey(USER_MODEL)`) is the AUTH_USER_MODEL's."
+ref_table(name) = name == "__user_model__" ? modelmeta(get_user_model()).table : name
+
 "The snapshot `Column` for a model field."
 function column_state(f::Field)
     d = f.default isa NoDefault || f.default isa Function || f.default isa Type ? nothing : f.default
@@ -147,7 +150,7 @@ function column_state(f::Field)
     gen = f.generated === nothing ? nothing : GeneratedSpec(expr_to_columns(f.model, f.generated[1]), f.generated[2])
     gen === nothing || (d = nothing)
     d !== nothing && f.kind in (:json, :array, :intrange, :daterange, :datetimerange, :uuid) && (d = nothing)  # set by Julia, not the DB
-    ref = f.kind === :fk ? modelmeta(related_model(f)).table : nothing
+    ref = f.kind !== :fk ? nothing : f.related === :__user_model__ ? "__user_model__" : modelmeta(related_model(f)).table
     f.kind === :fk && is_composite(related_model(f)) &&
         throw(ArgumentError("$(nameof(f.model)).$(f.name): foreign keys to $(nameof(related_model(f))) aren't supported (it has a composite primary key)"))
     of = f.kind === :array ? f.related : f.kind === :geometry ? geo_of(f) :
@@ -224,7 +227,7 @@ function column_sql(b::DatabaseBackend, c::Column; adding = false, inline_fk = i
     d = c.default
     (d === nothing && adding && !c.null) && (d = backfill_value(c))
     d === nothing || (s *= " DEFAULT " * lit(b, d))
-    (c.references !== nothing && inline_fk) && (s *= " REFERENCES $(quote_name(b, c.references)) ($(quote_name(b, "id")))")
+    (c.references !== nothing && inline_fk) && (s *= " REFERENCES $(quote_name(b, ref_table(c.references))) ($(quote_name(b, "id")))")
     s
 end
 
@@ -258,7 +261,7 @@ drop_index_sql(b::DatabaseBackend, table, c::Column) =
     [drop_index_stmt(b, table, constraint_name(table, c.name, s)) for s in ("uniq", "idx")]
 
 fk_sql(b::DatabaseBackend, table, c::Column) =
-    (c.references === nothing || inline_foreign_keys(b)) ? String[] : [foreign_key_sql(b, table, c.name, c.references)]
+    (c.references === nothing || inline_foreign_keys(b)) ? String[] : [foreign_key_sql(b, table, c.name, ref_table(c.references))]
 
 """
     create_table_sql(b, t; if_not_exists=false) -> (statements, foreign_keys)

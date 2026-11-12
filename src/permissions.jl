@@ -54,36 +54,41 @@ perm_strings(qs) = Set{String}(string(r[:content_type__app_label], ".", r[:coden
                                for r in values(qs, :content_type__app_label, :codename))
 
 "Permissions a user has directly, as `\"app.codename\"` strings."
-get_user_permissions(u::User) = perm_strings(filter(base_objects(Permission); user_set = u))
+get_user_permissions(u::AbstractUser) = perm_strings(filter(base_objects(Permission); user_set = u))
 "Permissions a user has through groups."
-get_group_permissions(u::User) = perm_strings(filter(base_objects(Permission); group_set__user_set = u))
+get_group_permissions(u::AbstractUser) = perm_strings(filter(base_objects(Permission); group_set__user_set = u))
 
-"""
-    get_all_permissions(user) -> Set{String}
-
-Everything the user may do (cached on the user object; reload the user after changing
-permissions). Superusers get every permission in the database.
-"""
-function get_all_permissions(u::User)
-    u.is_active || return Set{String}()
+"The permissions of a user's groups and their own (cached on the user object); superusers get every one."
+function model_permissions(u::AbstractUser)
     get!(getfield(u, :_cache), :_perm_cache) do
         u.is_superuser ? perm_strings(base_objects(Permission)) :
             perm_strings(filter(base_objects(Permission), Q(user_set = u) | Q(group_set__user_set = u)))
     end
 end
-get_all_permissions(::AnonymousUser) = Set{String}()
 
 """
-    has_perm(user, "app.codename"; obj=nothing) -> Bool
+    get_all_permissions(user; obj = nothing) -> Set{String}
 
-Active superusers have every permission; inactive users have none. Object-level checks
-(`obj`) aren't provided by the default rules and return `false` (superusers excepted).
+Everything the user may do, as far as `AUTHENTICATION_BACKENDS` say (cached on the user
+object; reload the user after changing permissions). Inactive users have none.
 """
-function has_perm(u::User, perm::AbstractString; obj = nothing)
+function get_all_permissions(u::AbstractUser; obj = nothing)
+    u.is_active || return Set{String}()
+    reduce(union, (Set{String}(backend_get_all_permissions(b, u, obj)) for b in auth_backends()); init = Set{String}())
+end
+get_all_permissions(::AnonymousUser; obj = nothing) = Set{String}()
+
+"""
+    has_perm(user, "app.codename"; obj = nothing) -> Bool
+
+Active superusers have every permission; inactive users have none. Otherwise the user has
+it if a backend says so (`backend_has_perm`). The default `ModelBackend` has no per-object
+rules, so with `obj` only a backend of your own can grant it.
+"""
+function has_perm(u::AbstractUser, perm::AbstractString; obj = nothing)
     u.is_active || return false
     u.is_superuser && return true
-    obj === nothing || return false
-    perm in get_all_permissions(u)
+    any(b -> backend_has_perm(b, u, perm, obj) === true, auth_backends())
 end
 has_perm(::AnonymousUser, perm::AbstractString; obj = nothing) = false
 has_perm(::Nothing, perm::AbstractString; obj = nothing) = false
@@ -92,7 +97,7 @@ has_perm(::Nothing, perm::AbstractString; obj = nothing) = false
 has_perms(u, perms; obj = nothing) = all(p -> has_perm(u, p; obj = obj), perms)
 
 "Whether the user has any permission in an app (`has_module_perms(user, \"project\")`)."
-function has_module_perms(u::User, app::AbstractString)
+function has_module_perms(u::AbstractUser, app::AbstractString)
     u.is_active || return false
     u.is_superuser && return true
     any(p -> startswith(p, app * "."), get_all_permissions(u))

@@ -62,7 +62,7 @@ end
 const RESET_EPOCH = DateTime(2001, 1, 1)
 reset_now() = round(Int, (now(Dates.UTC) - RESET_EPOCH) / Second(1))
 
-function reset_hash(u::User, ts::Int)
+function reset_hash(u::AbstractUser, ts::Int)
     login = u.last_login === nothing ? "" : Dates.format(u.last_login, "yyyy-mm-ddTHH:MM:SS")
     value = string(u.id, u.password, login, ts, u.email)
     h = bytes2hex(hmac_sha256(Vector{UInt8}(codeunits("juango.passwordreset" * string(settings.SECRET_KEY))), Vector{UInt8}(codeunits(value))))
@@ -70,10 +70,10 @@ function reset_hash(u::User, ts::Int)
 end
 
 "A one-time password reset token for a user."
-make_reset_token(u::User; ts = reset_now()) = string(ts; base = 36) * "-" * reset_hash(u, ts)
+make_reset_token(u::AbstractUser; ts = reset_now()) = string(ts; base = 36) * "-" * reset_hash(u, ts)
 
 "Whether a password reset token is valid (not tampered with, not used, not older than PASSWORD_RESET_TIMEOUT)."
-function check_reset_token(u::User, token::AbstractString)
+function check_reset_token(u::AbstractUser, token::AbstractString)
     parts = split(token, '-')
     length(parts) == 2 || return false
     ts = tryparse(Int, parts[1]; base = 36)
@@ -126,7 +126,7 @@ function PasswordResetView(; template = "registration/password_reset_form.html",
         form = PasswordResetForm(req.method == "POST" ? req.POST : nothing)
         if req.method == "POST" && is_valid(form)
             email = form.cleaned_data[:email]
-            for u in filter(User; email__iexact = email, is_active = true)
+            for u in filter(get_user_model(); email__iexact = email, is_active = true)
                 has_usable_password(u) || continue
                 ctx = Dict{String,Any}("user" => u, "uid" => uid_encode(u.id), "token" => make_reset_token(u),
                                        "protocol" => is_secure(req) ? "https" : "http", "domain" => get_host(req),
@@ -151,8 +151,8 @@ password. `validlink` is false in the template when the link is invalid or used.
 function PasswordResetConfirmView(; template = "registration/password_reset_confirm.html")
     name_view!(function (req::Request; uidb64, token, kw...)
         id = uid_decode(uidb64)
-        pk = id === nothing ? nothing : parse_pk(User, id)
-        u = pk === nothing ? nothing : first(filter(User; id = pk))
+        pk = id === nothing ? nothing : parse_pk(get_user_model(), id)
+        u = pk === nothing ? nothing : first(filter(get_user_model(); id = pk))
         if u === nothing || !check_reset_token(u, token)
             return render(req, template, Dict("validlink" => false, "form" => nothing))
         end

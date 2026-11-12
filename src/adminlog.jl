@@ -5,7 +5,7 @@
 
 @model struct LogEntry
     action_time = DateTimeField(auto_now_add = true)
-    user = ForeignKey(User, null = true, on_delete = :SET_NULL)
+    user = ForeignKey(USER_MODEL, null = true, on_delete = :SET_NULL)
     content_type = ForeignKey(ContentType, null = true, on_delete = :SET_NULL)
     object_id = TextField(null = true, blank = true)
     object_repr = CharField(max_length = 200)
@@ -20,7 +20,7 @@ const ADDITION, CHANGE, DELETION = 1, 2, 3
 
 "Record an admin action on `obj` by `user` (`ADDITION`, `CHANGE` or `DELETION`)."
 function log_action!(user, obj::Model, flag::Integer, message::AbstractString = "")
-    u = user isa User ? user : nothing
+    u = user isa AbstractUser ? user : nothing
     create(LogEntry; user = u, content_type = get_for_model(obj), object_id = string(obj.id),
            object_repr = first(string(obj), 200), action_flag = flag,
            change_message = isempty(message) ? (flag == ADDITION ? "Added." : flag == DELETION ? "Deleted." : "No fields changed.") : message)

@@ -110,9 +110,10 @@ Base.get(c::Client, path::AbstractString; kw...) = request(c, "GET", path; kw...
 post(c::Client, path::AbstractString, data = Dict{String,Any}(); kw...) = request(c, "POST", path; data = data, kw...)
 
 "Log a user in without a password check (creates a session and sets the cookie)."
-function force_login!(c::Client, u::User)
+function force_login!(c::Client, u::AbstractUser; backend = first(auth_backends()))
     s = Session()
     s["_auth_user_id"] = u.id
+    s["_auth_user_backend"] = backend_name(backend)
     s["_auth_user_hash"] = session_auth_hash(u)
     save_session!(s)
     c.cookies[settings.SESSION_COOKIE_NAME] = s.key

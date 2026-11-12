@@ -306,6 +306,7 @@ end
 function related_model(f::Field)
     r = f.related
     r === :self && return f.model
+    r === :__user_model__ && return get_user_model()        # ForeignKey(USER_MODEL)
     r isa Symbol || r isa AbstractString || return r
     for T in MODEL_LIST
         string(nameof(T)) == string(r) && return T
@@ -437,6 +438,7 @@ function m2m_relations(T::Type)
         push!(out, (f.name, f, true))
     end
     for M in MODEL_LIST, f in modelmeta(M).m2m
+        model_in_use(M) || continue
         related_model(f) === T || continue
         push!(out, (f.related_name === nothing ? Symbol(lowercase(modelmeta(M).name), :_set) : f.related_name, f, false))
     end
@@ -530,7 +532,7 @@ function reverse_relations(T::Type)
     out = Tuple{Symbol,Any,Field}[]
     lin = lineage(T)
     for M in MODEL_LIST
-        modelmeta(M).proxy && continue
+        (modelmeta(M).proxy || !model_in_use(M)) && continue
         for f in modelmeta(M).fields
             f.kind === :fk || continue
             related_model(f) in lin || continue

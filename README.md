@@ -769,6 +769,44 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 - CSRF protection on POST/PUT/PATCH/DELETE: `{% csrf_token %}` or an `X-CSRFToken` header. Mark exceptions with `csrf_exempt(view)`.
 - One-time messages: `message!(req, :success, "Saved")`, rendered with `{% for m in messages %}`.
 
+#### Custom user model
+
+Extend `AbstractUser` and name it in `AUTH_USER_MODEL` before the first `migrate`:
+
+```julia
+@model struct Member <: AbstractUser
+    phone = CharField(max_length = 20, blank = true)
+    Meta(app_label = "accounts")
+end
+Juango.username_field(::Type{Member}) = :email      # log in with the email (default :username)
+configure!(AUTH_USER_MODEL = "accounts.Member")     # or Member
+
+@model struct Order
+    customer = ForeignKey(USER_MODEL, on_delete = :CASCADE)   # follows AUTH_USER_MODEL
+end
+```
+
+`get_user_model()` returns it, and `create_user`, `authenticate`, sessions, permissions, password reset, the admin and `createsuperuser` all use it. Migrations record `ForeignKey(USER_MODEL)` references as swappable, so an app's migrations work whichever user model a project picks. Only the chosen user model has a table: Juango's `User` drops out of content types, permissions and reverse relations when it's swapped. Its `auth_user` table is still created by the auth app's migration, but stays unused.
+
+#### Authentication backends
+
+`AUTHENTICATION_BACKENDS` (default `[ModelBackend()]`) decides who can log in and what they may do. A backend is any value whose type has methods of some of these functions. Each returns `nothing` when it has no opinion:
+
+```julia
+struct TokenBackend end
+Juango.backend_authenticate(::TokenBackend, req; token = nothing, kw...) =
+    token === nothing ? nothing : first(filter(objects(get_user_model()); api_token = token))
+Juango.backend_get_user(::TokenBackend, id) = first(filter(objects(get_user_model()); id = id))
+Juango.backend_has_perm(::TokenBackend, user, perm, obj) =          # object-level permissions
+    obj isa Post && obj.author_id == user.id ? true : nothing
+configure!(AUTHENTICATION_BACKENDS = [ModelBackend(), TokenBackend()])
+
+authenticate(req; token = "...")                 # each backend in turn; the first user wins
+has_perm(user, "blog.change_post"; obj = post)   # true if any backend says so
+```
+
+The session remembers which backend logged a user in. If that backend is removed from the settings, the user is logged out. A backend can throw `PermissionDenied` to stop the search. `ModelBackend` checks the password and gives users their own and their groups' permissions, with no per-object rules. Active superusers have every permission.
+
 ### Email
 
 ```julia

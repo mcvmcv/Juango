@@ -76,7 +76,9 @@ const BUILTIN_LABELS = ("admin", "auth", "contenttypes", "sessions", "messages",
 Whether a model takes part in migrations, content types and permissions: models of Juango's
 own apps only while their app is installed; every other model always.
 """
-model_in_use(T) = (a = modelmeta(T).app; !(a in BUILTIN_LABELS) || is_installed(a))
+model_in_use(T) = (a = modelmeta(T).app; (!(a in BUILTIN_LABELS) || is_installed(a)) && !is_swapped(T) && !swapped_through(T))
+"The join model of a swapped user model's many-to-many fields."
+swapped_through(T) = T <: AutoThrough && any(f -> f.kind === :fk && is_swapped(related_model(f)), modelmeta(T).fields)
 
 const INSTALLED = Ref{Union{Nothing,Vector{App}}}(nothing)
 const APPS_LOCK = ReentrantLock()

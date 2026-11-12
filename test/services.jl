@@ -652,3 +652,76 @@ end
     end
     @test !(get(Article; title = "tz").created isa TZ.ZonedDateTime)      # naive again without USE_TZ
 end
+
+# An authentication backend: a secret token logs "tokenuser" in, and authors may change their own articles.
+struct TokenBackend end
+Juango.backend_authenticate(::TokenBackend, req; token = nothing, kw...) =
+    token == "letmein" ? first(filter(objects(get_user_model()); username = "tokenuser")) :
+    token == "blocked" ? throw(PermissionDenied("no")) : nothing
+Juango.backend_get_user(::TokenBackend, id) = first(filter(objects(get_user_model()); id = id))
+Juango.backend_has_perm(::TokenBackend, u, perm, obj) =
+    perm == "project.change_article" && obj isa Article && obj.author.name == u.username ? true : nothing
+Juango.backend_get_all_permissions(::TokenBackend, u, obj) =
+    obj isa Article && obj.author.name == u.username ? Set(["project.change_article"]) : Set{String}()
+
+@model struct Member <: AbstractUser
+    nickname = CharField(max_length = 20, blank = true)
+    Meta(table = "cu_member", app_label = "project")
+end
+Juango.username_field(::Type{Member}) = :email
+
+@testset "authentication backends and custom user models" begin
+    tu = create_user("tokenuser", "token-pw-123")
+    mine = create(Article; title = "tokens", author = create(Author; name = "tokenuser"))
+    other = create(Article; title = "not mine", author = ann_author())
+    try
+        configure!(AUTHENTICATION_BACKENDS = Any[ModelBackend(), TokenBackend()])
+        @test authenticate(; token = "letmein").id == tu.id
+        @test authenticate(; token = "wrong") === nothing && authenticate(; token = "blocked") === nothing
+        @test authenticate("tokenuser", "token-pw-123").id == tu.id && authenticate("tokenuser", "nope") === nothing
+        # per-object permissions come from the backend; ModelBackend adds none per object
+        @test has_perm(tu, "project.change_article"; obj = mine) && !has_perm(tu, "project.change_article"; obj = other)
+        @test !has_perm(tu, "project.change_article")
+        @test get_all_permissions(tu; obj = mine) == Set(["project.change_article"]) && isempty(get_all_permissions(tu))
+        # the session remembers the backend; removing it from the settings logs the user out
+        c = Client()
+        force_login!(c, tu; backend = TokenBackend())
+        @test text(get(c, "/whoami/")) == "user:tokenuser"
+        configure!(AUTHENTICATION_BACKENDS = Any[ModelBackend()])
+        @test text(get(c, "/whoami/")) == "anon"
+        configure!(AUTHENTICATION_BACKENDS = Any[ModelBackend(), TokenBackend()])
+        @test text(get(c, "/whoami/")) == "user:tokenuser"
+        # logging in through the login view stores the backend that accepted the password
+        c2 = Client()
+        post(c2, "/accounts/login/", Dict("username" => "tokenuser", "password" => "token-pw-123"))
+        @test text(get(c2, "/whoami/")) == "user:tokenuser"
+    finally
+        configure!(AUTHENTICATION_BACKENDS = Any[ModelBackend()])
+    end
+
+    # a custom user model that logs in with its email
+    try
+        configure!(AUTH_USER_MODEL = "project.Member")
+        @test get_user_model() === Member && Juango.is_swapped(User) && !Juango.model_in_use(User)
+        redirect_stdout(() -> migrate(verbose = false), devnull)
+        m = create_user("m@example.com", "member-pw-1"; nickname = "Em")
+        @test m isa Member && m.email == "m@example.com" && m.username == "m@example.com"
+        @test authenticate("m@example.com", "member-pw-1").id == m.id && authenticate(; email = "m@example.com", password = "x") === nothing
+        g = create(Group; name = "members-group")
+        add!(m.groups, g)
+        add!(g.permissions, get(Permission; codename = "view_article"))
+        @test [u.nickname for u in g.user_set] == ["Em"] && has_perm(get(Member; id = m.id), "project.view_article")
+        @test Juango.related_model(Juango.findfield(Juango.modelmeta(LogEntry), :user)) === Member
+        c = Client()
+        force_login!(c, m)
+        @test text(get(c, "/whoami/")) == "user:m@example.com"
+        Admin.register_user_model!()
+        @test Admin.is_registered(Member) && !Admin.is_registered(User)
+        @test_throws Juango.ImproperlyConfigured (configure!(AUTH_USER_MODEL = Article); get_user_model())
+    finally
+        configure!(AUTH_USER_MODEL = User)
+        Admin.unregister!(Member)
+        Admin.register_user_model!()
+    end
+    @test get_user_model() === User && Admin.is_registered(User) && Juango.model_in_use(User)
+end

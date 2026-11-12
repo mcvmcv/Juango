@@ -392,6 +392,7 @@ function build_graph(apps = migrated_apps(); applied = nothing)
     for a in apps, m in load_app(a)
         nodes[key(m)] = m
     end
+    resolve_swappable!(nodes)
     resolve_replacements!(nodes, applied)
     for m in values(nodes), d in m.dependencies
         haskey(nodes, d) || throw(MigrationError("$m depends on $(d[1]).$(d[2]), which does not exist"))
@@ -454,6 +455,23 @@ function replay(g::Graph, ks)
 end
 
 state_before(g::Graph, k) = replay(g, setdiff(ancestors(g, k), [k]))
+
+"""
+`(\"__user_model__\", \"__first__\")` dependencies become the first migration of the app with
+the AUTH_USER_MODEL (or go away when that app has no migrations).
+"""
+function resolve_swappable!(nodes)
+    U = Juango.get_user_model()
+    app = modelmeta(U).app
+    mine = sort([k for k in keys(nodes) if k[1] == app]; by = last)
+    target = isempty(mine) ? nothing : first(mine)
+    for m in values(nodes)
+        any(d -> d[1] == "__user_model__", m.dependencies) || continue
+        m.dependencies = unique([d for d in (d[1] == "__user_model__" ? target : d for d in m.dependencies)
+                                 if d !== nothing && d != key(m)])
+    end
+    nodes
+end
 
 """
 Squashed migrations stand in for the migrations they replace when none or all of those are
@@ -823,7 +841,7 @@ function creation_order(tables::Vector{Table})
     visit(t, path) = begin
         t.name in seen && return
         push!(path, t.name)
-        for r in vcat([c.references for c in t.columns], [t.parent])
+        for r in vcat([c.references === nothing ? nothing : Juango.ref_table(c.references) for c in t.columns], [t.parent])
             (r !== nothing && r in names && !(r in path)) && visit(byname[r], path)
         end
         pop!(path)
@@ -970,6 +988,8 @@ function makemigrations(; app = "project", name = nothing, empty = false, merge 
     tables = Dict(modelmeta(T).table => modelmeta(T).app for T in all_models())
     for op in ops, c in (op isa CreateModel ? op.columns : op isa Union{AddField,AlterField} ? [op.column] : Column[])
         c.references === nothing && continue
+        # a FK to USER_MODEL depends on whichever app provides the user model
+        c.references == "__user_model__" && (push!(deps, ("__user_model__", "__first__")); continue)
         other = get(tables, c.references, app)
         other == app && continue
         ol = leaf_nodes(g, other)

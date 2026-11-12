@@ -11,7 +11,7 @@ module Admin
 
 using ..Juango
 import ..Juango: Model, Field, Request, modelmeta, attname, label, findfield, related_model, format_date,
-                 SafeString, escape_html, render, NOTFOUND, tattr, urlencode, QueryDict, User, LoginView,
+                 SafeString, escape_html, render, NOTFOUND, tattr, urlencode, QueryDict, User, AbstractUser, LoginView,
                  make_password, set_unusable_password!, reverse_relations, Paginator, page, Http404,
                  ProtectedError, staff_member_required, message!, reverse_url, get_absolute_url, model_name,
                  HttpResponse, LogEntry, log_action!, ADDITION, CHANGE, DELETION, get_for_model
@@ -155,11 +155,23 @@ end
 is_registered(T::Type) = haskey(REGISTRY, model_name(T))
 
 function register_builtin!()
-    is_registered(User) || register!(User;
-        list_display = [:username, :email, :first_name, :last_name, :is_staff],
-        search_fields = [:username, :first_name, :last_name, :email],
-        list_filter = [:is_staff, :is_superuser, :is_active], password_fields = [:password])
+    register_user_model!()
     is_registered(Juango.Group) || register!(Juango.Group; list_display = [:name], search_fields = [:name])
+end
+
+"""
+    Admin.register_user_model!(T = get_user_model(); options...)
+
+Register a user model with the options Juango's `User` has (password hashing, search,
+filters). Done for the AUTH_USER_MODEL when the admin's URLs are built; call it yourself to
+change the options.
+"""
+function register_user_model!(T = Juango.get_user_model(); kw...)
+    is_registered(T) && isempty(kw) && return
+    T !== User && is_registered(User) && unregister!(User)
+    register!(T; list_display = [:username, :email, :first_name, :last_name, :is_staff],
+              search_fields = [:username, :first_name, :last_name, :email],
+              list_filter = [:is_staff, :is_superuser, :is_active], password_fields = [:password], kw...)
 end
 
 get_admin(slug) = (ma = get(REGISTRY, slug, nothing); ma === nothing ? throw(Http404("No admin for model '$slug'")) : ma)
@@ -196,7 +208,7 @@ function index(req::Request)
                              "can_add" => can(req, REGISTRY[s], :add), "can_view" => can_view(req, REGISTRY[s]),
                              "can_change" => can(req, REGISTRY[s], :change)))
                          for s in visible_models(req)]
-    recent = req.user isa User ? collect(select_related(filter(LogEntry; user = req.user), :content_type)[1:10]) : LogEntry[]
+    recent = req.user isa AbstractUser ? collect(select_related(filter(LogEntry; user = req.user), :content_type)[1:10]) : LogEntry[]
     ctx["recent_actions"] = [Dict{String,Any}("entry" => e, "url" => admin_url_for(e),
                                               "type" => e.content_type === nothing ? "" : e.content_type.model) for e in recent]
     render(req, "admin/index.html", ctx)
@@ -682,6 +694,7 @@ URL patterns for the admin, namespaced `admin`: `path("admin/", Admin.urls())`.
 """
 function urls()
     Juango.require_app("admin", "Admin.urls()")
+    register_user_model!()
     s(v) = staff_member_required(v)
     include_urls([
         path("", s(index); name = "index"),

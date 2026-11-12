@@ -734,3 +734,28 @@ end
         configure!(MIGRATION_MODULES = Dict{String,String}())
     end
 end
+
+@testset "migrations: foreign keys to the user model are swappable" begin
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("migusr" => dir))
+    quiet(f) = redirect_stdout(f, devnull)
+    try
+        @eval @model struct UsNote
+            owner = ForeignKey(USER_MODEL, on_delete = :CASCADE)
+            text = CharField(max_length = 20)
+            Meta(table = "us_note", app_label = "migusr")
+        end
+        src = read(only(quiet(() -> makemigrations(app = "migusr", questioner = _ -> false))), String)
+        @test occursin("references = \"__user_model__\"", src) && occursin("(\"__user_model__\", \"__first__\")", src)
+        g = Juango.Migrations.build_graph(["auth", "contenttypes", "migusr"])
+        n = only([m for m in values(g.nodes) if m.app == "migusr"])
+        @test ("auth", "0001_initial") in n.dependencies
+        quiet(() -> migrate())
+        note = create(UsNote; owner = root_user(), text = "hi")
+        @test get(UsNote; id = note.id).owner.username == "root"
+        quiet(() -> migrate(app = "migusr", target = "zero"))
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "migusr", Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end

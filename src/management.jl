@@ -82,7 +82,8 @@ function cmd_createsuperuser(args)
             end
         end
     end
-    exists(filter(objects(User); username = username)) && error("Error: That username is already taken.")
+    U = get_user_model()
+    exists(filter(objects(U), Q(username_field(U) => username))) && error("Error: That username is already taken.")
     create_superuser(username, password; email = email)
     println("Superuser created successfully.")
 end
@@ -231,7 +232,8 @@ for (n, h, f) in (
     ("clearsessions", "Delete expired sessions", _ -> println("Deleted ", clear_expired_sessions!(), " expired sessions.")),
     ("changepassword", "Change a user's password: changepassword <username>", function (args)
         pos, flags = parse_flags(args)
-        u = get(objects(User); username = isempty(pos) ? prompt("Username: ") : pos[1])
+        U = get_user_model()
+        u = get(objects(U), Q(username_field(U) => isempty(pos) ? prompt("Username: ") : pos[1]))
         pw = get(flags, "password", nothing)
         pw === nothing && (pw = read(Base.getpass("New password"), String))
         set_password!(u, pw)

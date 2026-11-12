@@ -2,12 +2,12 @@
 using Juango.Migrations
 
 Migration(
-    dependencies = [("auth", "0001_initial"), ("contenttypes", "0001_initial")],
+    dependencies = [("__user_model__", "__first__"), ("contenttypes", "0001_initial")],
     initial = true,
     operations = [
         CreateModel("juango_admin_log"; model = "LogEntry", columns = [
             Column("action_time", :datetime),
-            Column("user_id", :fk; null = true, index = true, references = "auth_user"),
+            Column("user_id", :fk; null = true, index = true, references = "__user_model__"),
             Column("content_type_id", :fk; null = true, index = true, references = "juango_content_type"),
             Column("object_id", :string; null = true),
             Column("object_repr", :string; max_length = 200),
