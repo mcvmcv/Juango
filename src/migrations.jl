@@ -19,14 +19,14 @@ module Migrations
 
 using Dates
 import ..Juango
-using ..Juango: Column, Table, Index, ConstraintSpec, Q, F, Value, CombinedExpression, Func, SchemaState, copy_state, getcolumn, hascolumn, with_column, same_definition,
+using ..Juango: Column, Table, Index, ConstraintSpec, Q, F, Value, CombinedExpression, Func, get_model, objects, save!, create, update!, SchemaState, copy_state, getcolumn, hascolumn, with_column, same_definition,
     backend, execute, atomic, settings, table_exists, table_columns, models_state, sync_models!, modelmeta,
     all_models, create_table_sql, drop_table_sql, rename_table_sql, add_column_sql, drop_column_sql,
     rename_column_sql, alter_column_sql, backfill_value, quote_name, VERSION_STRING
 
 export Migration, CreateModel, DeleteModel, RenameModel, AddField, RemoveField, AlterField, RenameField,
        AlterUniqueTogether, AddIndex, RemoveIndex, AddConstraint, RemoveConstraint, RunSQL, RunJulia, Column, Index,
-       ConstraintSpec, Q, F, Value, CombinedExpression, Func
+       ConstraintSpec, Q, F, Value, CombinedExpression, Func, get_model, objects, save!, create, update!
 
 # --- operations ---------------------------------------------------------------------------------
 
@@ -143,9 +143,15 @@ sqllist(x) = String[string(s) for s in x]
 """
     RunJulia(forward, backward=nothing)
 
-Run Julia code (a zero-argument function) as part of a migration, typically a data
-migration. Prefer `Juango.execute` with raw SQL over the ORM here: the ORM uses today's
-model definitions, which may not match the schema at this point in history.
+Run Julia code as part of a migration, typically a data migration. A function of one
+argument gets the models as they were at this point in history (use those, not today's
+model structs, whose fields may since have changed):
+
+    RunJulia(apps -> for p in objects(get_model(apps, "blog", "Post"))
+                         p.slug = lowercase(p.title); save!(p)
+                     end)
+
+A function of no arguments just runs (e.g. `Juango.execute` with raw SQL).
 """
 struct RunJulia <: Operation
     forward::Function
@@ -166,10 +172,11 @@ mutable struct Migration
     operations::Vector{Operation}
     initial::Bool
     path::String
+    replaces::Vector{Tuple{String,String}}   # a squashed migration: the migrations it stands for
 end
-Migration(; dependencies = [], operations = [], initial = false) =
+Migration(; dependencies = [], operations = [], initial = false, replaces = []) =
     Migration("", "", Tuple{String,String}[(string(a), string(n)) for (a, n) in dependencies],
-              collect(Operation, operations), initial, "")
+              collect(Operation, operations), initial, "", Tuple{String,String}[(string(a), string(n)) for (a, n) in replaces])
 
 key(m::Migration) = (m.app, m.name)
 Base.show(io::IO, m::Migration) = print(io, m.app, ".", m.name)
@@ -293,10 +300,17 @@ function backwards(op::RunSQL, b, from, to, deferred)
     op.backward === nothing && throw(IrreversibleError("RunSQL has no reverse SQL"))
     op.backward
 end
-forwards(op::RunJulia, b, from, to, deferred) = Any[op.forward]
+"A RunJulia function as an action: one that takes an argument gets the historical models."
+function julia_action(f, st)
+    () -> begin
+        apps = Juango.HistoricalApps(st)
+        Base.invokelatest(applicable, f, apps) ? Base.invokelatest(f, apps) : Base.invokelatest(f)
+    end
+end
+forwards(op::RunJulia, b, from, to, deferred) = Any[julia_action(op.forward, copy_state(from))]
 function backwards(op::RunJulia, b, from, to, deferred)
     op.backward === nothing && throw(IrreversibleError("RunJulia has no reverse function"))
-    Any[op.backward]
+    Any[julia_action(op.backward, copy_state(from))]
 end
 
 describe(op::CreateModel) = "Create model $(op.model) (table $(op.table))"
@@ -373,11 +387,12 @@ struct Graph
     nodes::Dict{Tuple{String,String},Migration}
 end
 
-function build_graph(apps = migrated_apps())
+function build_graph(apps = migrated_apps(); applied = nothing)
     nodes = Dict{Tuple{String,String},Migration}()
     for a in apps, m in load_app(a)
         nodes[key(m)] = m
     end
+    resolve_replacements!(nodes, applied)
     for m in values(nodes), d in m.dependencies
         haskey(nodes, d) || throw(MigrationError("$m depends on $(d[1]).$(d[2]), which does not exist"))
     end
@@ -440,6 +455,33 @@ end
 
 state_before(g::Graph, k) = replay(g, setdiff(ancestors(g, k), [k]))
 
+"""
+Squashed migrations stand in for the migrations they replace when none or all of those are
+applied (their dependants then depend on the squashed one); when only some are, the
+originals are used and the squashed migration is left out.
+"""
+function resolve_replacements!(nodes, applied)
+    squashed = [m for m in values(nodes) if !isempty(m.replaces)]
+    isempty(squashed) && return nodes
+    applied === nothing && (applied = try applied_migrations() catch; Set{Tuple{String,String}}() end)
+    for m in squashed
+        k = key(m)
+        reps = [r for r in m.replaces if haskey(nodes, r)]           # replaced files may be gone already
+        done = count(in(applied), m.replaces)
+        use_squashed = done == 0 || done == length(m.replaces) || isempty(reps)
+        if use_squashed
+            foreach(r -> delete!(nodes, r), reps)
+        else
+            delete!(nodes, k)
+        end
+        remap(d) = use_squashed ? (d in m.replaces ? k : d) : (d == k ? last(m.replaces) : d)
+        for n in values(nodes)
+            n.dependencies = filter(!=(key(n)), unique(map(remap, n.dependencies)))
+        end
+    end
+    nodes
+end
+
 # --- recorder -----------------------------------------------------------------------------------
 
 const RECORDER = Table("juango_migrations", "juango", "MigrationRecord",
@@ -458,6 +500,14 @@ function applied_migrations()
 end
 
 record_applied!(k) = execute("INSERT INTO \"juango_migrations\" (\"app\", \"name\", \"applied\") VALUES (?, ?, ?)", [k[1], k[2], now()])
+is_recorded(k) = !isempty(execute("SELECT 1 FROM \"juango_migrations\" WHERE \"app\" = ? AND \"name\" = ?", [k[1], k[2]]))
+"Record a migration (and those it replaces, for a squashed one) as applied."
+function record_applied_all!(m::Migration)
+    for k in vcat([key(m)], m.replaces)
+        is_recorded(k) || record_applied!(k)
+    end
+end
+record_unapplied_all!(m::Migration) = foreach(record_unapplied!, vcat([key(m)], m.replaces))
 record_unapplied!(k) = execute("DELETE FROM \"juango_migrations\" WHERE \"app\" = ? AND \"name\" = ?", [k[1], k[2]])
 
 # --- executing ----------------------------------------------------------------------------------
@@ -510,13 +560,13 @@ function apply!(g::Graph, k; backwards = false, fake = false, log = println)
     m = g.nodes[k]
     label = backwards ? "  Unapplying $(m)..." : "  Applying $(m)..."
     if !backwards && !fake && already_in_database(m)
-        record_applied!(k)
+        record_applied_all!(m)
         log(label * " FAKED (tables already exist)")
         return
     end
     atomic() do
         fake || foreach(run_action, migration_actions(g, k; backwards = backwards))
-        backwards ? record_unapplied!(k) : record_applied!(k)
+        backwards ? record_unapplied_all!(m) : record_applied_all!(m)
     end
     log(label * (fake ? " FAKED" : " OK"))
 end
@@ -578,9 +628,14 @@ function migrate_here(; app = nothing, target = nothing, fake = false, sync = fa
         return nothing
     end
     target !== nothing && app === nothing && (app = "project")
-    g = build_graph()
-    check_conflicts(g)
     applied = applied_migrations()
+    g = build_graph(; applied = applied)
+    check_conflicts(g)
+    for m in values(g.nodes)       # a squashed migration whose originals all ran counts as applied
+        if !isempty(m.replaces) && !(key(m) in applied) && all(in(applied), m.replaces)
+            record_applied!(key(m)); push!(applied, key(m))
+        end
+    end
     plan = migration_plan(g, applied; app = app, target = target)
     unmigrated = [T for T in all_models() if Juango.model_in_use(T) && !(modelmeta(T).app in migrated_apps()) && allowed(T)]
     log("Operations to perform:")
@@ -833,7 +888,8 @@ function migration_code(m::Migration)
     using Juango.Migrations
 
     Migration(
-        dependencies = $deps,$(m.initial ? "\n    initial = true," : "")
+        dependencies = $deps,$(m.initial ? "\n    initial = true," : "")$(isempty(m.replaces) ? "" :
+        "\n    replaces = [" * join(["($(jl(a)), $(jl(n)))" for (a, n) in m.replaces], ", ") * "],")
         operations = [
     $ops    ],
     )
@@ -933,7 +989,65 @@ function makemigrations(; app = "project", name = nothing, empty = false, merge 
                 dry_run = dry_run || check, log = log)]
 end
 
+"""
+    squashmigrations(app, stop; start = nothing, name = nothing, dry_run = false) -> path
+
+Write one migration that stands for `app`'s migrations from `start` (default: the first) to
+`stop`. Operations on tables that existed before are kept as they were; tables created in
+the range become one `CreateModel` with their final definition. The new file lists the
+migrations it `replaces`: databases that applied all (or none) of them use it, others keep
+using the originals. Once every database has migrated past it, delete the old files and
+the `replaces` line. Ranges with `RunSQL` or `RunJulia` (data migrations) are refused.
+"""
+function squashmigrations(app, stop; start = nothing, name = nothing, dry_run = false, verbose = true)
+    log(msg) = verbose && println(msg)
+    app = string(app)
+    g = build_graph(; applied = Set{Tuple{String,String}}())
+    order = [k for k in topo_order(g) if k[1] == app]
+    isempty(order) && throw(MigrationError("app '$app' has no migrations"))
+    last_k = resolve_name(g, app, string(stop))
+    first_k = start === nothing ? order[1] : resolve_name(g, app, string(start))
+    i, j = findfirst(==(first_k), order), findfirst(==(last_k), order)
+    (i !== nothing && j !== nothing && j > i) || throw(MigrationError("squashmigrations needs at least two migrations, from $(first_k[2]) to $(last_k[2])"))
+    range = order[i:j]
+    for k in range
+        isempty(g.nodes[k].replaces) || throw(MigrationError("$(k[2]) is itself a squashed migration; squash the originals instead"))
+        for op in g.nodes[k].operations
+            op isa Union{RunSQL,RunJulia} && throw(MigrationError(
+                "$(k[2]) has a $(nameof(typeof(op))) operation; squashmigrations only combines schema changes " *
+                "(squash the migrations before and after it separately)"))
+        end
+    end
+    inrange = Set(range)
+    deps = sort(unique([d for k in range for d in g.nodes[k].dependencies if !(d in inrange)]))
+    after = state_before(g, first_k)
+    created = Set{String}()            # tables created in the range, by their current name
+    kept = Operation[]
+    for k in range, op in g.nodes[k].operations
+        state_forwards!(op, after, app)
+        if op isa CreateModel
+            push!(created, op.table)
+        elseif op isa RenameModel && op.old in created
+            delete!(created, op.old); push!(created, op.new)
+        elseif op isa DeleteModel && op.table in created
+            delete!(created, op.table)
+        elseif hasfield(typeof(op), :table) && getfield(op, :table) in created
+            # folded into the table's CreateModel
+        else
+            push!(kept, op)
+        end
+    end
+    creates = Operation[CreateModel(t.name; model = t.model, columns = t.columns, unique_together = t.unique_together,
+                                    parent = t.parent, pk = t.pk, indexes = t.indexes, constraints = t.constraints,
+                                    pk_columns = t.pk_columns)
+                        for t in creation_order(Table[after[n] for n in created])]
+    m = Migration(; dependencies = deps, operations = vcat(creates, kept), initial = g.nodes[first_k].initial,
+                  replaces = range)
+    number = parse(Int, first_k[2][1:4])
+    write_file(app, number, something(name, "squashed_" * last_k[2]), m; dry_run = dry_run, log = log)
+end
+
 end # module Migrations
 
-using .Migrations: makemigrations, showmigrations, sqlmigrate
+using .Migrations: makemigrations, showmigrations, sqlmigrate, squashmigrations
 migrate(; kw...) = Migrations.migrate(; kw...)

@@ -165,6 +165,15 @@ function cmd_makemigrations(args)
     paths
 end
 
+# squashmigrations app [start] stop [--name NAME] [--dry-run]
+function cmd_squashmigrations(args)
+    pos, flags = parse_flags(args)
+    length(pos) in (2, 3) || error("usage: squashmigrations <app> [start] <stop> [--name NAME] [--dry-run]")
+    app = pos[1]
+    start, stop = length(pos) == 3 ? (pos[2], pos[3]) : (nothing, pos[2])
+    squashmigrations(app, stop; start = start, name = get(flags, "name", nothing), dry_run = haskey(flags, "dry-run"))
+end
+
 # sqlmigrate [app] name [--backwards]
 function cmd_sqlmigrate(args)
     pos, flags = parse_flags(args)
@@ -193,6 +202,7 @@ for (n, h, f) in (
     ("makemigrations", "Write migrations for model changes (--name, --empty, --merge, --dry-run, --check, --noinput, --app)", cmd_makemigrations),
     ("showmigrations", "List migrations and whether they are applied", _ -> showmigrations()),
     ("sqlmigrate", "Print the SQL for a migration: sqlmigrate [app] <name> [--backwards]", cmd_sqlmigrate),
+    ("squashmigrations", "Combine migrations into one: squashmigrations <app> [start] <stop> [--name NAME]", cmd_squashmigrations),
     ("createsuperuser", "Create an admin user (--username, --email, --password, --noinput)", cmd_createsuperuser),
     ("showurls", "List all URL patterns", cmd_showurls),
     ("startapp", "Create an app skeleton: startapp <name> [--dir DIR]", function (args)

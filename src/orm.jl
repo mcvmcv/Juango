@@ -46,6 +46,7 @@ mutable struct Field
     one_to_one::Bool    # OneToOneField: a unique FK whose reverse side is a single object
     db_default::Any     # value (or Now()) the database fills in when a new row leaves the field out
     generated::Any      # GeneratedField: (expression, persisted) computed by the database
+    symmetrical::Bool   # ManyToManyField(:self): a relation in one direction is one in both
 end
 
 "The value of a field with `db_default` until the row is saved and the database has filled it in."
@@ -61,7 +62,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                related_name = nothing, auto_now = false, auto_now_add = false, verbose_name = "",
                help_text = "", validators = Any[], widget = nothing, editable = true,
                db_index = false, required = nothing, label = nothing, through = nothing, one_to_one = false,
-               db_default = nothing, generated = nothing)
+               db_default = nothing, generated = nothing, symmetrical = false)
     required === nothing || (blank = !required)
     label === nothing || (verbose_name = string(label))
     if auto_now || auto_now_add
@@ -73,7 +74,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           auto_now, auto_now_add, verbose_name isa AbstractString ? verbose_name : string(verbose_name),
           help_text isa AbstractString ? help_text : string(help_text), collect(Any, validators),
           widget === nothing ? nothing : Symbol(widget), editable, db_index, nothing, through, one_to_one,
-          db_default, generated)
+          db_default, generated, symmetrical)
 end
 
 """
@@ -133,8 +134,18 @@ A many-to-many relation. Juango creates the join table (`<table>_<field>`, with 
 pair) unless `through` names your own intermediate model with two foreign keys. Access it
 as `post.tags` (a queryset) and change it with `add!`, `remove!`, `set!` and `clear!`.
 The other side gets `tag.post_set` (or `related_name`).
+
+A relation of a model to itself (`friends = ManyToManyField(:self)`) is symmetrical: when
+`a` is a friend of `b`, `b` is a friend of `a` (adding or removing either way changes both).
+Pass `symmetrical = false` for one-way relations such as "follows".
 """
-ManyToManyField(to; kw...) = Field(:m2m; related = to, kw...)
+function ManyToManyField(to; symmetrical = nothing, kw...)
+    sym = something(symmetrical, to === :self)
+    sym && to !== :self && throw(ArgumentError("symmetrical = true is for a ManyToManyField(:self)"))
+    sym && haskey(kw, :through) && kw[:through] !== nothing &&
+        throw(ArgumentError("a symmetrical ManyToManyField can't have a custom through model; use symmetrical = false"))
+    Field(:m2m; related = to, symmetrical = sym, kw...)
+end
 
 const STRING_KINDS = (:char, :text, :email, :slug, :url)
 
@@ -815,12 +826,13 @@ mutable struct SQLCompiler
     annotations::Dict{Symbol,Any}
     uses_aggregate::Bool        # set when a condition refers to an aggregate annotation (-> HAVING)
     outer::Union{Nothing,SQLCompiler}   # the enclosing query, for OuterRef
+    uses_window::Bool           # set when a condition refers to a window annotation (-> wrapping query)
 end
 function SQLCompiler(@nospecialize(T::Type); outer = nothing)
     table = modelmeta(T).table
     counter = outer === nothing ? Ref(0) : outer.counter
     c = SQLCompiler(T, table, table, String[], Dict{Any,String}(), Set{String}(), counter, false, 0,
-                    Dict{Symbol,Any}(), false, outer)
+                    Dict{Symbol,Any}(), false, outer, false)
     outer === nothing || (c.base = new_alias!(c))   # subqueries alias their table: no clash with the outer one
     c
 end
@@ -878,7 +890,11 @@ function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nos
     rest = String.(parts[2:end])
     f = nothing
     colps = Any[]
-    if alias == c.base && isempty(rest) && haskey(c.annotations, Symbol(fname))
+    if alias == c.base && isempty(rest) && haskey(c.annotations, Symbol(fname)) && contains_window(c.annotations[Symbol(fname)])
+        # Window functions can't appear in WHERE: the query is wrapped and this compares the column.
+        c.uses_window = true
+        col = qname(fname)
+    elseif alias == c.base && isempty(rest) && haskey(c.annotations, Symbol(fname))
         a = c.annotations[Symbol(fname)]
         contains_aggregate(a) && (c.uses_aggregate = true)
         sql, colps = compile_expr(c, a)
@@ -1347,13 +1363,21 @@ function related_columns!(c::SQLCompiler, paths)
             alias = field_alias!(c, alias, M, f)
             alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, "id", column(f); left = f.null)
             M = related_model(f)
-            isempty(ancestors(M)) || throw(LookupError("select_related can't load $M, which inherits from another table; use prefetch_related"))
             sub = path[1:i]
             any(x -> x[1] == sub, out) && continue
             push!(out, (sub, M, alias))
             push!(cols, "$(qcol(alias, "id")) AS $(qname(alias * "__id"))")
             for g in modelmeta(M).fields
                 push!(cols, "$(qcol(alias, column(g))) AS $(qname(alias * "__" * column(g)))")
+            end
+            # a model that extends another table: join its parents for the inherited fields
+            palias, A = alias, concrete_model(M)
+            while (P = table_parent(A)) !== nothing
+                palias = join!(c, palias, (palias, :__parent), modelmeta(P).table, "id", "id"; left = f.null)
+                for g in modelmeta(P).fields
+                    push!(cols, "$(qcol(palias, column(g))) AS $(qname(alias * "__" * column(g)))")
+                end
+                A = P
             end
         end
     end
@@ -1420,23 +1444,30 @@ function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = 
         push!(group, pk_select(c.base, T))
         append!(group, [qcol(a, "id") for (_, _, a) in related])
     end
-    if columns === nothing && !idonly
-        for (k, v) in qs.annotations
-            sql, p = compile_expr(c, v)
-            push!(sel, "$sql AS $(qname(string(k)))")
-            append!(sel_ps, p)
-        end
+    pre_ann = copy(sel)            # the select list without annotations (for a wrapping query)
+    ann_sel, ann_ps = String[], Any[]
+    for (k, v) in qs.annotations
+        sql, p = compile_expr(c, v)
+        push!(ann_sel, "$sql AS $(qname(string(k)))")
+        append!(ann_ps, p)
     end
-    # WHERE, or HAVING for conditions on aggregate annotations
-    wparts, wps, hparts, hps = String[], Any[], String[], Any[]
+    if columns === nothing && !idonly
+        append!(sel, ann_sel)
+        append!(sel_ps, ann_ps)
+    end
+    # WHERE, HAVING for conditions on aggregate annotations, or an outer WHERE for window ones
+    wparts, wps, hparts, hps, oparts, ops = String[], Any[], String[], Any[], String[], Any[]
     if qs.isnone
         push!(wparts, sql_false(backend()))
     else
         for (i, q) in enumerate(qs.where)
             c.scope = i
             c.uses_aggregate = false
+            c.uses_window = false
             sql, p = compile_q(c, c.base, T, q, false)
-            if c.uses_aggregate
+            if c.uses_window
+                push!(oparts, sql); append!(ops, p)
+            elseif c.uses_aggregate
                 push!(hparts, sql); append!(hps, p)
             else
                 push!(wparts, sql); append!(wps, p)
@@ -1462,6 +1493,21 @@ function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = 
           (grouped && !isempty(group) ? " GROUP BY " * join(unique(group), ", ") : "") *
           (isempty(hparts) ? "" : " HAVING " * join(hparts, " AND ")) *
           o * limit_offset_sql(backend(), qs.limit, qs.offset)
+    if !isempty(oparts)
+        # Conditions on window annotations: compute them in a subquery (named like the base table,
+        # so conditions on the model's own columns still resolve) and filter outside it.
+        inner_sel = vcat(columns !== nothing || idonly ? [qname(c.base) * ".*"] : pre_ann, ann_sel)
+        inner_ps = ann_ps
+        inner = "SELECT $dkw$(join(inner_sel, ", ")) FROM $(qname(c.table))" *
+                (c.base == c.table ? "" : " " * qname(c.base)) * join(c.joins) *
+                (isempty(wparts) ? "" : " WHERE " * join(wparts, " AND ")) *
+                (grouped && !isempty(group) ? " GROUP BY " * join(unique(group), ", ") : "") *
+                (isempty(hparts) ? "" : " HAVING " * join(hparts, " AND "))
+        outer_sel = idonly ? pk_select(c.base, T) : columns !== nothing ? columns : "*"
+        sql = "SELECT $outer_sel FROM ($inner) AS $(qname(c.base)) WHERE " * join(oparts, " AND ") *
+              o * limit_offset_sql(backend(), qs.limit, qs.offset)
+        return sql, vcat(inner_ps, wps, hps, ops), c, related
+    end
     if qs.for_update !== nothing && columns === nothing && !idonly && qs.values_fields === nothing
         sql *= for_update_sql(backend(), qs.for_update, c, related)
     end
@@ -1533,7 +1579,7 @@ function from_prefixed_row(::Type{T}, row, prefix) where {T<:Model}
     id === nothing && return nothing
     obj = T(Dict{Symbol,Any}(:id => pk_value(T, id)), Dict{Symbol,Any}())
     data = getfield(obj, :_data)
-    for f in modelmeta(T).fields
+    for f in all_fields(T)                       # inherited fields too (joined from the parent tables)
         data[attname(f)] = from_db(f, get(row, Symbol(prefix, column(f)), nothing))
     end
     obj
@@ -2533,6 +2579,7 @@ struct M2MOwner
     other::Field     # FK pointing at the related objects
     id::Any
     forward::Bool    # changed from the side that declares the ManyToManyField
+    symmetrical::Bool  # also keep the mirrored rows (other -> instance)
 end
 
 function m2m_queryset(m::Model, f::Field, forward::Bool)
@@ -2542,7 +2589,7 @@ function m2m_queryset(m::Model, f::Field, forward::Bool)
     id = getfield(m, :_data)[:id]
     step1, step2 = m2m_path(f, !forward)      # from the other model back to this instance
     qs = filter(objects(Other), Q(Symbol(step1, "__", step2) => id))
-    chain(qs; owner = M2MOwner(through_model(f), mine, other, id, forward), db = instance_db(m))
+    chain(qs; owner = M2MOwner(through_model(f), mine, other, id, forward, f.symmetrical), db = instance_db(m))
 end
 
 function m2m_owner(qs::QuerySet)
@@ -2581,6 +2628,13 @@ function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}())
             save!(o.through(; attname(o.mine) => o.id, attname(o.other) => id,
                             (Symbol(k) => v for (k, v) in pairs(through_defaults))...))
         end
+        if o.symmetrical          # and the other way round
+            back = Set(values_list(filter(base_objects(o.through), Q(attname(o.other) => o.id), Q(Symbol(attname(o.mine), "__in") => new)),
+                                   attname(o.mine); flat = true))
+            for id in new
+                id in back || id == o.id || save!(o.through(; attname(o.mine) => id, attname(o.other) => o.id))
+            end
+        end
         m2m_signal(o, :post_add, new)
     end
     qs
@@ -2593,6 +2647,7 @@ function remove!(qs::QuerySet, objs...)
     isempty(ids) && return qs
     m2m_signal(o, :pre_remove, ids)
     delete!(filter(base_objects(o.through), Q(attname(o.mine) => o.id), Q(Symbol(attname(o.other), "__in") => ids)))
+    o.symmetrical && delete!(filter(base_objects(o.through), Q(attname(o.other) => o.id), Q(Symbol(attname(o.mine), "__in") => ids)))
     m2m_signal(o, :post_remove, ids)
     qs
 end
@@ -2602,6 +2657,7 @@ function clear!(qs::QuerySet)
     o = m2m_owner(qs)
     m2m_signal(o, :pre_clear, nothing)
     delete!(filter(base_objects(o.through), Q(attname(o.mine) => o.id)))
+    o.symmetrical && delete!(filter(base_objects(o.through), Q(attname(o.other) => o.id)))
     m2m_signal(o, :post_clear, nothing)
     qs
 end

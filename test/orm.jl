@@ -266,6 +266,22 @@ end
     @test [p.name for p in filter(Person; friends__name = "Bob")] == ["Ann"]
     @test Set(Juango.table_columns(b, "person_friends")) == Set(["id", "from_person_id", "to_person_id"])
 
+    # self-referential and symmetrical (the default for :self)
+    cy = create(Person; name = "Cy")
+    add!(ann.pals, bob, cy)
+    @test sort([p.name for p in ann.pals]) == ["Bob", "Cy"] && [p.name for p in bob.pals] == ["Ann"]
+    add!(bob.pals, ann)                                         # already there both ways
+    @test count(objects(Juango.through_model(Juango.modelmeta(Person).m2m[2]))) == 4
+    remove!(cy.pals, ann)
+    @test [p.name for p in ann.pals] == ["Bob"] && count(cy.pals) == 0
+    add!(cy.pals, cy)                                           # a relation to itself is one row
+    @test [p.name for p in cy.pals] == ["Cy"]
+    clear!(bob.pals)
+    @test count(ann.pals) == 0 && count(bob.pals) == 0
+    @test sort([p.name for p in filter(Person; pals__name = "Cy")]) == ["Cy"]
+    @test_throws ArgumentError ManyToManyField(Topic; symmetrical = true)
+    @test_throws ArgumentError ManyToManyField(:self; through = :Membership)
+
     # custom intermediate model
     chess = create(Club; name = "Chess")
     add!(chess.members, ann; through_defaults = Dict(:role => "chair"))
@@ -400,6 +416,14 @@ end
                  tot = Window(Sum(:views); partition_by = [:author]))
     @test [(a.title, a.rn, a.tot) for a in order_by(w, "title")] == [("ex-1", 2, 40), ("ex-2", 1, 40), ("ex-3", 1, 5)]
     @test [a.prev for a in order_by(annotate(exa; prev = Window(Lag(:views); order_by = ["title"])), "title")] == [nothing, 10, 30]
+    # filtering on a window annotation wraps the query
+    @test titles(filter(w; rn = 1)) == ["ex-2", "ex-3"] && count(filter(w; rn = 1)) == 2
+    @test exists(filter(w; rn__gt = 1)) && !exists(filter(w; rn__gt = 2))
+    @test titles(filter(w; rn = 1, views__gt = 6)) == ["ex-2"]            # with the model's own fields
+    # plain conditions apply before the window is computed, as in Django
+    @test titles(filter(filter(w; rn = 1), title__endswith = "1")) == ["ex-1"]
+    @test values_list(order_by(filter(values(w, :title), rn = 1), "-title"), :title; flat = true) == ["ex-3", "ex-2"]
+    @test first(order_by(filter(w; rn = 1), "-views")).title == "ex-2"
 
     # --- F() in filters and updates ------------------------------------------------------------------
     @test titles(filter(exa; views__gt = F(:rating) * 5)) == ["ex-2"]
@@ -459,6 +483,12 @@ end
     @test count(filter(Pizzeria; city = "Auckland", serves_pizza = true)) == 1
     @test get(Place; id = nap.id).restaurant.pizzeria.oven == "coal"
     @test [p.name for p in order_by(filter(Restaurant; name__in = ["PP", "Napoli"]), "name")] == ["Napoli", "PP"]
+    # select_related into a model that extends other tables loads the inherited fields too
+    create(Delivery; pizzeria = nap, note = "fast"); create(Delivery; note = "none")
+    ds, n = count_queries(() -> collect(order_by(select_related(objects(Delivery), :pizzeria), "note")))
+    @test n == 1 && ds[1].note == "fast" && ds[2].pizzeria === nothing
+    @test last(count_queries(() -> (ds[1].pizzeria.oven, ds[1].pizzeria.name, ds[1].pizzeria.city, ds[1].pizzeria.serves_pizza))) == 0
+    @test (ds[1].pizzeria.oven, ds[1].pizzeria.name, ds[1].pizzeria.city, ds[1].pizzeria.serves_pizza) == ("coal", "Napoli", "Auckland", true)
 
     # reverse relations of the parent work from the child
     create(Review; place = get(Place; id = r.id), stars = 5)

@@ -636,3 +636,101 @@ end
         configure!(MIGRATION_MODULES = Dict{String,String}())
     end
 end
+
+@testset "squashmigrations and historical models" begin
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("migsq" => dir))
+    quiet(f) = redirect_stdout(f, devnull)
+    M = Juango.Migrations
+    mm() = basename(only(quiet(() -> makemigrations(app = "migsq", questioner = _ -> false))))
+    unreg() = foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "migsq", Juango.all_models()))
+    applied() = sort([k[2] for k in M.applied_migrations() if k[1] == "migsq"])
+    try
+        @eval @model struct SqA
+            name = CharField(max_length = 20)
+            Meta(table = "sq_a", app_label = "migsq")
+        end
+        f1 = mm()
+        unreg()
+        @eval @model struct SqA2
+            name = CharField(max_length = 20)
+            rank = IntegerField(default = 0)
+            Meta(table = "sq_a", name = "SqA", app_label = "migsq")
+        end
+        @eval @model struct SqB
+            label = CharField(max_length = 10)
+            a = ForeignKey(SqA2, on_delete = :CASCADE)
+            Meta(table = "sq_b", app_label = "migsq")
+        end
+        f2 = mm()
+        unreg()
+        @eval @model struct SqA3
+            name = CharField(max_length = 20)
+            rank = IntegerField(default = 0)
+            Meta(table = "sq_a", name = "SqA", app_label = "migsq")
+        end
+        @eval @model struct SqB3
+            label = CharField(max_length = 40)
+            a = ForeignKey(SqA3, on_delete = :CASCADE)
+            Meta(table = "sq_b", name = "SqB", app_label = "migsq")
+        end
+        f3 = mm()
+        n1, n3 = f1[1:end-3], f3[1:end-3]
+        quiet(() -> migrate(app = "migsq", target = n1))
+
+        # squash 0001..0003: both tables were created in the range, so it is two CreateModels
+        p = quiet(() -> squashmigrations("migsq", n3))
+        src = read(p, String)
+        @test basename(p) == "0001_squashed_$n3.jl"
+        @test occursin("replaces = [(\"migsq\", \"$n1\"), (\"migsq\", \"$(f2[1:end-3])\"), (\"migsq\", \"$n3\")]", src)
+        @test count("CreateModel(", src) == 2 && !occursin("AddField", src) && !occursin("AlterField", src)
+        @test occursin("Column(\"label\", :string; max_length = 40)", src) && occursin("initial = true", src)
+        sq = basename(p)[1:end-3]
+
+        # this database applied only the first original: it carries on with the originals
+        @test !haskey(M.build_graph(["migsq"]).nodes, ("migsq", sq))
+        quiet(() -> migrate())
+        @test applied() == sort([n1, f2[1:end-3], n3])
+        quiet(() -> migrate())                                  # now all originals ran: the squashed one counts as applied
+        @test sq in applied()
+        @test haskey(M.build_graph(["migsq"]).nodes, ("migsq", sq)) && !haskey(M.build_graph(["migsq"]).nodes, ("migsq", n1))
+        # a fresh database uses the squashed migration only
+        quiet(() -> migrate(app = "migsq", target = "zero"))
+        @test isempty(applied()) && !Juango.table_exists(Juango.backend(), "sq_a")
+        quiet(() -> migrate())
+        @test applied() == sort([sq, n1, f2[1:end-3], n3])
+        @test Set(Juango.table_columns(Juango.backend(), "sq_b")) == Set(["id", "label", "a_id"])
+        @test_throws M.MigrationError squashmigrations("migsq", n1)
+
+        # a data migration that uses historical models; it depends on an original, which is remapped
+        create(SqA3; name = "four"); create(SqA3; name = "sixsix")
+        write(joinpath(dir, "0004_fill.jl"), """
+            using Juango.Migrations
+            Migration(dependencies = [("migsq", "$n3")], operations = [
+                RunJulia(apps -> begin
+                             A = get_model(apps, "migsq", "SqA")
+                             for r in objects(A)
+                                 r.rank = length(r.name)
+                                 save!(r)
+                             end
+                             create(A; name = "hist")
+                             @assert count(A) == 3 && count(A; rank__gt = 4) == 1
+                             @assert get(A; name = "four").rank == 4 && length(filter(A; name__in = ["four", "nope"])) == 1
+                         end,
+                         apps -> update!(get_model(apps, "migsq", "SqA"), (; rank__gt = 0); rank = 0)),
+            ])
+            """)
+        @test M.build_graph(["migsq"]).nodes[("migsq", "0004_fill")].dependencies == [("migsq", sq)]
+        quiet(() -> migrate())
+        @test sort([(a.name, a.rank) for a in objects(SqA3)]) == [("four", 4), ("hist", 0), ("sixsix", 6)]
+        quiet(() -> migrate(app = "migsq", target = sq))
+        @test all(a -> a.rank == 0, objects(SqA3))
+        bad = Juango.HistoricalApps(M.replay(M.build_graph(["migsq"]), keys(M.build_graph(["migsq"]).nodes)))
+        @test_throws ArgumentError get_model(bad, "migsq", "SqA") |> objects |> first |> (r -> r.nope)
+        @test_throws Juango.LookupError get_model(bad, "migsq", "Nope")
+        quiet(() -> migrate(app = "migsq", target = "zero"))
+    finally
+        unreg()
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end

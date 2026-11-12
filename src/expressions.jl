@@ -150,6 +150,11 @@ Window(expr; partition_by = [], order_by = []) =
 
 # --- analysis -------------------------------------------------------------------------------
 
+contains_window(::Any) = false
+contains_window(::Window) = true
+contains_window(e::CombinedExpression) = contains_window(e.lhs) || contains_window(e.rhs)
+contains_window(e::Func) = any(contains_window, e.args)
+
 contains_aggregate(::Any) = false
 contains_aggregate(::Aggregate) = true
 contains_aggregate(e::CombinedExpression) = contains_aggregate(e.lhs) || contains_aggregate(e.rhs)

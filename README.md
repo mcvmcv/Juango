@@ -165,7 +165,7 @@ prefetch_related(objects(Post), :tags)            # 2 extra queries for any numb
 
 - **Join table.** Juango creates a join table (`post_tags`, unique per pair) that migrations manage like any other table. Deleting either side removes its links.
 - **Custom intermediate model.** Use `through=:Membership` for one with extra fields, and fill those fields with `add!(club.members, ann; through_defaults=Dict(:role => "chair"))`.
-- **Self-referential relations.** `ManyToManyField(:self)` works but isn't symmetrical: adding Bob to Ann's friends doesn't add Ann to Bob's.
+- **Self-referential relations.** `friends = ManyToManyField(:self)` is symmetrical: adding Bob to Ann's friends adds Ann to Bob's, and removing works both ways. Use `symmetrical = false` for one-way relations such as "follows".
 - **Forms and admin.** `ModelForm` renders a multiple select and `save!(form)` saves the relation. After `save!(form; commit=false)`, call `save_m2m!(form)` once the object is saved. The admin does this for you.
 - **`unique_together`.** `Meta(unique_together=[(:code, :batch)])` adds a multi-column unique constraint, and migrations track it (`AlterUniqueTogether`).
 
@@ -188,7 +188,7 @@ values_list(objects(Post), :title, :author__name)               # tuples; flat=t
 - **Subqueries:**
   - `annotate(objects(Author); latest = Subquery(values(order_by(filter(Post; author=OuterRef(:id)), "-created"), :title)[1:1]))`
   - `filter(objects(Author), Exists(filter(Post; author=OuterRef(:id))))`, negated with `!Exists(...)`
-- **Window functions:** `annotate(qs; rank = Window(RowNumber(); partition_by=[:author], order_by=["-views"]))`, also with `Rank`, `DenseRank`, `Lag`, `Lead` and aggregates over a window. You can order by them but not filter on them.
+- **Window functions:** `annotate(qs; rank = Window(RowNumber(); partition_by=[:author], order_by=["-views"]))`, also with `Rank`, `DenseRank`, `Lag`, `Lead` and aggregates over a window. You can order and filter by them: `filter(qs; rank = 1)` wraps the query, because SQL can't filter on a window function directly. Plain conditions in the same queryset apply before the window is computed, as in Django.
 - **`values()` is lazy.** It returns a queryset whose rows are `Dict`s. Aggregates in `annotate` after `values(:field)` group by that field. As in Django, combining aggregates over two different reverse relations multiplies rows, so use `distinct=true`.
 
 #### GIS (PostGIS)
@@ -412,7 +412,19 @@ Migration(
 )
 ```
 
-- **Data migrations.** `makemigrations --empty --name backfill` writes a file to fill in with `RunSQL(forward, backward)` or `RunJulia(forward_fn, backward_fn)`. Prefer raw SQL (`Juango.execute`) inside `RunJulia`. The ORM uses today's model definitions, which may not match the schema at that point in history.
+- **Data migrations.** `makemigrations --empty --name backfill` writes a file to fill in with `RunSQL(forward, backward)` or `RunJulia(forward_fn, backward_fn)`. A `RunJulia` function that takes an argument gets the models as they were at that point in history, so it doesn't depend on today's model structs:
+
+  ```julia
+  RunJulia(apps -> begin
+      Post = get_model(apps, "blog", "Post")
+      for p in objects(Post)                      # rows with the columns of that time
+          p.slug = lowercase(replace(p.title, " " => "-")); save!(p)
+      end
+  end)
+  ```
+
+  Historical models work on columns (`p.author_id`), and support `objects`, `filter`/`get`/`count` with simple lookups, `create`, `save!`, `update!(Model, (; lookups...); values...)` and `delete!`.
+- **Squashing.** `squashmigrations blog 0004` (or `manage.jl squashmigrations blog 0004`) writes one migration that replaces 0001 to 0004. Tables created in the range become a single `CreateModel`. Databases that applied all or none of the originals use it, the rest keep the originals. When every database has moved past it, delete the old files and the `replaces` line. Ranges with `RunSQL`/`RunJulia` are refused.
 - **Transactions.** Each migration runs in a transaction. If it fails, nothing is applied.
 - **SQLite.** SQLite can't alter or drop columns in place, so those changes rebuild the table: create a copy, move the rows, then swap. On Postgres they are ordinary `ALTER TABLE` statements.
 - **Backfill.** Adding a NOT NULL column without a default fills existing rows with `""`, `0`, `false` or 1970-01-01, and `makemigrations` says so.
@@ -1035,9 +1047,8 @@ Set them with `configure!(...)` and read them with `settings.NAME`. The main one
 
 ## Differences from Django (current limitations)
 
-- **Migrations can't be squashed yet.** Migration files describe tables and columns, and there are no historical model classes as in Django, so data migrations use raw SQL or today's models.
+- **Historical models are table-level.** In data migrations, `get_model` gives the table as it was (columns, not relations or methods), unlike Django's historical model classes.
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
-- **ORM features not yet built:** symmetrical self-referential many-to-many, filtering on window functions, and `select_related` into a model that inherits from another table (use `prefetch_related`).
 - `runserver` is HTTP.jl's server. It speaks HTTP/1.1 and HTTP/2 (cleartext with prior knowledge, or negotiated over TLS), and serves HTTPS with `runserver 8443 --cert cert.pem --key key.pem` (or `runserver(...; certfile, keyfile)`). WebSockets need HTTP/1.1, which browsers use for them anyway. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and set `SESSION_COOKIE_SECURE`/`CSRF_COOKIE_SECURE`.
 
 ## Layout

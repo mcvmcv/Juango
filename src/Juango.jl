@@ -51,6 +51,7 @@ include("files.jl")
 include("backends/sqlite_extra.jl")
 include("schema.jl")
 include("constraints.jl")
+include("historical.jl")
 include("backends/mysql_extra.jl")
 include("migrations.jl")
 include("forms.jl")
@@ -118,7 +119,7 @@ export CheckConstraint, UniqueConstraint, GeneratedField, DB_DEFAULT, CompositeP
 export Model, @model, @abstract_model, OneToOneField, Index, GinIndex, Field, ManyToManyField, add!, remove!, set!, clear!, base_objects, CharField, TextField, EmailField, SlugField, URLField, IntegerField,
        FloatField, BooleanField, DateTimeField, DateField, ForeignKey, Q, QuerySet, objects,
        exclude, order_by, exists, values_list, update!, create, get_or_create, update_or_create,
-       save!, refresh!, full_clean, aggregate, none, migrate, makemigrations, showmigrations, sqlmigrate,
+       save!, refresh!, full_clean, aggregate, none, migrate, makemigrations, showmigrations, sqlmigrate, squashmigrations,
        atomic, IntegrityError, PoolTimeout, pool_status, select_related, prefetch_related, Prefetch, count_queries, DoesNotExist,
        annotate, F, Value, Count, Sum, Avg, Min, Max, Lower, Upper, Length, Coalesce, Concat, Cast, Now,
        ExtractYear, ExtractMonth, ExtractDay, When, Case, OuterRef, Subquery, Exists, Window, RowNumber,

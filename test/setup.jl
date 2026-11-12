@@ -120,7 +120,8 @@ untitled(qs::QuerySet{Essay}) = filter(qs; title = "")
 
 @model struct Person
     name = CharField(max_length = 30)
-    friends = ManyToManyField(:self; blank = true)
+    friends = ManyToManyField(:self; blank = true, symmetrical = false)
+    pals = ManyToManyField(:self; blank = true, related_name = :pal_of)
 end
 
 @model struct Club
@@ -161,6 +162,10 @@ end
 @model struct Review
     place = ForeignKey(Place, on_delete = :CASCADE, related_name = :reviews)
     stars = IntegerField(default = 3)
+end
+@model struct Delivery
+    pizzeria = ForeignKey(Pizzeria, on_delete = :CASCADE, null = true)
+    note = CharField(max_length = 20, default = "")
 end
 @model struct BigPlace <: Place
     Meta(proxy = true, ordering = ["-name"])
