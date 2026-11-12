@@ -12,6 +12,13 @@
 # the database column holds the stored name. Assign an `UploadedFile` (from `req.FILES`) to a
 # file field and `save!` stores it.
 
+"""
+A place to keep files. A storage implements `save_file(s, name, bytes) -> stored name`,
+`Base.read(s, name)`, `exists(s, name)`, `Base.size(s, name)`, `delete_file(s, name)` and
+`url(s, name)`, and optionally `path(s, name)` (a local file path) and `listdir(s, dir)`.
+Juango has `FileSystemStorage` and `InMemoryStorage`; others (e.g. a cloud bucket) plug in
+by defining those methods and being named in the `STORAGES` setting.
+"""
 abstract type Storage end
 
 """
@@ -27,8 +34,126 @@ end
 FileSystemStorage(; location = nothing, base_url = nothing) = FileSystemStorage(location, base_url)
 FileSystemStorage(location::AbstractString, base_url = nothing) = FileSystemStorage(String(location), base_url)
 
-"The storage files are saved to: `settings.DEFAULT_FILE_STORAGE`, else a `FileSystemStorage`."
-default_storage() = something(settings.DEFAULT_FILE_STORAGE, FileSystemStorage())
+"""
+    InMemoryStorage(; base_url = settings.MEDIA_URL)
+
+Files kept in memory (for tests: nothing touches the disk). Like Django's `InMemoryStorage`.
+"""
+struct InMemoryStorage <: Storage
+    files::Dict{String,Vector{UInt8}}
+    base_url::Union{Nothing,String}
+    lock::ReentrantLock
+end
+InMemoryStorage(; base_url = nothing, location = nothing) = InMemoryStorage(Dict{String,Vector{UInt8}}(), base_url, ReentrantLock())
+
+memname(name) = (n = valid_path(name); isempty(n) ? throw(ArgumentError("'$name' is not a valid file name")) : n)
+exists(s::InMemoryStorage, name) = lock(() -> haskey(s.files, memname(name)), s.lock)
+Base.read(s::InMemoryStorage, name) = lock(s.lock) do
+    get(() -> throw(SystemError("no file '$name' in InMemoryStorage", 2)), s.files, memname(name))
+end
+Base.size(s::InMemoryStorage, name) = length(read(s, name))
+delete_file(s::InMemoryStorage, name) = lock(() -> (delete!(s.files, memname(name)); nothing), s.lock)
+path(::InMemoryStorage, name) = throw(ArgumentError("InMemoryStorage files have no path on disk"))
+url(s::InMemoryStorage, name) = rstrip(something(s.base_url, string(settings.MEDIA_URL)), '/') * "/" *
+                                join(URIs.escapeuri.(split(name, '/')), "/")
+function save_file(s::InMemoryStorage, name::AbstractString, data::AbstractVector{UInt8})
+    name = valid_path(name)
+    isempty(name) && (name = "file")
+    stem, ext = splitext(name)
+    lock(s.lock) do
+        candidate = name
+        while haskey(s.files, candidate)
+            candidate = stem * "_" * random_string(7) * ext
+        end
+        s.files[candidate] = Vector{UInt8}(data)
+        candidate
+    end
+end
+
+"""
+    listdir(storage, dir = "") -> (directories, files)
+
+The subdirectories and files directly inside `dir`.
+"""
+function listdir(s::FileSystemStorage, dir::AbstractString = "")
+    p = path(s, isempty(dir) ? "." : dir)
+    isdir(p) || return (String[], String[])
+    names = readdir(p)
+    (filter(n -> isdir(joinpath(p, n)), names), filter(n -> isfile(joinpath(p, n)), names))
+end
+function listdir(s::InMemoryStorage, dir::AbstractString = "")
+    prefix = isempty(dir) ? "" : rstrip(valid_path(dir), '/') * "/"
+    dirs, files = Set{String}(), String[]
+    lock(s.lock) do
+        for k in keys(s.files)
+            startswith(k, prefix) || continue
+            rest = k[ncodeunits(prefix)+1:end]
+            i = findfirst('/', rest)
+            i === nothing ? push!(files, rest) : push!(dirs, rest[1:i-1])
+        end
+    end
+    (sort!(collect(dirs)), sort!(files))
+end
+
+# --- the STORAGES setting ---------------------------------------------------------------------------
+#
+#     configure!(STORAGES = Dict(
+#         "default"     => Dict(:BACKEND => FileSystemStorage, :OPTIONS => Dict(:location => "/srv/media")),
+#         "staticfiles" => Dict(:BACKEND => :manifest),
+#         "avatars"     => Dict(:BACKEND => InMemoryStorage),
+#     ))
+#
+# A BACKEND is a Storage value, a type or function called with the OPTIONS as keywords, or
+# one of the names :filesystem, :memory; for "staticfiles" also :static (plain copies) and
+# :manifest (hashed names, see staticfiles.jl). `storages("name")` returns the instance.
+
+const STORAGE_CACHE = Dict{String,Tuple{Any,Any}}()     # name => (setting entry, instance)
+const STORAGE_LOCK = ReentrantLock()
+
+function make_storage(name, entry)
+    backend = get(entry, :BACKEND, get(entry, "BACKEND", :filesystem))
+    opts = get(entry, :OPTIONS, get(entry, "OPTIONS", Dict{Symbol,Any}()))
+    kw = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(opts))
+    backend isa Storage && return backend
+    backend === :filesystem && return FileSystemStorage(; kw...)
+    backend === :memory && return InMemoryStorage(; kw...)
+    if backend in (:static, :manifest)
+        name == "staticfiles" || throw(ImproperlyConfigured("STORAGES[\"$name\"]: :$backend is for \"staticfiles\""))
+        return FileSystemStorage(; location = get(kw, :location, string(settings.STATIC_ROOT)),
+                                   base_url = get(kw, :base_url, string(settings.STATIC_URL)))
+    end
+    backend isa Symbol && throw(ImproperlyConfigured("STORAGES[\"$name\"]: unknown backend :$backend"))
+    s = backend(; kw...)
+    s isa Storage || throw(ImproperlyConfigured("STORAGES[\"$name\"]: the backend made a $(typeof(s)), not a Storage"))
+    s
+end
+
+"""
+    storages(name = "default") -> Storage
+
+The storage configured as `name` in the `STORAGES` setting (one instance per configuration,
+so an `InMemoryStorage` keeps its files). Without `STORAGES["default"]`, `default` is
+`DEFAULT_FILE_STORAGE` or a `FileSystemStorage` under `MEDIA_ROOT`.
+"""
+function storages(name::AbstractString = "default")
+    conf = get(settings, :STORAGES, nothing)
+    entry = conf === nothing ? nothing : get(conf, name, get(conf, Symbol(name), nothing))
+    if entry === nothing
+        name == "default" && return something(settings.DEFAULT_FILE_STORAGE, FileSystemStorage())
+        name == "staticfiles" && return FileSystemStorage(; location = string(settings.STATIC_ROOT), base_url = string(settings.STATIC_URL))
+        throw(ImproperlyConfigured("no storage \"$name\" in STORAGES"))
+    end
+    lock(STORAGE_LOCK) do
+        cached = get(STORAGE_CACHE, name, nothing)
+        cached !== nothing && cached[1] === entry && return cached[2]
+        s = make_storage(name, entry)
+        STORAGE_CACHE[name] = (entry, s)
+        s
+    end
+end
+
+"The storage files are saved to: `STORAGES[\"default\"]`, else `DEFAULT_FILE_STORAGE`, else a `FileSystemStorage`."
+default_storage() = storages("default")
 
 function root(s::FileSystemStorage)
     loc = something(s.location, string(settings.MEDIA_ROOT))
@@ -141,7 +266,11 @@ function ImageField(; upload_to = "", storage = nothing, width_field = nothing, 
 end
 
 const FILE_KINDS = (:file, :image)
-field_storage(f::Field) = something(f.related[2], default_storage())
+"A field's storage: its `storage` option (a Storage, or the name of one in `STORAGES`), else the default."
+function field_storage(f::Field)
+    s = f.related[2]
+    s === nothing ? default_storage() : s isa Union{AbstractString,Symbol} ? storages(string(s)) : s
+end
 
 function upload_name(f::Field, obj, filename)
     up = f.related[1]

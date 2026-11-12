@@ -111,7 +111,7 @@ export Template, render_to_string, get_template, mark_safe, SafeString, register
 export GeometryField, PointField, LineStringField, PolygonField, MultiPointField, MultiLineStringField, MultiPolygonField,
        Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon, D, Distance, Area, GeoLength, AsGeoJSON,
        geojson, from_geojson, wkt, ewkt, parse_wkt, parse_wkb
-export FileField, ImageField, UploadedFile, FieldFile, FileSystemStorage, FileExtensionValidator, MaxFileSizeValidator,
+export FileField, ImageField, UploadedFile, FieldFile, FileSystemStorage, InMemoryStorage, storages, FileExtensionValidator, MaxFileSizeValidator,
        save_file, delete_file, image_size, default_storage
 export JSONField, HStoreField, TrigramSimilarity, TrigramWordSimilarity, TrigramStrictWordSimilarity, TrigramDistance, TrigramWordDistance, Unaccent, ArrayField, UUIDField, CICharField, IntegerRangeField, DateRangeField, DateTimeRangeField,
        ValueRange, SearchVector, SearchQuery, SearchRank, uuid4, UUID

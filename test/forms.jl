@@ -191,6 +191,28 @@ end
         @test r.status == 200 && text(r) == "via admin" && startswith(getheader(r, "Content-Type"), "text/plain")
         @test get(c, "/media/../runtests.jl").status == 404 && get(c, "/media/nope.txt").status == 404
         Admin.unregister!(Attachment)
+
+        # STORAGES and InMemoryStorage
+        override_settings(STORAGES = Dict("default" => Dict(:BACKEND => :memory),
+                                          "other" => Dict(:BACKEND => FileSystemStorage, :OPTIONS => Dict(:location => media, :base_url => "/o/")),
+                                          "staticfiles" => Dict(:BACKEND => :manifest))) do
+            ms = storages()
+            @test ms isa InMemoryStorage && storages("default") === ms && Juango.default_storage() === ms
+            m = create(Attachment; title = "in memory", file = UploadedFile("mem.txt", "kept in RAM"))
+            @test String(read(get(Attachment; id = m.id).file)) == "kept in RAM" && !isfile(joinpath(media, m.file.name))
+            @test m.file.url == "/media/" * m.file.name && Juango.exists(ms, m.file.name)
+            @test Juango.listdir(ms, "docs") == ([string(year(now()))], String[])
+            @test Juango.listdir(ms, "docs/$(year(now()))")[2] == [basename(m.file.name)]
+            @test_throws ArgumentError m.file.path
+            delete_file(ms, m.file.name)
+            @test !Juango.exists(ms, m.file.name)
+            o = storages("other")
+            @test o isa FileSystemStorage && Juango.url(o, "x.txt") == "/o/x.txt"
+            @test Juango.manifest_storage()
+            @test_throws Juango.ImproperlyConfigured storages("nope")
+        end
+        @test !(storages() isa InMemoryStorage) && !Juango.manifest_storage()
+        @test "outside.txt" in Juango.listdir(FileSystemStorage(), "")[2]
     finally
         configure!(MEDIA_ROOT = old_media)
     end

@@ -7,7 +7,12 @@
 # static files forever and still get new versions. CSS `url(...)` and `@import` references are
 # rewritten to the hashed names too.
 
-manifest_storage() = get(settings, :STATICFILES_STORAGE, :plain) === :manifest
+function manifest_storage()
+    conf = get(settings, :STORAGES, nothing)
+    entry = conf === nothing ? nothing : get(conf, "staticfiles", get(conf, :staticfiles, nothing))
+    entry === nothing && return get(settings, :STATICFILES_STORAGE, :plain) === :manifest
+    get(entry, :BACKEND, get(entry, "BACKEND", :static)) === :manifest
+end
 const MANIFEST_NAME = "staticfiles.json"
 const MANIFEST_CACHE = Ref{Union{Nothing,Tuple{String,Float64,Dict{String,String}}}}(nothing)
 
