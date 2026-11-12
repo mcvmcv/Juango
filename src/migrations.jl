@@ -699,6 +699,11 @@ function migrate_here(; app = nothing, target = nothing, fake = false, sync = fa
     isempty(g.nodes) || log("  Apply all migrations: " * join(sort(unique(first.(collect(keys(g.nodes))))), ", "))
     isempty(unmigrated) || target !== nothing ||
         log("  Synchronize unmigrated apps: " * join(sort(unique([modelmeta(T).app for T in unmigrated])), ", "))
+    labels = migrate_labels(g)
+    emit(sig, st) = for a in labels
+        Juango.send(sig, a; app_label = a, database = db, plan = plan, apps = Juango.HistoricalApps(st))
+    end
+    emit(Juango.pre_migrate, replay(g, filter(in(applied), keys(g.nodes))))
     log("Running migrations:")
     isempty(plan) && log("  No migrations to apply.")
     for (k, back) in plan
@@ -708,9 +713,7 @@ function migrate_here(; app = nothing, target = nothing, fake = false, sync = fa
         log("Synchronizing apps without migrations:")
         sync_models!(unmigrated; verbose = verbose) || log("  No changes.")
     end
-    Juango.migrate_allowed(db, "contenttypes") && Juango.update_contenttypes!()
-    Juango.migrate_allowed(db, "auth") && Juango.update_permissions!()
-    Juango.migrate_allowed(db, "sites") && Juango.create_default_site!()
+    emit(Juango.post_migrate, replay(g, filter(in(applied_migrations()), keys(g.nodes))))
     if verbose && target === nothing
         for a in migrated_apps()
             isempty(detect_changes(g, a; questioner = _ -> false)) && continue
@@ -720,6 +723,28 @@ function migrate_here(; app = nothing, target = nothing, fake = false, sync = fa
     end
     nothing
 end
+
+"""
+The app labels `pre_migrate`/`post_migrate` are sent for: apps with models in use or
+migrations, with contenttypes, auth and sites first (their receivers set up what other
+apps' receivers may need).
+"""
+function migrate_labels(g::Graph)
+    s = Set{String}(modelmeta(T).app for T in all_models() if Juango.model_in_use(T))
+    union!(s, first.(collect(keys(g.nodes))))
+    union!(s, ("contenttypes", "auth", "sites"))
+    firsts = [a for a in ("contenttypes", "auth", "sites") if a in s]
+    vcat(firsts, sort!([a for a in s if !(a in firsts)]))
+end
+
+# Juango's own post_migrate receivers
+function builtin_post_migrate(label; database, kw...)
+    label == "contenttypes" && Juango.migrate_allowed(database, "contenttypes") && Juango.update_contenttypes!()
+    label == "auth" && Juango.migrate_allowed(database, "auth") && Juango.update_permissions!()
+    label == "sites" && Juango.migrate_allowed(database, "sites") && Juango.create_default_site!()
+    nothing
+end
+Juango.connect!(Juango.post_migrate, builtin_post_migrate; dispatch_uid = :juango_builtin_post_migrate)
 
 function check_conflicts(g::Graph)
     for a in unique(first.(collect(keys(g.nodes))))

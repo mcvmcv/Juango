@@ -121,7 +121,7 @@ export gettext, ngettext, pgettext, npgettext, gettext_lazy, ngettext_lazy, pget
 export timezone_now, activate_timezone!, deactivate_timezone!, with_timezone, get_current_timezone, make_aware,
        make_naive, localtime, is_aware, TimezoneMiddleware, convert_naive_datetimes
 export Signal, connect!, disconnect!, receiver, send, send_robust, has_receivers, pre_save, post_save, pre_delete,
-       post_delete, m2m_changed, request_started, request_finished, user_logged_in, user_logged_out, user_login_failed
+       post_delete, m2m_changed, request_started, request_finished, user_logged_in, user_logged_out, user_login_failed, pre_migrate, post_migrate
 export cache, cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, get_or_set, cache_get_many,
        cache_set_many, incr, decr, incr_version, cache_page, CacheMiddleware, create_cache_table
 export EmailMessage, EmailMultiAlternatives, send!, send_mail, mail_admins, mail_managers, attach!, attach_alternative!, outbox,

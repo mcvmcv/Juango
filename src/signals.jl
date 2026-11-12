@@ -99,6 +99,19 @@ A many-to-many relation changed: sender is the join model; `action` is `:pre_add
 `model` (the other side), `pk_set`, `reverse`.
 """
 const m2m_changed = Signal("m2m_changed")
+"""
+Before `migrate` changes a database, once per app (sender: the app label, e.g. `"auth"`);
+`app_label`, `database` (the alias; Django's `using`), `plan` (`[(app, name) => backwards, ...]`) and
+`apps` (historical models as the database is now, for `get_model`).
+"""
+const pre_migrate = Signal("pre_migrate")
+"""
+After `migrate`, once per app (sender: the app label), with the same arguments as
+`pre_migrate`; `apps` describes the migrated state. Juango's content types, permissions
+and default site are created by receivers of this signal (for "contenttypes", "auth" and
+"sites"), so receivers for later apps can rely on them.
+"""
+const post_migrate = Signal("post_migrate")
 "A request arrived (sender `:handler`; `request`)."
 const request_started = Signal("request_started")
 "A response is ready (sender `:handler`; `request`, `response`)."

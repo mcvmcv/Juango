@@ -856,3 +856,24 @@ end
         configure!(MIGRATION_MODULES = Dict{String,String}())
     end
 end
+
+@testset "pre_migrate and post_migrate signals" begin
+    seen = Tuple{Symbol,String,Any}[]
+    pre = (s; app_label, database, plan, apps, kw...) -> push!(seen, (:pre, app_label, (database, apps)))
+    post = (s; app_label, database, plan, apps, kw...) -> push!(seen, (:post, app_label, (database, apps)))
+    connect!(pre_migrate, pre; dispatch_uid = :test_pre)
+    connect!(post_migrate, post; sender = "auth", dispatch_uid = :test_post)
+    try
+        redirect_stdout(() -> migrate(), devnull)
+        pres = [x[2] for x in seen if x[1] === :pre]
+        @test pres[1:3] == ["contenttypes", "auth", "sites"] && "project" in pres
+        @test [x[2] for x in seen if x[1] === :post] == ["auth"]                 # sender filter
+        @test all(x -> x[3][1] == "default" && x[3][2] isa Juango.HistoricalApps, seen)
+        @test findlast(x -> x[1] === :pre, seen) < findfirst(x -> x[1] === :post, seen)
+        # the built-in receiver still creates permissions for new models
+        @test exists(filter(Juango.Permission; codename = "add_article"))
+    finally
+        disconnect!(pre_migrate; dispatch_uid = :test_pre)
+        disconnect!(post_migrate; dispatch_uid = :test_post, sender = "auth")
+    end
+end
