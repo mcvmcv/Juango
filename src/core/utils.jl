@@ -74,7 +74,7 @@ conditional_escape(x) = (h = __html__(x); h === nothing ? escape_html(display_st
 
 "Write `x` to `io` as template output: escaped unless it is safe (or `autoescape` is off)."
 function write_value(io::IO, x, autoescape::Bool)
-    x isa Union{Integer,AbstractFloat} && !(x isa Bool) && return (print(io, display_string(x)); nothing)
+    x isa Union{Integer,AbstractFloat} && !(x isa Bool) && return (print(io, x); nothing)
     autoescape || return (write(io, display_string(x)); nothing)
     h = __html__(x)
     h === nothing ? escape_html(io, display_string(x)) : write(io, h)

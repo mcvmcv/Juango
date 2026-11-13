@@ -348,7 +348,10 @@ mutable struct ConnectionPool
     idle::Vector{PooledConnection}
     total::Int
     lock::ReentrantLock
+    freed::Threads.Condition       # (on `lock`) notified when a connection is returned or closed
 end
+ConnectionPool(b::DatabaseBackend, idle::Vector{PooledConnection}, total::Int, lk::ReentrantLock) =
+    ConnectionPool(b, idle, total, lk, Threads.Condition(lk))
 
 struct PoolTimeout <: Exception
     msg::String
@@ -383,6 +386,10 @@ end
 DatabaseState(alias, setting, backend, conn, depth, pool) =
     DatabaseState(alias, setting, backend, conn, depth, pool, CommitHook[])
 const DB_STATES = Dict{String,DatabaseState}()
+# A copy of DB_STATES that's replaced, never changed, whenever DB_STATES changes: every query looks
+# its database up here without taking DB_LOCK (or building the settings again).
+const DB_STATES_SNAPSHOT = Ref(Dict{String,DatabaseState}())
+publish_db_states!() = (DB_STATES_SNAPSHOT[] = copy(DB_STATES); nothing)
 
 "The configured databases: alias => setting (`DATABASES`, with `DATABASE` as \"default\")."
 function database_settings()
@@ -460,6 +467,10 @@ routed_db(T, write::Bool) = db_pinned() || isempty(routers()) ? nothing : write 
 
 "The state of database `alias`, set up (no connection opened) on first use or after its setting changed."
 function db_state(alias::AbstractString = current_alias())
+    st = get(DB_STATES_SNAPSHOT[], alias, nothing)      # settings changes drop changed states (below)
+    st === nothing ? db_state_slow(alias) : st
+end
+function db_state_slow(alias::AbstractString)
     lock(DB_LOCK) do
         confs = database_settings()
         haskey(confs, alias) || throw(ImproperlyConfigured("no database '$alias' in DATABASES (have: $(join(sort(collect(keys(confs))), ", ")))"))
@@ -468,6 +479,7 @@ function db_state(alias::AbstractString = current_alias())
         if st === nothing || !isequal(st.setting, s)
             st === nothing || close_state!(st)
             st = DB_STATES[alias] = DatabaseState(alias, s, backend_from_setting(s), nothing, 0, nothing)
+            publish_db_states!()
         end
         st
     end
@@ -498,7 +510,7 @@ end
 
 expired(pc::PooledConnection) = (age = settings.CONN_MAX_AGE; age !== nothing && time() - pc.last_used > age)
 discard(p::ConnectionPool, pc::PooledConnection) =
-    (try close_connection(p.backend, pc.conn) catch end; lock(() -> (p.total -= 1), p.lock); nothing)
+    (try close_connection(p.backend, pc.conn) catch end; lock(() -> (p.total -= 1; notify(p.freed)), p.lock); nothing)
 
 "Borrow a connection, waiting up to DATABASE_POOL_TIMEOUT seconds for one to be free."
 function checkout(b::DatabaseBackend)
@@ -538,13 +550,31 @@ function checkout(b::DatabaseBackend)
             try
                 return PooledConnection(open_connection(b), time(), time())
             catch
-                lock(() -> (p.total -= 1), p.lock)
+                lock(() -> (p.total -= 1; notify(p.freed)), p.lock)
                 rethrow()
             end
         end
         time() > deadline && throw(PoolTimeout("no database connection became free within $(settings.DATABASE_POOL_TIMEOUT) seconds " *
                                                "(DATABASE_POOL_SIZE = $(settings.DATABASE_POOL_SIZE)); is a transaction being held open?"))
-        sleep(0.005)
+        wait_for_connection(p, deadline)
+    end
+end
+
+"Wait (until `deadline` at most) for a connection to be returned to the pool or closed."
+function wait_for_connection(p::ConnectionPool, deadline::Float64)
+    lock(p.lock)
+    try
+        (isempty(p.idle) && p.total >= settings.DATABASE_POOL_SIZE) || return   # one came back meanwhile
+        t = Timer(max(0.0, deadline - time())) do _
+            lock(() -> notify(p.freed), p.lock)
+        end
+        try
+            wait(p.freed)
+        finally
+            close(t)
+        end
+    finally
+        unlock(p.lock)
     end
 end
 
@@ -555,7 +585,7 @@ function checkin(b::DatabaseBackend, pc::PooledConnection)
     if settings.CONN_MAX_AGE == 0 || p.total > settings.DATABASE_POOL_SIZE || !connection_usable(b, pc.conn)
         discard(p, pc)
     else
-        lock(() -> push!(p.idle, pc), p.lock)
+        lock(() -> (push!(p.idle, pc); notify(p.freed)), p.lock)
     end
     nothing
 end
@@ -590,6 +620,7 @@ push!(SETTINGS_CHANGED_HOOKS, function ()
             close_state!(st)
             delete!(DB_STATES, a)
         end
+        publish_db_states!()
     end
 end)
 

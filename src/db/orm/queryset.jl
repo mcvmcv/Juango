@@ -477,15 +477,32 @@ Base.@nospecializeinfer function select_sql(@nospecialize(qs::QuerySet); columns
 end
 
 "Build a model from columns labelled `prefix*column` (as produced for `select_related`)."
-Base.@nospecializeinfer function from_prefixed_row(@nospecialize(T::Type), row, prefix)
-    id = get(row, Symbol(prefix, "id"), nothing)
+Base.@nospecializeinfer function from_prefixed_row(@nospecialize(T::Type), row::Dict{Symbol,Any}, prefix::String)
+    idkey, plan = prefixed_plan(T, prefix)
+    id = get(row, idkey, nothing)
     id === nothing && return nothing
-    obj = T(Dict{Symbol,Any}(:id => pk_value(T, id)), Dict{Symbol,Any}())
-    data = (getfield(obj, :_data)::Dict{Symbol,Any})
-    for f in all_fields(T)                       # inherited fields too (joined from the parent tables)
-        data[attname(f)] = from_db(f, get(row, Symbol(prefix, column(f)), nothing))
+    data = Dict{Symbol,Any}(:id => pk_value(T, id))
+    sizehint!(data, length(plan) + 1)
+    for (f, key, att) in plan                    # inherited fields too (joined from the parent tables)
+        data[att] = from_db(f, get(row, key, nothing))
     end
-    obj
+    T(data, Dict{Symbol,Any}())
+end
+# The column labels of `T`'s fields under `prefix` (Symbols made once, not for every row).
+const PREFIXED_PLANS = Dict{Tuple{Any,String},Tuple{Symbol,Vector{Tuple{Field,Symbol,Symbol}}}}()
+const PREFIXED_LOCK = ReentrantLock()
+push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> empty!(PREFIXED_PLANS), PREFIXED_LOCK))
+Base.@nospecializeinfer function prefixed_plan(@nospecialize(T::Type), prefix::String)
+    key = (T, prefix)
+    lock(PREFIXED_LOCK)
+    try
+        p = get(PREFIXED_PLANS, key, nothing)
+        p === nothing || return p
+        plan = Tuple{Field,Symbol,Symbol}[(f, Symbol(prefix, column(f)), attname(f)) for f in all_fields(T)]
+        return PREFIXED_PLANS[key] = (Symbol(prefix, "id"), plan)
+    finally
+        unlock(PREFIXED_LOCK)
+    end
 end
 
 "Execute the query and return a `Vector` of model instances."

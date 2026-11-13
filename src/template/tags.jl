@@ -216,6 +216,7 @@ to_iterable(::Nothing) = Any[]
 to_iterable(::Undefined) = Any[]
 to_iterable(x::AbstractString) = collect(x)
 to_iterable(x::SafeString) = collect(x.s)
+to_iterable(x::AbstractVector) = x            # (callers don't change it)
 to_iterable(x) = collect(x)
 
 """
