@@ -112,7 +112,7 @@ public uuid4, FieldFile, FileSystemStorage, InMemoryStorage, storages, default_s
        get_for_model, model_class, natural_key, get_by_natural_key, manager, default_queryset,
        DatabaseBackend, register_backend!, execute, db_for_read, db_for_write, allow_migrate, allow_relation
 # migrations and database tools
-public showmigrations, sqlmigrate, squashmigrations, flush!, inspectdb, dbshell_cmd,
+public showmigrations, sqlmigrate, squashmigrations, optimizemigration, flush!, inspectdb, dbshell_cmd,
        serialize, deserialize, dumpdata, loaddata, load_fixtures
 # forms
 public management_form, empty_form, deleted_forms, ordered_forms, clean_form

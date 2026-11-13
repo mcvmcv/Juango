@@ -35,6 +35,20 @@ struct AlterPrimaryKey <: Operation
     AlterPrimaryKey(table, pk) = new(string(table), Symbol(pk))
 end
 
+"""
+    SeparateDatabaseAndState(; database_operations = [], state_operations = [])
+
+Run `database_operations` against the database and apply `state_operations` to the migration
+state, separately (Django's operation of the same name): for example to start managing a table
+that already exists, or to move a model between apps without touching its table.
+"""
+struct SeparateDatabaseAndState <: Operation
+    database_operations::Vector{Operation}
+    state_operations::Vector{Operation}
+end
+SeparateDatabaseAndState(; database_operations = Operation[], state_operations = Operation[]) =
+    SeparateDatabaseAndState(collect(Operation, database_operations), collect(Operation, state_operations))
+
 "Set or remove (`nothing`) a table's comment (`Meta(db_table_comment = ...)`)."
 struct AlterModelTableComment <: Operation
     table::String
@@ -275,6 +289,7 @@ function state_forwards!(op::RenameField, st, app)
     st
 end
 state_forwards!(::Union{RunSQL,RunJulia}, st, app) = st
+state_forwards!(op::SeparateDatabaseAndState, st, app) = (foreach(o -> state_forwards!(o, st, app), op.state_operations); st)
 
 # --- database changes ---------------------------------------------------------------------------
 # `from`/`to` are the states before and after the operation (in the forward direction).
@@ -327,6 +342,24 @@ forwards(op::AlterUniqueTogether, b, from, to, deferred) =
 backwards(op::AlterUniqueTogether, b, from, to, deferred) =
     Juango.alter_unique_together_sql(b, op.table, to[op.table].unique_together, from[op.table].unique_together)
 
+"The states the database operations of a SeparateDatabaseAndState pass through, from `from`."
+function db_states(op::SeparateDatabaseAndState, from)
+    states = [copy_state(from)]
+    for o in op.database_operations
+        push!(states, state_forwards!(o, copy_state(states[end]), "_"))
+    end
+    states
+end
+function forwards(op::SeparateDatabaseAndState, b, from, to, deferred)
+    states = db_states(op, from)
+    Any[a for (i, o) in enumerate(op.database_operations) for a in forwards(o, b, states[i], states[i+1], deferred)]
+end
+function backwards(op::SeparateDatabaseAndState, b, from, to, deferred)
+    states = db_states(op, from)              # `from` is the state before the operation, in both directions
+    Any[a for i in length(op.database_operations):-1:1
+          for a in backwards(op.database_operations[i], b, states[i], states[i+1], deferred)]
+end
+
 forwards(op::RunSQL, b, from, to, deferred) = op.forward
 function backwards(op::RunSQL, b, from, to, deferred)
     op.backward === nothing && throw(IrreversibleError("RunSQL has no reverse SQL"))
@@ -360,4 +393,5 @@ describe(op::RemoveIndex) = "Remove index $(op.name) from $(op.table)"
 describe(op::AddConstraint) = "Create constraint $(op.constraint.name) on $(op.table)"
 describe(op::RemoveConstraint) = "Remove constraint $(op.name) from $(op.table)"
 describe(op::RunSQL) = "Raw SQL operation"
+describe(op::SeparateDatabaseAndState) = "Custom state/database change combination"
 describe(op::RunJulia) = "Raw Julia operation"

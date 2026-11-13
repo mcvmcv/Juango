@@ -62,10 +62,10 @@ function already_in_database(m::Migration)
     true
 end
 
-function apply!(g::Graph, k; backwards = false, fake = false, log = println)
+function apply!(g::Graph, k; backwards = false, fake = false, fake_initial = true, log = println)
     m = g.nodes[k]
     label = backwards ? "  Unapplying $(m)..." : "  Applying $(m)..."
-    if !backwards && !fake && already_in_database(m)
+    if !backwards && !fake && fake_initial && already_in_database(m)
         record_applied_all!(m)
         log(label * " FAKED (tables already exist)")
         return
@@ -75,6 +75,28 @@ function apply!(g::Graph, k; backwards = false, fake = false, log = println)
         backwards ? record_unapplied_all!(m) : record_applied_all!(m)
     end
     log(label * (fake ? " FAKED" : " OK"))
+end
+
+"""
+`migrate(app = ..., prune = true)`: forget migrations recorded as applied whose files no longer
+exist, e.g. after deleting the migrations a squashed one replaced (Django's `migrate --prune`).
+"""
+function prune_migrations(app; log = println)
+    app === nothing && throw(MigrationError("migrations can be pruned only for an app: migrate(app = \"...\", prune = true)"))
+    g = build_graph(; applied = Set{Tuple{String,String}}())
+    gone = sort([k for k in applied_migrations() if k[1] == app && !haskey(g.nodes, k)])
+    still_replaced = Set(r for m in values(g.nodes) if m.app == app for r in m.replaces)
+    log("Pruning migrations:")
+    isempty(gone) && log("  No migrations to prune.")
+    for k in gone
+        if k in still_replaced
+            log("  Skipping $(k[1]).$(k[2]): a squashed migration still lists it in `replaces`; remove that line first.")
+        else
+            record_unapplied!(k)
+            log("  Pruning $(k[1]).$(k[2]) OK")
+        end
+    end
+    nothing
 end
 
 function resolve_name(g::Graph, app, name)
@@ -124,8 +146,10 @@ only synchronises tables for every model. `database` picks one of `DATABASES` (d
 """
 migrate(; database = nothing, kw...) = Juango.with_db(() -> migrate_here(; kw...), database)
 
-function migrate_here(; app = nothing, target = nothing, fake = false, sync = false, verbose = true)
+function migrate_here(; app = nothing, target = nothing, fake = false, fake_initial = true, sync = false, prune = false,
+                      verbose = true)
     log(msg) = verbose && println(msg)
+    prune && return prune_migrations(app; log = log)
     db = Juango.current_alias()
     allowed(T) = Juango.migrate_allowed(db, modelmeta(T).app; model = T)
     if sync
@@ -156,7 +180,7 @@ function migrate_here(; app = nothing, target = nothing, fake = false, sync = fa
     log("Running migrations:")
     isempty(plan) && log("  No migrations to apply.")
     for (k, back) in plan
-        apply!(g, k; backwards = back, fake = fake || !Juango.migrate_allowed(db, k[1]), log = log)
+        apply!(g, k; backwards = back, fake = fake || !Juango.migrate_allowed(db, k[1]), fake_initial = fake_initial, log = log)
     end
     if target === nothing && !isempty(unmigrated)
         log("Synchronizing apps without migrations:")

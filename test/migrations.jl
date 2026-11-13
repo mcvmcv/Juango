@@ -753,6 +753,97 @@ end
     end
 end
 
+@testset "migration tools: optimizemigration, --update, SeparateDatabaseAndState, --prune, fake_initial" begin
+    M = Juango.Migrations
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("migtools" => dir))
+    quiet(f) = redirect_stdout(f, devnull)
+    no = _ -> false
+    cols(t) = Set(Juango.table_columns(Juango.backend(), t))
+    try
+        @eval @model struct ToolV1
+            name = CharField(max_length = 20)
+            Meta(table = "mt_tool", name = "Tool", app_label = "migtools")
+        end
+        quiet(() -> makemigrations(app = "migtools", questioner = no))
+        quiet(() -> migrate())
+
+        # a hand-written migration with operations that cancel out or merge
+        write(joinpath(dir, "0002_messy.jl"), """
+            using Juango.Migrations
+            Migration(dependencies = [("migtools", "0001_initial")], operations = [
+                AddField("mt_tool", Column("size", :int; null = true)),
+                AlterField("mt_tool", Column("size", :int; default = 1)),
+                AddField("mt_tool", Column("tmp", :string; null = true, max_length = 5)),
+                RemoveField("mt_tool", "tmp"),
+                AlterField("mt_tool", Column("name", :string; max_length = 30)),
+                AlterField("mt_tool", Column("name", :string; max_length = 40)),
+            ])
+            """)
+        @test quiet(() -> M.optimizemigration("migtools", "0002"; check = true)) && occursin("tmp", read(joinpath(dir, "0002_messy.jl"), String))
+        @test quiet(() -> M.optimizemigration("migtools", "0002"))
+        src = read(joinpath(dir, "0002_messy.jl"), String)
+        @test occursin("AddField(\"mt_tool\", Column(\"size\", :int; default = 1))", src) && !occursin("tmp", src) &&
+              count("AlterField", src) == 1 && occursin("max_length = 40", src)
+        @test !quiet(() -> M.optimizemigration("migtools", "0002"))
+        @test M.optimize_operations(M.Operation[M.CreateModel("t1"; columns = [M.Column("a", :int)]), M.AddField("t1", M.Column("b", :int; null = true)),
+                                                 M.DeleteModel("t1")], Juango.SchemaState(), "migtools") == M.Operation[]
+
+        # makemigrations(update = true) folds new changes into the unapplied latest migration
+        Juango.unregister_model!(ToolV1)
+        @eval @model struct ToolV2
+            name = CharField(max_length = 40)
+            size = IntegerField(default = 1)
+            weight = IntegerField(default = 0)
+            Meta(table = "mt_tool", name = "Tool", app_label = "migtools")
+        end
+        p = only(quiet(() -> makemigrations(app = "migtools", update = true, questioner = no)))
+        @test basename(p) == "0002_messy.jl" && length(readdir(dir)) == 2 && occursin("weight", read(p, String))
+        quiet(() -> migrate())
+        @test "weight" in cols("mt_tool") && "size" in cols("mt_tool")
+        @test_throws M.MigrationError quiet(() -> makemigrations(app = "migtools", update = true, questioner = no))   # applied now
+
+        # SeparateDatabaseAndState: the database and the state each get their own operations
+        write(joinpath(dir, "0003_separate.jl"), """
+            using Juango.Migrations
+            Migration(dependencies = [("migtools", "0002_messy")], operations = [
+                SeparateDatabaseAndState(
+                    database_operations = [RunSQL("CREATE TABLE mt_legacy (id INTEGER PRIMARY KEY, code VARCHAR(10))", "DROP TABLE mt_legacy")],
+                    state_operations = [CreateModel("mt_legacy"; model = "Legacy", columns = [Column("code", :string; max_length = 10)])]),
+            ])
+            """)
+        @eval @model struct Legacy
+            code = CharField(max_length = 10)
+            Meta(table = "mt_legacy", app_label = "migtools")
+        end
+        quiet(() -> migrate())
+        @test Juango.table_exists(Juango.backend(), "mt_legacy")
+        @test isempty(M.detect_changes(M.build_graph(), "migtools"; questioner = no))      # the state knows the table
+        quiet(() -> migrate(app = "migtools", target = "0002"))
+        @test !Juango.table_exists(Juango.backend(), "mt_legacy")
+        quiet(() -> migrate())
+
+        # --prune forgets applied migrations whose files are gone
+        M.record_applied!(("migtools", "0099_gone"))
+        @test ("migtools", "0099_gone") in M.applied_migrations()
+        @test_throws M.MigrationError quiet(() -> migrate(prune = true))
+        quiet(() -> migrate(app = "migtools", prune = true))
+        @test !(("migtools", "0099_gone") in M.applied_migrations()) && ("migtools", "0003_separate") in M.applied_migrations()
+
+        # fake_initial = false: an initial migration whose tables exist isn't skipped
+        quiet(() -> migrate(app = "migtools", target = "zero"))
+        Juango.execute("CREATE TABLE " * Juango.qname("mt_tool") * " (" * Juango.qname("id") * " INTEGER PRIMARY KEY, " *
+                       Juango.qname("name") * " VARCHAR(20))")
+        @test_throws Exception quiet(() -> migrate(app = "migtools", target = "0001", fake_initial = false))
+        quiet(() -> migrate(app = "migtools", target = "0001"))                         # the default fakes it
+        @test ("migtools", "0001_initial") in M.applied_migrations()
+        quiet(() -> migrate(app = "migtools", target = "zero"))
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "migtools", Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end
+
 @testset "composite primary keys" begin
     dir = mktempdir()
     configure!(MIGRATION_MODULES = Dict("migcomp" => dir))

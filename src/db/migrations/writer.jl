@@ -46,6 +46,8 @@ op_code(op::AddField) = "AddField($(jl(op.table)), $(column_code(op.column)))"
 op_code(op::RemoveField) = "RemoveField($(jl(op.table)), $(jl(op.name)))"
 op_code(op::AlterField) = "AlterField($(jl(op.table)), $(column_code(op.column)))"
 op_code(op::RenameField) = "RenameField($(jl(op.table)), $(jl(op.old)), $(jl(op.new)))"
+op_code(op::SeparateDatabaseAndState) = "SeparateDatabaseAndState(database_operations = [" *
+    join(op_code.(op.database_operations), ", ") * "], state_operations = [" * join(op_code.(op.state_operations), ", ") * "])"
 op_code(op::RunSQL) = "RunSQL($(jl(op.forward)), $(op.backward === nothing ? "nothing" : jl(op.backward)))"
 
 function migration_code(m::Migration)
@@ -92,6 +94,31 @@ function suggest_name(ops, initial)
     length(s) > 50 ? "auto_" * Dates.format(now(), "yyyymmdd_HHMM") : s
 end
 
+"""
+`makemigrations(update = true)`: fold the model changes into the app's latest migration (which
+must not be applied yet, nor depended on), optimized, instead of writing a new one.
+"""
+function update_migration(g::Graph, app, leaves; name, dry_run, questioner, log)
+    length(leaves) == 1 || throw(MigrationError("makemigrations --update needs exactly one latest migration in '$app'"))
+    k = only(leaves)
+    m = g.nodes[k]
+    k in applied_migrations() && throw(MigrationError("$(k[2]) has been applied; it can't be updated (write a new migration)"))
+    any(o -> k in o.dependencies, values(g.nodes)) && throw(MigrationError("$(k[2]) is a dependency of another migration"))
+    any(op -> op isa Union{RunJulia,RunSQL,SeparateDatabaseAndState}, m.operations) &&
+        throw(MigrationError("$(k[2]) contains RunSQL, RunJulia or SeparateDatabaseAndState, which can't be rewritten"))
+    new = detect_changes(g, app; questioner = questioner)
+    if isempty(new)
+        log("No changes detected" * (app == "project" ? "" : " in app '$app'"))
+        return String[]
+    end
+    ops = optimize_operations(vcat(m.operations, new), state_before(g, k), app)
+    um = Migration(; dependencies = m.dependencies, operations = ops, initial = m.initial, replaces = m.replaces)
+    nm = something(name, k[2][6:end])
+    path = write_file(app, parse(Int, k[2][1:4]), nm, um; dry_run = dry_run, log = log)
+    !dry_run && path != m.path && rm(m.path)
+    [path]
+end
+
 next_number(g::Graph, app) = 1 + maximum([parse(Int, k[2][1:4]) for k in keys(g.nodes) if k[1] == app]; init = 0)
 
 function write_file(app, number, name, m::Migration; dry_run = false, log = println)
@@ -122,11 +149,12 @@ would-be paths without writing). `merge=true` writes a merge migration for confl
 branches. `empty=true` writes a migration with no operations, for `RunSQL`/`RunJulia`.
 """
 function makemigrations(; app = "project", name = nothing, empty = false, merge = false, dry_run = false,
-                        check = false, questioner = ask, verbose = true)
+                        check = false, update = false, questioner = ask, verbose = true)
     log(msg) = verbose && println(msg)
     app = string(app)
     g = build_graph(unique(vcat(migrated_apps(), [app])))
     leaves = leaf_nodes(g, app)
+    update && return update_migration(g, app, leaves; name = name, dry_run = dry_run || check, questioner = questioner, log = log)
     if merge
         length(leaves) > 1 || (log("No conflicts detected to merge."); return String[])
         m = Migration(; dependencies = leaves)
@@ -166,6 +194,94 @@ function makemigrations(; app = "project", name = nothing, empty = false, merge 
 end
 
 """
+    optimize_operations(ops, before, app) -> Vector{Operation}
+
+Fewer operations with the same effect: tables created along the way become one `CreateModel`
+with their final definition (and vanish if they're deleted again), and on other tables an
+`AddField` absorbs later `AlterField`s of its column, an `AddField` followed by a `RemoveField`
+cancels out, and only the last of several `AlterField`s is kept. `RunSQL`, `RunJulia` and
+`SeparateDatabaseAndState` are barriers: nothing is moved across them.
+"""
+function optimize_operations(ops::Vector{Operation}, before::SchemaState, app)
+    after = copy_state(before)
+    created = Set{String}()            # tables created by these operations, by their current name
+    kept = Operation[]
+    for op in ops
+        state_forwards!(op, after, app)
+        if op isa CreateModel
+            push!(created, op.table)
+        elseif op isa RenameModel && op.old in created
+            delete!(created, op.old); push!(created, op.new)
+        elseif op isa DeleteModel && op.table in created
+            delete!(created, op.table)
+        elseif hasfield(typeof(op), :table) && getfield(op, :table) in created && !(op isa SeparateDatabaseAndState)
+            # folded into the table's CreateModel
+        else
+            push!(kept, op)
+        end
+    end
+    creates = Operation[CreateModel(t.name; model = t.model, columns = t.columns, unique_together = t.unique_together,
+                                    parent = t.parent, pk = t.pk, indexes = t.indexes, constraints = t.constraints,
+                                    pk_columns = t.pk_columns, comment = t.comment)
+                        for t in creation_order(Table[after[n] for n in created])]
+    vcat(creates, reduce_field_ops(kept))
+end
+
+"Merge operations on the same column (between barriers)."
+function reduce_field_ops(ops::Vector{Operation})
+    out = Operation[]
+    barrier = 0                        # operations before this index in `out` are final
+    col(op) = op isa Union{AddField,AlterField} ? (op.table, op.column.name) : op isa RemoveField ? (op.table, op.name) : nothing
+    for op in ops
+        if op isa Union{RunSQL,RunJulia,SeparateDatabaseAndState}
+            push!(out, op); barrier = length(out); continue
+        end
+        c = col(op)
+        # an earlier op on the same column, with nothing that renames columns of that table in between
+        i = c === nothing ? nothing : findlast(x -> col(x) == c, out)
+        if i !== nothing && i > barrier && !any(x -> x isa RenameField && x.table == c[1], out[i+1:end])
+            prev = out[i]
+            if prev isa AddField && op isa AlterField
+                out[i] = AddField(prev.table, op.column); continue
+            elseif prev isa AddField && op isa RemoveField
+                deleteat!(out, i); continue
+            elseif prev isa AlterField && op isa Union{AlterField,RemoveField}
+                deleteat!(out, i)
+            end
+        end
+        push!(out, op)
+    end
+    out
+end
+
+"""
+    optimizemigration(app, name; check = false) -> Bool
+
+Rewrite one migration with fewer operations (see `optimize_operations`), keeping its name and
+dependencies. Returns whether it changed; `check = true` only reports it. Migrations with
+`RunSQL`, `RunJulia` or `SeparateDatabaseAndState` are left alone (their code can't be rewritten).
+"""
+function optimizemigration(app, name; check = false, verbose = true)
+    log(msg) = verbose && println(msg)
+    app = string(app)
+    g = build_graph(; applied = Set{Tuple{String,String}}())
+    k = resolve_name(g, app, string(name))
+    m = g.nodes[k]
+    any(op -> op isa Union{RunJulia,RunSQL,SeparateDatabaseAndState}, m.operations) &&
+        throw(MigrationError("$(k[2]) contains RunSQL, RunJulia or SeparateDatabaseAndState, which optimizemigration can't rewrite"))
+    ops = optimize_operations(m.operations, state_before(g, k), app)
+    if length(ops) == length(m.operations) && all(((a, b),) -> typeof(a) === typeof(b), zip(ops, m.operations))
+        log("No optimizations possible.")
+        return false
+    end
+    log("Optimized from $(length(m.operations)) operations to $(length(ops)) operations.")
+    check && return true
+    write(m.path, migration_code(Migration(; dependencies = m.dependencies, operations = ops, initial = m.initial, replaces = m.replaces)))
+    log("  " * relpath_or_abs(m.path))
+    true
+end
+
+"""
     squashmigrations(app, stop; start = nothing, name = nothing, dry_run = false) -> path
 
 Write one migration that stands for `app`'s migrations from `start` (default: the first) to
@@ -189,36 +305,15 @@ function squashmigrations(app, stop; start = nothing, name = nothing, dry_run = 
     for k in range
         isempty(g.nodes[k].replaces) || throw(MigrationError("$(k[2]) is itself a squashed migration; squash the originals instead"))
         for op in g.nodes[k].operations
-            op isa Union{RunSQL,RunJulia} && throw(MigrationError(
+            op isa Union{RunSQL,RunJulia,SeparateDatabaseAndState} && throw(MigrationError(
                 "$(k[2]) has a $(nameof(typeof(op))) operation; squashmigrations only combines schema changes " *
                 "(squash the migrations before and after it separately)"))
         end
     end
     inrange = Set(range)
     deps = sort(unique([d for k in range for d in g.nodes[k].dependencies if !(d in inrange)]))
-    after = state_before(g, first_k)
-    created = Set{String}()            # tables created in the range, by their current name
-    kept = Operation[]
-    for k in range, op in g.nodes[k].operations
-        state_forwards!(op, after, app)
-        if op isa CreateModel
-            push!(created, op.table)
-        elseif op isa RenameModel && op.old in created
-            delete!(created, op.old); push!(created, op.new)
-        elseif op isa DeleteModel && op.table in created
-            delete!(created, op.table)
-        elseif hasfield(typeof(op), :table) && getfield(op, :table) in created
-            # folded into the table's CreateModel
-        else
-            push!(kept, op)
-        end
-    end
-    creates = Operation[CreateModel(t.name; model = t.model, columns = t.columns, unique_together = t.unique_together,
-                                    parent = t.parent, pk = t.pk, indexes = t.indexes, constraints = t.constraints,
-                                    pk_columns = t.pk_columns, comment = t.comment)
-                        for t in creation_order(Table[after[n] for n in created])]
-    m = Migration(; dependencies = deps, operations = vcat(creates, kept), initial = g.nodes[first_k].initial,
-                  replaces = range)
+    ops = optimize_operations(Operation[op for k in range for op in g.nodes[k].operations], state_before(g, first_k), app)
+    m = Migration(; dependencies = deps, operations = ops, initial = g.nodes[first_k].initial, replaces = range)
     number = parse(Int, first_k[2][1:4])
     write_file(app, number, something(name, "squashed_" * last_k[2]), m; dry_run = dry_run, log = log)
 end

@@ -152,11 +152,12 @@ function cmd_migrate(args)
         isempty(ks) && return println("App '$app' has no migrations.")
         target = last(ks)[2]
     end
+    haskey(flags, "prune") && return migrate(; app = app, prune = true, database = get(flags, "database", nothing))
     migrate(; app = app, target = target, fake = haskey(flags, "fake"), sync = haskey(flags, "sync"),
-            database = get(flags, "database", nothing))
+            fake_initial = !haskey(flags, "no-fake-initial"), database = get(flags, "database", nothing))
 end
 
-# makemigrations [app...] [--app NAME] [--name NAME] [--empty] [--merge] [--dry-run] [--check] [--noinput]
+# makemigrations [app...] [--app NAME] [--name NAME] [--empty] [--merge] [--update] [--dry-run] [--check] [--noinput]
 # Without an app: the project's models and every installed app that has a directory.
 function cmd_makemigrations(args)
     pos, flags = parse_flags(args)
@@ -168,7 +169,8 @@ function cmd_makemigrations(args)
     q = haskey(flags, "noinput") || haskey(flags, "no-input") ? (_ -> false) : Migrations.ask
     paths = makemigrations(; app = get(flags, "app", "project"), name = get(flags, "name", nothing),
                            empty = haskey(flags, "empty"), merge = haskey(flags, "merge"),
-                           dry_run = haskey(flags, "dry-run"), check = haskey(flags, "check"), questioner = q)
+                           dry_run = haskey(flags, "dry-run"), check = haskey(flags, "check"), update = haskey(flags, "update"),
+                           questioner = q)
     haskey(flags, "check") && !isempty(paths) && exit(1)
     paths
 end
@@ -221,6 +223,14 @@ function cmd_loaddata(args)
     println("Installed $n object(s) from $(length(pos)) fixture(s)")
 end
 
+# optimizemigration app name [--check]
+function cmd_optimizemigration(args)
+    pos, flags = parse_flags(args)
+    length(pos) == 2 || error("usage: optimizemigration <app> <migration> [--check]")
+    changed = optimizemigration(pos[1], pos[2]; check = haskey(flags, "check"))
+    haskey(flags, "check") && changed && exit(1)
+end
+
 # squashmigrations app [start] stop [--name NAME] [--dry-run]
 function cmd_squashmigrations(args)
     pos, flags = parse_flags(args)
@@ -254,8 +264,9 @@ end
 
 for (n, h, f) in (
     ("runserver", "Start the development server: runserver [host:]port [--cert cert.pem --key key.pem]", cmd_runserver),
-    ("migrate", "Apply migrations: migrate [app] [target|zero] [--fake] [--sync] [--database ALIAS]", cmd_migrate),
-    ("makemigrations", "Write migrations for model changes (--name, --empty, --merge, --dry-run, --check, --noinput, --app)", cmd_makemigrations),
+    ("migrate", "Apply migrations: migrate [app] [target|zero] [--fake] [--no-fake-initial] [--sync] [--prune] [--database ALIAS]", cmd_migrate),
+    ("optimizemigration", "Rewrite a migration with fewer operations: optimizemigration <app> <migration> [--check]", cmd_optimizemigration),
+    ("makemigrations", "Write migrations for model changes (--name, --empty, --merge, --update, --dry-run, --check, --noinput, --app)", cmd_makemigrations),
     ("showmigrations", "List migrations and whether they are applied", _ -> showmigrations()),
     ("sqlmigrate", "Print the SQL for a migration: sqlmigrate [app] <name> [--backwards]", cmd_sqlmigrate),
     ("db_worker", "Run background tasks of the database backend: db_worker [--queue a,b] [--max-tasks N] [--stop-when-empty]",
