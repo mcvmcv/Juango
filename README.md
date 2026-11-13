@@ -355,6 +355,23 @@ values_list(objects(Post), :title, :author__name)               # tuples; flat=t
   - `annotate(qs; n = Count(:pub))`, `filter(qs; pub__title__contains = "Julia")`, `exclude(qs; pub__views = 0)`, `order_by(qs, "pub__views")`
 - **`values()` is lazy.** It returns a queryset whose rows are `Dict`s. Aggregates in `annotate` after `values(:field)` group by that field. As in Django, combining aggregates over two different reverse relations multiplies rows, so use `distinct=true`.
 
+**More functions** live in `Juango.Functions` (Django's `django.db.models.functions`):
+
+```julia
+using Juango.Functions
+annotate(Product; slug = Lower(Replace(:name, " ", "-")), code = LPad(Cast(:id, :string), 6, "0"),
+         cheapest = Least(:price, :sale_price), net = Round(F(:price) / 1.2, 2), h = SHA256(:name))
+aggregate(Product; sd = StdDev(:price), names = StringAgg(:name, ", "; ordering = "name"),
+          ids = ArrayAgg(:id; ordering = "-id"), total = Sum(:price; default = 0))
+filter(Product; name__regex = "^[A-Z]{2}-\\d+", code__iregex = "x\$")
+```
+
+- **Comparison and text:** `Greatest`, `Least`, `NullIf`, `Collate`, `Replace`, `Substr`, `Left`, `Right`, `Trim`, `LTrim`, `RTrim`, `LPad`, `RPad`, `Repeat`, `Reverse`, `StrIndex`, `MD5`, `SHA256`, `Chr` and `Ord`.
+- **Math:** `Abs`, `Round`, `Ceil`, `Floor`, `Mod`, `Power`, `Sqrt`, `Sign`, `Ln`, `Log`, `Exp`, the trigonometric functions, `Degrees`, `Radians` and `Pi`.
+- **Aggregates:** `StdDev` and `Variance` (`sample = true`), `StringAgg`, `ArrayAgg` (also `JSONBAgg`), `BoolAnd`, `BoolOr`, `BitAnd` and `BitOr`. Every aggregate takes `filter =` and `default =`.
+- **How they work on each database.** `ArrayAgg` builds a JSON array in the database, so it works everywhere, and dates come back as text. MySQL ignores the ordering of `ArrayAgg`; MariaDB respects it. `Greatest`/`Least` follow each database's NULL rules. SQLite lacks many of these functions, so Juango registers Julia versions on its connections.
+- **Regular expressions.** `regex` and `iregex` lookups use the database's own syntax: `~` and `~*` on Postgres, PCRE or ICU on MySQL, and Julia's PCRE on SQLite.
+
 #### Async
 
 Views already run as tasks on a thread pool, so blocking database calls don't hold up the server. For starting work and collecting it later, or running queries side by side, Juango has Django's async names. Each returns a `Task`:

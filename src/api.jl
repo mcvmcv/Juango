@@ -9,6 +9,7 @@
 #     using Juango.Testing      # Client, RequestFactory, assertions, override_settings, outbox ...
 #     using Juango.GIS          # geometry fields and types, distances, GeoJSON and WKT
 #     using Juango.Postgres     # hstore, citext, full-text search, trigrams, exclusion constraints
+#     using Juango.Functions    # Greatest, Replace, LPad, Round, Sqrt, StdDev, StringAgg ... (Django's db.models.functions)
 #
 # plus `Juango.Admin` and `Juango.Migrations`. Functions that projects add methods to
 # (`get_absolute_url`, `tattr`, `natural_key`, router and auth-backend hooks ...) are public too.
@@ -151,6 +152,17 @@ export Client, RequestFactory, request, post, force_login!, text, outbox, rollba
     assert_num_queries, assert_form_error, count_queries, dummy_results
 end
 
+module Functions
+using ..Juango: Lower, Upper, Length, Coalesce, Concat, Cast, Now, Greatest, Least, NullIf, Collate, Replace,
+    Substr, Left, Right, Trim, LTrim, RTrim, LPad, RPad, Repeat, Reverse, StrIndex, MD5, SHA256, Chr, Ord, Abs,
+    Round, Ceil, Floor, Mod, Power, Sqrt, Sign, Ln, Log, Exp, Sin, Cos, Tan, Cot, ASin, ACos, ATan, ATan2,
+    Degrees, Radians, Pi, StdDev, Variance, ArrayAgg, JSONBAgg, StringAgg, BoolAnd, BoolOr, BitAnd, BitOr
+export Lower, Upper, Length, Coalesce, Concat, Cast, Now, Greatest, Least, NullIf, Collate, Replace,
+    Substr, Left, Right, Trim, LTrim, RTrim, LPad, RPad, Repeat, Reverse, StrIndex, MD5, SHA256, Chr, Ord, Abs,
+    Round, Ceil, Floor, Mod, Power, Sqrt, Sign, Ln, Log, Exp, Sin, Cos, Tan, Cot, ASin, ACos, ATan, ATan2,
+    Degrees, Radians, Pi, StdDev, Variance, ArrayAgg, JSONBAgg, StringAgg, BoolAnd, BoolOr, BitAnd, BitOr
+end
+
 module GIS
 using ..Juango: GeometryField, PointField, LineStringField, PolygonField, MultiPointField,
     MultiLineStringField, MultiPolygonField, Point, LineString, Polygon, MultiPoint, MultiLineString,
@@ -169,4 +181,4 @@ export HStoreField, CICharField, SearchVector, SearchQuery, SearchRank, TrigramS
     ExclusionConstraint, GinIndex
 end
 
-public Testing, GIS, Postgres, Migrations
+public Testing, GIS, Postgres, Functions, Migrations

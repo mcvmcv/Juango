@@ -348,6 +348,8 @@ function lookup_condition(c::SQLCompiler, col, lookup, @nospecialize(value), @no
         return lookup_sql(backend(), Val(Symbol(lookup)), col, value)
     elseif lookup in ("gt", "gte", "lt", "lte")
         return ("$col $(COMPARISON_OPS[lookup]) ?", Any[conv(value)])
+    elseif lookup in ("regex", "iregex")
+        return regex_sql(backend(), col, string(value isa Regex ? value.pattern : value), lookup == "iregex")
     elseif lookup == "in"
         if value isa QuerySet
             sql, ps = value.values_fields === nothing ? subquery_sql(c, value; columns = nothing, idonly = true) :

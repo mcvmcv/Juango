@@ -24,7 +24,7 @@ Base.:~(a::Q) = !a
 
 const LOOKUPS = Set(["exact", "iexact", "contains", "icontains", "startswith", "istartswith",
                      "endswith", "iendswith", "gt", "gte", "lt", "lte", "in", "isnull", "range",
-                     "ne", "contained_by", "overlap", "has_key", "has_keys",
+                     "ne", "regex", "iregex", "contained_by", "overlap", "has_key", "has_keys",
                      "has_any_keys", "search", "intersects", "within", "covers", "coveredby", "disjoint", "touches",
                      "crosses", "overlaps", "equals", "distance_lt", "distance_lte", "distance_gt", "distance_gte", "dwithin"])
 

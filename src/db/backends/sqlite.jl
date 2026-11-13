@@ -19,6 +19,7 @@ function open_connection(b::SQLiteBackend)
     end
     SQLite.execute(db, "PRAGMA foreign_keys=OFF")   # cascades are done by the ORM (on_delete)
     register_sqlite_functions!(db)                  # juango_datepart, juango_trunc (datefunctions.jl)
+    register_sqlite_extras!(db)                     # LPAD, MD5, math, REGEXP, STDDEV ... (functions.jl)
 end
 
 close_connection(::SQLiteBackend, db) = DBInterface.close!(db)
@@ -73,6 +74,7 @@ function column_type(::SQLiteBackend, kind::Symbol, max_length)
 end
 
 encode_duration(::SQLiteBackend, us::Integer) = us
+regex_sql(::SQLiteBackend, col, pattern, icase::Bool) = ("$col REGEXP ?", Any[(icase ? "(?i)" : "") * pattern])   # regexp() is registered
 duration_param_sql(::SQLiteBackend) = "?"
 
 autoincrement_pk(b::SQLiteBackend, int = :bigint) = quote_name(b, "id") * " INTEGER PRIMARY KEY AUTOINCREMENT"

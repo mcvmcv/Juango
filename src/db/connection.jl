@@ -255,6 +255,9 @@ lookup_sql(b::DatabaseBackend, ::Val{:iendswith}, col, v) = ("LOWER($col) LIKE ?
 
 escape_like(s) = replace(s, "\\" => "\\\\", "%" => "\\%", "_" => "\\_")
 
+"The `regex` / `iregex` lookups (PostgreSQL's `~` and `~*`)."
+regex_sql(::DatabaseBackend, col, pattern, icase::Bool) = ("$col $(icase ? "~*" : "~") ?", Any[pattern])
+
 # transactions
 begin_sql(::DatabaseBackend) = "BEGIN"
 commit_sql(::DatabaseBackend) = "COMMIT"

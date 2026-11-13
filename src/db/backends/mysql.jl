@@ -78,6 +78,8 @@ duration_param_sql(::MySQLBackend) = "?"
 decimal_column_type(::MySQLBackend, max_digits, decimal_places) = "DECIMAL($max_digits, $decimal_places)"
 autoincrement_pk(b::MySQLBackend, int = :bigint) = quote_name(b, "id") * " " * column_type(b, int, nothing) * " NOT NULL AUTO_INCREMENT PRIMARY KEY"
 positive_check(::MySQLBackend) = false
+# PCRE (MariaDB) and ICU (MySQL) take the (?i) / (?-i) flags, whatever the column's collation
+regex_sql(::MySQLBackend, col, pattern, icase::Bool) = ("$col REGEXP ?", Any[(icase ? "(?i)" : "(?-i)") * pattern])
 "Type names CAST accepts."
 cast_type(b::MySQLBackend, kind::Symbol) = kind in INT_KINDS || kind === :fk ? "SIGNED" : kind === :float ? "DOUBLE" :
     kind === :date ? "DATE" : kind === :datetime ? "DATETIME(6)" : "CHAR"

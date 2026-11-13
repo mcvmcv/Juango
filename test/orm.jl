@@ -1493,3 +1493,47 @@ end
         end
     end
 end
+
+@testset "database functions, aggregates, regex lookups" begin
+    for n in ("fn Alice", "fn Bob", "fn carol"); create(Author; name = n); end
+    one(; kw...) = only(values(annotate(filter(Author; name = "fn Alice"); kw...), :name))
+    r = one(a = Replace(:name, "fn ", ""), b = Substr(:name, 4), c = Substr(:name, 4, 2), d = Left(:name, 2), e = Right(:name, 3),
+            f = Trim(Value("  x  ")), g = LTrim(Value("  x")), h = RTrim(Value("x  ")), i = LPad(Value("7"), 3, "0"),
+            j = RPad(Value("ab"), 4, "-"), k = Repeat(Value("ab"), 3), l = Reverse(Value("abc")), m = StrIndex(:name, Value("Al")),
+            n = Chr(Value(65)), o = Ord(Value("A")), p = Upper(Replace(:name, "fn ", "")))
+    @test (r[:a], r[:b], r[:c], r[:d], r[:e]) == ("Alice", "Alice", "Al", "fn", "ice")
+    @test (r[:f], r[:g], r[:h], r[:i], r[:j], r[:k], r[:l]) == ("x", "x", "x", "007", "ab--", "ababab", "cba")
+    @test (r[:m], r[:n], r[:o], r[:p]) == (4, "A", 65, "ALICE")
+    h = one(m5 = MD5(Value("abc")), s2 = SHA256(Value("abc")))
+    @test h[:m5] == "900150983cd24fb0d6963f7d28e17f72" && h[:s2] == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    c = one(g = Greatest(Value(3), Value(7), Value(5)), l = Least(Value(3), Value(7), Value(5)), n = NullIf(Value(1), Value(1)),
+            k = NullIf(Value(2), Value(1)), co = Collate(:name, IS_POSTGRES ? "C" : IS_MYSQL ? "utf8mb4_bin" : "BINARY"))
+    @test (c[:g], c[:l], c[:n], c[:k], c[:co]) == (7, 3, nothing, 2, "fn Alice")
+
+    m = one(a = Abs(Value(-3)), r = Round(Value(2.567), 2), ce = Ceil(Value(2.1)), fl = Floor(Value(2.9)), mo = Mod(Value(10), Value(3)),
+            po = Power(Value(2), Value(10)), sq = Sqrt(Value(16)), sg = Sign(Value(-5)), ln = Ln(Value(1)), lg = Log(Value(10), Value(1000)),
+            ex = Exp(Value(0)), si = Sin(Value(0)), at = ATan2(Value(1), Value(1)), de = Degrees(Pi()), ra = Radians(Value(180)))
+    @test m[:a] == 3 && m[:r] ≈ 2.57 && m[:ce] == 3 && m[:fl] == 2 && m[:mo] == 1 && m[:po] == 1024 && m[:sq] == 4 && m[:sg] == -1
+    @test m[:ln] == 0 && m[:lg] ≈ 3 && m[:ex] ≈ 1 && m[:si] == 0 && m[:at] ≈ π / 4 && m[:de] ≈ 180 && m[:ra] ≈ π
+
+    # aggregates
+    for k in 1:3; create(Tally; small = -77, count = k); end
+    t = aggregate(filter(Tally; small = -77); sd = StdDev(:count), sds = StdDev(:count; sample = true), v = Variance(:count),
+                  vs = Variance(:count; sample = true), ba = BitAnd(:count), bo = BitOr(:count),
+                  none = Sum(:count; filter = Q(count__gt = 10), default = 0))
+    @test t[:sd] ≈ sqrt(2 / 3) && t[:sds] ≈ 1 && t[:v] ≈ 2 / 3 && t[:vs] ≈ 1 && t[:ba] == 0 && t[:bo] == 3 && t[:none] == 0
+    au = create(Author; name = "fn bools")
+    create(Article; title = "fn yes", author = au, published = true); create(Article; title = "fn no", author = au, published = false)
+    b = aggregate(filter(Article; author = au); all = BoolAnd(:published), any = BoolOr(:published))
+    @test b[:all] === false && b[:any] === true
+    names = aggregate(filter(Author; name__startswith = "fn ", name__regex = "^fn [A-Za-z]+\$"); s = StringAgg(:name, ", "; ordering = "name"),
+                      a = ArrayAgg(:name; ordering = "-name"), d = ArrayAgg(:name; distinct = true))
+    @test sort(split(names[:s], ", ")) == ["fn Alice", "fn Bob", "fn bools", "fn carol"] && sort(names[:a]) == sort(names[:d])
+    IS_POSTGRES && @test names[:s] == "fn Alice, fn Bob, fn bools, fn carol" && names[:a] == ["fn carol", "fn bools", "fn Bob", "fn Alice"]
+
+    # regex lookups
+    qs = filter(Author; name__startswith = "fn ")
+    @test sort([x.name for x in filter(qs; name__regex = "^fn [A-B]")]) == ["fn Alice", "fn Bob"]
+    @test [x.name for x in filter(qs; name__iregex = "^FN C")] == ["fn carol"] && isempty(filter(qs; name__regex = "^FN"))
+    @test [x.name for x in exclude(qs; name__regex = r"o")] == ["fn Alice"]
+end

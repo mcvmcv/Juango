@@ -90,7 +90,12 @@ struct Aggregate <: Expression
     arg::Union{Nothing,Expression}
     distinct::Bool
     filter::Union{Nothing,Q}
+    default::Any                    # COALESCE(aggregate, default) when there are no rows
+    ordering::Vector{String}        # ORDER BY inside the aggregate (StringAgg, ArrayAgg): "name", "-created"
+    delimiter::Union{Nothing,String}   # StringAgg
 end
+Aggregate(func, arg, distinct, filter; default = nothing, ordering = String[], delimiter = nothing) =
+    Aggregate(func, arg, distinct, filter, default, ordering isa AbstractString ? [String(ordering)] : String[string(o) for o in ordering], delimiter)
 """
     Count(field=nothing; distinct=false, filter=nothing)
 
@@ -98,10 +103,35 @@ Count rows (`Count()`), non-NULL values of a field, or related objects (`Count(:
 `filter=Q(...)` counts only matching rows.
 """
 Count(x = nothing; distinct = false, filter = nothing) = Aggregate("COUNT", x === nothing ? nothing : ref(x), distinct, filter)
-Sum(x; distinct = false, filter = nothing) = Aggregate("SUM", ref(x), distinct, filter)
-Avg(x; distinct = false, filter = nothing) = Aggregate("AVG", ref(x), distinct, filter)
-Min(x; filter = nothing) = Aggregate("MIN", ref(x), false, filter)
-Max(x; filter = nothing) = Aggregate("MAX", ref(x), false, filter)
+Sum(x; distinct = false, filter = nothing, default = nothing) = Aggregate("SUM", ref(x), distinct, filter; default = default)
+Avg(x; distinct = false, filter = nothing, default = nothing) = Aggregate("AVG", ref(x), distinct, filter; default = default)
+Min(x; filter = nothing, default = nothing) = Aggregate("MIN", ref(x), false, filter; default = default)
+Max(x; filter = nothing, default = nothing) = Aggregate("MAX", ref(x), false, filter; default = default)
+"Standard deviation: of the population, or with `sample = true` of a sample."
+StdDev(x; sample = false, filter = nothing, default = nothing) = Aggregate(sample ? "STDDEV_SAMP" : "STDDEV_POP", ref(x), false, filter; default = default)
+"Variance: of the population, or with `sample = true` of a sample."
+Variance(x; sample = false, filter = nothing, default = nothing) = Aggregate(sample ? "VAR_SAMP" : "VAR_POP", ref(x), false, filter; default = default)
+"""
+    ArrayAgg(x; distinct = false, ordering = [], filter = nothing, default = nothing)
+
+The values as a `Vector` (a JSON array in the database, so it works everywhere; dates come back as
+text). `ordering` sorts them: `ordering = "-created"`. MySQL ignores `ordering` (MariaDB sorts).
+"""
+ArrayAgg(x; distinct = false, ordering = String[], filter = nothing, default = nothing) =
+    Aggregate("ARRAY_AGG", ref(x), distinct, filter; default = default, ordering = ordering)
+"Like `ArrayAgg` (PostgreSQL's JSONBAgg: a JSON array of the values)."
+JSONBAgg(x; kw...) = ArrayAgg(x; kw...)
+"The values joined into one string with `delimiter` (STRING_AGG / GROUP_CONCAT)."
+StringAgg(x, delimiter::AbstractString; distinct = false, ordering = String[], filter = nothing, default = nothing) =
+    Aggregate("STRING_AGG", ref(x), distinct, filter; default = default, ordering = ordering, delimiter = String(delimiter))
+"Whether all the values are true."
+BoolAnd(x; filter = nothing, default = nothing) = Aggregate("BOOL_AND", ref(x), false, filter; default = default)
+"Whether any of the values is true."
+BoolOr(x; filter = nothing, default = nothing) = Aggregate("BOOL_OR", ref(x), false, filter; default = default)
+"Bitwise AND of the values."
+BitAnd(x; filter = nothing, default = nothing) = Aggregate("BIT_AND", ref(x), false, filter; default = default)
+"Bitwise OR of the values."
+BitOr(x; filter = nothing, default = nothing) = Aggregate("BIT_OR", ref(x), false, filter; default = default)
 
 "`When(Q(...); then=value)` or `When(; then=value, lookups...)`, used inside `Case`."
 struct When
@@ -347,6 +377,8 @@ function compile_expr(c::SQLCompiler, e::Func)
     n === :trunc && return trunc_expr(b, e.args[2], sqls[1], something(temporal_kind(c, e.args[1]), :datetime)), ps
     n in (:similarity, :word_similarity, :strict_word_similarity, :unaccent) &&
         return uppercase(string(n)) * "(" * join(sqls, ", ") * ")", ps
+    sql = function_sql(b, n, sqls, e)                 # functions.jl: Greatest, Replace, Round, Sqrt, ...
+    sql === nothing || return sql, ps
     throw(ArgumentError("unknown function $n"))
 end
 
@@ -368,7 +400,43 @@ function compile_expr(c::SQLCompiler, e::Aggregate)
         arg = "CASE WHEN $cond THEN $(e.arg === nothing ? "1" : arg) END"
         ps = vcat(cps, ps)
     end
-    "$(e.func)($(e.distinct ? "DISTINCT " : "")$arg)", ps
+    order = String[]
+    for o in e.ordering
+        osql, ops = compile_expr(c, F(lstrip(o, '-')))
+        push!(order, osql * (startswith(o, "-") ? " DESC" : " ASC"))
+        append!(ps, ops)
+    end
+    sql = aggregate_sql(backend(), e.func, (e.distinct ? "DISTINCT " : "") * arg, order, e)
+    if e.default !== nothing
+        dsql, dps = compile_expr(c, lit_expr(e.default))
+        sql = "COALESCE($sql, $dsql)"
+        append!(ps, dps)
+    end
+    sql, ps
+end
+
+sql_string_literal(s) = "'" * replace(s, "'" => "''") * "'"
+obsql(order) = isempty(order) ? "" : " ORDER BY " * join(order, ", ")
+"SQL for an aggregate (`arg` already has DISTINCT); PostgreSQL's spelling by default."
+function aggregate_sql(::DatabaseBackend, func, arg, order, e)
+    func == "ARRAY_AGG" && return "CAST(JSON_AGG($arg$(obsql(order))) AS TEXT)"
+    func == "STRING_AGG" && return "STRING_AGG(CAST($arg AS TEXT), $(sql_string_literal(e.delimiter))$(obsql(order)))"
+    "$func($arg)"
+end
+function aggregate_sql(::MySQLBackend, func, arg, order, e)
+    func == "ARRAY_AGG" && return "JSON_ARRAYAGG($arg$(occursin("MariaDB", vendor(backend())) ? obsql(order) : ""))"
+    func == "STRING_AGG" && return "GROUP_CONCAT($arg$(obsql(order)) SEPARATOR $(sql_string_literal(e.delimiter)))"
+    func == "BOOL_AND" && return "MIN($arg)"
+    func == "BOOL_OR" && return "MAX($arg)"
+    "$func($arg)"
+end
+function aggregate_sql(::SQLiteBackend, func, arg, order, e)
+    func == "ARRAY_AGG" && return "json_group_array($arg$(obsql(order)))"
+    func == "STRING_AGG" && return "GROUP_CONCAT($arg, $(sql_string_literal(e.delimiter))$(obsql(order)))"
+    func == "BOOL_AND" && return "MIN($arg)"
+    func == "BOOL_OR" && return "MAX($arg)"
+    func in ("STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "BIT_AND", "BIT_OR") && return "juango_$(lowercase(func))($arg)"
+    "$func($arg)"
 end
 
 function compile_expr(c::SQLCompiler, e::Case)
@@ -505,6 +573,10 @@ numbers as Float64.
 """
 function expr_value(@nospecialize(T), e, v)
     v === nothing && return nothing
+    if e isa Aggregate
+        e.func == "ARRAY_AGG" && return v isa AbstractString ? JSON.parse(v) : v
+        e.func in ("BOOL_AND", "BOOL_OR") && return v isa Bool ? v : v != 0
+    end
     if e isa Union{CombinedExpression,Aggregate} || (e isa Func && e.name === :trunc)
         k = try temporal_kind(SQLCompiler(T), e) catch; nothing end
         k === :duration && return to_duration(v)
