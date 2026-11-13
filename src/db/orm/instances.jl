@@ -116,7 +116,7 @@ end
 function Base.delete!(obj::T; db = nothing) where {T<:Model}
     id = obj.id
     id === nothing && error("cannot delete an unsaved $(T)")
-    with_db(() -> atomic(() -> delete_ids!(T, [id])), write_db(obj, db))
+    with_db(() -> atomic(() -> delete_rows!(T, [id])), write_db(obj, db))
     getfield(obj, :_data)[:id] = nothing
     obj
 end

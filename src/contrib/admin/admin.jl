@@ -13,7 +13,7 @@ using ..Juango
 import ..Juango: Model, Field, Request, modelmeta, attname, label, findfield, related_model, format_date,
                  SafeString, escape_html, render, NOTFOUND, tattr, urlencode, QueryDict, User, AbstractUser, LoginView,
                  make_password, set_unusable_password!, reverse_relations, Paginator, page, Http404,
-                 ProtectedError, staff_member_required, message!, reverse_url, get_absolute_url, model_name,
+                 ProtectedError, RestrictedError, staff_member_required, message!, reverse_url, get_absolute_url, model_name,
                  HttpResponse, LogEntry, log_action!, ADDITION, CHANGE, DELETION, get_for_model, management_form
 using Dates
 
@@ -341,7 +341,7 @@ function delete_selected(ma::ModelAdmin, req::Request, qs)
         n = length(objs)
         message!(req, :success, "Successfully deleted $n $(n == 1 ? meta.verbose_name : meta.verbose_name_plural).")
     catch e
-        e isa ProtectedError || rethrow()
+        e isa Union{ProtectedError,RestrictedError} || rethrow()
         message!(req, :error, e.msg)
     end
     nothing
@@ -655,7 +655,7 @@ function delete_view(req::Request; model, id)
                                                 Dict("model" => meta.verbose_name, "object" => name)))
             return Juango.HttpResponseRedirect(reverse_url("admin:changelist"; model = ma.slug))
         catch e
-            e isa ProtectedError || rethrow()
+            e isa Union{ProtectedError,RestrictedError} || rethrow()
             message!(req, :error, e.msg)
             return Juango.HttpResponseRedirect(reverse_url("admin:change"; model = ma.slug, id = id))
         end
@@ -667,7 +667,10 @@ function delete_view(req::Request; model, id)
         n > 0 && push!(related, Dict{String,Any}("name" => modelmeta(M).verbose_name_plural, "count" => n,
                                                  "action" => f.on_delete === :CASCADE ? "deleted" :
                                                              f.on_delete === :SET_NULL ? "unlinked" :
-                                                             f.on_delete === :PROTECT ? "protected (blocks deletion)" : "left untouched"))
+                                                             f.on_delete === :PROTECT ? "protected (blocks deletion)" :
+                                                             f.on_delete === :RESTRICT ? "restricted (blocks deletion unless deleted along with it)" :
+                                                             f.on_delete === :SET_DEFAULT || f.on_delete isa Juango.OnDeleteSet ? "reassigned" :
+                                                             "left untouched"))
     end
     ctx = base_context(req, gettext("Are you sure?"))
     merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "related" => related))

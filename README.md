@@ -96,7 +96,7 @@ update!(filter(Post; author=ann); published=true)
 aggregate(objects(Post), :count, :id)
 get_or_create(Author; name="Bob", defaults=Dict(:email => "b@x.io"))
 atomic() do                      # transaction; nested calls use savepoints
-    save!(post); delete!(ann)    # on_delete: :CASCADE / :SET_NULL / :PROTECT / :DO_NOTHING
+    save!(post); delete!(ann)    # on_delete decides what happens to related rows (see below)
 end
 ```
 
@@ -179,6 +179,18 @@ union(filter(Post; featured = true), filter(Post; views__gt = 1000))     # inter
 ```
 
 `bulk_create` and `bulk_update` don't call `save!` or send signals. Combined querysets can be ordered, sliced and counted but not filtered further.
+
+#### What deleting does: on_delete
+
+```julia
+record = ForeignKey(Record, on_delete = :RESTRICT)              # see below
+venue  = ForeignKey(Venue, on_delete = :SET_DEFAULT, default = default_venue_id)
+backup = ForeignKey(Venue, on_delete = SET(fallback), null = true)   # an object, a key, or a function returning one
+```
+
+- **The options.** `:CASCADE` deletes the referencing rows too, `:SET_NULL` clears the key (it needs `null = true`), `:PROTECT` refuses with `ProtectedError`, and `:DO_NOTHING` leaves the rows alone. `:SET_DEFAULT` points the key at its `default`, and `SET(x)` points it at `x` or at what `x()` returns.
+- **`:RESTRICT`** works like `:PROTECT`, with one exception, as in Django. Deleting is allowed when the rows pointing through the key are deleted by the same operation. For example, deleting a band deletes its records and its tracks together, even though a track's `record` key is restricted. Deleting just the record raises `RestrictedError`.
+- **The admin's delete page** says which related rows each option affects.
 
 #### Integer sizes and primary keys
 
@@ -459,7 +471,7 @@ line.shipments                         # the reverse queryset
 filter(Shipment; line__qty__gt = 2); filter(OrderLine; shipments__id = 3)
 ```
 
-`to_fields` defaults to the target's primary key, so a `ForeignObject` can point at any model. Deleting the target applies `on_delete` (`:CASCADE` by default, `:SET_NULL`, `:PROTECT`, `:DO_NOTHING`). There is no database constraint, and the relation isn't a form field: forms edit the fields it is made of.
+`to_fields` defaults to the target's primary key, so a `ForeignObject` can point at any model. Deleting the target applies `on_delete` (`:CASCADE` by default, `:SET_NULL`, `:PROTECT`, `:RESTRICT`, `:DO_NOTHING`). There is no database constraint, and the relation isn't a form field: forms edit the fields it is made of.
 
 The admin supports composite-key models. Their URLs carry the key as `7,apple` (each part escaped as Django's admin does, so a comma inside a value becomes `_2C`; `pk_string(obj)` and `parse_pk(Model, s)` convert). The key fields can be filled in when adding and are read-only afterwards.
 

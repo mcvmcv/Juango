@@ -123,6 +123,14 @@ function compile_fobj_lookup(c::SQLCompiler, alias, g::Field, M::Type, rest, loo
     compile_lookup(c, a, M, subkey, value, negated)
 end
 
+"The rows of `M` whose ForeignObject `f` points at the `T` rows with these keys (nothing if none can)."
+function fobj_referrers(@nospecialize(T), @nospecialize(M), f::Field, keys::Vector)
+    doomed = fetch(filter(base_objects(T); pk__in = keys))
+    isempty(doomed) && return nothing
+    parts = fobj_parts(f)
+    filter(base_objects(M), reduce(|, [Q(:AND, Any[p[1] => getfield(o, :_data)[p[3]] for p in parts], false) for o in doomed]))
+end
+
 "Apply `on_delete` to the rows whose ForeignObjects point at `T` rows with these keys."
 function delete_fobj_refs!(T::Type, keys::Vector)
     rels = reverse_foreign_objects(T)
@@ -133,7 +141,7 @@ function delete_fobj_refs!(T::Type, keys::Vector)
         parts = fobj_parts(f)
         conds = [Q(:AND, Any[p[1] => getfield(o, :_data)[p[3]] for p in parts], false) for o in doomed]
         rel = filter(base_objects(M), reduce(|, conds))
-        if f.on_delete === :CASCADE
+        if f.on_delete === :CASCADE || f.on_delete === :RESTRICT
             delete_ids!(M, row_keys(rel))
         elseif f.on_delete === :SET_NULL
             update!(rel; (p[1] => nothing for p in parts)...)

@@ -35,7 +35,7 @@ mutable struct Field
     max_length::Union{Nothing,Int}
     choices::Union{Nothing,Vector{Pair{Any,String}}}
     related::Any
-    on_delete::Symbol
+    on_delete::Any                    # :CASCADE, :SET_NULL, :PROTECT, :RESTRICT, :SET_DEFAULT, :DO_NOTHING or SET(...)
     related_name::Union{Nothing,Symbol}
     auto_now::Bool
     auto_now_add::Bool
@@ -78,6 +78,24 @@ struct DatabaseDefault end
 const DB_DEFAULT = DatabaseDefault()
 Base.show(io::IO, ::DatabaseDefault) = print(io, "DB_DEFAULT")
 
+"""
+    SET(value), SET(f)
+
+`on_delete = SET(value)`: when the referenced object is deleted, point at `value` (an object or
+a primary key) instead, or at what `f()` returns.
+"""
+struct OnDeleteSet
+    value::Any
+end
+SET(v) = OnDeleteSet(v)
+norm_on_delete(x::OnDeleteSet) = x
+function norm_on_delete(x)
+    s = Symbol(uppercase(string(x)))
+    s in (:CASCADE, :SET_NULL, :PROTECT, :RESTRICT, :SET_DEFAULT, :DO_NOTHING) ||
+        throw(ArgumentError("on_delete must be :CASCADE, :SET_NULL, :PROTECT, :RESTRICT, :SET_DEFAULT, :DO_NOTHING or SET(...), not $(repr(x))"))
+    s
+end
+
 normchoices(::Nothing) = nothing
 normchoices(cs) = Pair{Any,String}[c isa Pair ? (c.first => string(c.second)) : (c => string(c)) for c in cs]
 
@@ -95,7 +113,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
         blank = true
     end
     Field(kind, :_, null, blank, default, unique, max_length, normchoices(choices), related,
-          Symbol(uppercase(string(on_delete))), related_name === nothing ? nothing : Symbol(related_name),
+          norm_on_delete(on_delete), related_name === nothing ? nothing : Symbol(related_name),
           auto_now, auto_now_add, verbose_name isa AbstractString ? verbose_name : string(verbose_name),
           help_text isa AbstractString ? help_text : string(help_text), collect(Any, validators),
           widget isa Union{AbstractString,Symbol} ? Symbol(widget) : widget, editable, db_index, nothing, through, one_to_one,
@@ -267,7 +285,13 @@ DurationField(; kw...) = Field(:duration; kw...)
 `Model` may be a type, `:self`, or a `Symbol` naming a model defined later.
 `on_delete` is one of `:CASCADE`, `:SET_NULL`, `:PROTECT`, `:DO_NOTHING`.
 """
-ForeignKey(to; on_delete = :CASCADE, kw...) = Field(:fk; related = to, on_delete = on_delete, db_index = true, kw...)
+function ForeignKey(to; on_delete = :CASCADE, kw...)
+    f = Field(:fk; related = to, on_delete = on_delete, db_index = true, kw...)
+    f.on_delete === :SET_DEFAULT && f.default isa NoDefault &&
+        throw(ArgumentError("on_delete = :SET_DEFAULT needs a default for the foreign key"))
+    f.on_delete === :SET_NULL && !f.null && throw(ArgumentError("on_delete = :SET_NULL needs null = true"))
+    f
+end
 
 """
     OneToOneField(Model; on_delete=:CASCADE, related_name=nothing, kw...)

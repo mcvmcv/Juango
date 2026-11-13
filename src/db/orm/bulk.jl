@@ -311,6 +311,71 @@ struct ProtectedError <: Exception
     msg::String
 end
 Base.showerror(io::IO, e::ProtectedError) = print(io, "ProtectedError: ", e.msg)
+"Deleting would leave rows pointing through an `on_delete = :RESTRICT` key at deleted rows."
+struct RestrictedError <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::RestrictedError) = print(io, "RestrictedError: ", e.msg)
+
+"""
+Every row a deletion reaches through cascades (model => keys), and the `:RESTRICT` relations it
+meets on the way. As in Django, a restricted row may be deleted only when the rows pointing at it
+are deleted by the same operation.
+"""
+function deletion_closure!(seen::IdDict{Any,Set{Any}}, restricts, @nospecialize(T), ids)
+    T = concrete_model(T)
+    new = setdiff(Set{Any}(ids), get!(Set{Any}, seen, T))
+    isempty(new) && return
+    union!(seen[T], new)
+    v = collect(new)
+    for (_, M, f) in reverse_foreign_objects(T)
+        rel = fobj_referrers(T, M, f, v)
+        rel === nothing && continue
+        f.on_delete === :CASCADE ? deletion_closure!(seen, restricts, M, row_keys(rel)) :
+            f.on_delete === :RESTRICT && push!(restricts, (T, M, f, rel))
+    end
+    is_composite(T) && return
+    for g in generic_relations(T)
+        M = related_model(g)
+        ctf, fkf = g.through
+        deletion_closure!(seen, restricts, M, row_keys(filter(base_objects(M), Q(Symbol(ctf, :_id) => get_for_model(T).id), Q(Symbol(fkf, "__in") => v))))
+    end
+    for C in child_models(T)
+        deletion_closure!(seen, restricts, C, values_list(filter(base_objects(C); id__in = v), :id; flat = true))
+    end
+    for (_, M, f) in reverse_relations(T)
+        rel = filter(base_objects(M), Q(Symbol(attname(f), "__in") => v))
+        f.on_delete === :CASCADE ? deletion_closure!(seen, restricts, M, row_keys(rel)) :
+            f.on_delete === :RESTRICT && push!(restricts, (T, M, f, rel))
+    end
+    P = table_parent(T)
+    P === nothing || deletion_closure!(seen, restricts, P, v)
+    nothing
+end
+
+"Raise `RestrictedError` if deleting these rows would orphan rows behind a `:RESTRICT` key."
+function check_restricted(@nospecialize(T), ids)
+    seen, restricts = IdDict{Any,Set{Any}}(), Any[]
+    deletion_closure!(seen, restricts, T, ids)
+    for (R, M, f, rel) in restricts
+        left = setdiff(Set{Any}(row_keys(rel)), get(seen, concrete_model(M), Set{Any}()))
+        isempty(left) || throw(RestrictedError("cannot delete some $(nameof(R)) objects because they are referenced through restricted foreign key $(nameof(M)).$(f.name)"))
+    end
+end
+
+"Delete rows by key, with `on_delete` handling: the entry point of `delete!`."
+delete_rows!(@nospecialize(T), ids) = ((isempty(ids) || !any_restrict()) || check_restricted(T, ids); delete_ids!(T, ids))
+"Whether any relation uses `on_delete = :RESTRICT` (otherwise deleting needs no look-ahead)."
+any_restrict() = cached_relations(:any_restrict, Model) do _
+    any(f -> f.kind in (:fk, :fobj) && f.on_delete === :RESTRICT, (f for M in MODEL_LIST for f in vcat(all_fields(M), foreign_objects(M))))
+end
+
+"The value an `on_delete = :SET_DEFAULT` or `SET(...)` key takes."
+function on_delete_value(f::Field)
+    v = f.on_delete isa OnDeleteSet ? f.on_delete.value : default_value(f)
+    v isa Function && (v = v())
+    v isa Model ? v.id : v
+end
 
 function delete_ids!(T::Type, ids::Vector)
     isempty(ids) && return 0
@@ -328,10 +393,12 @@ function delete_ids!(T::Type, ids::Vector)
     end
     for (_, M, f) in reverse_relations(T)
         rel = filter(base_objects(M), Q(Symbol(attname(f), "__in") => ids))
-        if f.on_delete === :CASCADE
+        if f.on_delete === :CASCADE || f.on_delete === :RESTRICT    # (restricted rows were checked: they go too)
             delete_ids!(M, row_keys(rel))
         elseif f.on_delete === :SET_NULL
             update!(rel; Symbol(attname(f)) => nothing)
+        elseif f.on_delete === :SET_DEFAULT || f.on_delete isa OnDeleteSet
+            update!(rel; Symbol(attname(f)) => on_delete_value(f))
         elseif f.on_delete === :PROTECT
             exists(rel) && throw(ProtectedError("cannot delete $(nameof(T)) objects because they are referenced through protected foreign key $(nameof(M)).$(f.name)"))
         end
@@ -369,7 +436,7 @@ end
 
 "Delete all matching rows (with `on_delete` handling for related objects). Returns the count."
 Base.delete!(qs::QuerySet{T}) where {T} =
-    in_db(() -> atomic(() -> delete_ids!(T, row_keys(qs))), qs, true)
+    in_db(() -> atomic(() -> delete_rows!(T, row_keys(qs))), qs, true)
 
 Base.show(io::IO, qs::QuerySet{T}) where {T} = print(io, "<QuerySet{", nameof(T), "}>")
 function Base.show(io::IO, ::MIME"text/plain", qs::QuerySet{T}) where {T}

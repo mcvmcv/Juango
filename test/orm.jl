@@ -1389,3 +1389,34 @@ end
     @test only(Juango.deserialize(:json, js)).object.blob == bytes
     @test only(Juango.deserialize(:xml, Juango.serialize(:xml, filter(Device; name = "r1")))).object.blob == bytes
 end
+
+@testset "on_delete: RESTRICT, SET_DEFAULT, SET(...)" begin
+    @test_throws ArgumentError ForeignKey(Venue, on_delete = :SET_DEFAULT)
+    @test_throws ArgumentError ForeignKey(Venue, on_delete = :SET_NULL)
+    @test_throws ArgumentError ForeignKey(Venue, on_delete = :EXPLODE)
+
+    # RESTRICT: a record with tracks can't be deleted on its own...
+    band = create(Band; name = "The Julias")
+    rec = create(Record; band = band, title = "Multiple Dispatch")
+    create(Track; band = band, record = rec)
+    @test_throws RestrictedError delete!(rec)
+    @test exists(filter(Record; id = rec.id))
+    # ...but deleting the band takes the records and the tracks together
+    delete!(band)
+    @test !exists(filter(Record; id = rec.id)) && !exists(filter(Track; record_id = rec.id))
+    # a track of another band keeps the record restricted
+    b1, b2 = create(Band; name = "One"), create(Band; name = "Two")
+    r1 = create(Record; band = b1, title = "Shared")
+    create(Track; band = b1, record = r1); create(Track; band = b2, record = r1)
+    @test_throws RestrictedError delete!(b1)
+    @test exists(filter(Record; id = r1.id)) && count(filter(Track; record_id = r1.id)) == 2
+    delete!(filter(Band; id__in = [b1.id, b2.id]))            # both bands at once: everything goes
+    @test !exists(filter(Record; id = r1.id))
+
+    # SET_DEFAULT and SET(...)
+    stage = create(Venue; name = "Stage")
+    g = create(Gig; venue = stage, backup = stage)
+    delete!(stage)
+    refresh!(g)
+    @test g.venue.name == "TBA" && g.backup.name == "TBA"
+end

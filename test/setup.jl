@@ -230,6 +230,27 @@ end
     Meta(permissions = [("publish_memo", "Can publish memos")])
 end
 
+# on_delete = :RESTRICT, :SET_DEFAULT and SET(...) (Django's documentation example)
+@model struct Band
+    name = CharField(max_length = 20)
+end
+@model struct Record
+    band = ForeignKey(Band, on_delete = :CASCADE)
+    title = CharField(max_length = 20)
+end
+@model struct Track
+    band = ForeignKey(Band, on_delete = :CASCADE)
+    record = ForeignKey(Record, on_delete = :RESTRICT)
+end
+@model struct Venue
+    name = CharField(max_length = 20, unique = true)
+end
+venue_tba() = (v = first(filter(Venue; name = "TBA")); v === nothing ? create(Venue; name = "TBA") : v).id
+@model struct Gig
+    venue = ForeignKey(Venue, on_delete = :SET_DEFAULT, default = venue_tba)
+    backup = ForeignKey(Venue, on_delete = SET(venue_tba), null = true, blank = true, related_name = :backup_gigs)
+end
+
 const FILEPATH_DIR = mktempdir()
 foreach(n -> write(joinpath(FILEPATH_DIR, n), "x"), ["a.txt", "b.txt", "c.log"])
 mkpath(joinpath(FILEPATH_DIR, "sub")); write(joinpath(FILEPATH_DIR, "sub", "d.txt"), "x")
