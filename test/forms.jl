@@ -266,3 +266,49 @@ end
     @test occursin("<p><label for=\"id_name\">", out) && occursin("<ul class=\"errorlist\">", out)
     @test string(tr("{{ form }}", Dict("form" => f))) == string(as_p(f))      # the default stays as_p
 end
+
+@testset "ModelChoiceField, typed, regex and combo fields, as_field_group, formfield_callback" begin
+    a1, a2 = create(Author; name = "MC Ann"), create(Author; name = "MC Bob")
+    other = create(Author; name = "Elsewhere")
+    write(joinpath(TPL, "custom_field.html"), "<div class=\"custom\">{{ field.label }}: {{ field }}</div>")
+    PickForm(data = nothing) = Form(Pair{Symbol,Any}[
+        :author => ModelChoiceField(filter(Author; name__startswith = "MC ")),
+        :byname => ModelChoiceField(Author; to_field_name = :name, required = false),
+        :many => ModelMultipleChoiceField(filter(Author; name__startswith = "MC "); label_from_instance = a -> uppercase(a.name)),
+        :n => TypedChoiceField(["1" => "One", "2" => "Two"]; coerce = x -> parse(Int, x)),
+        :tags => MultipleChoiceField(["a" => "A", "b" => "B"]),
+        :code => RegexField(r"^[A-Z]{3}$"; error_message = "Three capitals.", template_name = "custom_field.html"),
+        :both => ComboField([CharField(max_length = 12), EmailField()])]; data = data)
+    good = Dict("author" => string(a1.id), "byname" => "MC Bob", "many" => [string(a1.id), string(a2.id)], "n" => "2",
+                "tags" => ["a", "b"], "code" => "ABC", "both" => "x@y.io")
+    f = PickForm(good)
+    @test is_valid(f)
+    cd = cleaned_data(f)
+    @test cd[:author] == a1 && cd[:byname] == a2 && cd[:many] == [a1, a2] && cd[:n] === 2 && cd[:tags] == ["a", "b"]
+    @test cd[:code] == "ABC" && cd[:both] == "x@y.io"
+    bad = PickForm(merge(good, Dict("author" => string(other.id), "many" => [string(other.id)], "n" => "3", "tags" => ["z"],
+                                    "code" => "abc", "both" => "a.very.long.name@example.com")))
+    @test !is_valid(bad)
+    @test bad.errors[:author] == ["Select a valid choice. That choice is not one of the available choices."]
+    @test haskey(bad.errors, :many) && haskey(bad.errors, :n) && haskey(bad.errors, :tags)
+    @test bad.errors[:code] == ["Three capitals."] && length(bad.errors[:both]) == 1
+    @test !is_valid(PickForm(merge(good, Dict("many" => String[]))))                     # required
+    blank = PickForm()
+    many_html = Juango.widget_html(blank[:many])
+    @test occursin("multiple", many_html) && occursin(">MC ANN<", many_html) && !occursin("Elsewhere", many_html)
+    @test occursin("<option value=\"\">---------</option>", Juango.widget_html(blank[:author]))
+    @test occursin("value=\"MC Bob\"", Juango.widget_html(blank[:byname]))
+    t(s, ctx) = render(Template(s), ctx)
+    @test occursin("<div class=\"custom\">Code: <input", t("{{ form.code.as_field_group }}", Dict("form" => blank)))
+    g = t("{{ form.n.as_field_group }}", Dict("form" => blank))
+    @test occursin("<label for=\"id_n\">", g) && occursin("<select", g) && occursin("Two", g)
+    @test occursin("<div>", string(as_div(blank)))
+
+    # ModelForm: other form fields, and a callback for each
+    mf = ModelForm(Article; fields = [:title, :body], field_classes = Dict(:title => CharField(max_length = 5)),
+                   data = Dict("title" => "too long", "body" => "b"))
+    @test !is_valid(mf) && haskey(mf.errors, :title)
+    cb = ModelForm(Article; fields = [:title, :body, :status],
+                   formfield_callback = f -> f.name === :body ? nothing : (f.help_text = "from the callback"; f))
+    @test [x.name for x in cb.fields] == [:title, :status] && all(x -> x.help_text == "from the callback", cb.fields)
+end

@@ -63,7 +63,9 @@ export migrate, makemigrations
 # forms
 export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data, save_m2m!, has_changed,
        changed_fields, FormSet, formset_factory, modelformset_factory, inlineformset_factory,
-       Widget, MultiWidget, MultiValueField, SplitDateTimeField, Media
+       Widget, MultiWidget, MultiValueField, SplitDateTimeField, Media, ModelChoiceField,
+       ModelMultipleChoiceField, TypedChoiceField, TypedMultipleChoiceField, MultipleChoiceField, RegexField,
+       ComboField, as_field_group, as_div, as_table
 # views
 export render, redirect, get_object_or_404, get_list_or_404, TemplateView, RedirectView, ListView,
        DetailView, CreateView, UpdateView, DeleteView, FormView, ArchiveIndexView, YearArchiveView,

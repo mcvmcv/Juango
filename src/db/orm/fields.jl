@@ -55,6 +55,7 @@ mutable struct Field
     max_digits::Union{Nothing,Int}      # DecimalField: digits in total
     decimal_places::Union{Nothing,Int}  # DecimalField: digits after the point
     unique_for::Any                     # nothing, or (:date / :month / :year, date field name): unique_for_date = :pub_date
+    template_name::Union{Nothing,String}   # forms: the template `as_field_group` renders the field with
     att::Symbol         # attname for the name in `attfor` (see `attname`)
     col::String         # string(att): the column name
     attfor::Symbol      # the name `att` and `col` were worked out for
@@ -228,7 +229,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                db_index = false, required = nothing, label = nothing, through = nothing, one_to_one = false,
                db_default = nothing, generated = nothing, symmetrical = false, db_comment = nothing,
                max_digits = nothing, decimal_places = nothing, unique_for_date = nothing, unique_for_month = nothing,
-               unique_for_year = nothing)
+               unique_for_year = nothing, template_name = nothing)
     required === nothing || (blank = !required)
     label === nothing || (verbose_name = string(label))
     if auto_now || auto_now_add
@@ -244,6 +245,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           max_digits === nothing ? nothing : Int(max_digits), decimal_places === nothing ? nothing : Int(decimal_places),
           unique_for_date !== nothing ? (:date, Symbol(unique_for_date)) : unique_for_month !== nothing ? (:month, Symbol(unique_for_month)) :
           unique_for_year !== nothing ? (:year, Symbol(unique_for_year)) : nothing,
+          template_name === nothing ? nothing : string(template_name),
           field_att(kind, :_), string(field_att(kind, :_)), :_)
 end
 

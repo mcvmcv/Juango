@@ -984,6 +984,32 @@ is_valid(form) && save!(form)
 
 For cross-field validation, define `Juango.clean_form(f::Form, ::Val{:ContactForm})` and call `add_error!`.
 
+**More form fields and rendering:**
+
+```julia
+@form OrderForm begin
+    customer = ModelChoiceField(filter(Customer; active = true))          # cleaned value: the object
+    sku      = ModelChoiceField(Product; to_field_name = :sku)            # submits a field other than the key
+    extras   = ModelMultipleChoiceField(Extra; label_from_instance = e -> uppercase(e.name))
+    qty      = TypedChoiceField(["1" => "One", "2" => "Two"]; coerce = x -> parse(Int, x))
+    days     = MultipleChoiceField(["mon" => "Monday", "tue" => "Tuesday"])
+    code     = RegexField(r"^[A-Z]{3}\d{2}$"; error_message = "Like ABC12.", template_name = "fields/code.html")
+    contact  = ComboField([CharField(max_length = 40), EmailField()])
+end
+
+ModelForm(Post; field_classes = Dict(:slug => SlugField(max_length = 30)),          # a different form field
+          formfield_callback = f -> f.name === :internal ? nothing : f)              # change or leave out each field
+```
+
+```
+{{ form.code.as_field_group }}      {# label, help text, errors and widget (Django 5) #}
+{{ form.as_div }}  {{ form.as_table }}  {{ form.as_p }}
+```
+
+- **Model choices.** `ModelChoiceField` and `ModelMultipleChoiceField` work in any form. Their querysets are read when the form is rendered and validated, so they're always current.
+- **Field groups.** `as_field_group` uses the field's `template_name`, else `juango/forms/field.html`.
+- **Other field types.** Decimal, time, duration, IP address and file path fields work in forms too.
+
 #### Media, widgets, multi-value fields and renderers
 
 ```julia

@@ -54,6 +54,67 @@ function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), pref
          media === nothing ? Media() : media)
 end
 
+# --- form-only fields --------------------------------------------------------------------------------
+
+"What a ModelChoiceField chooses from."
+struct ModelChoiceSpec
+    queryset::Any                    # a QuerySet (or a model: all its objects), read each time it's needed
+    to_field_name::Union{Nothing,Symbol}
+    empty_label::Union{Nothing,String}
+    label_from_instance::Any         # nothing (string(obj)) or obj -> label
+end
+choice_queryset(s::ModelChoiceSpec) = s.queryset isa Type ? objects(s.queryset) : s.queryset
+choice_key(s::ModelChoiceSpec, o) = s.to_field_name === nothing ? pk_string(o) : string(getproperty(o, s.to_field_name))
+instance_label(s::ModelChoiceSpec, o) = s.label_from_instance === nothing ? string(o) : string(s.label_from_instance(o))
+
+"""
+    ModelChoiceField(queryset; to_field_name = nothing, empty_label = "---------", label_from_instance = nothing, kw...)
+
+A select of model objects for any form (a `ModelForm` makes these for foreign keys itself). The
+cleaned value is the object; `to_field_name` submits another unique field instead of the primary
+key. The queryset is read when the form is rendered and validated.
+"""
+ModelChoiceField(qs; to_field_name = nothing, empty_label = "---------", label_from_instance = nothing, kw...) =
+    Field(:modelchoice; related = ModelChoiceSpec(qs, to_field_name === nothing ? nothing : Symbol(to_field_name),
+                                                  empty_label === nothing ? nothing : string(empty_label), label_from_instance), kw...)
+"A multiple select of model objects; the cleaned value is a vector of objects."
+ModelMultipleChoiceField(qs; to_field_name = nothing, label_from_instance = nothing, kw...) =
+    Field(:modelmultichoice; related = ModelChoiceSpec(qs, to_field_name === nothing ? nothing : Symbol(to_field_name), nothing,
+                                                       label_from_instance), kw...)
+
+"""
+    TypedChoiceField(choices; coerce = identity, empty_value = "", kw...)
+    TypedMultipleChoiceField(choices; coerce = identity, kw...)
+    MultipleChoiceField(choices; kw...)
+
+Choices whose cleaned value is converted with `coerce` (`TypedChoiceField(["1" => "One"]; coerce = x -> parse(Int, x))`),
+and the multiple-select versions.
+"""
+TypedChoiceField(choices; coerce = identity, empty_value = "", kw...) =
+    Field(:typedchoice; choices = choices, related = (coerce = coerce, empty_value = empty_value), kw...)
+TypedMultipleChoiceField(choices; coerce = identity, kw...) = Field(:multichoice; choices = choices, related = (coerce = coerce,), kw...)
+MultipleChoiceField(choices; kw...) = TypedMultipleChoiceField(choices; kw...)
+
+"""
+    RegexField(regex; max_length = nothing, error_message = "Enter a valid value.", kw...)
+
+A text field whose value must match `regex`.
+"""
+RegexField(rx; max_length = nothing, error_message = nothing, validators = Any[], kw...) =
+    Field(:char; max_length = max_length,
+          validators = vcat(Any[v -> occursin(rx isa Regex ? rx : Regex(string(rx)), string(v)) ||
+                                     something(error_message, gettext("Enter a valid value."))], collect(Any, validators)), kw...)
+
+"""
+    ComboField(fields; kw...)
+
+A value that every one of `fields` must accept (Django's `ComboField`), e.g.
+`ComboField([CharField(max_length = 20), EmailField()])`; the cleaned value is the last field's.
+"""
+ComboField(fields; kw...) = Field(:combo; related = collect(Field, fields), kw...)
+
+const MULTI_KINDS = (:m2m, :modelmultichoice, :multichoice)
+
 """
     @form Name begin
         field = CharField(...)
@@ -96,7 +157,8 @@ into the instance (creating one if needed) and saves it.
 function ModelForm(::Type{T}; data = nothing, files = nothing, instance = nothing, fields = nothing, exclude = Symbol[],
                    initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
                    labels = Dict{Symbol,String}(), help_texts = Dict{Symbol,String}(),
-                   widgets = Dict{Symbol,Symbol}()) where {T<:Model}
+                   widgets = Dict{Symbol,Symbol}(), field_classes = Dict{Symbol,Any}(),
+                   formfield_callback = nothing) where {T<:Model}
     meta = modelmeta(T)
     chosen = fields === nothing ? vcat([f.name for f in all_fields(T) if f.editable], [f.name for f in meta.m2m if f.editable]) :
              Symbol.(collect(fields))
@@ -108,6 +170,11 @@ function ModelForm(::Type{T}; data = nothing, files = nothing, instance = nothin
         haskey(labels, n) && (f.verbose_name = labels[n])
         haskey(help_texts, n) && (f.help_text = help_texts[n])
         haskey(widgets, n) && (f.widget = widgets[n])
+        haskey(field_classes, n) && (f = deepcopy(field_classes[n]))            # a different form field for it
+        if formfield_callback !== nothing
+            f = formfield_callback(f)                                          # nothing leaves the field out
+            f === nothing && continue
+        end
         push!(fs, n => f)
     end
     init = Dict{Symbol,Any}()
@@ -133,7 +200,7 @@ html_id(f::Form, fld::Field) = "id_" * html_name(f, fld)
 function raw_value(f::Form, fld::Field)
     f.data === nothing && return nothing
     fld.kind === :multi && return multi_raw(f, fld)
-    fld.kind === :m2m && return raw_list(f.data, html_name(f, fld))
+    fld.kind in MULTI_KINDS && return raw_list(f.data, html_name(f, fld))
     get(f.data, html_name(f, fld), nothing)
 end
 "All submitted values for a multi-valued field."
@@ -147,6 +214,22 @@ end
 function to_julia(fld::Field, raw)
     k = fld.kind
     k === :multi && return clean_multi(fld, raw)
+    if k in (:modelmultichoice, :multichoice)
+        vals = String[strip(string(r)) for r in (raw === nothing ? [] : raw) if !isempty(strip(string(r)))]
+        if k === :multichoice
+            keys_ = Set(string(c.first) for c in field_choices(fld))
+            for v in vals
+                v in keys_ || return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v))
+            end
+            return Any[fld.related.coerce(v) for v in vals], nothing
+        end
+        s = fld.related
+        objs = Dict(choice_key(s, o) => o for o in choice_queryset(s))
+        for v in vals
+            haskey(objs, v) || return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v))
+        end
+        return Any[objs[v] for v in unique(vals)], nothing
+    end
     if k === :m2m
         ids = Any[]
         for r in (raw === nothing ? [] : raw)
@@ -231,6 +314,25 @@ function to_julia(fld::Field, raw)
         catch
             return nothing, "Enter valid range bounds."
         end
+    elseif k === :modelchoice
+        sp = fld.related
+        obj = sp.to_field_name === nothing ? (id = parse_pk(queryset_model(choice_queryset(sp)), s); id === nothing ? nothing : first(filter(choice_queryset(sp); pk = id))) :
+              first(filter(choice_queryset(sp), Q(sp.to_field_name => s)))
+        return obj, obj === nothing ? gettext("Select a valid choice. That choice is not one of the available choices.") : nothing
+    elseif k === :typedchoice
+        any(c -> string(c.first) == s, field_choices(fld)) ||
+            return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
+        return fld.related.coerce(String(s)), nothing
+    elseif k === :combo
+        v = String(s)
+        for sub in fld.related
+            v2, err = to_julia(sub, v)
+            err === nothing || return nothing, err
+            errs = validate_field(sub, v2)
+            isempty(errs) || return nothing, errs[1]
+            v = v2
+        end
+        return v, nothing
     elseif k === :fk
         id = parse_pk(related_model(fld), s)
         obj = id === nothing ? nothing : first(filter(objects(related_model(fld)); id = id))
@@ -261,7 +363,7 @@ function is_valid(f::Form)
             add_error!(f, fld.name, err)
             continue
         end
-        errs = fld.kind === :m2m ? (isempty(v) && !fld.blank ? [gettext("This field is required.")] : String[]) :
+        errs = fld.kind in MULTI_KINDS ? (isempty(v) && !fld.blank ? [gettext("This field is required.")] : String[]) :
                validate_field(fld, v isa Model ? v.id : v)
         if isempty(errs) && f.model !== nothing && fld.unique && v !== nothing && v != ""
             q = filter(objects(f.model), Q(attname(fld) => v))
@@ -448,6 +550,9 @@ function display_value(bf::BoundField)
     v = get(f.initial, fld.name, nothing)
     v === nothing && (v = fld.default isa NoDefault ? nothing : (fld.default isa Function ? fld.default() : fld.default))
     fld.kind === :m2m && return v === nothing ? Any[] : collect(v)
+    fld.kind === :modelmultichoice && return v === nothing ? Any[] : [x isa Model ? choice_key(fld.related, x) : string(x) for x in v]
+    fld.kind === :multichoice && return v === nothing ? Any[] : [string(x) for x in v]
+    fld.kind === :modelchoice && v isa Model && return choice_key(fld.related, v)
     v === nothing && return v
     fld.kind in (:json, :hstore) && return JSON.json(json_scalar_tree(v))
     fld.kind === :array && return join(string.(v), ", ")
@@ -509,6 +614,23 @@ function widget_html(bf::BoundField)
         end
         print(io, "</select>")
         return String(take!(io))
+    elseif fld.kind in (:modelchoice, :modelmultichoice, :multichoice)
+        multiple = fld.kind !== :modelchoice
+        chosen = Set(string(x) for x in (multiple ? (val isa AbstractVector ? val : Any[]) : (val === nothing ? Any[] : Any[val])))
+        io = IOBuffer()
+        print(io, "<select$attrs", multiple ? " multiple" : "", ">")
+        if fld.kind === :multichoice
+            opts = Pair{Any,Any}[string(c.first) => c.second for c in field_choices(fld)]
+        else
+            sp = fld.related
+            opts = Pair{Any,Any}[choice_key(sp, o) => instance_label(sp, o) for o in choice_queryset(sp)]
+            !multiple && sp.empty_label !== nothing && print(io, "<option value=\"\">", escape_html(sp.empty_label), "</option>")
+        end
+        for (k, lbl) in opts
+            print(io, "<option value=\"", escape_html(string(k)), "\"", string(k) in chosen ? " selected" : "", ">", escape_html(string(lbl)), "</option>")
+        end
+        print(io, "</select>")
+        return String(take!(io))
     elseif fld.kind === :fk || fld.choices !== nothing || fld.kind === :filepath
         groups = fld.kind === :fk ? [(nothing, Pair{Any,Any}[o.id => string(o) for o in objects(related_model(fld))])] :
                  fld.kind === :filepath ? [(nothing, filepath_choices(fld))] : choice_groups(fld)
@@ -564,6 +686,15 @@ end
 
 __html__(f::Form) = get(settings, :FORM_RENDERER, nothing) isa TemplateFormRenderer ? render_form(f).s : as_p(f).s
 __html__(bf::BoundField) = widget_html(bf)
+
+"""
+    as_field_group(bound_field)
+
+The field's label, help text, errors and widget together, rendered with the field's
+`template_name` or `juango/forms/field.html` (Django 5's `{{ form.name.as_field_group }}`).
+"""
+as_field_group(bf::BoundField) =
+    SafeString(render(get_template(something(bf.field.template_name, "juango/forms/field.html")), Dict{String,Any}("field" => bf)))
 Base.show(io::IO, bf::BoundField) = print(io, "<BoundField ", bf.field.name, ">")
 
 function tattr(f::Form, ::Val{S}) where {S}
@@ -595,6 +726,7 @@ function tattr(bf::BoundField, ::Val{S}) where {S}
     S === :help_text && return bf.field.help_text
     S === :widget && return SafeString(widget_html(bf))
     S === :row && return SafeString(field_row(bf))
+    S === :as_field_group && return as_field_group(bf)
     S === :is_hidden && return widget_kind(bf.field.widget) === :hidden
     S === :field && return bf.field
     NOTFOUND
