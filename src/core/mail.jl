@@ -44,6 +44,16 @@ bytesof(x::UploadedFile) = read(x)
 "Attach a file: `attach!(msg, \"report.pdf\", bytes, \"application/pdf\")`."
 attach!(m::EmailMessage, filename, content, mimetype = "application/octet-stream") =
     (push!(m.attachments, (string(filename), bytesof(content), string(mimetype))); m)
+"""
+    attach_file(msg, path; mimetype = nothing)
+
+Attach a file from disk under its own name, with a MIME type guessed from the extension.
+"""
+attach_file(m::EmailMessage, path::AbstractString; mimetype = nothing) =
+    attach!(m, basename(path), read(path), something(mimetype, guess_mimetype(path)))
+"A MIME type for a file name (application/octet-stream when unknown)."
+guess_mimetype(path) = (t = get(MIME_TYPES, lowercase(splitext(path)[2]), "application/octet-stream"); first(split(t, ';')))
+
 "Add an alternative rendering, usually HTML."
 attach_alternative!(m::EmailMessage, content, mimetype = "text/html") = (push!(m.alternatives, (string(content), string(mimetype))); m)
 "Everyone the message is delivered to (to, cc and bcc)."

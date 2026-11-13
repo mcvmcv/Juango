@@ -107,6 +107,7 @@ function default_settings()
         :MIGRATIONS_DIR => "migrations",
         :DEFAULT_AUTO_FIELD => :BigAutoField,
         :REMOTE_USER_HEADER => "Remote-User",
+        :SILENCED_SYSTEM_CHECKS => String[],           # check ids to leave out ("security.W004", ...)
         :ATOMIC_REQUESTS => false,                     # true (the default database) or database aliases: each view in a transaction
         :HANDLER400 => nothing, :HANDLER403 => nothing, :HANDLER404 => nothing, :HANDLER500 => nothing,   # custom error views
         :FILE_UPLOAD_MAX_MEMORY_SIZE => 2_621_440,     # bigger uploads go to temporary files

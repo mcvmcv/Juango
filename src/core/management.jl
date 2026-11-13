@@ -102,35 +102,113 @@ function cmd_showurls(args)
     end
 end
 
-function cmd_check(args)
-    _, flags = parse_flags(args)
-    issues = String[]
-    haskey(flags, "deploy") && append!(issues, deploy_issues())
-    append!(issues, error_handler_issues())
-    settings.SECRET_KEY == default_settings()[:SECRET_KEY] && !settings.DEBUG &&
-        push!(issues, "SECRET_KEY is the insecure default while DEBUG is false.")
-    isempty(settings.ROOT_URLCONF) && push!(issues, "ROOT_URLCONF is empty.")
-    for d in settings.TEMPLATE_DIRS
-        isdir(d) || push!(issues, "Template directory '$d' does not exist.")
-    end
-    append!(issues, app_issues())
-    for T in MODEL_LIST
-        for f in modelmeta(T).fields
-            f.kind === :fk || continue
-            try
-                related_model(f)
-            catch e
-                push!(issues, "$(nameof(T)).$(f.name): $(sprint(showerror, e))")
-            end
+# Juango's own system checks (`register_check!` adds yours)
+register_check!(tags = [:security]) do
+    settings.SECRET_KEY == default_settings()[:SECRET_KEY] && !settings.DEBUG ?
+        [CheckMessage(:error, "SECRET_KEY is the insecure default while DEBUG is false."; id = "security.E101")] : CheckMessage[]
+end
+register_check!(tags = [:urls]) do
+    msgs = [CheckMessage(:error, m; id = "urls.E007") for m in error_handler_issues()]
+    isempty(settings.ROOT_URLCONF) && push!(msgs, CheckMessage(:warning, "ROOT_URLCONF is empty."; id = "urls.W001"))
+    msgs
+end
+register_check!(tags = [:templates]) do
+    [CheckMessage(:error, "Template directory '$d' does not exist."; id = "templates.E001") for d in settings.TEMPLATE_DIRS if !isdir(d)]
+end
+register_check!(() -> [CheckMessage(:error, m; id = "apps.E001") for m in app_issues()]; tags = [:apps])
+register_check!(tags = [:models]) do
+    msgs = CheckMessage[]
+    for T in MODEL_LIST, f in modelmeta(T).fields
+        f.kind === :fk || continue
+        try
+            related_model(f)
+        catch e
+            push!(msgs, CheckMessage(:error, "$(nameof(T)).$(f.name): $(sprint(showerror, e))"; id = "fields.E300"))
         end
     end
-    if isempty(issues)
-        println("System check identified no issues (0 silenced).")
+    msgs
+end
+register_check!(deploy_checks; tags = [:security], deploy = true)
+
+"Print check messages as `manage.jl check` does (with how many were silenced); returns them."
+function report_checks(msgs, silenced::Integer = 0; io = stdout)
+    sil = " ($silenced silenced)"
+    if isempty(msgs)
+        println(io, "System check identified no issues", sil, ".")
     else
-        println("System check identified $(length(issues)) issue(s):")
-        foreach(i -> println("  ⚠ ", i), issues)
+        println(io, "System check identified $(length(msgs)) issue$(length(msgs) == 1 ? "" : "s")", sil, ":")
+        for lvl in (:critical, :error, :warning, :info, :debug), m in msgs
+            m.level === lvl && println(io, "  ", uppercase(string(lvl)), ": ", m)
+        end
     end
-    issues
+    msgs
+end
+
+"""
+    diffsettings(; all = false) -> Vector{String}
+
+The settings that differ from Juango's defaults as `NAME = value` lines (`all = true`: every
+setting, the changed ones marked `###`), as Django's `diffsettings`.
+"""
+function diffsettings(; all::Bool = false)
+    defaults = default_settings()
+    lines = String[]
+    for k in sort(collect(keys(Juango.SETTINGS)); by = string)
+        v = Juango.SETTINGS[k]
+        changed = !haskey(defaults, k) || !isequal(defaults[k], v)
+        (changed || all) && push!(lines, string(k, " = ", repr(v), all && changed ? "  ###" : ""))
+    end
+    lines
+end
+
+"""
+    sendtestemail(recipients...; managers = false, admins = false) -> Int
+
+Send a test message (Django's `sendtestemail`) to the addresses given, and/or to MANAGERS and ADMINS.
+"""
+function sendtestemail(recipients::AbstractString...; managers::Bool = false, admins::Bool = false)
+    subject = "Test email from $(gethostname()) on $(Dates.format(now(), "yyyy-mm-dd HH:MM"))"
+    body = "If you're reading this, it was successful."
+    n = isempty(recipients) ? 0 : send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, collect(String, recipients))
+    managers && (n += mail_managers(subject, body))
+    admins && (n += mail_admins(subject, body))
+    n
+end
+
+"Where a static file is found: every matching path in the static directories, the one served first first."
+findstatic(path::AbstractString) =
+    [p for p in (normpath(joinpath(abspath(d), path)) for d in static_dirs()) if isfile(p)]
+
+"""
+    remove_stale_contenttypes(; include_stale_apps = false, confirm = true) -> Vector{ContentType}
+
+Delete content types whose model no longer exists (and, by cascade, their permissions and admin
+log entries), for installed apps, or for every app with `include_stale_apps`. `confirm` is a
+function given the stale content types (default: ask on a terminal); returning false keeps them.
+"""
+function remove_stale_contenttypes(; include_stale_apps::Bool = false, confirm = nothing, verbose = true)
+    known = Set((modelmeta(T).app, lowercase(modelmeta(T).name)) for T in MODEL_LIST)
+    apps = Set(modelmeta(T).app for T in MODEL_LIST)
+    stale = [ct for ct in objects(ContentType) if !((ct.app_label, ct.model) in known) && (include_stale_apps || ct.app_label in apps)]
+    isempty(stale) && (verbose && println("No stale content types."); return ContentType[])
+    ok = confirm === nothing ? begin
+        println("These content types are stale and will be deleted, with their permissions and log entries:")
+        foreach(ct -> println("  - ", ct), stale)
+        Migrations.ask("Delete them?")
+    end : confirm(stale)
+    ok || return ContentType[]
+    foreach(delete!, stale)
+    verbose && foreach(ct -> println("Deleted content type ", ct), stale)
+    stale
+end
+
+# check [--deploy] [--tag TAG,...]: prints the problems and returns them (CheckMessages)
+function cmd_check(args)
+    _, flags = parse_flags(args)
+    tags = haskey(flags, "tag") ? split(flags["tag"], ',') : nothing
+    deploy = haskey(flags, "deploy")
+    msgs = run_checks(; tags = tags, deploy = deploy)
+    report_checks(msgs, length(run_checks(; tags = tags, deploy = deploy, include_silenced = true)) - length(msgs))
 end
 
 # migrate [app] [target] [--fake] [--sync]
@@ -309,7 +387,29 @@ for (n, h, f) in (
     ("compilemessages", "Compile .po translation files into .mo", _ -> foreach(p -> println("compiled ", p), compilemessages())),
     ("createcachetable", "Create the table for database caches (CACHES backend :db)", _ -> foreach(create_cache_table, keys(settings.CACHES))),
     ("sqlschema", "Print the SQL schema for all models", _ -> println(schema_sql())),
-    ("check", "Inspect the project for common problems: check [--deploy]", cmd_check),
+    ("check", "Run the system checks: check [--deploy] [--tag security,models]", cmd_check),
+    ("diffsettings", "Show the settings that differ from the defaults: diffsettings [--all]",
+     function (args)
+        _, f = parse_flags(args)
+        foreach(println, diffsettings(; all = haskey(f, "all")))
+    end),
+    ("sendtestemail", "Send a test email: sendtestemail [address ...] [--managers] [--admins]", function (args)
+        pos, f = parse_flags(args)
+        n = sendtestemail(pos...; managers = haskey(f, "managers"), admins = haskey(f, "admins"))
+        println(n, " message", n == 1 ? "" : "s", " sent.")
+    end),
+    ("findstatic", "Where static files are found: findstatic <path> ...", function (args)
+        for p in first(parse_flags(args))
+            found = findstatic(p)
+            isempty(found) ? println("No matching file found for '$p'.") : (println("Found '$p' here:"); foreach(x -> println("  ", x), found))
+        end
+    end),
+    ("remove_stale_contenttypes", "Delete content types of models that no longer exist: remove_stale_contenttypes [--include-stale-apps] [--noinput]",
+     function (args)
+        _, f = parse_flags(args)
+        remove_stale_contenttypes(; include_stale_apps = haskey(f, "include-stale-apps"),
+                                  confirm = haskey(f, "noinput") || haskey(f, "no-input") ? (_ -> true) : nothing)
+    end),
     ("clearsessions", "Delete expired sessions", _ -> println("Deleted ", clear_expired_sessions!(), " expired sessions.")),
     ("changepassword", "Change a user's password: changepassword <username>", function (args)
         pos, flags = parse_flags(args)
@@ -326,7 +426,8 @@ for (n, h, f) in (
     COMMANDS[n] = (h, f)
 end
 # commands that belong to an optional built-in app (gone when it isn't installed)
-for (n, app) in (("createsuperuser", AUTH_APP), ("changepassword", AUTH_APP), ("clearsessions", SESSIONS_APP))
+for (n, app) in (("createsuperuser", AUTH_APP), ("changepassword", AUTH_APP), ("clearsessions", SESSIONS_APP),
+                 ("remove_stale_contenttypes", CONTENTTYPES_APP))
     app.commands[n] = pop!(COMMANDS, n)
 end
 

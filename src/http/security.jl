@@ -155,24 +155,30 @@ csp_report_only_override(view, policy) = csp_override(view, policy; key = :csp_r
 Settings that are unsafe in production (`manage.jl check --deploy`).
 """
 function deploy_issues()
+    [m.msg for m in deploy_checks()]
+end
+
+"The deployment checks as CheckMessages, with Django's ids (`check --deploy`)."
+function deploy_checks()
     s = settings
-    out = String[]
-    s.DEBUG && push!(out, "DEBUG is true: error pages show code and settings. Set DEBUG = false in production.")
+    out = CheckMessage[]
+    w(id, msg) = push!(out, CheckMessage(:warning, msg; id = id))
+    s.DEBUG && w("security.W018", "DEBUG is true: error pages show code and settings. Set DEBUG = false in production.")
     (s.SECRET_KEY == default_settings()[:SECRET_KEY] || length(s.SECRET_KEY) < 50 || length(Set(s.SECRET_KEY)) < 5) &&
-        push!(out, "SECRET_KEY is the default, or shorter than 50 characters or with fewer than 5 different ones. Generate a long random key.")
+        w("security.W009", "SECRET_KEY is the default, or shorter than 50 characters or with fewer than 5 different ones. Generate a long random key.")
     all(h -> h in ("localhost", "127.0.0.1", "[::1]"), s.ALLOWED_HOSTS) &&
-        push!(out, "ALLOWED_HOSTS has only local addresses: set it to the site's domain names.")
+        w("security.W020", "ALLOWED_HOSTS has only local addresses: set it to the site's domain names.")
     mws = s.MIDDLEWARE
-    SecurityMiddleware in mws || push!(out, "SecurityMiddleware isn't in MIDDLEWARE: the security headers and HTTPS settings do nothing.")
+    SecurityMiddleware in mws || w("security.W001", "SecurityMiddleware isn't in MIDDLEWARE: the security headers and HTTPS settings do nothing.")
     s.SECURE_HSTS_SECONDS == 0 &&
-        push!(out, "SECURE_HSTS_SECONDS is 0. Once the whole site is on HTTPS, set it (for instance to 31536000) so browsers refuse plain HTTP.")
+        w("security.W004", "SECURE_HSTS_SECONDS is 0. Once the whole site is on HTTPS, set it (for instance to 31536000) so browsers refuse plain HTTP.")
     s.SECURE_HSTS_SECONDS > 0 && !s.SECURE_HSTS_INCLUDE_SUBDOMAINS &&
-        push!(out, "SECURE_HSTS_INCLUDE_SUBDOMAINS is false: subdomains can still be reached over plain HTTP.")
-    s.SECURE_SSL_REDIRECT || push!(out, "SECURE_SSL_REDIRECT is false: plain-HTTP requests aren't redirected to HTTPS (unless your proxy does it).")
-    s.SESSION_COOKIE_SECURE || push!(out, "SESSION_COOKIE_SECURE is false: the session cookie can be sent over plain HTTP.")
-    s.CSRF_COOKIE_SECURE || push!(out, "CSRF_COOKIE_SECURE is false: the CSRF cookie can be sent over plain HTTP.")
-    s.X_FRAME_OPTIONS == "DENY" || push!(out, "X_FRAME_OPTIONS isn't DENY: pages can be framed by other sites unless they need to be.")
+        w("security.W005", "SECURE_HSTS_INCLUDE_SUBDOMAINS is false: subdomains can still be reached over plain HTTP.")
+    s.SECURE_SSL_REDIRECT || w("security.W008", "SECURE_SSL_REDIRECT is false: plain-HTTP requests aren't redirected to HTTPS (unless your proxy does it).")
+    s.SESSION_COOKIE_SECURE || w("security.W012", "SESSION_COOKIE_SECURE is false: the session cookie can be sent over plain HTTP.")
+    s.CSRF_COOKIE_SECURE || w("security.W016", "CSRF_COOKIE_SECURE is false: the CSRF cookie can be sent over plain HTTP.")
+    s.X_FRAME_OPTIONS == "DENY" || w("security.W019", "X_FRAME_OPTIONS isn't DENY: pages can be framed by other sites unless they need to be.")
     ContentSecurityPolicyMiddleware in mws || isempty(s.SECURE_CSP) ||
-        push!(out, "SECURE_CSP is set but ContentSecurityPolicyMiddleware isn't in MIDDLEWARE.")
+        w("security.W026", "SECURE_CSP is set but ContentSecurityPolicyMiddleware isn't in MIDDLEWARE.")
     out
 end

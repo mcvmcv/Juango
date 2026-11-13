@@ -186,6 +186,8 @@ function runserver(host::AbstractString = "127.0.0.1", port::Integer = 8000; blo
         throw(ArgumentError("runserver: pass both certfile and keyfile, or neither"))
     scheme = certfile === nothing ? "http" : "https"
     if !quiet
+        msgs = try run_checks() catch; CheckMessage[] end          # the system checks, as Django's runserver
+        isempty(msgs) || report_checks(msgs)
         println(Dates.format(now(), "U dd, yyyy - HH:MM:SS"))
         println("Juango version $VERSION_STRING (Julia $(VERSION)), DEBUG = $(settings.DEBUG)")
         println("Starting development server at $scheme://$(occursin(':', host) ? "[$host]" : host):$port/")

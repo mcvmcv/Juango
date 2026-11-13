@@ -1171,7 +1171,7 @@ The session remembers which backend logged a user in. If that backend is removed
 ```julia
 send_mail("Welcome", "Hi Ann!", nothing, ["ann@example.com"]; html_message = "<p>Hi Ann!</p>")   # nothing = DEFAULT_FROM_EMAIL
 msg = EmailMessage("Report", "See attached."; to = ["boss@example.com"], cc = [...], bcc = [...], reply_to = [...])
-attach!(msg, "report.csv", csv_text, "text/csv")
+attach!(msg, "report.csv", csv_text, "text/csv")         # or attach_file(msg, "/path/report.pdf")
 attach_alternative!(msg, html, "text/html")
 send!(msg)
 mail_admins("Disk almost full", details)          # to settings.ADMINS = [("Name", "email"), ...]
@@ -1346,10 +1346,12 @@ const home = cache_page(home_view; timeout = 60)   # whole GET responses, keyed 
   - `:locmem` (per process, LRU)
   - `:db` (run `manage.jl createcachetable`)
   - `:redis` (`:location => "redis://host:6379/0"`, using a small built-in client)
+  - `:memcached` (`:location => "127.0.0.1:11211"`, also built in)
+  - `:file` (`:location => "/var/tmp/cache"`, one file per key, culled at `:max_entries`)
   - `:dummy`
 
   Use another cache with `cache_name = "shared"`. `:locmem` stores copies of the values.
-- **What `:db` and `:redis` store.** They store JSON with type tags, so a value comes back equal and with the same type, and reading an entry never runs code. That covers `nothing`, booleans, numbers (including `BigInt`, `Rational`, `NaN`), strings, symbols, chars, dates and times (with time zones), UUIDs, `SafeString`, byte vectors, vectors, dicts, tuples, named tuples, pairs, sets, model instances and `HttpResponse`s (so `cache_page` works). Vectors, dicts and sets keep simple element types (`Vector{Int}`, `Dict{String,Date}`); nested containers come back with `Any`. Storing anything else raises `Juango.CacheSerializationError`.
+- **What `:db`, `:redis`, `:memcached` and `:file` store.** They store JSON with type tags, so a value comes back equal and with the same type, and reading an entry never runs code. That covers `nothing`, booleans, numbers (including `BigInt`, `Rational`, `NaN`), strings, symbols, chars, dates and times (with time zones), UUIDs, `SafeString`, byte vectors, vectors, dicts, tuples, named tuples, pairs, sets, model instances and `HttpResponse`s (so `cache_page` works). Vectors, dicts and sets keep simple element types (`Vector{Int}`, `Dict{String,Date}`); nested containers come back with `Any`. Storing anything else raises `Juango.CacheSerializationError`.
 
   `:serializer => :serialization` in a cache's settings uses Julia's `Serialization` instead, which stores any value. Like Django's pickle, it lets anyone who can write to the cache store (the Redis server, the cache table) make the reader construct arbitrary objects, which can lead to running code. It also can't be read by another Julia version. An entry that can't be read counts as a miss and is deleted.
 - **Page caching.** `cache_page` and the per-site `CacheMiddleware` (`CACHE_MIDDLEWARE_SECONDS`) skip responses that set cookies or vary on `Cookie`, so per-user pages aren't shared.
@@ -1629,12 +1631,24 @@ Juango.get_by_natural_key(::Type{Tag}, name) = get(Tag; name = name)
 
 ### Management commands
 
-`runserver [host:]port`, `makemigrations`, `migrate`, `showmigrations`, `sqlmigrate`, `createsuperuser`, `changepassword`, `showurls`, `sqlschema`, `check`, `clearsessions`, `dumpdata`, `loaddata`, `flush`, `dbshell`, `inspectdb`, `squashmigrations`, `test`, `help`. Add your own with `Juango.register_command!("name", "help", args -> ...)`.
+`runserver [host:]port`, `makemigrations`, `migrate`, `showmigrations`, `sqlmigrate`, `createsuperuser`, `changepassword`, `showurls`, `sqlschema`, `check`, `clearsessions`, `dumpdata`, `loaddata`, `flush`, `dbshell`, `inspectdb`, `squashmigrations`, `optimizemigration`, `diffsettings`, `sendtestemail`, `findstatic`, `remove_stale_contenttypes`, `test`, `help`. Add your own with `Juango.register_command!("name", "help", args -> ...)`.
 
 - `inspectdb [table ...]` writes `@model` definitions for existing tables, with `Meta(managed = false)` so migrations leave those tables alone. Check the field types it guesses.
 - `flush` empties every table Juango manages (asks first, unless `--noinput`).
 - `dbshell` opens `sqlite3`, `psql` or `mysql` on the configured database.
 - `test` runs `test/runtests.jl`, or else each `tests/test*.jl`.
+- `diffsettings [--all]` lists the settings that differ from the defaults. `sendtestemail you@example.com [--managers] [--admins]` checks the mail setup. `findstatic css/site.css` shows where a static file comes from. `remove_stale_contenttypes [--include-stale-apps]` deletes the content types of models that no longer exist, along with their permissions.
+
+**System checks.** `check` runs every registered check. `--deploy` adds the deployment checks, and `--tag security,models` picks tags. `runserver` reports problems when it starts. Add your own checks:
+
+```julia
+Juango.register_check!(tags = [:billing]) do
+    isempty(objects(Plan)) ? [Juango.CheckMessage(:warning, "No plans yet."; id = "billing.W001", hint = "Add one in the admin.")] : []
+end
+configure!(SILENCED_SYSTEM_CHECKS = ["billing.W001", "security.W004"])
+```
+
+Juango's own checks use Django's ids where Django has the same check (`security.W004` for HSTS, `security.W009` for `SECRET_KEY`, and so on).
 
 ## Settings
 

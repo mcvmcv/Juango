@@ -1038,3 +1038,111 @@ end
         configure!(INSTALLED_APPS = old_apps, TASKS = Dict("default" => Dict("backend" => :immediate)))
     end
 end
+
+@testset "system checks, file and Memcached caches, attach_file, more commands" begin
+    quiet(f) = redirect_stdout(f, devnull)
+    # checks: register your own, tags, ids, silencing
+    n0 = length(Juango.CHECKS)
+    Juango.register_check!(tags = [:billing]) do
+        [Juango.CheckMessage(:warning, "No plans yet."; id = "billing.W001", hint = "Create one."), "a plain string"]
+    end
+    try
+        msgs = Juango.run_checks(tags = [:billing])
+        @test length(msgs) == 2 && msgs[1].id == "billing.W001" && msgs[2].level === :warning && msgs[2].msg == "a plain string"
+        @test occursin("HINT: Create one.", sprint(show, msgs[1]))
+        @test all(m -> m.id != "billing.W001", Juango.run_checks(tags = [:security]))
+        configure!(SILENCED_SYSTEM_CHECKS = ["billing.W001"])
+        @test [m.msg for m in Juango.run_checks(tags = [:billing])] == ["a plain string"]
+        out = sprint(io -> Juango.report_checks(Juango.run_checks(tags = [:billing]), 1; io = io))
+        @test occursin("1 issue (1 silenced)", out)
+        deploy = Juango.run_checks(deploy = true, tags = [:security])
+        @test any(m -> m.id == "security.W004", deploy) && !any(m -> m.id == "security.W004", Juango.run_checks(tags = [:security]))
+    finally
+        resize!(Juango.CHECKS, n0)
+        configure!(SILENCED_SYSTEM_CHECKS = String[])
+    end
+
+    # file-based cache
+    old_caches = settings.CACHES
+    fdir = mktempdir()
+    configure!(CACHES = Dict("default" => Dict(:backend => :locmem), "files" => Dict(:backend => :file, :location => fdir, :max_entries => 3)))
+    try
+        cache_set("a", Dict("x" => [1, 2]); cache_name = "files")
+        @test cache_get("a"; cache_name = "files") == Dict("x" => [1, 2]) && length(readdir(fdir)) == 1
+        cache_set("brief", 1; timeout = 0.3, cache_name = "files"); sleep(0.4)
+        @test cache_get("brief", :gone; cache_name = "files") === :gone
+        for k in ("p", "q", "r", "s"); cache_set(k, k; cache_name = "files"); end
+        @test length(readdir(fdir)) <= 3                                         # culled
+        @test cache_delete("s"; cache_name = "files") && cache_get("s"; cache_name = "files") === nothing
+        cache_set("n", 1; cache_name = "files"); @test Juango.incr("n"; cache_name = "files") == 2
+        cache_clear(cache_name = "files")
+        @test isempty(readdir(fdir))
+    finally
+        configure!(CACHES = old_caches)
+    end
+
+    # Memcached, against a fake server speaking the text protocol
+    server = Sockets.listen(Sockets.localhost, 0)
+    port = Int(Sockets.getsockname(server)[2])
+    store = Dict{String,String}()
+    srv = @async begin
+        sock = Sockets.accept(server)
+        while isopen(sock) && !eof(sock)
+            parts = split(readline(sock))
+            cmd = parts[1]
+            if cmd == "get"
+                v = get(store, parts[2], nothing)
+                v === nothing || write(sock, "VALUE $(parts[2]) 0 $(ncodeunits(v))\r\n$v\r\n")
+                write(sock, "END\r\n")
+            elseif cmd == "set"
+                data = String(read(sock, parse(Int, parts[5]))); read(sock, 2)
+                store[parts[2]] = data; write(sock, "STORED\r\n")
+            elseif cmd == "delete"
+                write(sock, pop!(store, parts[2], nothing) === nothing ? "NOT_FOUND\r\n" : "DELETED\r\n")
+            elseif cmd == "flush_all"
+                empty!(store); write(sock, "OK\r\n")
+            end
+        end
+    end
+    configure!(CACHES = Dict("default" => Dict(:backend => :memcached, :location => "127.0.0.1:$port")))
+    try
+        cache_set("m", (a = 1, b = [Date(2026, 1, 1)]); timeout = 60)
+        @test cache_get("m") == (a = 1, b = [Date(2026, 1, 1)]) && cache_get("absent") === nothing
+        @test cache_delete("m") && !cache_delete("m")
+        cache_set("x", 1); cache_clear()
+        @test isempty(store)
+    finally
+        configure!(CACHES = old_caches)
+        close(server)
+    end
+
+    # attach_file
+    p = joinpath(mktempdir(), "report.csv"); write(p, "a,b\n1,2\n")
+    m = EmailMessage("Report", "Attached."; to = ["x@example.com"])
+    attach_file(m, p)
+    @test m.attachments == [("report.csv", Vector{UInt8}(codeunits("a,b\n1,2\n")), "text/csv")] ||
+          (m.attachments[1][1] == "report.csv" && m.attachments[1][2] == Vector{UInt8}(codeunits("a,b\n1,2\n")))
+
+    # diffsettings, sendtestemail, findstatic, remove_stale_contenttypes
+    @test any(l -> startswith(l, "DATABASE = "), Juango.diffsettings()) && !any(l -> startswith(l, "MEDIA_URL = "), Juango.diffsettings())
+    @test any(l -> startswith(l, "MEDIA_URL = "), Juango.diffsettings(all = true))
+    empty!(Juango.outbox)
+    configure!(EMAIL_BACKEND = :locmem)
+    @test Juango.sendtestemail("ops@example.com") == 1 && startswith(only(Juango.outbox).subject, "Test email from ")
+    sdir = mktempdir(); mkpath(joinpath(sdir, "css")); write(joinpath(sdir, "css", "site.css"), "body{}")
+    old_static = settings.STATIC_DIRS
+    configure!(STATIC_DIRS = vcat([sdir], old_static))
+    try
+        @test Juango.findstatic("css/site.css") == [joinpath(sdir, "css", "site.css")] && isempty(Juango.findstatic("nope.css"))
+    finally
+        configure!(STATIC_DIRS = old_static)
+    end
+    stale = create(ContentType; app_label = "project", model = "vanishedmodel")
+    other = create(ContentType; app_label = "uninstalled_app", model = "gone")
+    @test isempty(quiet(() -> Juango.remove_stale_contenttypes(confirm = _ -> false))) && exists(filter(ContentType; id = stale.id))
+    removed = quiet(() -> Juango.remove_stale_contenttypes(confirm = _ -> true))
+    @test ("project", "vanishedmodel") in [(ct.app_label, ct.model) for ct in removed] &&
+          all(ct -> ct.app_label != "uninstalled_app", removed) && exists(filter(ContentType; id = other.id))
+    quiet(() -> Juango.remove_stale_contenttypes(include_stale_apps = true, confirm = _ -> true))
+    @test !exists(filter(ContentType; id = other.id)) && exists(filter(ContentType; app_label = "project", model = "article"))
+end

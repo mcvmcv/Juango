@@ -11,7 +11,8 @@
 #                              "shared"  => Dict(:backend => :redis, :location => "redis://localhost:6379/0")))
 #
 # Backends: :locmem (per process, LRU), :db (a table; run `manage.jl createcachetable`),
-# :redis (a small built-in client) and :dummy (stores nothing). :db and :redis store JSON
+# :file (a directory, `:location`), :redis and :memcached (small built-in clients) and :dummy
+# (stores nothing). :db and :redis store JSON
 # (see "serializers" below); `:serializer => :serialization` stores any Julia value instead.
 
 abstract type CacheBackend end
@@ -66,6 +67,13 @@ function make_cache(d)
     b === :locmem && return LocMemCache(conf, Dict{String,Tuple{Any,Union{Nothing,Float64}}}(), Dict{String,Int}(), 0, Int(opt(d, :max_entries, 300)), ReentrantLock())
     b === :dummy && return DummyCache(conf)
     b === :db && return DatabaseCache(conf, string(opt(d, :location, "juango_cache")))
+    b === :file && return FileBasedCache(conf, abspath(string(opt(d, :location, joinpath(tempdir(), "juango_cache")))),
+                                         Int(opt(d, :max_entries, 300)), ReentrantLock())
+    if b === :memcached
+        m = match(r"^(?:memcached://)?([^:/]+)(?::(\d+))?/?$", string(opt(d, :location, "127.0.0.1:11211")))
+        m === nothing && throw(ImproperlyConfigured("bad Memcached location; use host:port"))
+        return MemcachedCache(conf, m[1], m[2] === nothing ? 11211 : parse(Int, m[2]), nothing, ReentrantLock())
+    end
     if b === :redis
         m = match(r"^redis://(?::([^@]*)@)?([^:/]+)(?::(\d+))?(?:/(\d+))?$", string(opt(d, :location, "redis://127.0.0.1:6379/0")))
         m === nothing && throw(ImproperlyConfigured("bad Redis location; use redis://[:password@]host[:port][/db]"))
@@ -381,6 +389,95 @@ function raw_set(c::RedisCache, k, v, exp)
 end
 raw_delete(c::RedisCache, k) = redis(c, "DEL", k) > 0
 raw_clear(c::RedisCache) = (redis(c, "FLUSHDB"); nothing)
+
+# File-based cache: one file per key in a directory (Django's FileBasedCache)
+mutable struct FileBasedCache <: CacheBackend
+    conf::CacheConfig
+    dir::String
+    max_entries::Int
+    lock::ReentrantLock
+end
+cache_file(c::FileBasedCache, k) = joinpath(c.dir, bytes2hex(sha256(k)) * ".jcache")
+function raw_get(c::FileBasedCache, k)
+    p = cache_file(c, k)
+    text = lock(() -> isfile(p) ? read(p, String) : nothing, c.lock)
+    text === nothing && return (false, nothing)
+    head, _, body = partition_str(text, '\n')
+    exp = isempty(head) ? nothing : tryparse(Float64, head)
+    if exp !== nothing && exp <= time()
+        raw_delete(c, k)
+        return (false, nothing)
+    end
+    read_entry(c, k, body)
+end
+function raw_set(c::FileBasedCache, k, v, exp)
+    s = serialize_value(c, v)
+    lock(c.lock) do
+        mkpath(c.dir)
+        files = filter(endswith(".jcache"), readdir(c.dir))
+        if length(files) >= c.max_entries                      # full: drop the oldest third, as Django culls
+            byage = sort(files; by = f -> mtime(joinpath(c.dir, f)))
+            foreach(f -> rm(joinpath(c.dir, f); force = true), byage[1:max(1, length(byage) ÷ 3)])
+        end
+        p = cache_file(c, k)
+        tmp = p * "." * random_string(8) * ".tmp"
+        write(tmp, (exp === nothing ? "" : string(exp)) * "\n" * s)
+        mv(tmp, p; force = true)                               # readers never see half a file
+    end
+    nothing
+end
+raw_delete(c::FileBasedCache, k) = lock(() -> (p = cache_file(c, k); isfile(p) ? (rm(p); true) : false), c.lock)
+raw_clear(c::FileBasedCache) = lock(c.lock) do
+    isdir(c.dir) && foreach(f -> endswith(f, ".jcache") && rm(joinpath(c.dir, f); force = true), readdir(c.dir))
+    nothing
+end
+
+# Memcached: just enough of the text protocol
+mutable struct MemcachedCache <: CacheBackend
+    conf::CacheConfig
+    host::String
+    port::Int
+    sock::Any
+    lock::ReentrantLock
+end
+close_cache(c::MemcachedCache) = (c.sock === nothing || try close(c.sock) catch end; c.sock = nothing)
+function memcached(f, c::MemcachedCache)
+    lock(c.lock) do
+        (c.sock === nothing || !isopen(c.sock)) && (c.sock = Sockets.connect(c.host, c.port))
+        try
+            f(c.sock)
+        catch
+            close_cache(c)              # a broken connection is opened again next time
+            rethrow()
+        end
+    end
+end
+mc_line(io) = (l = readline(io); isempty(l) && !isopen(io) ? throw(ErrorException("memcached connection closed")) : l)
+function raw_get(c::MemcachedCache, k)
+    data = memcached(c) do io
+        write(io, "get $k\r\n")
+        l = mc_line(io)
+        l == "END" && return nothing
+        startswith(l, "VALUE ") || throw(ErrorException("memcached: $l"))
+        n = parse(Int, split(l)[4])
+        d = String(read(io, n)); read(io, 2)
+        mc_line(io) == "END" || throw(ErrorException("memcached: expected END"))
+        d
+    end
+    data === nothing ? (false, nothing) : read_entry(c, k, data)
+end
+function raw_set(c::MemcachedCache, k, v, exp)
+    s = serialize_value(c, v)
+    ttl = exp === nothing ? 0 : max(1, round(Int, exp))       # an absolute Unix time (memcached reads big numbers so)
+    memcached(c) do io
+        write(io, "set $k 0 $ttl $(ncodeunits(s))\r\n", s, "\r\n")
+        r = mc_line(io)
+        r == "STORED" || throw(ErrorException("memcached: $r"))
+    end
+    nothing
+end
+raw_delete(c::MemcachedCache, k) = memcached(io -> (write(io, "delete $k\r\n"); mc_line(io) == "DELETED"), c)
+raw_clear(c::MemcachedCache) = (memcached(io -> (write(io, "flush_all\r\n"); mc_line(io)), c); nothing)
 
 # --- the API --------------------------------------------------------------------------------------------------
 

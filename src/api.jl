@@ -95,7 +95,7 @@ export cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, ge
        vary_on_cookie, condition, etag, last_modified, ConditionalGetMiddleware, GZipMiddleware,
        ContentSecurityPolicyMiddleware, CSP, csp_nonce
 # mail
-export send_mail, mail_admins, mail_managers, EmailMessage, EmailMultiAlternatives, send!, attach!,
+export send_mail, mail_admins, mail_managers, EmailMessage, EmailMultiAlternatives, send!, attach!, attach_file,
        attach_alternative!
 # apps, contrib apps, tasks
 export App, get_model, Admin, Sitemap, sitemap_urls, Feed, FlatPage, Site, get_current_site,
@@ -141,7 +141,8 @@ public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, sitema
        sitemap_index_view, flatpage, flatpage_urls, FlatpageFallbackMiddleware, RequestSite,
        clear_site_cache!, Redirect, RedirectFallbackMiddleware, background, TaskDef, db_worker
 # apps, settings, commands
-public installed_apps, is_installed, get_app, model_label, app_models, static_dirs, default_settings,
+public CheckMessage, register_check!, run_checks, diffsettings, sendtestemail, findstatic,
+       remove_stale_contenttypes, installed_apps, is_installed, get_app, model_label, app_models, static_dirs, default_settings,
        startproject, startapp, collectstatic, register_command!, slugify
 
 # --- Juango.Testing, Juango.GIS, Juango.Postgres ----------------------------------------------------
