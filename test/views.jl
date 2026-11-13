@@ -948,3 +948,83 @@ function documented_view(req) HttpResponse("doc") end
         configure!(INSTALLED_APPS = old_apps, ROOT_URLCONF = old_urls)
     end
 end
+
+# a backend with an object-level rule: authors may change their own articles
+struct OwnArticlesBackend end
+Juango.backend_has_perm(::OwnArticlesBackend, u, perm, obj) =
+    perm == "project.change_article" && obj isa Article && obj.author.name == u.username ? true : nothing
+
+@testset "LoginRequiredMiddleware, remote users, scrypt, object permissions" begin
+    # scrypt: RFC 7914 test vectors, and a hash made by Python's hashlib (Django's format)
+    @test bytes2hex(Juango.scrypt(UInt8[], UInt8[], 16, 1, 1, 64)) ==
+          "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906"
+    @test bytes2hex(Juango.scrypt(codeunits("password"), codeunits("NaCl"), 1024, 8, 16, 64)) ==
+          "fdbabe1c9d3472007856e7190d01e9fe7c6ad7cbc8237830e77376634b3731622eaf30d92e22a3886ff109279d9830dac727afb94a83ee6d8360cbdfa2cc0640"
+    old_hashers = get(settings, :PASSWORD_HASHERS, nothing)
+    configure!(PASSWORD_HASHERS = [ScryptPasswordHasher(work_factor = 2^10), Juango.PBKDF2Hasher()])
+    try
+        django = "scrypt\$1024\$seasalt\$8\$1\$mBdsVxZCf6G+Bs1aXMjSdR6I0Vt8atpmM4Gvd0hAgnod0ZyMUPDbZ9Z0534FznWrdtrH3Ifd/FCn7Akjoe9Wrg=="
+        @test check_password("secret", django) && !check_password("Secret", django)
+        h = make_password("hunter2")
+        @test startswith(h, "scrypt\$1024\$") && check_password("hunter2", h)
+    finally
+        old_hashers === nothing ? configure!(PASSWORD_HASHERS = Any[Juango.PBKDF2Hasher()]) : configure!(PASSWORD_HASHERS = old_hashers)
+    end
+
+    # LoginRequiredMiddleware
+    mw = settings.MIDDLEWARE
+    configure!(MIDDLEWARE = vcat(mw, [LoginRequiredMiddleware]))
+    try
+        c = Client()
+        r = get(c, "/whoami/")
+        @test r.status == 302 && getheader(r, "Location") == "/accounts/login/?next=%2Fwhoami%2F"
+        @test get(c, "/accounts/login/").status == 200 && get(c, "/accounts/password_reset/").status == 200
+        r = get(c, "/admin/")
+        @test r.status == 302 && startswith(getheader(r, "Location"), "/admin/login/")          # the admin's own login
+        @test get(c, "/no/such/page/").status == 404
+        create_user("lr_user", "pw-lr-12345")
+        force_login!(c, get(User; username = "lr_user"))
+        @test text(get(c, "/whoami/")) == "user:lr_user"
+        @test Juango.is_login_not_required(Juango.login_not_required(req -> HttpResponse("open")))
+    finally
+        configure!(MIDDLEWARE = mw)
+    end
+
+    # remote users: a proxy authenticates, Juango trusts its header
+    configure!(MIDDLEWARE = vcat(mw, [RemoteUserMiddleware]),
+               AUTHENTICATION_BACKENDS = Any[RemoteUserBackend(), ModelBackend()])
+    try
+        c = Client()
+        @test text(get(c, "/whoami/"; headers = Dict("Remote-User" => "proxied"))) == "user:proxied"
+        u = get(User; username = "proxied")
+        @test !Juango.has_usable_password(u)
+        @test text(get(c, "/whoami/")) == "anon"                                  # header gone: logged out
+        @test text(get(c, "/whoami/"; headers = Dict("Remote-User" => "proxied"))) == "user:proxied"
+        @test text(get(c, "/whoami/"; headers = Dict("Remote-User" => "other"))) == "user:other"   # a different user
+        configure!(AUTHENTICATION_BACKENDS = Any[RemoteUserBackend(create_unknown_user = false), ModelBackend()])
+        @test text(get(Client(), "/whoami/"; headers = Dict("Remote-User" => "stranger"))) == "anon"
+        @test !exists(filter(User; username = "stranger"))
+        configure!(MIDDLEWARE = vcat(mw, [PersistentRemoteUserMiddleware]))
+        c2 = Client()
+        get(c2, "/whoami/"; headers = Dict("Remote-User" => "proxied"))
+        @test text(get(c2, "/whoami/")) == "user:proxied"                         # kept without the header
+    finally
+        configure!(MIDDLEWARE = mw, AUTHENTICATION_BACKENDS = Any[ModelBackend()])
+    end
+
+    # object-level permissions from a backend, and in generic views
+    configure!(AUTHENTICATION_BACKENDS = Any[ModelBackend(), OwnArticlesBackend()])
+    try
+        writer = create_user("objwriter", "pw-ow-12345")
+        mine = create(Article; title = "Mine", author = create(Author; name = "objwriter"))
+        theirs = create(Article; title = "Theirs", author = create(Author; name = "someone else"))
+        @test has_perm(writer, "project.change_article"; obj = mine) && !has_perm(writer, "project.change_article"; obj = theirs)
+        @test !has_perm(writer, "project.change_article")                       # no model-wide permission
+        v = UpdateView(Article; fields = [:title], object_permission_required = "project.change_article", login_required = true)
+        rq(o) = (r = RequestFactory(); req = get(r, "/x/"); req.user = writer; req)
+        @test v(rq(mine); id = mine.id).status == 200
+        @test_throws PermissionDenied v(rq(theirs); id = theirs.id)
+    finally
+        configure!(AUTHENTICATION_BACKENDS = Any[ModelBackend()])
+    end
+end

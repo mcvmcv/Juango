@@ -122,6 +122,30 @@ const UNSAFE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 csrf_exempt(view) = (CSRF_EXEMPT[view] = true; view)
 is_csrf_exempt(view) = haskey(CSRF_EXEMPT, view)
 
+const LOGIN_NOT_REQUIRED = IdDict{Any,Bool}()
+"""
+    login_not_required(view)
+
+Let anonymous users reach a view when `LoginRequiredMiddleware` is on (Django 5.1). Juango's
+login, password reset and admin views are marked already.
+"""
+login_not_required(view) = (LOGIN_NOT_REQUIRED[view] = true; view)
+is_login_not_required(view) = haskey(LOGIN_NOT_REQUIRED, view)
+
+"""
+Require login for every view (Django 5.1's `LoginRequiredMiddleware`): anonymous users are sent
+to `settings.LOGIN_URL`, except for views marked `login_not_required` and the login page itself.
+Put it after `AuthenticationMiddleware`. Unknown URLs still give 404.
+"""
+function LoginRequiredMiddleware(get_response)
+    function (req::Request)
+        rm = req.resolver_match
+        (rm === nothing || is_login_not_required(rm.view) || req.path == settings.LOGIN_URL || is_authenticated(req.user)) &&
+            return get_response(req)
+        redirect_to_login(req, settings.LOGIN_URL)
+    end
+end
+
 const VIEW_NAMES = IdDict{Any,String}()
 
 "Human-readable name of a view (used by `showurls` and error pages)."
@@ -132,6 +156,7 @@ name_view!(v, name) = (VIEW_NAMES[v] = string(name); v)
 "Copy marker flags (CSRF exemption, display name) from a wrapped view onto its wrapper."
 function propagate_flags!(wrapper, view)
     is_csrf_exempt(view) && (CSRF_EXEMPT[wrapper] = true)
+    is_login_not_required(view) && (LOGIN_NOT_REQUIRED[wrapper] = true)
     VIEW_NAMES[wrapper] = view_label(view)
     wrapper
 end

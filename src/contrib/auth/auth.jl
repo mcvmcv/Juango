@@ -173,6 +173,65 @@ end
 backend_get_all_permissions(::ModelBackend, u, obj) =
     u isa AbstractUser && u.is_active && obj === nothing ? model_permissions(u) : Set{String}()
 
+"""
+    RemoteUserBackend(; create_unknown_user = true)
+
+Trust the user name a front-end server or proxy has authenticated (`RemoteUserMiddleware`
+passes it as `remote_user`): the user with that `username_field`, created with an unusable
+password if there is none and `create_unknown_user`. Permissions as `ModelBackend`.
+"""
+Base.@kwdef struct RemoteUserBackend
+    create_unknown_user::Bool = true
+end
+function backend_authenticate(b::RemoteUserBackend, req; remote_user = nothing, kw...)
+    remote_user === nothing && return nothing
+    name = strip(string(remote_user))
+    isempty(name) && return nothing
+    T = get_user_model()
+    uf = username_field(T)
+    u = first(filter(objects(T), Q(uf => name)))
+    if u === nothing
+        b.create_unknown_user || return nothing
+        u = T(; uf => String(name))
+        set_unusable_password!(u)
+        save!(u)
+    end
+    u.is_active ? u : nothing
+end
+backend_get_user(::RemoteUserBackend, id) = backend_get_user(ModelBackend(), id)
+backend_has_perm(::RemoteUserBackend, u, perm, obj) = backend_has_perm(ModelBackend(), u, perm, obj)
+backend_get_all_permissions(::RemoteUserBackend, u, obj) = backend_get_all_permissions(ModelBackend(), u, obj)
+
+"""
+    RemoteUserMiddleware, PersistentRemoteUserMiddleware
+
+Log in the user a front-end server authenticated, from the `REMOTE_USER_HEADER` request header
+(default `Remote-User`), with `RemoteUserBackend` in `AUTHENTICATION_BACKENDS`. Put it after
+`AuthenticationMiddleware`. Without the header, `RemoteUserMiddleware` logs out a user that it
+logged in; `PersistentRemoteUserMiddleware` keeps the session (for a header sent only on the
+login page). The proxy must remove the header from clients' requests, or anyone can send it.
+"""
+RemoteUserMiddleware(get_response) = remote_user_middleware(get_response; force_logout_if_no_header = true)
+PersistentRemoteUserMiddleware(get_response) = remote_user_middleware(get_response; force_logout_if_no_header = false)
+function remote_user_middleware(get_response; force_logout_if_no_header::Bool)
+    remote = backend_name(RemoteUserBackend())
+    by_remote(req) = req.session isa Session && get(req.session, "_auth_user_backend", nothing) == remote
+    function (req::Request)
+        name = header(req, settings.REMOTE_USER_HEADER)
+        if name === nothing || isempty(strip(name))
+            force_logout_if_no_header && is_authenticated(req.user) && by_remote(req) && logout!(req)
+            return get_response(req)
+        end
+        if is_authenticated(req.user)
+            string(getproperty(req.user, username_field(typeof(req.user)))) == strip(name) && return get_response(req)
+            by_remote(req) && logout!(req)          # another user than the header names
+        end
+        u = authenticate(req; remote_user = name)
+        u === nothing || login!(req, u)
+        get_response(req)
+    end
+end
+
 auth_backends() = get(settings, :AUTHENTICATION_BACKENDS, Any[ModelBackend()])
 backend_name(b) = string(parentmodule(typeof(b)), ".", nameof(typeof(b)))
 
@@ -306,7 +365,7 @@ safe_next(req, fallback) = (n = get(req.GET, "next", get(req.POST, "next", ""));
 A login page view. The template gets `form` and `next`.
 """
 function LoginView(; template = "registration/login.html", redirect_url = nothing, require_staff = false)
-    name_view!(function (req::Request; kw...)
+    login_not_required(name_view!(function (req::Request; kw...)
         form = AuthenticationForm(req.method == "POST" ? req.POST : nothing)
         if req.method == "POST" && is_valid(form)
             u = authenticate(form.cleaned_data[:username], form.cleaned_data[:password])
@@ -320,7 +379,7 @@ function LoginView(; template = "registration/login.html", redirect_url = nothin
             end
         end
         render(req, template, Dict("form" => form, "next" => safe_next(req, "")))
-    end, "LoginView")
+    end, "LoginView"))
 end
 
 "Log out (POST) and redirect to `settings.LOGOUT_REDIRECT_URL`."
@@ -343,8 +402,8 @@ auth_urls() = (require_app("auth", "auth_urls()"); include_urls([
     path("logout/", LogoutView(); name = "logout"),
     path("password_change/", PasswordChangeView(); name = "password_change"),
     path("password_change/done/", PasswordChangeDoneView(); name = "password_change_done"),
-    path("password_reset/", PasswordResetView(); name = "password_reset"),
-    path("password_reset/done/", template_page("registration/password_reset_done.html", "PasswordResetDoneView"); name = "password_reset_done"),
-    path("reset/<str:uidb64>/<str:token>/", PasswordResetConfirmView(); name = "password_reset_confirm"),
-    path("reset/done/", template_page("registration/password_reset_complete.html", "PasswordResetCompleteView"); name = "password_reset_complete"),
+    path("password_reset/", login_not_required(PasswordResetView()); name = "password_reset"),
+    path("password_reset/done/", login_not_required(template_page("registration/password_reset_done.html", "PasswordResetDoneView")); name = "password_reset_done"),
+    path("reset/<str:uidb64>/<str:token>/", login_not_required(PasswordResetConfirmView()); name = "password_reset_confirm"),
+    path("reset/done/", login_not_required(template_page("registration/password_reset_complete.html", "PasswordResetCompleteView")); name = "password_reset_complete"),
 ]))

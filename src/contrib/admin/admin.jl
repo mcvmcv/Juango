@@ -844,11 +844,12 @@ function site_view(st::AdminSite, view; public = false)
                 return Juango.redirect_to_login(req, reverse_url("admin:login"))
             view(req; kw...)
         end
-    function (req; kw...)
+    # the admin checks logins itself, so LoginRequiredMiddleware leaves its views alone (as Django's)
+    Juango.login_not_required(function (req; kw...)
         Base.ScopedValues.with(CURRENT_SITE => st, Juango.CURRENT_APP => ("admin" => st.name)) do
             checked(req; kw...)
         end
-    end
+    end)
 end
 
 """

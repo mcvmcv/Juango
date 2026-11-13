@@ -185,7 +185,23 @@ end
 const GENERIC_OPTIONS = Set([:template, :extra_context, :queryset, :paginate_by, :context_object_name, :allow_empty,
     :pk_kwarg, :slug_kwarg, :slug_field, :fields, :success_url, :success_message, :initial, :login_required,
     :permission_required, :test_func, :login_url, :raise_exception, :date_field, :allow_future, :make_object_list,
-    :form])
+    :form, :object_permission_required])
+
+"""
+The view's object (the `get_object` hook), refused with 403 unless the user has every
+`object_permission_required` permission *for that object* (`has_perm(user, perm; obj)`,
+which a backend of your own decides; combine with `login_required = true`).
+"""
+function get_checked_object(v)
+    obj = hook(:get_object, v)
+    perms = opt(v, :object_permission_required)
+    if perms !== nothing
+        u = v.request.user
+        all(p -> has_perm(u, p; obj = obj), perms isa AbstractString ? [perms] : perms) ||
+            throw(PermissionDenied("You don't have permission to do this."))
+    end
+    obj
+end
 
 # --- the default steps ---
 
@@ -325,7 +341,7 @@ The template gets `object` and `<model>`.
 """
 DetailView(::Type{T}; kw...) where {T<:Model} =
     generic_view(:DetailView, T, kw) do v
-        v.object = hook(:get_object, v)
+        v.object = get_checked_object(v)
         render_view(v, Dict{String,Any}())
     end
 
@@ -349,7 +365,7 @@ CreateView(::Type{T}; kw...) where {T<:Model} = generic_view(run_form_view, :Cre
 """
 UpdateView(::Type{T}; kw...) where {T<:Model} =
     generic_view(:UpdateView, T, kw) do v
-        v.object = hook(:get_object, v)
+        v.object = get_checked_object(v)
         run_form_view(v)
     end
 
@@ -361,7 +377,7 @@ and redirects.
 """
 DeleteView(::Type{T}; kw...) where {T<:Model} =
     generic_view(:DeleteView, T, kw) do v
-        v.object = hook(:get_object, v)
+        v.object = get_checked_object(v)
         v.request.method == "POST" ? hook(:form_valid, v, nothing) : render_view(v, Dict{String,Any}())
     end
 
@@ -528,7 +544,7 @@ DateDetailView(::Type{T}; kw...) where {T<:Model} =
         d = period_date(v, url_int(v, :year), url_int(v, :month), url_int(v, :day))
         base = get(v.opts, :get_queryset, nothing)            # v.opts is this call's own copy
         v.opts[:get_queryset] = w -> in_period(w, base === nothing ? dated_queryset_default(w) : base(w), d, d + Day(1))
-        v.object = hook(:get_object, v)
+        v.object = get_checked_object(v)
         render_view(v, Dict{String,Any}())
     end
 function dated_queryset_default(v)

@@ -103,7 +103,8 @@ function default_settings()
         :PASSWORD_ITERATIONS => 260_000,
         :SQL_DEBUG => false,
         :MIGRATIONS_DIR => "migrations",
-        :DEFAULT_AUTO_FIELD => :BigAutoField,          # the automatic primary key: AutoField, BigAutoField or SmallAutoField
+        :DEFAULT_AUTO_FIELD => :BigAutoField,
+        :REMOTE_USER_HEADER => "Remote-User",          # RemoteUserMiddleware's header (set only by your proxy)          # the automatic primary key: AutoField, BigAutoField or SmallAutoField
         :MIGRATION_MODULES => Dict{String,String}(),
         :SITE_NAME => "Juango",
     )

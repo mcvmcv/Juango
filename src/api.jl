@@ -74,7 +74,8 @@ export render, redirect, get_object_or_404, get_list_or_404, TemplateView, Redir
 export User, AbstractUser, AnonymousUser, USER_MODEL, get_user_model, authenticate, login!, logout!,
        create_user, create_superuser, set_password!, check_password, make_password, is_authenticated, login_required,
        staff_member_required, Permission, Group, has_perm, has_perms, permission_required, ModelBackend,
-       validate_password, update_session_auth_hash!, UserCreationForm, UserChangeForm,
+       validate_password, update_session_auth_hash!, UserCreationForm, UserChangeForm, login_not_required,
+       LoginRequiredMiddleware, RemoteUserMiddleware, PersistentRemoteUserMiddleware, RemoteUserBackend,
        PasswordChangeView, PasswordChangeDoneView, PasswordResetView, PasswordResetConfirmView
 export message!, get_messages
 # signals
@@ -118,7 +119,7 @@ public showmigrations, sqlmigrate, squashmigrations, optimizemigration, flush!, 
 public management_form, empty_form, deleted_forms, ordered_forms, clean_form
 # auth
 public username_field, has_module_perms, get_all_permissions, perm_name, auth_urls,
-       PBKDF2Hasher, Argon2Hasher, BCryptSHA256Hasher, BCryptHasher, MinimumLengthValidator,
+       PBKDF2Hasher, Argon2Hasher, BCryptSHA256Hasher, BCryptHasher, ScryptPasswordHasher, scrypt, MinimumLengthValidator,
        NumericPasswordValidator, CommonPasswordValidator, UserAttributeSimilarityValidator,
        password_summary, password_error, make_reset_token, check_reset_token,
        backend_authenticate, backend_get_user, backend_has_perm

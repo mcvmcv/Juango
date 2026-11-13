@@ -50,6 +50,121 @@ function verify_password(h::PBKDF2Hasher, raw::AbstractString, encoded::Abstract
 end
 must_update(h::PBKDF2Hasher, encoded) = (p = split(encoded, '$'); length(p) < 2 || tryparse(Int, p[2]) != iterations_of(h))
 
+"PBKDF2-HMAC-SHA256 with any output length (scrypt uses one iteration and long outputs)."
+function pbkdf2_sha256(password::AbstractVector{UInt8}, salt::AbstractVector{UInt8}, iterations::Int, dklen::Int)
+    out = UInt8[]
+    pw = Vector{UInt8}(password)
+    for block in 1:cld(dklen, 32)
+        u = hmac_sha256(pw, vcat(salt, reverse(reinterpret(UInt8, [UInt32(block)]))))
+        t = copy(u)
+        for _ in 2:iterations
+            u = hmac_sha256(pw, u)
+            t .⊻= u
+        end
+        append!(out, t)
+    end
+    out[1:dklen]
+end
+
+# --- scrypt (RFC 7914) -----------------------------------------------------------------------------
+
+@inline function salsa20_8!(B::AbstractVector{UInt32}, x::Vector{UInt32})
+    copyto!(x, B)
+    R(a, n) = bitrotate(a, n)
+    @inbounds for _ in 1:4
+        x[5] ⊻= R(x[1] + x[13], 7);  x[9] ⊻= R(x[5] + x[1], 9);   x[13] ⊻= R(x[9] + x[5], 13);  x[1] ⊻= R(x[13] + x[9], 18)
+        x[10] ⊻= R(x[6] + x[2], 7);  x[14] ⊻= R(x[10] + x[6], 9); x[2] ⊻= R(x[14] + x[10], 13); x[6] ⊻= R(x[2] + x[14], 18)
+        x[15] ⊻= R(x[11] + x[7], 7); x[3] ⊻= R(x[15] + x[11], 9); x[7] ⊻= R(x[3] + x[15], 13);  x[11] ⊻= R(x[7] + x[3], 18)
+        x[4] ⊻= R(x[16] + x[12], 7); x[8] ⊻= R(x[4] + x[16], 9);  x[12] ⊻= R(x[8] + x[4], 13);  x[16] ⊻= R(x[12] + x[8], 18)
+        x[2] ⊻= R(x[1] + x[4], 7);   x[3] ⊻= R(x[2] + x[1], 9);   x[4] ⊻= R(x[3] + x[2], 13);   x[1] ⊻= R(x[4] + x[3], 18)
+        x[7] ⊻= R(x[6] + x[5], 7);   x[8] ⊻= R(x[7] + x[6], 9);   x[5] ⊻= R(x[8] + x[7], 13);   x[6] ⊻= R(x[5] + x[8], 18)
+        x[12] ⊻= R(x[11] + x[10], 7); x[9] ⊻= R(x[12] + x[11], 9); x[10] ⊻= R(x[9] + x[12], 13); x[11] ⊻= R(x[10] + x[9], 18)
+        x[13] ⊻= R(x[16] + x[15], 7); x[14] ⊻= R(x[13] + x[16], 9); x[15] ⊻= R(x[14] + x[13], 13); x[16] ⊻= R(x[15] + x[14], 18)
+    end
+    @inbounds for i in 1:16
+        B[i] += x[i]
+    end
+    B
+end
+
+"scryptBlockMix: `B` (2r 16-word blocks) into `Y`."
+function block_mix!(Y::Vector{UInt32}, B::Vector{UInt32}, r::Int, X::Vector{UInt32}, tmp::Vector{UInt32})
+    copyto!(X, 1, B, (2r - 1) * 16 + 1, 16)
+    @inbounds for i in 0:2r-1
+        for k in 1:16
+            X[k] ⊻= B[i*16+k]
+        end
+        salsa20_8!(X, tmp)
+        dest = (iseven(i) ? i ÷ 2 : r + i ÷ 2) * 16
+        copyto!(Y, dest + 1, X, 1, 16)
+    end
+    Y
+end
+
+function scrypt_romix!(B::Vector{UInt32}, N::Int, r::Int)
+    n = 32r
+    V = Vector{UInt32}(undef, n * N)
+    X, Y = copy(B), similar(B)
+    x16, tmp = Vector{UInt32}(undef, 16), Vector{UInt32}(undef, 16)
+    for i in 0:N-1
+        copyto!(V, i * n + 1, X, 1, n)
+        block_mix!(Y, X, r, x16, tmp); X, Y = Y, X
+    end
+    for _ in 1:N
+        j = Int((UInt64(X[(2r-1)*16+1]) | UInt64(X[(2r-1)*16+2]) << 32) % UInt64(N))
+        @inbounds for k in 1:n
+            X[k] ⊻= V[j*n+k]
+        end
+        block_mix!(Y, X, r, x16, tmp); X, Y = Y, X
+    end
+    copyto!(B, X)
+end
+
+"""
+    scrypt(password, salt, N, r, p, dklen) -> Vector{UInt8}
+
+The scrypt key derivation function (RFC 7914), as Python's `hashlib.scrypt`.
+"""
+function scrypt(password::AbstractVector{UInt8}, salt::AbstractVector{UInt8}, N::Int, r::Int, p::Int, dklen::Int)
+    (N > 1 && ispow2(N)) || throw(ArgumentError("scrypt: N must be a power of 2 greater than 1"))
+    B = pbkdf2_sha256(password, salt, 1, p * 128 * r)
+    words = [ltoh(w) for w in reinterpret(UInt32, B)]
+    n = 32r
+    for i in 0:p-1
+        chunk = words[i*n+1:(i+1)*n]
+        scrypt_romix!(chunk, N, r)
+        words[i*n+1:(i+1)*n] = chunk
+    end
+    pbkdf2_sha256(password, reinterpret(UInt8, [htol(w) for w in words]), 1, dklen)
+end
+
+"""
+    ScryptPasswordHasher(; work_factor = 2^14, block_size = 8, parallelism = 1)
+
+scrypt, memory-hard like Argon2 (Django's `ScryptPasswordHasher`; about 16 MB per hash with
+the defaults). Stored as `scrypt\$<N>\$<salt>\$<r>\$<p>\$<hash>`.
+"""
+Base.@kwdef struct ScryptPasswordHasher <: PasswordHasher
+    work_factor::Int = 2^14
+    block_size::Int = 8
+    parallelism::Int = 1
+end
+algorithm(::ScryptPasswordHasher) = "scrypt"
+function encode_password(h::ScryptPasswordHasher, raw::AbstractString, salt::AbstractString;
+                         N = h.work_factor, r = h.block_size, p = h.parallelism)
+    dk = scrypt(codeunits(raw), codeunits(salt), N, r, p, 64)
+    "scrypt\$$N\$$salt\$$r\$$p\$$(base64encode(dk))"
+end
+function verify_password(h::ScryptPasswordHasher, raw::AbstractString, encoded::AbstractString)
+    parts = split(encoded, '$')
+    (length(parts) == 6 && parts[1] == "scrypt") || return false
+    N, r, p = tryparse(Int, parts[2]), tryparse(Int, parts[4]), tryparse(Int, parts[5])
+    (N === nothing || r === nothing || p === nothing) && return false
+    consteq(encode_password(h, raw, parts[3]; N = N, r = r, p = p), encoded)
+end
+must_update(h::ScryptPasswordHasher, encoded) = (p = split(encoded, '$');
+    length(p) != 6 || (p[2], p[4], p[5]) != (string(h.work_factor), string(h.block_size), string(h.parallelism)))
+
 # --- bcrypt ----------------------------------------------------------------------------------------
 
 # Blowfish's initial P-array and S-boxes are the hexadecimal digits of π's fractional part.

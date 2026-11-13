@@ -1059,7 +1059,7 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 
 #### Passwords
 
-- **Hashers.** `PASSWORD_HASHERS` (default `[PBKDF2Hasher()]`) lists the accepted hashers; the first hashes new passwords. `Argon2Hasher()`, `BCryptSHA256Hasher()` and `BCryptHasher()` are built in (pure Julia) and use Django's formats, so hashes move between the two frameworks. A password stored with an older hasher, or with weaker settings, is re-hashed when the user next logs in.
+- **Hashers.** `PASSWORD_HASHERS` (default `[PBKDF2Hasher()]`) lists the accepted hashers; the first hashes new passwords. `Argon2Hasher()`, `ScryptPasswordHasher()`, `BCryptSHA256Hasher()` and `BCryptHasher()` are built in (pure Julia) and use Django's formats, so hashes move between the two frameworks. A password stored with an older hasher, or with weaker settings, is re-hashed when the user next logs in.
 - **Validators.** `AUTH_PASSWORD_VALIDATORS` (default: `MinimumLengthValidator()` and `NumericPasswordValidator()`) also offers `CommonPasswordValidator()` (Django's list of 20,000 common passwords, or `path = "file"`, plain or `.gz`) and `UserAttributeSimilarityValidator()`. `validate_password(pw; user)` returns the messages; the password reset, password change and `createsuperuser` use them. A validator of your own is any value with a method `Juango.password_error(v, password, user)` returning a message or `nothing`.
 - **Changing passwords.** `auth_urls()` includes `password_change/` and `password_change/done/` (`PasswordChangeView`, `PasswordChangeDoneView`). The user stays logged in; their other sessions end. Call `update_session_auth_hash!(req, user)` after changing a password in your own views.
 
@@ -1100,6 +1100,10 @@ has_perm(user, "blog.change_post"; obj = post)   # true if any backend says so
 ```
 
 The session remembers which backend logged a user in. If that backend is removed from the settings, the user is logged out. A backend can throw `PermissionDenied` to stop the search. `ModelBackend` checks the password and gives users their own and their groups' permissions, with no per-object rules. Active superusers have every permission.
+
+- **Object permissions in views.** Generic views check them with `UpdateView(Post; object_permission_required = "blog.change_post", login_required = true)`, which asks `has_perm(user, perm; obj = the_object)` once the object is loaded and answers 403 if the user lacks the permission.
+- **Logins by a front-end server.** `RemoteUserMiddleware` (after `AuthenticationMiddleware`) with `RemoteUserBackend()` logs in the user whose name the proxy puts in the `REMOTE_USER_HEADER` header (default `Remote-User`). It creates the user on first sight unless `RemoteUserBackend(create_unknown_user = false)`, and logs them out when the header goes away. `PersistentRemoteUserMiddleware` keeps the session instead. The proxy must strip that header from clients' requests.
+- **Login required everywhere.** `LoginRequiredMiddleware` (Django 5.1) sends anonymous users to `LOGIN_URL` from every view except those wrapped in `login_not_required(view)`. The login, password reset and admin views are exempt already.
 
 ### Email
 
@@ -1147,7 +1151,7 @@ const edit_post = permission_required("project.change_post")(edit_post_view)   #
   - With only `view_` permission, a user sees a read-only page.
   - Adding, changing and deleting each need the matching permission.
 - **Groups in the admin.** Groups are registered in the admin, and a user's groups and permissions can be edited on their page.
-- **Not yet supported.** Object-level permissions (`has_perm(user, perm; obj)`) return `false` except for superusers.
+- **Object-level permissions** (`has_perm(user, perm; obj)`) come from authentication backends; see Authentication backends.
 
 ### Translations and formats
 
