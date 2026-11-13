@@ -11,7 +11,7 @@ main { max-width:44rem; margin:0 auto; padding:1.5rem 1rem; }
 footer { text-align:center; color:var(--muted); padding:2rem 1rem; font-size:.9rem; }
 .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:1rem 1.25rem; margin:1rem 0; }
 .card h2 { margin:.2rem 0; } .meta, .muted { color:var(--muted); font-size:.9rem; }
-.msg { padding:.6rem 1rem; border-radius:8px; background:var(--card); border-left:4px solid var(--accent); }
+.message { padding:.6rem 1rem; border-radius:8px; background:var(--card); border-left:4px solid var(--accent); }
 .search { display:flex; gap:.5rem; } .search input { flex:1; }
 input, textarea, select { font:inherit; padding:.4rem .6rem; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--fg); max-width:100%; }
 form p label { display:block; font-weight:600; } textarea { width:100%; } input[type=text] { width:100%; }
@@ -19,3 +19,9 @@ form p label { display:block; font-weight:600; } textarea { width:100%; } input[
 .errorlist { color:#cf222e; list-style:none; padding:0; margin:.25rem 0; }
 .comment { border-top:1px solid var(--border); padding:.75rem 0; }
 .pager { display:flex; justify-content:space-between; margin-top:1.5rem; }
+
+/* htmx examples */
+a.more { display: block; text-align: center; padding: 1em; color: #888; }
+button.link { background: none; border: none; color: #888; cursor: pointer; font-size: 0.5em; vertical-align: middle; }
+form.inline-edit input { font-size: 1.5em; width: 60%; }
+form.inline-edit .errorlist { color: #b00; }

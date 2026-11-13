@@ -166,8 +166,8 @@ end
 app_dir(a::App, sub) = a.path === nothing ? nothing : (d = joinpath(a.path, sub); isdir(d) ? d : nothing)
 app_dirs(sub) = get(settings, :APP_DIRS, true) ? String[d for d in (app_dir(a, sub) for a in installed_apps()) if d !== nothing] : String[]
 
-"Static directories: STATIC_DIRS, then each installed app's `static/`."
-static_dirs() = vcat(String[abspath(string(d)) for d in settings.STATIC_DIRS], app_dirs("static"))
+"Static directories: STATIC_DIRS, then each installed app's `static/`, then Juango's own (htmx)."
+static_dirs() = vcat(String[abspath(string(d)) for d in settings.STATIC_DIRS], app_dirs("static"), [joinpath(ASSETS_DIR, "static")])
 app_locale_dirs() = app_dirs("locale")
 
 "Management commands: Juango's own, plus those of installed apps."

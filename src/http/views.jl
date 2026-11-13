@@ -5,9 +5,17 @@
 
 Render a template with the request's context processors and return an `HttpResponse`.
 `template_name` may also be a list (first existing is used) or a `Template`.
+
+`htmx_partial = "name"` renders only the partial `{% partialdef name %}` of the template for
+htmx requests (not for `hx-boost` ones or history restores, which want the whole page), and
+the whole template otherwise; the response varies on `HX-Request`.
 """
 function render(req::Request, template, context = Dict{String,Any}(); status = 200,
-                content_type = "text/html; charset=utf-8")
+                content_type = "text/html; charset=utf-8", htmx_partial = nothing)
+    if htmx_partial !== nothing && is_htmx(req; boosted = false)      # contrib/htmx.jl
+        template isa AbstractString || throw(ArgumentError("render: htmx_partial needs a template name"))
+        template = string(template, "#", htmx_partial)
+    end
     t = template isa Template ? template : select_template(template)
     ctx = to_context_dict(context)
     resp = HttpResponse(render(t, ctx; request = req); status = status, content_type = content_type)

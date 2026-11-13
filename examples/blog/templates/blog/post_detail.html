@@ -2,7 +2,18 @@
 {% block title %}{{ post.title }} · {{ block.super }}{% endblock %}
 {% block content %}
 <article>
-  <h1>{{ post.title }}</h1>
+  {# Inline edit: the author's "edit" swaps the title for a form, which swaps back when saved. #}
+  {% partialdef title inline %}
+  <h1 id="post-title">{{ post.title }}
+    {% if user.id == post.author_id %}<button class="link" hx-get="{% url 'blog:title' slug=post.slug %}" hx-target="#post-title" hx-swap="outerHTML">edit</button>{% endif %}</h1>
+  {% endpartialdef %}
+  {% partialdef title_form %}
+  <form id="post-title" class="inline-edit" hx-post="{% url 'blog:title' slug=post.slug %}" hx-target="this" hx-swap="outerHTML">
+    {{ form.title }} <button>Save</button>
+    <button type="button" class="link" hx-get="{% url 'blog:title' slug=post.slug %}?cancel=1" hx-target="#post-title" hx-swap="outerHTML">Cancel</button>
+    {{ form.title.errors }}
+  </form>
+  {% endpartialdef %}
   <p class="meta">by {{ post.author.username }} · {{ post.created|date:"l, F jS Y" }}{% if not post.published %} · <strong>draft</strong>{% endif %}
   {% if user.id == post.author_id %} · <a href="{% url 'blog:edit' slug=post.slug %}">Edit</a>{% endif %}</p>
   {{ post.body|linebreaks }}

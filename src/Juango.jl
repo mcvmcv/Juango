@@ -99,6 +99,7 @@ include("contrib/admin/log.jl")
 include("core/mail.jl")
 include("contrib/auth/passwordreset.jl")
 include("contrib/messages.jl")
+include("contrib/htmx.jl")
 
 # request handling, views and the server
 include("http/middleware.jl")

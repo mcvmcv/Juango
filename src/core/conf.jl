@@ -45,6 +45,7 @@ function default_settings()
         :CACHES => Dict("default" => Dict(:backend => :locmem)),
         :CACHE_MIDDLEWARE_SECONDS => 600,
         :TEMPLATE_CACHE_CHECK_MTIME => nothing,        # read templates again when they change (nothing: only with DEBUG)
+        :HTMX_OOB_MESSAGES => true,                    # after htmx requests, send queued messages as an out-of-band swap
         :ACCESS_LOG => true,                           # runserver prints a line to stderr for each request
         :TEMPLATE_COMPILE => nothing,                  # compile templates into Julia functions (nothing: when DEBUG is off)
         :TEMPLATES => nothing,                         # template engines (nothing: Juango's, with TEMPLATE_DIRS)
@@ -78,6 +79,7 @@ function default_settings()
             CommonMiddleware,
             CsrfViewMiddleware,
             AuthenticationMiddleware,
+            HtmxMiddleware,
         ],
         :CONTEXT_PROCESSORS => Any[
             cp_request, cp_auth, cp_csrf, cp_messages, cp_static, cp_csp,

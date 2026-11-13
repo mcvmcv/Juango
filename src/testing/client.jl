@@ -67,11 +67,19 @@ function make_test_request(method::AbstractString, target::AbstractString; host 
 end
 
 """
-    request(c::Client, method, path; data=nothing, json=nothing, headers=Dict(), follow=false)
+    request(c::Client, method, path; data=nothing, json=nothing, headers=Dict(), follow=false, htmx=false)
+
+`htmx = true` sends the request as htmx would (`HX-Request: true`); a NamedTuple or Dict adds
+other HX-* headers too: `htmx = (target = "results", trigger = "search", boosted = true)`.
 """
 function request(c::Client, method::AbstractString, target::AbstractString; data = nothing, json = nothing,
-                 headers = Dict{String,String}(), follow = false, content_type = nothing, body = nothing)
+                 headers = Dict{String,String}(), follow = false, content_type = nothing, body = nothing, htmx = false)
     method = uppercase(method)
+    if htmx !== false
+        hx = Dict{String,String}("HX-Request" => "true")
+        htmx === true || foreach(((k, v),) -> hx["HX-" * join(uppercasefirst.(split(string(k), '_')), "-")] = string(v), pairs(htmx))
+        headers = merge(hx, Dict{String,String}(string(k) => string(v) for (k, v) in pairs_of(headers)))
+    end
     req = make_test_request(method, target; host = c.host, default_headers = c.default_headers, cookies = c.cookies,
                             data = data, json = json, headers = headers, content_type = content_type, body = body)
     req.meta[:test_client] = true

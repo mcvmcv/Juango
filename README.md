@@ -975,6 +975,45 @@ render(req, "emails/welcome.mustache", Dict("name" => user.username))
 
 `{% load humanize %}` adds `intcomma` (`1,234,567`, with the active language's separator), `intword` (`1.2 million`), `apnumber` (`four`), `ordinal` (`22nd`), `naturalday` (`today`, `yesterday`, `tomorrow`, else the date) and `naturaltime` (`3 minutes ago`, `an hour from now`).
 
+#### htmx
+
+[htmx](https://htmx.org) comes with Juango, much as django-htmx adds it to Django. Put
+`{% htmx_script %}` in your base template's `<head>`: it loads htmx from Juango's static files
+(`juango/htmx.min.js`, version 2.0.4), sends the CSRF token with every htmx request, and makes
+htmx swap in 422 responses (see forms below). The example blog has active search, infinite
+scroll and editing a title in place.
+
+```julia
+function post_list(req)
+    qs = filter(Post; title__icontains = get(req.GET, "q", ""))
+    render(req, "posts.html", Dict("posts" => page(Paginator(qs, 10), get(req.GET, "page", "1")));
+           htmx_partial = "results")    # {% partialdef results %} for htmx, the whole page otherwise
+end
+
+function edit_title(req; id)
+    post = get_object_or_404(Post; id = id)
+    form = ModelForm(Post; data = req.method == "POST" ? req.POST : nothing, instance = post, fields = [:title])
+    if req.method == "POST" && is_valid(form)
+        save!(form)
+        message!(req, :success, "Saved.")                       # sent as an out-of-band swap
+        return hx_trigger(render(req, "post.html#title", Dict("post" => post)), "post-saved")
+    end
+    render(req, "post.html#title_form", Dict("post" => post, "form" => form); status = form_status(form))
+end
+```
+
+- **The request:** `is_htmx(req)` says whether htmx sent it (`boosted = false` leaves out `hx-boost` requests and history restores, which want whole pages). `req.htmx` has the details: `boosted`, `target`, `trigger`, `trigger_name`, `current_url`, `current_url_abs_path`, `history_restore_request` and `prompt`. In templates, use `{% if request.htmx %}`. Reading either marks the response `Vary: HX-Request`, so caches and conditional GETs keep partials and whole pages apart.
+- **Responses:**
+  - `hx_redirect(url)` makes the browser load a page. A plain redirect would be followed by htmx and the result swapped in.
+  - `hx_refresh()` reloads the page.
+  - `hx_location(path; target = "#main", ...)` loads `path` with htmx and pushes it to the history.
+  - `hx_push_url`, `hx_replace_url`, `hx_retarget`, `hx_reswap` and `hx_reselect` set those headers on a response.
+  - `hx_trigger(resp, events; after = :receive | :settle | :swap)` triggers client-side events. `events` is a name, a vector of names, or a Dict of name => detail.
+  - `hx_stop_polling()` answers 286.
+- **Forms:** `form_status(form)` is 422 for a submitted form with errors, and 200 otherwise. Re-render the form's partial with that status: `{% htmx_script %}` tells htmx to swap 422 responses, so the errors appear in place, while tests and logs still see the failure.
+- **Messages:** after an htmx request, messages still queued are appended to the HTML response as `<div id="messages" hx-swap-oob="true">`. Give your base template a `<div id="messages">` for them to replace. The markup is `juango/htmx_messages.html` (override it in your templates), and `HTMX_OOB_MESSAGES = false` turns it off. This, and the `Vary` header, are done by `HtmxMiddleware`, which is in the default `MIDDLEWARE`.
+- **Tests:** `get(client, "/posts/"; htmx = true)` sends `HX-Request`. `htmx = (target = "results", boosted = true)` adds other headers. `assert_htmx(resp; redirect = "/done/", trigger = "post-saved")` checks the response headers.
+
 ### Forms
 
 ```julia
@@ -1440,7 +1479,7 @@ end
 configure!(MIDDLEWARE = [Juango.default_settings()[:MIDDLEWARE]..., Timing])
 ```
 
-The defaults are security headers, sessions, `APPEND_SLASH`, CSRF and authentication. Also available:
+The defaults are security headers, sessions, `APPEND_SLASH`, CSRF, authentication and htmx (`Vary: HX-Request` and out-of-band messages). Also available:
 
 - `GZipMiddleware` compresses responses of 200 bytes or more for clients that accept gzip, with random padding in the gzip header against BREACH (as Django does). Put it first. Streaming responses are compressed chunk by chunk, each chunk flushed so it still goes out at once.
 - `BrokenLinkEmailsMiddleware` emails `MANAGERS` (via `mail_managers`) when a page linked from somewhere returns 404, unless `DEBUG` is on. Links from your own site are reported as broken internal links. Like Django it ignores requests without a referer, search engines, and paths matching `IGNORABLE_404_URLS` regexes.

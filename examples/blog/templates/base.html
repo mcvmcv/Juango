@@ -6,6 +6,7 @@
   <title>{% block title %}Juango Blog{% endblock %}</title>
   <link rel="stylesheet" href="{% static 'blog.css' %}">
   <link rel="alternate" type="application/rss+xml" title="Juango Blog" href="{% url 'feed' %}">
+  {% htmx_script %}
 </head>
 <body>
   <header class="site">
@@ -23,7 +24,7 @@
     </nav>
   </header>
   <main>
-    {% for message in messages %}<p class="msg {{ message.tags }}">{{ message }}</p>{% endfor %}
+    <div id="messages">{% for message in messages %}<p class="message {{ message.tags }}">{{ message }}</p>{% endfor %}</div>
     {% block content %}{% endblock %}
   </main>
   <footer>Built with Juango · <a href="{% url 'api_posts' %}">JSON API</a></footer>

@@ -1,7 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
-<form class="search" method="get"><input type="search" name="q" value="{{ q }}" placeholder="Search posts"><button>Search</button></form>
-{% if q %}<p class="muted">Results for “{{ q }}” — <a href="{% url 'blog:list' %}">clear</a></p>{% endif %}
+{# Active search: results replace #posts as you type (and the URL follows, so back/forward work). #}
+<form class="search" method="get">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search posts" autocomplete="off"
+         hx-get="{% url 'blog:list' %}" hx-trigger="input changed delay:300ms, search" hx-target="#posts" hx-push-url="true">
+  <button>Search</button>
+</form>
+<div id="posts">
+{% partialdef posts inline %}
 {% for post in page_obj %}
   <article class="card">
     <h2><a href="{{ post.get_absolute_url }}">{{ post.title }}</a></h2>
@@ -9,13 +15,13 @@
     <p>{{ post.body|truncatewords:30 }}</p>
   </article>
 {% empty %}
-  <p>No posts yet. {% if user.is_authenticated %}<a href="{% url 'blog:create' %}">Write one!</a>{% else %}Run <code>julia --project manage.jl seed</code>.{% endif %}</p>
+  <p>{% if q %}No posts match “{{ q }}”.{% else %}No posts yet. {% if user.is_authenticated %}<a href="{% url 'blog:create' %}">Write one!</a>{% else %}Run <code>julia --project manage.jl seed</code>.{% endif %}{% endif %}</p>
 {% endfor %}
-{% if page_obj.has_other_pages %}
-<nav class="pager">
-  {% if page_obj.has_previous %}<a href="?page={{ page_obj.previous_page_number }}{% if q %}&q={{ q|urlencode }}{% endif %}">‹ Newer</a>{% endif %}
-  <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
-  {% if page_obj.has_next %}<a href="?page={{ page_obj.next_page_number }}{% if q %}&q={{ q|urlencode }}{% endif %}">Older ›</a>{% endif %}
-</nav>
+{# Infinite scroll: when this link scrolls into view, htmx replaces it with the next page (and its own link). #}
+{% if page_obj.has_next %}
+  <a class="more" href="?page={{ page_obj.next_page_number }}{% if q %}&q={{ q|urlencode }}{% endif %}"
+     hx-get="?page={{ page_obj.next_page_number }}{% if q %}&q={{ q|urlencode }}{% endif %}" hx-trigger="revealed" hx-swap="outerHTML">Older posts ›</a>
 {% endif %}
+{% endpartialdef %}
+</div>
 {% endblock %}

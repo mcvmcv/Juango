@@ -4,7 +4,8 @@ function post_list(req)
     q = strip(get(req.GET, "q", ""))
     isempty(q) || (qs = filter(qs, Q(title__icontains = q) | Q(body__icontains = q)))
     pg = page(Paginator(qs, 5), get(req.GET, "page", "1"))
-    render(req, "blog/post_list.html", Dict("page_obj" => pg, "q" => q))
+    # htmx (search as you type, the next page when scrolling) gets just the list of posts
+    render(req, "blog/post_list.html", Dict("page_obj" => pg, "q" => q); htmx_partial = "posts")
 end
 
 function post_detail(req; slug)
@@ -39,6 +40,23 @@ function edit_own_post(req; slug)
     post_form(req, post)
 end
 const post_edit = login_required(edit_own_post)
+
+"The title of a post, edited in place with htmx (see the partials in post_detail.html)."
+function edit_title(req; slug)
+    post = get_object_or_404(Post; slug = slug, author = req.user)
+    show(form = nothing; status = 200) =
+        render(req, "blog/post_detail.html#" * (form === nothing ? "title" : "title_form"),
+               Dict("post" => post, "form" => form); status = status)
+    if req.method == "POST"
+        form = ModelForm(Post; data = req.POST, instance = post, fields = [:title])
+        is_valid(form) || return show(form; status = form_status(form))      # 422: htmx swaps the errors in
+        save!(form)
+        message!(req, :success, "Title updated.")                             # arrives as an out-of-band swap
+        return show()
+    end
+    haskey(req.GET, "cancel") ? show() : show(ModelForm(Post; instance = post, fields = [:title]))
+end
+const post_title = login_required(edit_title)
 
 const drafts = login_required(ListView(Post; template = "blog/drafts.html",
                                  queryset = req -> filter(Post; author = req.user, published = false)))

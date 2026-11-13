@@ -181,6 +181,7 @@ const LAZY_USER = LazyUser()
 
 function Base.getproperty(r::Request, s::Symbol)
     s === :FILES && return get(getfield(r, :meta), :FILES, FileDict())
+    s === :htmx && return htmx_details(r)                 # contrib/htmx.jl
     if s === :user
         u = getfield(r, :user)
         u isa LazyUser || return u
@@ -190,7 +191,7 @@ function Base.getproperty(r::Request, s::Symbol)
     end
     getfield(r, s)
 end
-Base.propertynames(r::Request, private::Bool = false) = (fieldnames(Request)..., :FILES)
+Base.propertynames(r::Request, private::Bool = false) = (fieldnames(Request)..., :FILES, :htmx)
 
 "Parse a multipart body: fields into `req.POST`, files into `req.FILES`."
 function parse_multipart_fields(req::Request)

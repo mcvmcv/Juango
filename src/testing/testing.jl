@@ -219,6 +219,35 @@ function assert_redirects(r::HttpResponse, url::AbstractString; status = 302, ta
     true
 end
 
+"""
+    assert_htmx(resp; redirect, refresh, location, push_url, replace_url, retarget, reswap, reselect,
+                trigger, trigger_after_settle, trigger_after_swap, status)
+
+Check the HX-* headers of a response: each keyword given must match its header exactly
+(`refresh = true` for `HX-Refresh: true`). `trigger = "saved"` only needs that event among the
+`HX-Trigger` events; pass a Dict to check details too.
+"""
+function assert_htmx(r::HttpResponse; status = nothing, kw...)
+    status === nothing || r.status == status || fail("response status was $(r.status), expected $status")
+    for (k, want) in kw
+        name = "HX-" * join(uppercasefirst.(split(string(k), '_')), "-")
+        got = getheader(r, name)
+        got === nothing && fail("the response has no $name header")
+        if startswith(string(k), "trigger")
+            evs = startswith(strip(got), "{") ? JSON.parse(got) : Dict{String,Any}(strip(e) => nothing for e in split(got, ','))
+            wanted = want isa AbstractDict ? Dict{String,Any}(string(e) => d for (e, d) in pairs(want)) :
+                     Dict{String,Any}(string(e) => missing for e in (want isa Union{AbstractString,Symbol} ? [want] : want))
+            for (e, d) in wanted
+                haskey(evs, e) || fail("$name doesn't trigger $(repr(e)); it has $(repr(got))")
+                d === missing || evs[e] == d || fail("$name gives $(repr(e)) the detail $(repr(evs[e])), expected $(repr(d))")
+            end
+        else
+            got == (want === true ? "true" : want === false ? "false" : string(want)) || fail("$name was $(repr(got)), expected $(repr(want))")
+        end
+    end
+    true
+end
+
 "The response was rendered with template `name` (by `render`)."
 function assert_template_used(r::HttpResponse, name::AbstractString)
     name in r.templates || fail("template $(repr(name)) wasn't used; used: $(isempty(r.templates) ? "none" : join(repr.(r.templates), ", "))")

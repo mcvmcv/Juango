@@ -4,6 +4,7 @@ const blog_patterns = [
     path("drafts/", drafts; name = "drafts"),
     path("<slug:slug>/", post_detail; name = "detail"),
     path("<slug:slug>/edit/", post_edit; name = "edit"),
+    path("<slug:slug>/title/", post_title; name = "title"),          # htmx inline edit
 ]
 
 const sitemaps = Dict(

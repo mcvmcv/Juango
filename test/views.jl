@@ -881,9 +881,10 @@ end
     write(joinpath(src, "css", "base.css"), "body { color: red }")
     write(joinpath(src, "css", "site.css"), """@import "base.css";\n.logo { background: url("../img/logo.png") } .x { background: url(data:image/png;base64,AAA) }""")
     override_settings(STATIC_DIRS = [src], STATIC_ROOT = root, STATICFILES_STORAGE = :manifest) do
-        @test collectstatic() == 3
+        @test collectstatic() == 5                                         # and Juango's htmx.min.js and its licence
         paths = JSON.parse(read(joinpath(root, "staticfiles.json"), String))["paths"]
         logo, site, base = paths["img/logo.png"], paths["css/site.css"], paths["css/base.css"]
+        @test haskey(paths, "juango/htmx.min.js")
         @test occursin(r"^img/logo\.[0-9a-f]{12}\.png$", logo) && isfile(joinpath(root, logo)) && isfile(joinpath(root, "img", "logo.png"))
         css = read(joinpath(root, site), String)
         @test occursin("url(\"../" * logo * "\")", css) && occursin("@import \"" * basename(base) * "\"", css)
@@ -1108,5 +1109,109 @@ Juango.upload_file(::RefusingUploads, field, name, ctype, data) = endswith(name,
                    HANDLER403 = nothing, HANDLER500 = nothing, FILE_UPLOAD_MAX_MEMORY_SIZE = 2_621_440,
                    FILE_UPLOAD_HANDLERS = Any[Juango.MemoryFileUploadHandler(), Juango.TemporaryFileUploadHandler()],
                    FILE_UPLOAD_PERMISSIONS = 0o644)
+    end
+end
+
+@form HxNameForm begin
+    name = CharField(max_length = 10)
+end
+
+@testset "htmx" begin
+    write(joinpath(TPL, "hx_page.html"), "<html>{% htmx_script %}<div id=\"messages\"></div>" *
+          "<ul>{% partialdef rows inline %}{% for x in xs %}<li>{{ x }}</li>{% endfor %}{% endpartialdef %}</ul></html>")
+    write(joinpath(TPL, "hx_form.html"), "<main>{% partialdef form inline %}<form>{{ form.name.errors }}</form>{% endpartialdef %}</main>")
+    function hx_list(req)
+        q = get(req.GET, "q", "")
+        render(req, "hx_page.html", Dict("xs" => filter(x -> occursin(q, x), ["apple", "banana", "cherry"])); htmx_partial = "rows")
+    end
+    function hx_info(req)
+        h = req.htmx
+        JsonResponse(Dict("htmx" => is_htmx(req), "boosted" => h.boosted, "target" => h.target, "trigger" => h.trigger,
+                          "trigger_name" => h.trigger_name, "prompt" => h.prompt, "path" => h.current_url_abs_path,
+                          "restore" => h.history_restore_request))
+    end
+    function hx_form(req)
+        form = HxNameForm(req.method == "POST" ? req.POST : nothing)
+        req.method == "POST" && is_valid(form) && return hx_trigger(hx_redirect("/done/"), Dict("saved" => Dict("id" => 7)))
+        render(req, "hx_form.html", Dict("form" => form); htmx_partial = "form", status = form_status(form))
+    end
+    function hx_msg(req)
+        message!(req, :success, "Saved <ok>")
+        render(req, "hx_form.html", Dict("form" => HxNameForm(nothing)); htmx_partial = "form")
+    end
+    plain(req) = HttpResponse("plain")
+    old_urls = settings.ROOT_URLCONF
+    configure!(ROOT_URLCONF = [path("hx/list/", hx_list), path("hx/info/", hx_info), path("hx/form/", hx_form),
+                               path("hx/msg/", hx_msg), path("hx/plain/", plain)])
+    try
+        c = Client()
+        # the whole page normally; the partial for htmx, but not for boosted requests; Vary either way
+        r = get(c, "/hx/list/")
+        @test occursin("<html>", text(r)) && occursin("htmx.min.js", text(r)) && occursin("htmx:configRequest", text(r))
+        @test occursin("HX-Request", something(getheader(r, "Vary"), ""))
+        r = get(c, "/hx/list/?q=an"; htmx = true)
+        @test text(r) == "<li>banana</li>" && occursin("HX-Request", getheader(r, "Vary"))
+        @test occursin("<html>", text(get(c, "/hx/list/"; htmx = (boosted = true,))))
+        @test occursin("<html>", text(get(c, "/hx/list/"; htmx = (history_restore_request = true,))))
+        @test getheader(get(c, "/hx/plain/"), "Vary") === nothing || !occursin("HX-Request", getheader(get(c, "/hx/plain/"), "Vary"))
+        # the htmx script tag: config, the vendored file (served from Juango's static files), the CSRF header
+        @test occursin("\"code\":\"422\",\"swap\":true", text(get(c, "/hx/list/")))
+        @test get(c, settings.STATIC_URL * "juango/htmx.min.js").status == 200
+        override_settings(SECURE_CSP = Dict("script-src" => [CSP.SELF, CSP.NONCE]),          # the inline script gets the nonce
+                          MIDDLEWARE = [Juango.default_settings()[:MIDDLEWARE]..., ContentSecurityPolicyMiddleware]) do
+            r = get(c, "/hx/list/")
+            nonce = match(r"<script nonce=\"([^\"]+)\">document", text(r))
+            @test nonce !== nothing && occursin("'nonce-" * nonce[1] * "'", getheader(r, "Content-Security-Policy"))
+        end
+        @test !occursin("nonce", text(get(c, "/hx/list/")))
+
+        # request details, including URI-encoded headers
+        d = Juango.JSON.parse(text(get(c, "/hx/info/"; htmx = (target = "results", trigger = "search", trigger_name = "q",
+                                                                  current_url = "http://testserver/hx/list/?q=a", prompt = "yes"))))
+        @test d["htmx"] && !d["boosted"] && d["target"] == "results" && d["trigger"] == "search" && d["trigger_name"] == "q"
+        @test d["prompt"] == "yes" && d["path"] == "/hx/list/?q=a" && !d["restore"]
+        d = Juango.JSON.parse(text(get(c, "/hx/info/")))
+        @test !d["htmx"] && d["target"] === nothing && d["path"] === nothing
+        d = Juango.JSON.parse(text(get(c, "/hx/info/"; headers = Dict("HX-Request" => "true", "HX-Prompt" => "caf%C3%A9",
+                                                                        "HX-Prompt-URI-AutoEncoded" => "true",
+                                                                        "HX-Current-URL" => "https://elsewhere.example/x"))))
+        @test d["prompt"] == "café" && d["path"] === nothing
+        @test Juango.truthy(HtmxDetails(Request("GET", "/"; headers = Dict("HX-Request" => "true"))))
+        @test tr("{% if request.htmx %}hx{% else %}page{% endif %}", Dict("request" => Request("GET", "/"))) == "page"
+
+        # forms: errors re-render the partial with 422; success redirects the browser and triggers an event
+        r = post(c, "/hx/form/", Dict("name" => "far too long a name"); htmx = true)
+        @test r.status == 422 && startswith(text(r), "<form>") && occursin("at most", text(r))
+        r = post(c, "/hx/form/", Dict("name" => "Ann"); htmx = true)
+        @test assert_htmx(r; redirect = "/done/", trigger = Dict("saved" => Dict("id" => 7)), status = 200)
+        @test_throws Exception assert_htmx(r; refresh = true)
+        @test get(c, "/hx/form/").status == 200
+
+        # messages queued during an htmx request arrive as an out-of-band swap, once
+        r = get(c, "/hx/msg/"; htmx = true)
+        @test occursin("<div id=\"messages\" hx-swap-oob=\"true\"><p class=\"message success\">Saved &lt;ok&gt;</p></div>", text(r))
+        @test !occursin("hx-swap-oob", text(get(c, "/hx/form/"; htmx = true)))
+        override_settings(HTMX_OOB_MESSAGES = false) do
+            @test !occursin("hx-swap-oob", text(get(c, "/hx/msg/"; htmx = true)))
+        end
+
+        # response helpers
+        r = hx_trigger(HttpResponse("x"), "a")
+        hx_trigger(r, ["b", "a"])
+        @test getheader(r, "HX-Trigger") == "a, b"
+        hx_trigger(r, Dict("c" => 1))
+        @test Juango.JSON.parse(getheader(r, "HX-Trigger")) == Dict("a" => nothing, "b" => nothing, "c" => 1)
+        @test getheader(hx_trigger(HttpResponse(""), :done; after = :settle), "HX-Trigger-After-Settle") == "done"
+        @test getheader(hx_trigger(HttpResponse(""), "done"; after = :swap), "HX-Trigger-After-Swap") == "done"
+        @test_throws ArgumentError hx_trigger(HttpResponse(""), "x"; after = :later)
+        @test getheader(hx_refresh(), "HX-Refresh") == "true"
+        @test getheader(hx_location("/a/"), "HX-Location") == "/a/"
+        @test Juango.JSON.parse(getheader(hx_location("/a/"; target = "#main"), "HX-Location")) == Dict("path" => "/a/", "target" => "#main")
+        r = hx_reselect(hx_reswap(hx_retarget(hx_replace_url(hx_push_url(HttpResponse(""), false), "/b/"), "#t"), "outerHTML"), ".x")
+        @test assert_htmx(r; push_url = false, replace_url = "/b/", retarget = "#t", reswap = "outerHTML", reselect = ".x")
+        @test hx_stop_polling().status == HTMX_STOP_POLLING == 286
+    finally
+        configure!(ROOT_URLCONF = old_urls)
+        rm(joinpath(TPL, "hx_page.html"); force = true); rm(joinpath(TPL, "hx_form.html"); force = true)
     end
 end
