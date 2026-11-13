@@ -180,5 +180,16 @@ function deploy_checks()
     s.X_FRAME_OPTIONS == "DENY" || w("security.W019", "X_FRAME_OPTIONS isn't DENY: pages can be framed by other sites unless they need to be.")
     ContentSecurityPolicyMiddleware in mws || isempty(s.SECURE_CSP) ||
         w("security.W026", "SECURE_CSP is set but ContentSecurityPolicyMiddleware isn't in MIDDLEWARE.")
+    CsrfViewMiddleware in mws || w("security.W003", "CsrfViewMiddleware isn't in MIDDLEWARE: forms and other unsafe requests aren't protected against cross-site request forgery.")
+    "*" in s.ALLOWED_HOSTS && w("juango.W101", "ALLOWED_HOSTS contains \"*\": any Host header is accepted, so links built from it (password reset emails, absolute URLs) can point elsewhere.")
+    for (alias, c) in pairs(s.CACHES)
+        get(c, :serializer, :json) === :serialization && get(c, :backend, :locmem) !== :locmem &&
+            w("juango.W102", "Cache \"$alias\" stores Julia's Serialization format in a shared store: anyone who can write to it can make Juango deserialise arbitrary values. Use the JSON serializer unless the store is trusted.")
+    end
+    limits = [k for k in (:DATA_UPLOAD_MAX_MEMORY_SIZE, :FILE_UPLOAD_MAX_SIZE, :DATA_UPLOAD_MAX_NUMBER_FIELDS, :DATA_UPLOAD_MAX_NUMBER_FILES)
+              if get(s, k, 0) === nothing]
+    isempty(limits) || w("juango.W103", "Request limits are off ($(join(limits, ", ")) = nothing): a client can send requests big enough to exhaust memory.")
+    something(get(s, :SERVER_READ_HEADER_TIMEOUT, nothing), 0) > 0 && something(get(s, :SERVER_IDLE_TIMEOUT, nothing), 0) > 0 ||
+        w("juango.W104", "SERVER_READ_HEADER_TIMEOUT or SERVER_IDLE_TIMEOUT is off: slow or idle clients can hold runserver's connections open indefinitely.")
     out
 end

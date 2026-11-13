@@ -79,7 +79,7 @@ export User, AbstractUser, AnonymousUser, USER_MODEL, get_user_model, authentica
        validate_password, update_session_auth_hash!, UserCreationForm, UserChangeForm, login_not_required,
        LoginRequiredMiddleware, RemoteUserMiddleware, PersistentRemoteUserMiddleware, RemoteUserBackend,
        PasswordChangeView, PasswordChangeDoneView, PasswordResetView, PasswordResetConfirmView
-export message!, get_messages
+export message!, get_messages, url_has_allowed_host_and_scheme
 export HtmxDetails, is_htmx, hx_redirect, hx_refresh, hx_location, hx_stop_polling, hx_push_url, hx_replace_url,
        hx_retarget, hx_reswap, hx_reselect, hx_trigger, form_status, HtmxMiddleware, HTMX_STOP_POLLING
 export LiveView, live, mount, handle_event, handle_info, live_context, live_redirect, subscribe, unsubscribe, publish

@@ -31,6 +31,9 @@ function SessionMiddleware(get_response)
                     # nothing to store
                 else
                     save_session!(s)
+                    # browsers drop cookies over about 4 KB, which loses a signed-cookie session silently
+                    ncodeunits(s.key) > 4000 && log!("juango.security.SessionCookieTooLarge", :warning,
+                        "The session cookie is $(ncodeunits(s.key)) bytes: browsers may drop it. Store less in signed-cookie sessions."; request = req)
                     set_cookie!(resp, name, s.key; max_age = settings.SESSION_COOKIE_AGE, httponly = true,
                                 secure = settings.SESSION_COOKIE_SECURE)
                 end
@@ -117,6 +120,8 @@ end
 
 const CSRF_EXEMPT = IdDict{Any,Bool}()
 const UNSAFE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+"Methods CSRF protection lets through (RFC 9110's safe methods); every other one is checked, as in Django."
+const SAFE_METHODS = ("GET", "HEAD", "OPTIONS", "TRACE")
 
 "Mark a view as exempt from CSRF checks (e.g. a webhook endpoint)."
 csrf_exempt(view) = (CSRF_EXEMPT[view] = true; view)
@@ -206,19 +211,55 @@ struct CsrfFailure <: Exception
     reason::String
 end
 
+# The token in pages is masked: a random 32-character mask followed by the secret shifted by it,
+# different each time it's rendered, so compression (GZipMiddleware) can't be used to guess the
+# secret from responses (BREACH). The cookie holds the secret itself; both forms are accepted.
+const CSRF_SECRET_LENGTH = 32
+const CSRF_INDEX = Dict(c => i - 1 for (i, c) in enumerate(ALNUM))
+"`mask_csrf(secret)`: a masked form of the CSRF secret, for pages."
+function mask_csrf(secret::AbstractString)
+    mask = random_string(CSRF_SECRET_LENGTH)
+    n = length(ALNUM)
+    mask * String([ALNUM[(CSRF_INDEX[s] + CSRF_INDEX[m]) % n + 1] for (s, m) in zip(secret, mask)])
+end
+"The secret in a submitted token (masked or not); `nothing` if it isn't a well-formed token."
+function unmask_csrf(tok::AbstractString)
+    all(c -> haskey(CSRF_INDEX, c), tok) || return nothing
+    length(tok) == CSRF_SECRET_LENGTH && return String(tok)
+    length(tok) == 2CSRF_SECRET_LENGTH || return nothing
+    n = length(ALNUM)
+    mask, cipher = tok[1:CSRF_SECRET_LENGTH], tok[CSRF_SECRET_LENGTH+1:end]
+    String([ALNUM[mod(CSRF_INDEX[c] - CSRF_INDEX[m], n) + 1] for (c, m) in zip(cipher, mask)])
+end
+
+"The request's own origin, `scheme://host`."
+request_origin(req::Request) = (is_secure(req) ? "https://" : "http://") * get_host(req)
+
 function check_csrf(req::Request)
     cookie = get(req.COOKIES, settings.CSRF_COOKIE_NAME, nothing)
     cookie === nothing && throw(CsrfFailure("CSRF cookie not set."))
     origin = header(req, "origin")
-    if origin !== nothing && origin != "null"
-        host = get_host(req)
-        allowed = [("http://" * host), ("https://" * host), settings.CSRF_TRUSTED_ORIGINS...]
-        origin in allowed || throw(CsrfFailure("Origin checking failed - $origin does not match any trusted origins."))
+    if origin !== nothing
+        # the same scheme as the request: an http:// page can't post to the https:// site
+        (origin == request_origin(req) || origin in settings.CSRF_TRUSTED_ORIGINS) ||
+            throw(CsrfFailure("Origin checking failed - $origin does not match any trusted origins."))
+    elseif is_secure(req)
+        # as Django: over HTTPS without an Origin, the Referer must be this site (or trusted), so a
+        # man-in-the-middle on plain HTTP can't set the cookie and post a matching token
+        ref = header(req, "referer")
+        ref === nothing && throw(CsrfFailure("Referer checking failed - no Referer."))
+        m = match(r"^([a-zA-Z][a-zA-Z0-9+.-]*)://([^/?#]+)", ref)
+        m === nothing && throw(CsrfFailure("Referer checking failed - Referer is malformed."))
+        lowercase(m[1]) == "https" || throw(CsrfFailure("Referer checking failed - Referer is insecure while host is secure."))
+        ref_origin = "https://" * m[2]
+        (ref_origin == request_origin(req) || ref_origin in settings.CSRF_TRUSTED_ORIGINS) ||
+            throw(CsrfFailure("Referer checking failed - $(m[2]) does not match any trusted origins."))
     end
     tok = get(req.POST, "csrfmiddlewaretoken", nothing)
     tok === nothing && (tok = header(req, "x-csrftoken"))
     tok === nothing && throw(CsrfFailure("CSRF token missing."))
-    consteq(tok, cookie) || throw(CsrfFailure("CSRF token incorrect."))
+    secret = unmask_csrf(tok)
+    (secret !== nothing && consteq(secret, cookie)) || throw(CsrfFailure("CSRF token incorrect."))
 end
 
 """
@@ -228,9 +269,11 @@ sets the CSRF cookie when a token was used.
 function CsrfViewMiddleware(get_response)
     function (req::Request)
         cookie = get(req.COOKIES, settings.CSRF_COOKIE_NAME, nothing)
+        # a malformed cookie (not one Juango set) is replaced with a new secret
+        cookie !== nothing && (length(cookie) != CSRF_SECRET_LENGTH || unmask_csrf(cookie) === nothing) && (cookie = nothing)
         cookie === nothing || (req.meta[:csrf_token] = cookie)
         rm = req.resolver_match
-        if req.method in UNSAFE_METHODS && !get(req.meta, :dont_enforce_csrf, false) &&
+        if !(req.method in SAFE_METHODS) && !get(req.meta, :dont_enforce_csrf, false) &&
            !(rm !== nothing && is_csrf_exempt(rm.view))
             try
                 check_csrf(req)
@@ -273,9 +316,9 @@ stay cacheable.
 struct LazyCsrfToken
     req::Request
 end
-display_string(t::LazyCsrfToken) = get_csrf_token(t.req)
-Base.string(t::LazyCsrfToken) = get_csrf_token(t.req)
-Base.print(io::IO, t::LazyCsrfToken) = print(io, get_csrf_token(t.req))
+display_string(t::LazyCsrfToken) = mask_csrf(get_csrf_token(t.req))        # masked: see mask_csrf
+Base.string(t::LazyCsrfToken) = mask_csrf(get_csrf_token(t.req))
+Base.print(io::IO, t::LazyCsrfToken) = print(io, mask_csrf(get_csrf_token(t.req)))
 cp_csrf(req) = Dict("csrf_token" => LazyCsrfToken(req))
 cp_messages(req) = Dict("messages" => LazyMessages(req, nothing))
 cp_static(req) = Dict("STATIC_URL" => settings.STATIC_URL, "DEBUG" => settings.DEBUG)

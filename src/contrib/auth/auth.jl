@@ -163,7 +163,8 @@ function backend_authenticate(::ModelBackend, req; password = nothing, kw...)
         make_password(password)   # equalise timing
         return nothing
     end
-    u.is_active && check_password(u, password) ? u : nothing
+    ok = check_password(u, password)          # checked for inactive users too, so timing doesn't tell them apart
+    u.is_active && ok ? u : nothing
 end
 backend_get_user(::ModelBackend, id) = first(filter(objects(get_user_model()); id = id, is_active = true))
 function backend_has_perm(::ModelBackend, u, perm, obj)
@@ -357,7 +358,11 @@ end
     password = CharField(widget = :password, max_length = 4096)
 end
 
-safe_next(req, fallback) = (n = get(req.GET, "next", get(req.POST, "next", "")); startswith(n, "/") && !startswith(n, "//") ? n : fallback)
+"The `next` parameter if it's safe to redirect to (this site), else `fallback`."
+function safe_next(req, fallback)
+    n = get(req.GET, "next", get(req.POST, "next", ""))
+    url_has_allowed_host_and_scheme(n, [get_host(req)]; require_https = is_secure(req)) ? n : fallback
+end
 
 """
     LoginView(; template="registration/login.html", redirect_url=settings.LOGIN_REDIRECT_URL)

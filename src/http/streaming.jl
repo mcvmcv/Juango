@@ -220,6 +220,5 @@ end
 function websocket_origin_allowed(req::Request)
     origin = header(req, "origin")
     origin === nothing && return true          # not a browser
-    host = get_host(req)
-    origin in ("http://" * host, "https://" * host) || origin in settings.CSRF_TRUSTED_ORIGINS
+    origin == request_origin(req) || origin in settings.CSRF_TRUSTED_ORIGINS     # same scheme too, as for CSRF
 end

@@ -178,7 +178,7 @@ valid_path(name) = join([get_valid_name(p) for p in split(replace(name, '\\' => 
 function path(s::FileSystemStorage, name::AbstractString)
     r = root(s)
     p = normpath(joinpath(r, name))
-    (p == r || startswith(p, rstrip(r, '/') * "/")) || throw(ArgumentError("'$name' is outside the storage location"))
+    within(r, p) || throw(ArgumentError("'$name' is outside the storage location"))
     p
 end
 

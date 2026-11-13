@@ -17,7 +17,7 @@ function serve_static(req::Request)
     for dir in static_dirs()
         root = normpath(abspath(dir))
         p = normpath(joinpath(root, rel))
-        (startswith(p, root) && isfile(p)) || continue
+        (within(root, p) && isfile(p)) || continue
         ext = lowercase(splitext(p)[2])
         resp = HttpResponse(read(p); content_type = get(MIME_TYPES, ext, "application/octet-stream"))
         setheader!(resp, "Cache-Control", "no-cache")
@@ -26,11 +26,26 @@ function serve_static(req::Request)
     throw(Http404("Static file '$rel' not found"))
 end
 
+# As Django's: a domain name or IPv4 address, or an IPv6 address in brackets; then perhaps a port.
+const HOST_RE = r"^([a-z0-9.-]+|\[[a-f0-9]*:[a-f0-9.:]+\])(:[0-9]+)?$"
+"The host name of a Host header without its port (`nothing` if the header isn't a valid host)."
+function host_name(h::AbstractString)
+    m = match(HOST_RE, lowercase(h))
+    m === nothing ? nothing : rstrip(m[1], '.')
+end
+
+"""
+Whether the request's Host is in ALLOWED_HOSTS. With DEBUG on and ALLOWED_HOSTS empty, only
+localhost names are allowed (as in Django), so a page on another site can't reach a development
+server through a DNS name it controls (DNS rebinding).
+"""
 function host_allowed(req::Request)
-    settings.DEBUG && return true
     get(req.meta, :test_client, false) && return true
-    host = lowercase(first(split(get_host(req), ':')))
-    for allowed in settings.ALLOWED_HOSTS
+    host = host_name(get_host(req))
+    host === nothing && return false
+    allowed_hosts = settings.ALLOWED_HOSTS
+    settings.DEBUG && isempty(allowed_hosts) && (allowed_hosts = [".localhost", "127.0.0.1", "[::1]"])
+    for allowed in allowed_hosts
         allowed == "*" && return true
         a = lowercase(allowed)
         (host == a || (startswith(a, ".") && (endswith(host, a) || host == a[2:end]))) && return true

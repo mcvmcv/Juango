@@ -591,7 +591,7 @@ template_dirs() = vcat(String[abspath(d) for d in settings.TEMPLATE_DIRS], app_d
 function find_template(name::AbstractString, dirs = template_dirs(), tried = String[]; throw_missing = true)
     for d in dirs
         p = normpath(joinpath(d, name))
-        startswith(p, normpath(d)) || continue
+        within(d, p) || continue
         isfile(p) && return p
         push!(tried, p)
     end

@@ -64,7 +64,7 @@ end
     @test post(c, "/contact/", Dict("name" => "x")).status == 403
     r = get(c, "/contact/")
     tok = match(r"name=\"csrfmiddlewaretoken\" value=\"(\w+)\"", text(r))[1]
-    @test haskey(c.cookies, "csrftoken") && c.cookies["csrftoken"] == tok
+    @test haskey(c.cookies, "csrftoken") && length(tok) == 64 && Juango.unmask_csrf(tok) == c.cookies["csrftoken"]   # masked
     r = post(c, "/contact/", Dict("csrfmiddlewaretoken" => tok, "name" => "Q", "email" => "q@x.io",
                                   "password" => "p", "confirm" => "p"))
     @test r.status == 302
@@ -1306,4 +1306,100 @@ Juango.handle_info(v::LiveCounter, msg) = push!(v.log, string(msg))
         configure!(ROOT_URLCONF = old_urls)
         rm(joinpath(TPL, "live_counter.html"); force = true)
     end
+end
+
+
+@testset "security review (#100)" begin
+    # paths: a sibling directory isn't inside the root
+    @test Juango.within("/srv/static", "/srv/static/css/a.css") && Juango.within("/srv/static/", "/srv/static")
+    @test !Juango.within("/srv/static", "/srv/static_private/x") && !Juango.within("/srv/static", "/srv")
+    parent = mktempdir()
+    sdir, private = joinpath(parent, "static"), joinpath(parent, "static_private")
+    mkpath(sdir); mkpath(private)
+    write(joinpath(sdir, "ok.txt"), "public"); write(joinpath(private, "secret.txt"), "secret")
+    override_settings(STATIC_DIRS = [sdir]) do
+        c = Client()
+        @test text(get(c, "/static/ok.txt")) == "public"
+        @test get(c, "/static/../static_private/secret.txt").status == 404
+        @test get(c, "/static/%2e%2e/static_private/secret.txt").status == 404
+    end
+    write(joinpath(parent, "static_private", "t.html"), "private template")
+    @test Juango.find_template("../static_private/t.html", [sdir]; throw_missing = false) === nothing
+
+    # hosts: DEBUG with no ALLOWED_HOSTS allows only localhost names; malformed hosts never pass
+    hreq(h) = Request("GET", "/"; headers = Dict("Host" => h))
+    override_settings(DEBUG = true, ALLOWED_HOSTS = String[]) do
+        @test all(h -> Juango.host_allowed(hreq(h)), ["localhost", "localhost:8000", "app.localhost", "127.0.0.1:8000", "[::1]:8000"])
+        @test !any(h -> Juango.host_allowed(hreq(h)), ["evil.example", "rebind.attacker.example:8000"])
+    end
+    override_settings(DEBUG = false, ALLOWED_HOSTS = [".example.com"]) do
+        @test Juango.host_allowed(hreq("www.example.com")) && Juango.host_allowed(hreq("example.com:443"))
+        @test !any(h -> Juango.host_allowed(hreq(h)), ["evilexample.com", "example.com@evil.org", "exa mple.com", "example.com/x", ""])
+    end
+
+    # redirects: only this site
+    ok = ["/next/", "/a?b=//c", "http://testserver/x", "https://testserver/x"]
+    bad = ["//evil.example", "/\\evil.example", "\\\\evil.example", "/\t/evil.example", "https:evil.example", "javascript:alert(1)",
+           "http://evil.example", "http://testserver@evil.example/", "///evil.example", "", "ftp://testserver/x"]
+    @test all(u -> url_has_allowed_host_and_scheme(u, ["testserver"]), ok)
+    @test !any(u -> url_has_allowed_host_and_scheme(u, ["testserver"]), bad)
+    @test !url_has_allowed_host_and_scheme("http://testserver/x", ["testserver"]; require_https = true)
+    create_user("redirect-tester", "pw-redirect-1"; email = "rt@x.io")
+    c = Client()
+    r = post(c, "/accounts/login/?next=/\\evil.example", Dict("username" => "redirect-tester", "password" => "pw-redirect-1"))
+    @test r.status == 302 && !occursin("evil", getheader(r, "Location"))
+
+    # CSRF: masked tokens, scheme-aware Origin, Referer over HTTPS, every unsafe method, malformed cookies
+    secret = Juango.random_string(32)
+    m1, m2 = Juango.mask_csrf(secret), Juango.mask_csrf(secret)
+    @test m1 != m2 && Juango.unmask_csrf(m1) == secret == Juango.unmask_csrf(m2) && Juango.unmask_csrf(secret) == secret
+    @test Juango.unmask_csrf("short") === nothing && Juango.unmask_csrf("\"" ^ 64) === nothing
+    function creq(; method = "POST", origin = nothing, referer = nothing, secure = false, token = Juango.mask_csrf(secret), cookie = secret)
+        h = Dict("Host" => "testserver", "Cookie" => "csrftoken=$cookie", "X-CSRFToken" => token)
+        origin === nothing || (h["Origin"] = origin)
+        referer === nothing || (h["Referer"] = referer)
+        r = Request(method, "/"; headers = h)
+        secure && (r.meta[:secure] = true)
+        r
+    end
+    passes(r) = try Juango.check_csrf(r); true catch e; e isa Juango.CsrfFailure || rethrow(); false end
+    @test passes(creq()) && passes(creq(token = secret)) && !passes(creq(token = Juango.mask_csrf(Juango.random_string(32))))
+    @test passes(creq(origin = "http://testserver")) && !passes(creq(origin = "https://evil.example")) && !passes(creq(origin = "null"))
+    @test passes(creq(secure = true, origin = "https://testserver")) && !passes(creq(secure = true, origin = "http://testserver"))
+    @test !passes(creq(secure = true)) && passes(creq(secure = true, referer = "https://testserver/form/"))
+    @test !passes(creq(secure = true, referer = "http://testserver/form/")) && !passes(creq(secure = true, referer = "https://evil.example/"))
+    override_settings(CSRF_TRUSTED_ORIGINS = ["https://app.example"]) do
+        @test passes(creq(secure = true, referer = "https://app.example/x")) && passes(creq(origin = "https://app.example"))
+    end
+    override_settings(ROOT_URLCONF = [path("csrf-form/", req -> render(req, Template("<form>{% csrf_token %}</form>")))]) do
+        c = Client(enforce_csrf = true)
+        @test request(c, "PROPFIND", "/csrf-form/").status == 403                    # not just POST/PUT/PATCH/DELETE
+        r = get(c, "/csrf-form/"; headers = Dict("Cookie" => "csrftoken=\"<script>"))  # a malformed cookie is replaced
+        @test r.status == 200 && length(c.cookies["csrftoken"]) == 32 && !occursin("<script>", text(r))
+    end
+
+    # output: the *_html truncation filters keep unsafe input escaped
+    @test tr("{{ s|truncatechars_html:20 }}", Dict("s" => "<script>x</script>")) == "&lt;script&gt;x&lt;/script&gt;"
+    @test tr("{{ s|truncatewords_html:2 }}", Dict("s" => "<b>a</b> b c")) == "&lt;b&gt;a&lt;/b&gt; b …"
+    @test tr("{{ s|safe|truncatewords_html:2 }}", Dict("s" => "<b>a</b> b c")) == "<b>a</b> b …"
+
+    # request limits: the number of uploaded files
+    override_settings(DATA_UPLOAD_MAX_NUMBER_FILES = 2) do
+        files = Dict("f$i" => Juango.UploadedFile("f$i.txt", "x"; content_type = "text/plain") for i in 1:3)
+        @test post(Client(), "/contact/", files).status == 400
+    end
+    @test Juango.server_timeouts().read_header_timeout == 10 && Juango.server_timeouts().idle_timeout == 120
+
+    # timing: an inactive user's password is still checked
+    @test authenticate("alice", "nope") === nothing
+
+    # check --deploy names the new risks
+    override_settings(ALLOWED_HOSTS = ["*"], DATA_UPLOAD_MAX_NUMBER_FILES = nothing, SERVER_IDLE_TIMEOUT = nothing,
+                      CACHES = Dict("default" => Dict(:backend => :redis, :serializer => :serialization)),
+                      MIDDLEWARE = filter(!=(Juango.CsrfViewMiddleware), Juango.default_settings()[:MIDDLEWARE])) do
+        ids = [m.id for m in Juango.deploy_checks()]
+        @test all(in(ids), ["juango.W101", "juango.W102", "juango.W103", "juango.W104", "security.W003"])
+    end
+    @test !any(in(["juango.W101", "juango.W102", "juango.W103", "juango.W104", "security.W003"]), [m.id for m in Juango.deploy_checks()])
+    rm(parent; recursive = true)
 end

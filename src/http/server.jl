@@ -6,6 +6,8 @@ function from_http(hreq::HTTP.Request, remote = "127.0.0.1"; body = body_bytes(h
         lk = lowercase(k)
         headers[lk] = haskey(headers, lk) ? headers[lk] * (lk == "cookie" ? "; " : ", ") * v : v
     end
+    # HTTP/2 sends the host as the :authority pseudo-header, which HTTP.jl keeps in `host`
+    haskey(headers, "host") || hreq.host === nothing || (headers["host"] = hreq.host)
     Request(hreq.method, hreq.target; headers = headers, body = body, remote_addr = remote)
 end
 
@@ -23,6 +25,10 @@ function to_http(resp::HttpResponse)
     end
     HTTP.Response(resp.status, hs, resp.body)
 end
+
+"Timeouts for HTTP.jl's server, so slow or idle clients can't hold connections open forever."
+server_timeouts() = (read_header_timeout = settings.SERVER_READ_HEADER_TIMEOUT, idle_timeout = settings.SERVER_IDLE_TIMEOUT,
+                     read_timeout = settings.SERVER_READ_TIMEOUT)
 
 function log_request(req::Request, resp::HttpResponse)
     settings.ACCESS_LOG === false && return
@@ -196,12 +202,12 @@ function runserver(host::AbstractString = "127.0.0.1", port::Integer = 8000; blo
         flush(stdout)
     end
     server = if certfile === nothing
-        HTTP.listen!(stream_handler, host, Int(port))
+        HTTP.listen!(stream_handler, host, Int(port); server_timeouts()...)
     else
         config = TLS.Config(; cert_file = string(certfile), key_file = string(keyfile),
                               alpn_protocols = ["h2", "http/1.1"])
         addr = (occursin(':', host) ? "[$host]" : host) * ":$port"
-        HTTP.listen!(s -> stream_handler(s; secure = true), TLS.listen("tcp", addr, config))
+        HTTP.listen!(s -> stream_handler(s; secure = true), TLS.listen("tcp", addr, config); server_timeouts()...)
     end
     block || return server
     try

@@ -37,6 +37,10 @@ function default_settings()
         :ADMINS => Any[],
         :DATA_UPLOAD_MAX_MEMORY_SIZE => 2_621_440,     # bytes of a non-multipart body (nothing: no limit)
         :DATA_UPLOAD_MAX_NUMBER_FIELDS => 1000,        # GET + POST parameters (nothing: no limit)
+        :DATA_UPLOAD_MAX_NUMBER_FILES => 100,            # files in one multipart request (nothing: no limit)
+        :SERVER_READ_HEADER_TIMEOUT => 10,             # runserver: seconds a client may take to send its headers (slow clients)
+        :SERVER_IDLE_TIMEOUT => 120,                   # runserver: seconds a kept-alive connection may wait for its next request
+        :SERVER_READ_TIMEOUT => nothing,               # runserver: seconds to read a whole request, body included (nothing: no limit)
         :FILE_UPLOAD_MAX_SIZE => 100 * 1024 * 1024,    # bytes of a multipart (file upload) body (nothing: no limit)
         :MANAGERS => Any[],
         :IGNORABLE_404_URLS => Any[],

@@ -1200,7 +1200,11 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 - `User` model with PBKDF2-SHA256 password hashes in Django's format, so existing Django hashes verify.
 - `authenticate`, `login!`, `logout!`, `create_user`, `create_superuser`, `login_required`, `staff_member_required`.
 - Sessions (`req.session["k"] = v`) are stored where `SESSION_ENGINE` says: `:db` (default), `:cache`, `:cached_db`, `:file` (in `SESSION_FILE_PATH`) or `:signed_cookies` (the signed data itself in the cookie, so nothing on the server, but a session can't be revoked early). The session key rotates on login, and changing a password invalidates existing sessions. Sessions and `req.user` load lazily, as in Django: the store is read when a view first uses the session, and the user is looked up when `req.user` is first read (templates that don't use `user` or `perms` don't load it), so requests that don't need them cost no queries. `clearsessions` removes expired database rows and files.
-- CSRF protection on POST/PUT/PATCH/DELETE: `{% csrf_token %}` or an `X-CSRFToken` header. Mark exceptions with `csrf_exempt(view)`. The token (and its cookie) is only created when a page uses it.
+- CSRF protection on every method except GET, HEAD, OPTIONS and TRACE: `{% csrf_token %}` or an `X-CSRFToken` header. Mark exceptions with `csrf_exempt(view)`. The token (and its cookie) is only created when a page uses it.
+  - Pages get a masked form of the token, different on every render, so response compression can't leak it (BREACH). The cookie's plain value is accepted too, for JavaScript that reads it.
+  - As in Django, a browser's `Origin` must match the request's scheme and host, or be in `CSRF_TRUSTED_ORIGINS`.
+  - Over HTTPS without an `Origin`, the `Referer` must be an https URL of this site.
+- `url_has_allowed_host_and_scheme(url, hosts)` says whether a redirect target (a `next` parameter, say) stays on the site. The login and logout views and `set_language` use it, and it refuses what browsers would read as another site (`//evil`, `/\evil`, `https:evil`).
 - Forms: `AuthenticationForm`, `UserCreationForm` (username, two passwords checked against `AUTH_PASSWORD_VALIDATORS`; `save!` hashes the password), `UserChangeForm` (every field but the password; `Juango.password_summary(user)` describes the stored hash safely), `PasswordChangeForm`, `SetPasswordForm`. The admin's "add user" page uses `UserCreationForm`, then opens the user's change page.
 - One-time messages: `message!(req, :success, "Saved")`, rendered with `{% for m in messages %}`.
 
@@ -1788,7 +1792,15 @@ CMD ["julia", "--project", "-J", "build/juango.so", "manage.jl", "runserver", "0
 
 ## Settings
 
-Set them with `configure!(...)` and read them with `settings.NAME`. Request limits, as in Django: `DATA_UPLOAD_MAX_MEMORY_SIZE` (2.5 MB, for bodies that aren't file uploads), `DATA_UPLOAD_MAX_NUMBER_FIELDS` (1000 GET and POST parameters) and Juango's `FILE_UPLOAD_MAX_SIZE` (100 MB, for multipart uploads, which Juango holds in memory). A request over a limit gets 400 Bad Request; `nothing` turns a limit off. The main ones: `DEBUG`, `SECRET_KEY`, `DATABASE` (a SQLite path, `":memory:"`, a `scheme://` URL, or a backend instance), `INSTALLED_APPS`, `APP_DIRS`, `ROOT_URLCONF`, `TEMPLATE_DIRS`, `STATIC_URL`, `STATIC_DIRS`, `STATIC_ROOT`, `ALLOWED_HOSTS`, `MIDDLEWARE`, `CONTEXT_PROCESSORS`, `LOGIN_URL`, `LOGIN_REDIRECT_URL`, `APPEND_SLASH`, `SESSION_COOKIE_AGE`, `PASSWORD_ITERATIONS`, `SQL_DEBUG`. Any extra keyword becomes a custom setting.
+Set them with `configure!(...)` and read them with `settings.NAME`. Request limits:
+- `DATA_UPLOAD_MAX_MEMORY_SIZE`: 2.5 MB, for bodies that aren't file uploads.
+- `DATA_UPLOAD_MAX_NUMBER_FIELDS`: 1000 GET and POST parameters.
+- `DATA_UPLOAD_MAX_NUMBER_FILES`: 100 files in one request.
+- `FILE_UPLOAD_MAX_SIZE`: 100 MB, for multipart uploads, which Juango holds in memory.
+
+A request over a limit gets 400 Bad Request; `nothing` turns a limit off. `runserver` drops clients that take more than `SERVER_READ_HEADER_TIMEOUT` seconds (10) to send their headers, and kept-alive connections idle for `SERVER_IDLE_TIMEOUT` seconds (120). `SERVER_READ_TIMEOUT` limits reading a whole request (off by default, so slow uploads, server-sent events and WebSockets work).
+
+`ALLOWED_HOSTS` is checked with `DEBUG` on too: the default allows only `localhost`, `127.0.0.1` and `[::1]`. An empty list in `DEBUG` allows any `*.localhost` name as well. This keeps other sites from reaching a development server through DNS rebinding. Add your machine's name or address to reach it from elsewhere. The main ones: `DEBUG`, `SECRET_KEY`, `DATABASE` (a SQLite path, `":memory:"`, a `scheme://` URL, or a backend instance), `INSTALLED_APPS`, `APP_DIRS`, `ROOT_URLCONF`, `TEMPLATE_DIRS`, `STATIC_URL`, `STATIC_DIRS`, `STATIC_ROOT`, `ALLOWED_HOSTS`, `MIDDLEWARE`, `CONTEXT_PROCESSORS`, `LOGIN_URL`, `LOGIN_REDIRECT_URL`, `APPEND_SLASH`, `SESSION_COOKIE_AGE`, `PASSWORD_ITERATIONS`, `SQL_DEBUG`. Any extra keyword becomes a custom setting.
 
 ## Differences from Django (current limitations)
 

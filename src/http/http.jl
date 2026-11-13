@@ -200,6 +200,9 @@ function parse_multipart_fields(req::Request)
     try
         parts = HTTP.parse_multipart_form(header(req, "content-type"), req.body)
         parts === nothing && return q
+        maxfiles = get(settings, :DATA_UPLOAD_MAX_NUMBER_FILES, nothing)
+        maxfiles === nothing || count(p -> p.filename !== nothing, parts) <= maxfiles ||
+            throw(BadRequest("The number of files exceeded DATA_UPLOAD_MAX_NUMBER_FILES."))
         for p in parts
             if p.filename === nothing
                 push!(get!(q.data, p.name, String[]), String(read(p.data)))
@@ -223,6 +226,33 @@ header(req::Request, name::AbstractString, default = nothing) = get(req.headers,
 json_body(req::Request) = JSON.parse(String(copy(req.body)))
 
 get_host(req::Request) = get(req.headers, "host", "testserver")
+
+"""
+    url_has_allowed_host_and_scheme(url, allowed_hosts; require_https = false) -> Bool
+
+Whether redirecting to `url` (from a `next` parameter, say) is safe: a path on this site, or an
+absolute http(s) URL on one of `allowed_hosts`. As Django's, it refuses what browsers would read
+as another site: `//evil.example`, `/\\evil.example`, `/\t/evil.example`, `https:evil.example`,
+`javascript:...`.
+"""
+function url_has_allowed_host_and_scheme(url, allowed_hosts; require_https::Bool = false)
+    url === nothing && return false
+    u = strip(string(url))
+    isempty(u) && return false
+    any(c -> c < ' ' || c == '\x7f', u) && return false           # browsers drop tabs and newlines
+    u = replace(u, '\\' => '/')                                     # and read \ as /
+    startswith(u, "///") && return false
+    m = match(r"^(?:([a-zA-Z][a-zA-Z0-9+.-]*):)?(?://([^/?#]*))?", u)
+    scheme, netloc = m[1], m[2]
+    if netloc === nothing
+        return scheme === nothing                                    # a path; "javascript:", "https:evil" aren't
+    end
+    scheme === nothing || lowercase(scheme) in (require_https ? ("https",) : ("http", "https")) || return false
+    host = host_name(String(last(split(netloc, '@'))))               # without user:password@
+    host === nothing && return false
+    hosts = Set(something(host_name(string(h)), "") for h in (allowed_hosts isa AbstractString ? [allowed_hosts] : allowed_hosts))
+    host in hosts
+end
 full_path(req::Request) = isempty(req.query_string) ? req.path : req.path * "?" * req.query_string
 build_absolute_uri(req::Request, loc = full_path(req)) =
     (is_secure(req) ? "https://" : "http://") * get_host(req) * loc

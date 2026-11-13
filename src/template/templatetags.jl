@@ -566,8 +566,8 @@ let F(name, f; kw...) = register_filter!(name, f; kw...)
     F("addslashes", (v, _) -> replace(str(v), "\\" => "\\\\", "\"" => "\\\"", "'" => "\\'"))
     F("escapejs", (v, _) -> join(c in "\\'\"<>&=-;`\u2028\u2029" || c < ' ' ? "\\u" * uppercase(string(UInt32(c), base = 16, pad = 4)) : string(c)
                                  for c in str(v)))
-    F("truncatechars_html", (v, a) -> SafeString(truncate_html(str(v), Int(tonum(a)); words = false)); is_safe = true)
-    F("truncatewords_html", (v, a) -> SafeString(truncate_html(str(v), Int(tonum(a)); words = true)); is_safe = true)
+    F("truncatechars_html", (v, a) -> truncate_html(str(v), Int(tonum(a)); words = false); is_safe = true)   # safe only if the input was
+    F("truncatewords_html", (v, a) -> truncate_html(str(v), Int(tonum(a)); words = true); is_safe = true)
     F("urlizetrunc", (v, a, ae) -> begin
         n = Int(tonum(a))
         s = ae ? escape_html(str(v)) : str(v)

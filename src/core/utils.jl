@@ -185,3 +185,15 @@ end
 
 "Format seconds since epoch as an HTTP date."
 http_date(dt::DateTime) = Dates.format(dt, "e, dd u yyyy HH:MM:SS") * " GMT"
+
+"""
+    within(root, p) -> Bool
+
+Whether the normalised path `p` is `root` or inside it. (A plain `startswith` would also accept
+a sibling: `/srv/static_private` starts with `/srv/static`.)
+"""
+function within(root::AbstractString, p::AbstractString)
+    r = rstrip(normpath(root), ('/', '\\'))
+    p = normpath(p)
+    p == r || startswith(p, r * Base.Filesystem.path_separator) || (Sys.iswindows() && startswith(p, r * "/"))
+end

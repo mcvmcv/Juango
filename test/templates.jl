@@ -113,10 +113,10 @@ end
           "\t<li>States\n\t<ul>\n\t\t<li>Kansas\n\t\t<ul>\n\t\t\t<li>Lawrence</li>\n\t\t\t<li>Topeka</li>\n\t\t</ul>\n\t\t</li>\n\t\t<li>&lt;Illinois&gt;</li>\n\t</ul>\n\t</li>"
     @test tr("{{ s|wordwrap:5 }}", Dict("s" => "Joel is a slug")) == "Joel\nis a\nslug"
     h = Dict("h" => "<p>Joel is a <b>slug</b> &amp; more</p>")
-    @test tr("{{ h|truncatechars_html:7 }}", h) == "<p>Joel i…</p>"
-    @test tr("{{ h|truncatewords_html:4 }}", h) == "<p>Joel is a <b>slug …</b></p>"
-    @test tr("{{ h|truncatewords_html:9 }}", h) == h["h"]
-    @test tr("{{ s|truncatechars_html:4 }}", Dict("s" => "<i>héllo</i>")) == "<i>hél…</i>"
+    @test tr("{{ h|safe|truncatechars_html:7 }}", h) == "<p>Joel i…</p>"
+    @test tr("{{ h|safe|truncatewords_html:4 }}", h) == "<p>Joel is a <b>slug …</b></p>"
+    @test tr("{{ h|safe|truncatewords_html:9 }}", h) == h["h"]
+    @test tr("{{ s|safe|truncatechars_html:4 }}", Dict("s" => "<i>héllo</i>")) == "<i>hél…</i>"
     @test tr("{{ u|urlizetrunc:15 }}", Dict("u" => "see http://example.com/a/long/path")) ==
           "see <a href=\"http://example.com/a/long/path\" rel=\"nofollow\">http://example…</a>"
     @test tr("{{ d|timeuntil }}", Dict("d" => now() + Day(3) + Hour(1))) == "3 days"
