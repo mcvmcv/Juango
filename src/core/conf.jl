@@ -104,7 +104,13 @@ function default_settings()
         :SQL_DEBUG => false,
         :MIGRATIONS_DIR => "migrations",
         :DEFAULT_AUTO_FIELD => :BigAutoField,
-        :REMOTE_USER_HEADER => "Remote-User",          # RemoteUserMiddleware's header (set only by your proxy)          # the automatic primary key: AutoField, BigAutoField or SmallAutoField
+        :REMOTE_USER_HEADER => "Remote-User",
+        :ATOMIC_REQUESTS => false,                     # true (the default database) or database aliases: each view in a transaction
+        :HANDLER400 => nothing, :HANDLER403 => nothing, :HANDLER404 => nothing, :HANDLER500 => nothing,   # custom error views
+        :FILE_UPLOAD_MAX_MEMORY_SIZE => 2_621_440,     # bigger uploads go to temporary files
+        :FILE_UPLOAD_TEMP_DIR => nothing,              # nothing: the system's temporary directory
+        :FILE_UPLOAD_PERMISSIONS => 0o644,             # mode of uploaded files saved by FileSystemStorage (nothing: leave it)
+        :FILE_UPLOAD_DIRECTORY_PERMISSIONS => nothing, # mode of directories it creates          # RemoteUserMiddleware's header (set only by your proxy)          # the automatic primary key: AutoField, BigAutoField or SmallAutoField
         :MIGRATION_MODULES => Dict{String,String}(),
         :SITE_NAME => "Juango",
     )

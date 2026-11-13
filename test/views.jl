@@ -1028,3 +1028,85 @@ Juango.backend_has_perm(::OwnArticlesBackend, u, perm, obj) =
         configure!(AUTHENTICATION_BACKENDS = Any[ModelBackend()])
     end
 end
+
+"A middleware with a TemplateResponse hook: adds to the context before rendering."
+TplHookMiddleware(get_response) = req -> get_response(req)
+Juango.process_template_response(::typeof(TplHookMiddleware), req, resp) = (resp.context_data["name"] = "Hooked"; resp)
+struct RefusingUploads end
+Juango.upload_file(::RefusingUploads, field, name, ctype, data) = endswith(name, ".exe") ? throw(BadRequest("no executables")) : nothing
+
+@testset "ATOMIC_REQUESTS, error views, TemplateResponse, uploads" begin
+    function make_then_fail(req)
+        create(Author; name = "atomic-" * req.GET["n"])
+        get(req.GET, "fail", "") == "1" && error("boom")
+        HttpResponse("made")
+    end
+    calm(req) = HttpResponse("tpl")
+    files_view(req) = (f = req.FILES["doc"]; HttpResponse(string(f.size, " ", temporary_file_path(f) !== nothing, " ", read(f, String),
+                                                                 " ", something(temporary_file_path(f), ""))))
+    extra = [path("atomic/", make_then_fail), path("nonatomic/", non_atomic_requests(req -> make_then_fail(req))),
+             path("tplresp/", req -> TemplateResponse(req, "child.html", Dict("name" => "Plain"))),
+             path("upload/", csrf_exempt(files_view)), path("deny/", req -> throw(PermissionDenied("nope")))]
+    old = (settings.ROOT_URLCONF, settings.MIDDLEWARE)
+    configure!(ROOT_URLCONF = vcat(extra, old[1]), ATOMIC_REQUESTS = true, DEBUG = false)
+    try
+        c = Client()
+        @test get(c, "/atomic/"; data = Dict("n" => "ok")).status == 200 && exists(filter(Author; name = "atomic-ok"))
+        @test get(c, "/atomic/"; data = Dict("n" => "rolled", "fail" => "1")).status == 500
+        @test !exists(filter(Author; name = "atomic-rolled"))                    # the view's transaction was rolled back
+        get(c, "/nonatomic/"; data = Dict("n" => "kept", "fail" => "1"))
+        @test exists(filter(Author; name = "atomic-kept"))                       # non_atomic_requests: no transaction
+
+        # custom error views
+        configure!(HANDLER404 = (req; exception) -> HttpResponse("custom 404 for $(req.path)"; status = 404),
+                   HANDLER500 = req -> HttpResponse("custom 500"; status = 500),
+                   HANDLER403 = (req; exception) -> HttpResponse("custom 403: $(exception.msg)"; status = 403))
+        r = get(c, "/no-such-page/")
+        @test r.status == 404 && text(r) == "custom 404 for /no-such-page/"
+        r = get(c, "/atomic/"; data = Dict("n" => "x", "fail" => "1"))
+        @test r.status == 500 && text(r) == "custom 500"
+        @test text(get(c, "/deny/")) == "custom 403: nope"
+        @test isempty(Juango.error_handler_issues())
+        configure!(HANDLER404 = req -> HttpResponse("no exception keyword"), HANDLER500 = (a, b) -> nothing)
+        @test length(Juango.error_handler_issues()) == 2
+        configure!(HANDLER404 = (req; exception) -> error("broken handler"), HANDLER500 = nothing, HANDLER403 = nothing)
+        @test get(c, "/no-such-page/").status == 404                             # a failing handler falls back to the built-in page
+        configure!(HANDLER404 = nothing)
+
+        # TemplateResponse: rendered after the middleware's hook
+        r = get(c, "/tplresp/")
+        @test occursin("Plain", text(r)) && r.is_rendered && r.templates == ["child.html"]
+        configure!(MIDDLEWARE = vcat(old[2], [TplHookMiddleware]))
+        r = get(c, "/tplresp/")
+        @test occursin("Hooked", text(r)) && !occursin("Plain", text(r))
+        tr = TemplateResponse(get(RequestFactory(), "/"), "child.html", Dict("name" => "Direct"))
+        @test !tr.is_rendered && tr.template_name == "child.html"
+        tr.context_data = Dict("name" => "Changed")
+        @test occursin("Changed", text(Juango.render_response!(tr)))
+        configure!(MIDDLEWARE = old[2])
+
+        # uploads: big files go to a temporary file, removed after the request
+        configure!(FILE_UPLOAD_MAX_MEMORY_SIZE = 10)
+        r = post(c, "/upload/", Dict("doc" => UploadedFile("small.txt", "tiny")))
+        @test text(r) == "4 false tiny "
+        r = post(c, "/upload/", Dict("doc" => UploadedFile("big.txt", "a much longer file body")))
+        size_, ondisk, body, tmp = split(text(r), " "; limit = 4)[1], split(text(r), " ")[2], "a much longer file body", split(text(r), " ")[end]
+        @test size_ == "23" && ondisk == "true" && occursin(body, text(r)) && !isfile(tmp)
+        configure!(FILE_UPLOAD_HANDLERS = Any[RefusingUploads(), Juango.MemoryFileUploadHandler()], FILE_UPLOAD_MAX_MEMORY_SIZE = 2_621_440)
+        @test post(c, "/upload/", Dict("doc" => UploadedFile("virus.exe", "MZ"))).status == 400
+        @test text(post(c, "/upload/", Dict("doc" => UploadedFile("ok.txt", "fine")))) == "4 false fine "
+
+        # FileSystemStorage moves temporary uploads into place, with FILE_UPLOAD_PERMISSIONS
+        dir = mktempdir()
+        tmpf = tempname(); write(tmpf, "on disk")
+        configure!(FILE_UPLOAD_PERMISSIONS = 0o600)
+        st = Juango.FileSystemStorage(dir)
+        name = Juango.save_upload(st, "docs/a.txt", Juango.TemporaryUploadedFile("a.txt", tmpf))
+        @test read(joinpath(dir, name), String) == "on disk" && (filemode(joinpath(dir, name)) & 0o777) == 0o600
+    finally
+        configure!(ROOT_URLCONF = old[1], MIDDLEWARE = old[2], ATOMIC_REQUESTS = false, HANDLER404 = nothing,
+                   HANDLER403 = nothing, HANDLER500 = nothing, FILE_UPLOAD_MAX_MEMORY_SIZE = 2_621_440,
+                   FILE_UPLOAD_HANDLERS = Any[Juango.MemoryFileUploadHandler(), Juango.TemporaryFileUploadHandler()],
+                   FILE_UPLOAD_PERMISSIONS = 0o644)
+    end
+end

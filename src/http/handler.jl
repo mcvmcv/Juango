@@ -43,10 +43,34 @@ function dispatch(req::Request)
     try
         rm = req.resolver_match
         rm === nothing && throw(Http404("No URL pattern matches '$(req.path)'"))
-        to_response(rm.view(req; rm.kwargs...))
+        call = () -> to_response(rm.view(req; rm.kwargs...))
+        for alias in atomic_request_aliases(rm.view)          # ATOMIC_REQUESTS: the view in a transaction
+            inner = call
+            call = () -> atomic(inner; db = alias)
+        end
+        resp = call()
+        resp.deferred === nothing ? resp : render_template_response!(req, resp)
     catch e
         response_for_exception(req, e, catch_backtrace())
     end
+end
+
+"""
+    process_template_response(middleware, req, resp) -> resp
+
+Define a method for your middleware function to change a `TemplateResponse` after the view and
+before it's rendered (`resp.template_name`, `resp.context_data`), as Django's hook of the same
+name: `Juango.process_template_response(::typeof(MyMiddleware), req, resp) = (resp.context_data["x"] = 1; resp)`.
+"""
+function process_template_response end
+
+"Run the middleware's template response hooks (innermost first), then render the template."
+function render_template_response!(req, resp::HttpResponse)
+    for mw in Iterators.reverse(settings.MIDDLEWARE)
+        hasmethod(process_template_response, Tuple{typeof(mw),Request,HttpResponse}) &&
+            (resp = process_template_response(mw, req, resp))
+    end
+    render_response!(resp)
 end
 
 "The middleware chain around `dispatch`, built once per MIDDLEWARE setting (like Django, middleware is instantiated once)."
@@ -72,7 +96,11 @@ both the HTTP server and the test `Client` call.
 """
 function handle_request(req::Request)
     has_receivers(request_started, :handler) && send(request_started, :handler; request = req)
-    resp = handle_request_inner(req)
+    resp = try
+        handle_request_inner(req)
+    finally
+        cleanup_uploads(req)                         # temporary files of big uploads
+    end
     has_receivers(request_finished, :handler) && send(request_finished, :handler; request = req, response = resp)
     resp
 end
@@ -99,6 +127,7 @@ function handle_request_inner(req::Request)
         if (settings.DEBUG || LIVE_SERVER_STATIC[]) && startswith(req.path, settings.STATIC_URL) && !isempty(static_dirs())
             return serve_static(req)
         end
+        haskey(req.meta, :upload_error) && throw(req.meta[:upload_error])
         too_many_fields(req) && throw(BadRequest("The number of GET/POST parameters exceeded DATA_UPLOAD_MAX_NUMBER_FIELDS."))
         host_allowed(req) || (log!("juango.security.DisallowedHost", :warning, "Invalid HTTP_HOST header: '$(get_host(req))'"; request = req);
                               throw(BadRequest("Invalid HTTP_HOST header: '$(get_host(req))'. You may need to add it to ALLOWED_HOSTS.")))
@@ -106,6 +135,7 @@ function handle_request_inner(req::Request)
         req.resolver_match === nothing || req.resolver_match.language === nothing ||
             (req.meta[:language_prefix] = req.resolver_match.language)
         resp = build_handler()(req)
+        resp.deferred === nothing || render_response!(resp)       # a middleware returned a TemplateResponse
         req.method == "HEAD" && (resp.body = UInt8[]; resp.stream = nothing)
         resp
     catch e
@@ -122,18 +152,55 @@ function try_render(names, ctx, status)
     end
 end
 
+"""
+The response of a custom error view (`HANDLER404` & co.), or `nothing` when there's none or it
+fails (then the built-in page is used). 400/403/404 views are called as `view(req; exception)`,
+the 500 view as `view(req)`.
+"""
+function custom_error_response(req::Request, status::Int, e)
+    h = get(settings, Symbol("HANDLER", status), nothing)
+    h === nothing && return nothing
+    try
+        r = to_response(status == 500 ? h(req) : h(req; exception = e))
+        r.deferred === nothing ? r : render_response!(r)
+    catch err
+        @error "The HANDLER$status view failed" exception = (err, catch_backtrace())
+        nothing
+    end
+end
+
+"Problems with the HANDLER400/403/404/500 settings, for `manage.jl check`."
+function error_handler_issues()
+    issues = String[]
+    for status in (400, 403, 404, 500)
+        h = get(settings, Symbol("HANDLER", status), nothing)
+        h === nothing && continue
+        ok = status == 500 ? hasmethod(h, Tuple{Request}) || hasmethod(h, Tuple{Any}) :
+             any(m -> :exception in Base.kwarg_decl(m) || any(endswith("..."), string.(Base.kwarg_decl(m))), methods(h))
+        ok || push!(issues, status == 500 ? "HANDLER500 must be a view taking just the request: view(req)." :
+                                          "HANDLER$status must be a view taking the request and an `exception` keyword: view(req; exception).")
+    end
+    issues
+end
+
 function response_for_exception(req::Request, e, bt)
     if e isa Http404
         log!("juango.request", :warning, "Not Found: $(req.path)"; request = req, status_code = 404)
         settings.DEBUG && return technical_404(req, e)
+        c = custom_error_response(req, 404, e)
+        c === nothing || return c
         r = try_render("404.html", Dict("request_path" => req.path, "exception" => e.msg), 404)
         return something(r, HttpResponseNotFound("<h1>Not Found</h1><p>The requested resource was not found on this server.</p>"))
     elseif e isa PermissionDenied
         log!("juango.request", :warning, "Forbidden (Permission denied): $(req.path)"; request = req, status_code = 403)
+        c = custom_error_response(req, 403, e)
+        c === nothing || return c
         r = try_render("403.html", Dict("exception" => e.msg), 403)
         return something(r, HttpResponseForbidden())
     elseif e isa BadRequest
         log!("juango.request", :warning, "Bad Request: $(req.path): $(e.msg)"; request = req, status_code = 400)
+        c = custom_error_response(req, 400, e)
+        c === nothing || return c
         r = try_render("400.html", Dict("exception" => e.msg), 400)
         return something(r, HttpResponseBadRequest(settings.DEBUG ? "<h1>Bad Request (400)</h1><p>$(escape_html(e.msg))</p>" :
                                                                     "<h1>Bad Request (400)</h1>"))
@@ -141,6 +208,8 @@ function response_for_exception(req::Request, e, bt)
     # logged to juango.request: Julia's logger, and mailed to ADMINS when DEBUG is false (see LOGGING)
     log!("juango.request", :error, "Internal Server Error: $(req.path)"; exception = (e, bt), request = req, status_code = 500)
     settings.DEBUG && return technical_500(req, e, bt)
+    c = custom_error_response(req, 500, e)
+    c === nothing || return c
     r = try_render("500.html", Dict{String,Any}(), 500)
     something(r, HttpResponse("<h1>Server Error (500)</h1>"; status = 500))
 end

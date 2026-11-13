@@ -132,6 +132,23 @@ login, password reset and admin views are marked already.
 login_not_required(view) = (LOGIN_NOT_REQUIRED[view] = true; view)
 is_login_not_required(view) = haskey(LOGIN_NOT_REQUIRED, view)
 
+const NON_ATOMIC = IdDict{Any,Any}()
+"""
+    non_atomic_requests(view; databases = nothing)
+
+Leave a view out of `ATOMIC_REQUESTS` transactions (for all databases, or the aliases in `databases`).
+"""
+non_atomic_requests(view; databases = nothing) =
+    (NON_ATOMIC[view] = databases === nothing ? :all : Set(string.(databases isa AbstractString ? [databases] : databases)); view)
+
+"The databases whose ATOMIC_REQUESTS transaction a view runs in."
+function atomic_request_aliases(view)
+    a = get(settings, :ATOMIC_REQUESTS, false)
+    aliases = a === true ? ["default"] : a === false || a === nothing ? String[] : String[string(x) for x in a]
+    skip = get(NON_ATOMIC, view, nothing)
+    skip === :all ? String[] : skip === nothing ? aliases : filter(x -> !(x in skip), aliases)
+end
+
 """
 Require login for every view (Django 5.1's `LoginRequiredMiddleware`): anonymous users are sent
 to `settings.LOGIN_URL`, except for views marked `login_not_required` and the login page itself.
@@ -157,6 +174,7 @@ name_view!(v, name) = (VIEW_NAMES[v] = string(name); v)
 function propagate_flags!(wrapper, view)
     is_csrf_exempt(view) && (CSRF_EXEMPT[wrapper] = true)
     is_login_not_required(view) && (LOGIN_NOT_REQUIRED[wrapper] = true)
+    haskey(NON_ATOMIC, view) && (NON_ATOMIC[wrapper] = NON_ATOMIC[view])
     VIEW_NAMES[wrapper] = view_label(view)
     wrapper
 end

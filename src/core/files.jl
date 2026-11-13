@@ -190,13 +190,20 @@ delete_file(s::FileSystemStorage, name) = (p = path(s, name); isfile(p) && rm(p)
 url(s::FileSystemStorage, name) = rstrip(something(s.base_url, string(settings.MEDIA_URL)), '/') * "/" *
                                   join(URIs.escapeuri.(split(name, '/')), "/")
 
+"Store an upload: big ones are moved from their temporary file rather than read into memory."
+save_upload(s::Storage, name::AbstractString, f) = save_file(s, name, read(f))
+function save_upload(s::FileSystemStorage, name::AbstractString, f)
+    temporary_file_path(f) === nothing && return save_file(s, name, read(f))
+    save_file(s, name, f)
+end
+
 """
     save_file(storage, name, bytes) -> stored name
 
 Store bytes under a sanitised version of `name` (directories allowed); a name that exists
 gets a random suffix (`report_a8Xk2Lq.pdf`).
 """
-function save_file(s::FileSystemStorage, name::AbstractString, data::AbstractVector{UInt8})
+function save_file(s::FileSystemStorage, name::AbstractString, data)
     name = valid_path(name)
     isempty(name) && (name = "file")
     stem, ext = splitext(name)
@@ -205,8 +212,15 @@ function save_file(s::FileSystemStorage, name::AbstractString, data::AbstractVec
         candidate = stem * "_" * random_string(7) * ext
     end
     p = path(s, candidate)
-    mkpath(dirname(p))
-    write(p, data)
+    dir = dirname(p)
+    if !isdir(dir)
+        mkpath(dir)
+        dperm = get(settings, :FILE_UPLOAD_DIRECTORY_PERMISSIONS, nothing)
+        dperm === nothing || chmod(dir, dperm)
+    end
+    data isa UploadedFile ? cp(temporary_file_path(data), p) : write(p, data)
+    perm = get(settings, :FILE_UPLOAD_PERMISSIONS, nothing)
+    perm === nothing || chmod(p, perm)
     candidate
 end
 
@@ -287,9 +301,9 @@ function store_uploaded_files!(obj::Model, data)
         v = data[attname(f)]
         v isa UploadedFile || continue
         st = field_storage(f)
-        data[attname(f)] = FieldFile(save_file(st, upload_name(f, obj, v.name), v.data), st)
+        data[attname(f)] = FieldFile(save_upload(st, upload_name(f, obj, v.name), v), st)
         if f.kind === :image
-            d = image_size(v.data)
+            d = image_size(read(v))
             wf, hf = f.related[3], f.related[4]
             d === nothing || (wf === nothing || (data[wf] = d[1]); hf === nothing || (data[hf] = d[2]))
         end
@@ -311,8 +325,8 @@ FileExtensionValidator(allowed) = v -> begin
         "File extension “$(ext)” is not allowed. Allowed extensions are: $(join(lowercase.(string.(allowed)), ", "))."
 end
 "`MaxFileSizeValidator(2_000_000)`: reject uploads larger than this many bytes."
-MaxFileSizeValidator(n::Integer) = v -> !(v isa UploadedFile) || length(v.data) <= n ||
-    "Ensure this file is at most $(n) bytes (it is $(length(v.data)) bytes)."
+MaxFileSizeValidator(n::Integer) = v -> !(v isa UploadedFile) || v.size <= n ||
+    "Ensure this file is at most $(n) bytes (it is $(v.size) bytes)."
 
 # --- image dimensions ---------------------------------------------------------------------------------------
 

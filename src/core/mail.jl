@@ -39,7 +39,7 @@ EmailMessage(subject, body; from_email = nothing, to = String[], cc = String[], 
 const EmailMultiAlternatives = EmailMessage
 bytesof(x::AbstractString) = Vector{UInt8}(codeunits(x))
 bytesof(x::AbstractVector{UInt8}) = Vector{UInt8}(x)
-bytesof(x::UploadedFile) = copy(x.data)
+bytesof(x::UploadedFile) = read(x)
 
 "Attach a file: `attach!(msg, \"report.pdf\", bytes, \"application/pdf\")`."
 attach!(m::EmailMessage, filename, content, mimetype = "application/octet-stream") =

@@ -21,7 +21,7 @@ export settings, configure!
 # requests and responses
 export Request, HttpResponse, JsonResponse, HttpResponseRedirect, HttpResponsePermanentRedirect,
        HttpResponseNotFound, HttpResponseForbidden, HttpResponseBadRequest, HttpResponseNotAllowed,
-       StreamingHttpResponse, FileResponse, Http404, PermissionDenied, BadRequest, QueryDict, getlist,
+       StreamingHttpResponse, FileResponse, TemplateResponse, Http404, PermissionDenied, BadRequest, QueryDict, getlist,
        set_cookie!, delete_cookie!, getheader, setheader!, json_body
 export EventStreamResponse, sse_event, websocket, ws_send, ws_receive, ws_close, ws_isopen
 # urls
@@ -68,7 +68,7 @@ export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data, save_m2
 export render, redirect, get_object_or_404, get_list_or_404, TemplateView, RedirectView, ListView,
        DetailView, CreateView, UpdateView, DeleteView, FormView, ArchiveIndexView, YearArchiveView,
        MonthArchiveView, DayArchiveView, DateDetailView, ViewCall, default_hook, Paginator, page,
-       require_http_methods, require_GET, require_POST, csrf_exempt, get_csrf_token,
+       require_http_methods, require_GET, require_POST, csrf_exempt, non_atomic_requests, get_csrf_token,
        LoginRequiredMixin, PermissionRequiredMixin, UserPassesTestMixin
 # auth and messages
 export User, AbstractUser, AnonymousUser, USER_MODEL, get_user_model, authenticate, login!, logout!,
@@ -104,7 +104,8 @@ export runserver, execute_from_command_line
 # --- public, not exported ----------------------------------------------------------------------------
 
 # requests, responses and streaming
-public header, text, sse_comment, WebSocketView, is_streaming, build_absolute_uri, handle_request
+public header, text, render_response!, process_template_response, temporary_file_path, TemporaryUploadedFile,
+       MemoryFileUploadHandler, TemporaryFileUploadHandler, upload_file, sse_comment, WebSocketView, is_streaming, build_absolute_uri, handle_request
 # templates
 public render_form, TemplateFormRenderer
 # models, files, querysets

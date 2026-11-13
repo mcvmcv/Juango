@@ -17,6 +17,33 @@ function render(req::Request, template, context = Dict{String,Any}(); status = 2
 end
 
 """
+    TemplateResponse(req, template, context = Dict(); status = 200, content_type = "text/html; charset=utf-8")
+
+A response whose template is rendered at the last moment (Django's `TemplateResponse`): after
+the view returns, middleware with a `process_template_response` method can still change
+`resp.template_name` and `resp.context_data`. Once rendered, it's an ordinary response
+(`resp.is_rendered`).
+"""
+function TemplateResponse(req::Request, template, context = Dict{String,Any}(); status = 200,
+                          content_type = "text/html; charset=utf-8")
+    r = HttpResponse(""; status = status, content_type = content_type)
+    r.deferred = DeferredTemplate(req, template, to_context_dict(context))
+    r
+end
+
+"Render a `TemplateResponse` now (nothing to do for other responses)."
+function render_response!(r::HttpResponse)
+    d = r.deferred
+    d === nothing && return r
+    out = render(d.request, d.template_name, d.context_data; status = r.status)
+    r.body = out.body
+    r.context = out.context
+    append!(r.templates, out.templates)
+    r.deferred = nothing
+    r
+end
+
+"""
     redirect(to, args...; permanent=false, kwargs...)
 
 `to` can be a URL (`"/posts/"`, `"https://…"`), a URL pattern name (reversed with

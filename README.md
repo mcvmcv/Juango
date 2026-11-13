@@ -823,6 +823,23 @@ configure!(ROOT_URLCONF=urlpatterns, DATABASE="db.sqlite3", TEMPLATE_DIRS=["temp
 
 Converters: `str int slug path uuid`, plus `register_converter!`.
 
+#### Transactions, error pages and TemplateResponse
+
+```julia
+configure!(ATOMIC_REQUESTS = true)                 # each view in a transaction (or a list of database aliases)
+path("report/", non_atomic_requests(report))       # this one manages its own transactions
+
+configure!(HANDLER404 = (req; exception) -> render(req, "errors/404.html"; status = 404),
+           HANDLER500 = req -> HttpResponse("Sorry!"; status = 500))   # also HANDLER400, HANDLER403
+
+article(req; id) = TemplateResponse(req, "article.html", Dict("article" => get(Article; id)))
+Juango.process_template_response(::typeof(MyMiddleware), req, resp) = (resp.context_data["ad"] = pick_ad(); resp)
+```
+
+- **`ATOMIC_REQUESTS`.** If the view throws, its transaction is rolled back and the error page is shown, as in Django.
+- **Error views.** Without them, the `404.html`, `403.html`, `400.html` and `500.html` templates are used. With `DEBUG`, 404s and 500s show the debug pages instead. An error view that fails itself falls back to the built-in page. `manage.jl check` reports error views with the wrong signature.
+- **`TemplateResponse`** is rendered after the middleware's `process_template_response` methods run. Until then, `resp.template_name` and `resp.context_data` can still change.
+
 ### Generic views
 
 `TemplateView`, `RedirectView`, `ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView` and `FormView` are configured with keywords (`template`, `queryset`, `paginate_by`, `fields`, `success_url`, `extra_context`, `context_object_name`...). Any step can be replaced with a hook. A hook receives the `ViewCall` `v`, which holds `v.request`, the URL's `v.kwargs`, `v.object`, `v.object_list`, `v.form` and `v.model`. Inside a hook, `default_hook(name, v, args...)` runs the built-in step, like `super()`:
@@ -1048,6 +1065,8 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 - **Serving.** With `DEBUG`, the development server serves `MEDIA_URL`. In production, serve `MEDIA_ROOT` from your web server.
 - **Deleting objects keeps their files**, as in Django. Use `delete_file` to remove them.
 
+
+**Big uploads and upload handlers.** Uploads up to `FILE_UPLOAD_MAX_MEMORY_SIZE` (2.5 MB) stay in memory. Bigger ones are written to a temporary file in `FILE_UPLOAD_TEMP_DIR`: `temporary_file_path(f)` returns it, `FileSystemStorage` moves it into place rather than reading it, and it's removed when the request is done. `FILE_UPLOAD_HANDLERS` (default `[MemoryFileUploadHandler(), TemporaryFileUploadHandler()]`) decides what becomes of each file. A handler is any value with a method `Juango.upload_file(handler, field, filename, content_type, data)` that returns an `UploadedFile`, returns `nothing` to pass, or throws `BadRequest` to refuse the upload with a 400. `FILE_UPLOAD_PERMISSIONS` (default `0o644`) and `FILE_UPLOAD_DIRECTORY_PERMISSIONS` set the modes of what `FileSystemStorage` writes.
 ### Auth, sessions, CSRF, messages
 
 - `User` model with PBKDF2-SHA256 password hashes in Django's format, so existing Django hashes verify.

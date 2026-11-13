@@ -106,6 +106,7 @@ function cmd_check(args)
     _, flags = parse_flags(args)
     issues = String[]
     haskey(flags, "deploy") && append!(issues, deploy_issues())
+    append!(issues, error_handler_issues())
     settings.SECRET_KEY == default_settings()[:SECRET_KEY] && !settings.DEBUG &&
         push!(issues, "SECRET_KEY is the insecure default while DEBUG is false.")
     isempty(settings.ROOT_URLCONF) && push!(issues, "ROOT_URLCONF is empty.")

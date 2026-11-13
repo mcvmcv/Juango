@@ -109,15 +109,58 @@ the bytes (`read(f)`). Also used to post files with the test `Client`.
 struct UploadedFile
     name::String
     content_type::String
-    data::Vector{UInt8}
+    bytes::Union{Nothing,Vector{UInt8}}   # in memory, or
+    path::Union{Nothing,String}           # a temporary file (big uploads; see FILE_UPLOAD_HANDLERS)
+    filesize::Int
 end
 UploadedFile(name, data; content_type = "application/octet-stream") =
-    UploadedFile(string(name), string(content_type), data isa AbstractString ? Vector{UInt8}(codeunits(data)) : Vector{UInt8}(data))
-Base.read(f::UploadedFile) = copy(f.data)
-Base.read(f::UploadedFile, ::Type{String}) = String(copy(f.data))
-Base.size(f::UploadedFile) = length(f.data)
-Base.getproperty(f::UploadedFile, s::Symbol) = s === :size ? length(getfield(f, :data)) : getfield(f, s)
-Base.show(io::IO, f::UploadedFile) = print(io, "<UploadedFile ", repr(f.name), " (", length(f.data), " bytes)>")
+    (b = data isa AbstractString ? Vector{UInt8}(codeunits(data)) : Vector{UInt8}(data);
+     UploadedFile(string(name), string(content_type), b, nothing, length(b)))
+"An upload kept in a temporary file (Django's `TemporaryUploadedFile`)."
+TemporaryUploadedFile(name, path; content_type = "application/octet-stream") =
+    UploadedFile(string(name), string(content_type), nothing, String(path), filesize(path))
+Base.read(f::UploadedFile) = (b = getfield(f, :bytes); b === nothing ? read(getfield(f, :path)) : copy(b))
+Base.read(f::UploadedFile, ::Type{String}) = String(read(f))
+Base.size(f::UploadedFile) = getfield(f, :filesize)
+"The temporary file holding a big upload, or `nothing` when it's in memory."
+temporary_file_path(f::UploadedFile) = getfield(f, :path)
+Base.getproperty(f::UploadedFile, s::Symbol) = s === :size ? getfield(f, :filesize) : s === :data ? read(f) : getfield(f, s)
+Base.show(io::IO, f::UploadedFile) = print(io, "<UploadedFile ", repr(f.name), " (", f.size, " bytes", f.path === nothing ? "" : ", on disk", ")>")
+
+# --- upload handlers: what becomes of each uploaded file -----------------------------------------------
+#
+# FILE_UPLOAD_HANDLERS (default: MemoryFileUploadHandler(), TemporaryFileUploadHandler()) are asked in
+# turn; the first that returns an UploadedFile wins. A handler of your own is any value with a method
+# `Juango.upload_file(handler, field_name, file_name, content_type, data::Vector{UInt8})` returning an
+# UploadedFile, or `nothing` to pass it on (throw BadRequest to refuse the upload).
+
+"Keep uploads of up to `FILE_UPLOAD_MAX_MEMORY_SIZE` bytes in memory."
+struct MemoryFileUploadHandler end
+"Write uploads to a temporary file in `FILE_UPLOAD_TEMP_DIR` (removed when the request is done)."
+struct TemporaryFileUploadHandler end
+upload_file(h, field, name, content_type, data) = nothing
+upload_file(::MemoryFileUploadHandler, field, name, content_type, data) =
+    length(data) <= something(get(settings, :FILE_UPLOAD_MAX_MEMORY_SIZE, nothing), typemax(Int)) ?
+        UploadedFile(name, data; content_type = content_type) : nothing
+function upload_file(::TemporaryFileUploadHandler, field, name, content_type, data)
+    dir = something(get(settings, :FILE_UPLOAD_TEMP_DIR, nothing), tempdir())
+    p, io = mktemp(dir; cleanup = false)
+    write(io, data); close(io)
+    TemporaryUploadedFile(name, p; content_type = content_type)
+end
+"Turn an uploaded part into an UploadedFile with the configured handlers."
+function handle_upload(field, name, content_type, data)
+    for h in get(settings, :FILE_UPLOAD_HANDLERS, Any[MemoryFileUploadHandler(), TemporaryFileUploadHandler()])
+        f = upload_file(h, field, name, content_type, data)
+        f === nothing || return f
+    end
+    UploadedFile(name, data; content_type = content_type)
+end
+"Remove the temporary files of a request's uploads."
+cleanup_uploads(req) = for fs in values(get(req.meta, :FILES, FileDict()).data), f in fs
+    p = getfield(f, :path)
+    p === nothing || rm(p; force = true)
+end
 
 "Uploaded files by field name (several per name for `multiple` inputs): `get(req.FILES, \"doc\", nothing)`, `getlist`."
 struct FileDict
@@ -162,10 +205,11 @@ function parse_multipart_fields(req::Request)
             else
                 isempty(p.filename) && continue      # an empty file input
                 push!(get!(files.data, p.name, UploadedFile[]),
-                      UploadedFile(p.filename, read(p.data); content_type = isempty(p.contenttype) ? "application/octet-stream" : p.contenttype))
+                      handle_upload(p.name, p.filename, isempty(p.contenttype) ? "application/octet-stream" : p.contenttype, read(p.data)))
             end
         end
-    catch
+    catch e
+        e isa BadRequest && (req.meta[:upload_error] = e)     # an upload handler refused: a 400 from the handler
     end
     req.meta[:FILES] = files
     q
@@ -200,6 +244,14 @@ mutable struct HttpResponse
     context::Any
     templates::Vector{String}
     stream::Any             # an iterable of chunks for a streaming response (see streaming.jl), else nothing
+    deferred::Any           # a TemplateResponse not rendered yet: DeferredTemplate, else nothing
+end
+
+"What a `TemplateResponse` renders, kept until it's rendered."
+mutable struct DeferredTemplate
+    request::Any
+    template_name::Any       # a name, a list of names (the first that exists) or a Template
+    context_data::Dict{String,Any}
 end
 
 function HttpResponse(content = ""; status::Integer = 200,
@@ -207,7 +259,22 @@ function HttpResponse(content = ""; status::Integer = 200,
     body = content isa AbstractVector{UInt8} ? Vector{UInt8}(content) : Vector{UInt8}(codeunits(string(content)))
     hs = Pair{String,String}[string(k) => string(v) for (k, v) in headers]
     any(h -> header_eq(h.first, "content-type"), hs) || pushfirst!(hs, "Content-Type" => content_type)
-    HttpResponse(Int(status), hs, body, String[], nothing, String[], nothing)
+    HttpResponse(Int(status), hs, body, String[], nothing, String[], nothing, nothing)
+end
+
+function Base.getproperty(r::HttpResponse, s::Symbol)
+    s === :template_name && return (d = getfield(r, :deferred); d === nothing ? nothing : d.template_name)
+    s === :context_data && return (d = getfield(r, :deferred); d === nothing ? getfield(r, :context) : d.context_data)
+    s === :is_rendered && return getfield(r, :deferred) === nothing
+    getfield(r, s)
+end
+function Base.setproperty!(r::HttpResponse, s::Symbol, v)
+    if s in (:template_name, :context_data)
+        d = getfield(r, :deferred)
+        d === nothing && throw(ArgumentError("the response is already rendered"))
+        return setfield!(d, s, s === :context_data ? to_context_dict(v) : v)
+    end
+    setfield!(r, s, convert(fieldtype(HttpResponse, s), v))
 end
 
 "Response body as a `String` (a streaming response is read to the end first)."
