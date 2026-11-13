@@ -56,7 +56,7 @@ struct InlineAdmin
     max_num::Int
     style::Symbol
 end
-TabularInline(T; fields = nothing, extra = 1, can_delete = true, fk = nothing, max_num = 1000) =
+Base.@nospecializeinfer TabularInline(@nospecialize(T); fields = nothing, extra = 1, can_delete = true, fk = nothing, max_num = 1000) =
     InlineAdmin(T, fields === nothing ? nothing : Symbol.(fields), extra, can_delete, fk === nothing ? nothing : Symbol(fk), max_num, :tabular)
 StackedInline(T; kw...) = (i = TabularInline(T; kw...); InlineAdmin(i.model, i.fields, i.extra, i.can_delete, i.fk, i.max_num, :stacked))
 
@@ -222,7 +222,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
 end
 
 "Remove a model from the admin (`site` defaults to `Admin.site`)."
-function unregister!(T::Type; site::AdminSite = Admin.site)
+Base.@nospecializeinfer function unregister!(@nospecialize(T::Type); site::AdminSite = Admin.site)
     slug = model_name(T)
     delete!(site.registry, slug)
     filter!(!=(slug), site.order)
@@ -261,7 +261,7 @@ list_filter(ma::ModelAdmin, req) = ma.get_list_filter === nothing ? ma.list_filt
     Any[x isa Union{AbstractString,Symbol} ? Symbol(x) : x for x in ma.get_list_filter(req)]
 search_fields(ma::ModelAdmin, req) = ma.get_search_fields === nothing ? ma.search_fields : Symbol.(collect(ma.get_search_fields(req)))
 ordering(ma::ModelAdmin, req) = ma.get_ordering === nothing ? ma.ordering : String.(string.(collect(ma.get_ordering(req))))
-readonly_fields(ma::ModelAdmin, req, obj) = ma.get_readonly_fields === nothing ? ma.readonly_fields : Symbol.(collect(ma.get_readonly_fields(req, obj)))
+Base.@nospecializeinfer readonly_fields(ma::ModelAdmin, req, @nospecialize(obj)) = ma.get_readonly_fields === nothing ? ma.readonly_fields : Symbol.(collect(ma.get_readonly_fields(req, obj)))
 
 opts(ma::ModelAdmin) = (m = modelmeta(ma.model);
     Dict{String,Any}("slug" => ma.slug, "verbose_name" => m.verbose_name, "verbose_name_plural" => m.verbose_name_plural,
@@ -273,15 +273,15 @@ opts(ma::ModelAdmin) = (m = modelmeta(ma.model);
 Whether the user may `action` (:view, :change, :add, :delete) the model, or one object: the
 ModelAdmin's `has_<action>_permission(req, obj)` when given, else the model permission.
 """
-function can(req, ma::ModelAdmin, action, obj = nothing)
+Base.@nospecializeinfer function can(req, ma::ModelAdmin, action, @nospecialize(obj = nothing))
     hook = action === :view ? ma.has_view_permission : action === :change ? ma.has_change_permission :
            action === :add ? ma.has_add_permission : action === :delete ? ma.has_delete_permission : nothing
     hook === nothing ? Juango.has_perm(req.user, Juango.perm_name(ma.model, action)) : Bool(hook(req, obj))
 end
 can_model(req, T::Type, action) = Juango.has_perm(req.user, Juango.perm_name(T, action))
-can_view(req, ma, obj = nothing) = can(req, ma, :view, obj) || can(req, ma, :change, obj)
+Base.@nospecializeinfer can_view(req, ma, @nospecialize(obj = nothing)) = can(req, ma, :view, obj) || can(req, ma, :change, obj)
 "Throw 403 unless the user may do one of `actions` on the model (or on `obj`)."
-require_perm(req, ma, actions...; obj = nothing) = any(a -> can(req, ma, a, obj), actions) ||
+Base.@nospecializeinfer require_perm(req, ma, actions...; obj = nothing) = any(a -> can(req, ma, a, obj), actions) ||
     throw(Juango.PermissionDenied("You don't have permission to $(join(string.(actions), " or ")) $(modelmeta(ma.model).verbose_name_plural)."))
 visible_models(req) = (st = current_site(); [s for s in st.order if can_view(req, st.registry[s]) || can(req, st.registry[s], :add)])
 
@@ -329,7 +329,7 @@ function header_label(ma::ModelAdmin, col)
     f === nothing ? uppercasefirst(replace(string(col), '_' => ' ')) : label(f)
 end
 
-function raw_cell(ma::ModelAdmin, obj, col)
+Base.@nospecializeinfer function raw_cell(ma::ModelAdmin, @nospecialize(obj), col)
     col isa Pair && return col.second(obj)
     col === :__str__ && return string(obj)
     f = findfield(modelmeta(ma.model), Symbol(col))
@@ -337,7 +337,7 @@ function raw_cell(ma::ModelAdmin, obj, col)
     f !== nothing && f.choices !== nothing && return Juango.choice_label(Juango.field_choices(f), val)
     val
 end
-cell_value(ma::ModelAdmin, obj, col) = format_value(raw_cell(ma, obj, col))
+Base.@nospecializeinfer cell_value(ma::ModelAdmin, @nospecialize(obj), col) = format_value(raw_cell(ma, obj, col))
 
 format_value(::Nothing) = "-"
 format_value(v::Bool) = SafeString(v ? "<span class=\"yes\" title=\"True\">✔</span>" : "<span class=\"no\" title=\"False\">✘</span>")
@@ -421,7 +421,7 @@ end
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
 
 "Filter by the date_hierarchy GET parameters; return (queryset, drill-down context)."
-function date_drilldown(req, ma::ModelAdmin, qs)
+Base.@nospecializeinfer function date_drilldown(req, ma::ModelAdmin, @nospecialize(qs))
     ma.date_hierarchy === nothing && return qs, nothing
     f = ma.date_hierarchy
     p(k) = (v = get(req.GET, "$(f)__$k", nothing); v === nothing ? nothing : tryparse(Int, v))
@@ -448,7 +448,7 @@ end
 # --- actions -------------------------------------------------------------------------------------
 
 "Built-in action: delete the selected objects after a confirmation page."
-function delete_selected(ma::ModelAdmin, req::Request, qs)
+Base.@nospecializeinfer function delete_selected(ma::ModelAdmin, req::Request, @nospecialize(qs))
     meta = modelmeta(ma.model)
     objs = collect(qs)
     if get(req.POST, "post", "") != "yes"
@@ -612,7 +612,7 @@ end
 
 # --- change form ---------------------------------------------------------------------------------------
 
-function admin_fields(ma::ModelAdmin, req = nothing, obj = nothing)
+Base.@nospecializeinfer function admin_fields(ma::ModelAdmin, req = nothing, @nospecialize(obj = nothing))
     fs = ma.get_fields !== nothing ? Symbol.(collect(ma.get_fields(req, obj))) : ma.fields !== nothing ? ma.fields :
          [f.name for f in vcat(Juango.all_fields(ma.model), modelmeta(ma.model).m2m)
           if f.editable && !(f.name in ma.exclude) && !(f.name in ma.password_fields)]
@@ -620,20 +620,20 @@ function admin_fields(ma::ModelAdmin, req = nothing, obj = nothing)
     [f for f in fs if !(f in ro)]
 end
 
-function readonly_value(obj, f::Field)
+Base.@nospecializeinfer function readonly_value(@nospecialize(obj), f::Field)
     obj === nothing && return "-"
     v = getproperty(obj, f.name)
     f.kind === :m2m && return join(string.(collect(v)), ", ")
     f.choices !== nothing && v !== nothing && return string(Juango.choice_label(Juango.field_choices(f), v))
     format_value(v)
 end
-readonly_row(ma, obj, name) = (f = findfield(modelmeta(ma.model), name);
+Base.@nospecializeinfer readonly_row(ma, @nospecialize(obj), name) = (f = findfield(modelmeta(ma.model), name);
     f === nothing && (f = findfirst(x -> x.name === name, modelmeta(ma.model).m2m) |> i -> i === nothing ? nothing : modelmeta(ma.model).m2m[i]);
     Dict{String,Any}("readonly" => true, "label" => f === nothing ? uppercasefirst(replace(string(name), '_' => ' ')) : label(f),
                      "value" => f === nothing ? format_value(obj === nothing ? nothing : getproperty(obj, name)) : readonly_value(obj, f)))
 
 "The change form as groups of rows (fieldsets), each row a bound field or a read-only value."
-function form_groups(ma::ModelAdmin, form, obj, editable; locked = Symbol[], readonly = ma.readonly_fields)
+Base.@nospecializeinfer function form_groups(ma::ModelAdmin, form, @nospecialize(obj), editable; locked = Symbol[], readonly = ma.readonly_fields)
     row(name) = if editable && any(f -> f.name === name, form.fields)
         Dict{String,Any}("readonly" => false, "field" => form[name])
     else
@@ -644,7 +644,7 @@ function form_groups(ma::ModelAdmin, form, obj, editable; locked = Symbol[], rea
     [Dict{String,Any}("name" => name, "rows" => [row(n) for n in names]) for (name, names) in layout]
 end
 
-function inline_formsets(ma::ModelAdmin, req, obj, data)
+Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecialize(obj), data)
     out = Any[]
     for ia in ma.inlines
         M = ia.model
@@ -690,7 +690,7 @@ function configure_widgets!(ma::ModelAdmin, form)
     form
 end
 
-function change_form(req::Request, ma::ModelAdmin, obj)
+Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nospecialize(obj))
     T = ma.model
     meta = modelmeta(T)
     save_as_new = req.method == "POST" && ma.save_as && haskey(req.POST, "_saveasnew")

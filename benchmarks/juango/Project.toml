@@ -1,7 +1,6 @@
 [deps]
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 Juango = "05cba04f-b8df-4159-83db-d292e8d0197f"
-LibPQ = "194296ae-ab2e-5f79-8cd4-7183a0a5a0d1"
 
 [sources]
 Juango = {path = "../.."}

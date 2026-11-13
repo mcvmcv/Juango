@@ -1,8 +1,5 @@
 # The benchmark app in Juango (the Django one is in ../django): see ../README.md.
 const DB = get(ENV, "BENCH_DB", joinpath(@__DIR__, "..", "data", "juango.sqlite3"))
-if startswith(DB, "postgres")
-    using LibPQ                  # only for PostgreSQL: loading it costs some of Juango's precompiled code
-end
 using Juango
 using Dates
 

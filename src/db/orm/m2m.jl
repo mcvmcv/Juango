@@ -10,11 +10,11 @@ struct M2MOwner
     symmetrical::Bool  # also keep the mirrored rows (other -> instance)
 end
 
-function m2m_queryset(m::Model, f::Field, forward::Bool)
+Base.@nospecializeinfer function m2m_queryset(@nospecialize(m::Model), f::Field, forward::Bool)
     src, dst = through_fks(f)
     mine, other = forward ? (src, dst) : (dst, src)
     Other = related_model(other)
-    id = getfield(m, :_data)[:id]
+    id = (getfield(m, :_data)::Dict{Symbol,Any})[:id]
     step1, step2 = m2m_path(f, !forward)      # from the other model back to this instance
     qs = filter(objects(Other), Q(Symbol(step1, "__", step2) => id))
     chain(qs; owner = M2MOwner(through_model(f), mine, other, id, forward, f.symmetrical), db = instance_db(m))
@@ -25,7 +25,7 @@ function m2m_owner(qs::QuerySet)
     qs.owner.id === nothing && throw(ArgumentError("save the object before changing its many-to-many relations"))
     qs.owner
 end
-objid(x::Model) = (x.id === nothing && throw(ArgumentError("cannot relate an unsaved $(typeof(x))")); x.id)
+Base.@nospecializeinfer objid(@nospecialize(x::Model)) = (x.id === nothing && throw(ArgumentError("cannot relate an unsaved $(typeof(x))")); x.id)
 objid(x) = x
 
 "Send m2m_changed for a many-to-many change (only when someone listens)."
@@ -119,7 +119,7 @@ function prefetch_m2m!(objs::Vector, name, f::Field, forward::Bool, qs, to_attr)
         push!(get!(() -> Other[], groups, mid), t)
     end
     for o in objs
-        getfield(o, :_cache)[something(to_attr, name)] = PrefetchedList(get(groups, o.id, Other[]))
+        (getfield(o, :_cache)::Dict{Symbol,Any})[something(to_attr, name)] = PrefetchedList(get(groups, o.id, Other[]))
     end
     targets
 end

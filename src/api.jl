@@ -47,7 +47,7 @@ export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_lis
        difference, create, get_or_create, update_or_create, update!, save!, refresh!, full_clean,
        clean_fields, validate_unique, validate_constraints, get_next_by, get_previous_by, bulk_create,
        bulk_update, add!, remove!, set!, clear!, atomic, on_commit, using_db,
-       DoesNotExist, MultipleObjectsReturned, ProtectedError, RestrictedError, SET, IntegrityError, TransactionManagementError
+       DoesNotExist, MultipleObjectsReturned, ProtectedError, RestrictedError, SET, IntegrityError, DatabaseError, TransactionManagementError
 export run_async, sync_to_async, aget, acreate, acount, aexists, afirst, alast, acollect, aget_or_create,
        aupdate_or_create, abulk_create, abulk_update, aaggregate, ain_bulk, aupdate!, adelete!, asave!,
        arefresh!, aauthenticate, aiterator

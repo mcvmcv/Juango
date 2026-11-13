@@ -624,7 +624,7 @@ function count_queries(f)
     r, QUERY_COUNT[] - n0
 end
 
-function run_on(@nospecialize(f), b, conn, sql, @nospecialize(params))
+Base.@nospecializeinfer function run_on(@nospecialize(f), b, conn, sql, @nospecialize(params))
     Threads.atomic_add!(QUERY_COUNT, 1)
     settings.SQL_DEBUG && @info "SQL" sql params
     ps = Any[adapt_param(b, p) for p in params]
@@ -660,13 +660,13 @@ end
 Run raw SQL with `?` placeholders (portable across backends). SQL `NULL` comes back
 as `nothing`.
 """
-execute(sql::AbstractString, params = Any[]) = run_driver(driver_rows, sql, params)
+execute(sql::AbstractString, params = Any[]) = run_driver(driver_rows, sql, params)::Vector{Dict{Symbol,Any}}
 
 "Whether the current task is inside `atomic()`."
 in_atomic() = commit_holder().depth > 0
 
 "Run a statement and return the number of rows changed."
-execute_changes(sql::AbstractString, params = Any[]) = run_driver(driver_rowcount, sql, params)
+execute_changes(sql::AbstractString, params = Any[]) = run_driver(driver_rowcount, sql, params)::Int
 
 "Run an INSERT built with `insert_sql` and return the new row id."
 execute_insert(sql::AbstractString, params = Any[]) = run_driver(driver_insert_id, sql, params)
@@ -710,7 +710,7 @@ function atomic(f; db = nothing)
 end
 
 # `h` is the DatabaseState (non-pooled) or TaskDB (pooled) holding the depth and hooks.
-function transaction(@nospecialize(f), b, h::Union{DatabaseState,TaskDB})
+Base.@nospecializeinfer function transaction(@nospecialize(f), b, h::Union{DatabaseState,TaskDB})
     depth = h.depth
     sp = "juango_sp_$(depth)"
     execute(depth == 0 ? begin_sql(b) : savepoint_sql(b, sp))

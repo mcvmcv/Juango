@@ -263,3 +263,29 @@ import Mustache      # loads the Mustache extension (Juango.MustacheTemplates)
         configure!(TEMPLATE_DIRS = filter(!=(tdir), settings.TEMPLATE_DIRS), TEMPLATE_CACHE_CHECK_MTIME = true, DEBUG = old_debug)
     end
 end
+
+@testset "compiling templates in the background" begin
+    override_settings(TEMPLATE_COMPILE = true) do
+        @test Juango.COMPILE_TEMPLATES[] === :background
+        t = Template("{% for x in xs %}{{ x|add:1 }},{% endfor %}{% if ok %}yes{% endif %}")
+        ctx = Dict{String,Any}("xs" => [1, 2, 3], "ok" => true)
+        @test render(t, ctx) == "2,3,4,yes"                     # interpreted while the task compiles it
+        entry() = lock(() -> get(Juango.COMPILED_NODES, objectid(t.nodes), nothing), Juango.COMPILED_LOCK)
+        @test entry() !== nothing
+        t0 = time()
+        while (e = entry(); e === nothing || e.f === nothing) && time() - t0 < 60
+            sleep(0.05)
+        end
+        @test entry().f isa Function
+        @test render(t, ctx) == "2,3,4,yes"                     # now through the compiled function
+    end
+    override_settings(TEMPLATE_COMPILE = false) do
+        @test Juango.COMPILE_TEMPLATES[] === :interpret
+    end
+    try
+        @test_throws Juango.ImproperlyConfigured configure!(TEMPLATE_COMPILE = :sometimes)
+    finally
+        configure!(TEMPLATE_COMPILE = :eager)
+    end
+    @test Juango.COMPILE_TEMPLATES[] === :eager                 # the test setup's
+end

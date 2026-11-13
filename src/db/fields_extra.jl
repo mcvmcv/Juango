@@ -324,7 +324,7 @@ supports_full_text(::DatabaseBackend) = true
 Lookups that depend on the field type (JSON, arrays, ranges, full-text). Returns `nothing`
 when the field/lookup pair isn't special.
 """
-function special_lookup(c::SQLCompiler, f::Field, col, lookup, @nospecialize(value))
+Base.@nospecializeinfer function special_lookup(c::SQLCompiler, f::Field, col, lookup, @nospecialize(value))
     b = backend()
     k = f.kind
     if k === :geometry
@@ -362,7 +362,7 @@ end
 Resolve `field__rest...` into a column expression for JSON key paths and array `len`/indexes.
 Returns `(sql, params)` or `nothing`.
 """
-function transform_column(f::Field, col, rest::Vector{String}, lookup, @nospecialize(value))
+Base.@nospecializeinfer function transform_column(f::Field, col, rest::Vector{String}, lookup, @nospecialize(value))
     b = backend()
     if f.kind === :hstore && b isa PostgresBackend && !isempty(rest)
         length(rest) == 1 || return nothing

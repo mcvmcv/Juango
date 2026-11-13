@@ -214,7 +214,7 @@ contains_aggregate(::Window) = false
 # --- compilation ----------------------------------------------------------------------------
 
 "Resolve a field path for expressions: returns (SQL column, Field or nothing)."
-function resolve_path(c::SQLCompiler, alias, @nospecialize(T::Type), path::AbstractString)
+Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospecialize(T::Type), path::AbstractString)
     segs = String.(split(path, "__"))
     for (i, s) in enumerate(segs)
         last_ = i == length(segs)
@@ -504,7 +504,8 @@ Add computed values to each result, available as `obj.name` (or as keys in `valu
 Aggregates group the results: `annotate(objects(Author); n_posts = Count(:posts))`. Filter
 and order by annotations like fields: `filter(qs; n_posts__gt = 1)`, `order_by(qs, "-n_posts")`.
 """
-function annotate(qs::QuerySet{T}; kw...) where {T}
+Base.@nospecializeinfer function annotate(@nospecialize(qs::QuerySet); kw...)
+    T = model_of(qs)
     anns = copy(qs.annotations)
     for (k, v) in kw
         (findfield(modelmeta(T), k) !== nothing || k in (:id, :pk)) &&
@@ -513,7 +514,7 @@ function annotate(qs::QuerySet{T}; kw...) where {T}
     end
     chain(qs; annotations = anns)
 end
-annotate(::Type{T}; kw...) where {T<:Model} = annotate(objects(T); kw...)
+Base.@nospecializeinfer annotate(@nospecialize(T::Type{<:Model}); kw...) = annotate(objects(T); kw...)
 annotate(; kw...) = qs -> annotate(qs; kw...)
 
 """
@@ -523,11 +524,12 @@ The results as `Dict{Symbol,Any}` rows instead of objects. Fields may follow rel
 (`:author__name`). With aggregate annotations the rows are grouped by these fields:
 `values(objects(Post), :status) |> annotate(n = Count(:id))`.
 """
-function Base.values(qs::QuerySet{T}, fields::Union{Symbol,AbstractString}...) where {T}
+Base.@nospecializeinfer function Base.values(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
+    T = model_of(qs)
     fs = isempty(fields) ? vcat(["id"], [column(f) for f in all_fields(T)]) : String[string(f) for f in fields]
     chain(qs; values_fields = fs, group_by_object = any(p -> contains_aggregate(p.second), qs.annotations))
 end
-Base.values(::Type{T}, fields::Union{Symbol,AbstractString}...) where {T<:Model} = values(objects(T), fields...)
+Base.@nospecializeinfer Base.values(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...) = values(objects(T), fields...)
 
 """
     values_list(qs, fields...; flat=false) -> Vector
@@ -554,8 +556,8 @@ aggregate(qs::QuerySet; kw...) = in_db(() -> aggregate_here(qs; kw...), qs)
 const DATETIME_RESULT = Field(:datetime)       # converts computed datetimes like a DateTimeField's values
 
 "The DecimalField an expression's values come from (`F(:price)`, `Sum(:price)`, `F(:price) * 2`), else nothing."
-decimal_source(@nospecialize(T), e) = nothing
-function decimal_source(@nospecialize(T), e::F)
+Base.@nospecializeinfer decimal_source(@nospecialize(T), e) = nothing
+Base.@nospecializeinfer function decimal_source(@nospecialize(T), e::F)
     f = try
         last(resolve_path(SQLCompiler(T), modelmeta(T).table, T, e.name))
     catch
@@ -563,15 +565,15 @@ function decimal_source(@nospecialize(T), e::F)
     end
     f isa Field && f.kind === :decimal ? f : nothing
 end
-decimal_source(@nospecialize(T), e::Aggregate) = e.func in ("SUM", "MIN", "MAX", "AVG") && e.arg !== nothing ? decimal_source(T, e.arg) : nothing
-decimal_source(@nospecialize(T), e::CombinedExpression) = something(decimal_source(T, e.lhs), decimal_source(T, e.rhs), Some(nothing))
+Base.@nospecializeinfer decimal_source(@nospecialize(T), e::Aggregate) = e.func in ("SUM", "MIN", "MAX", "AVG") && e.arg !== nothing ? decimal_source(T, e.arg) : nothing
+Base.@nospecializeinfer decimal_source(@nospecialize(T), e::CombinedExpression) = something(decimal_source(T, e.lhs), decimal_source(T, e.rhs), Some(nothing))
 
 """
 A computed value (annotation or aggregate) as Julia sees it: Decimals for expressions over a
 DecimalField (rounded to its places, except for averages and arithmetic), other non-integer
 numbers as Float64.
 """
-function expr_value(@nospecialize(T), e, v)
+Base.@nospecializeinfer function expr_value(@nospecialize(T), e, v)
     v === nothing && return nothing
     if e isa Aggregate
         e.func == "ARRAY_AGG" && return v isa AbstractString ? JSON.parse(v) : v
@@ -592,7 +594,8 @@ function expr_value(@nospecialize(T), e, v)
     end
     v isa Decimal ? Float64(v) : v
 end
-function aggregate_here(qs::QuerySet{T}; kw...) where {T}
+Base.@nospecializeinfer function aggregate_here(@nospecialize(qs::QuerySet); kw...)
+    T = model_of(qs)
     isempty(kw) && throw(ArgumentError("aggregate needs at least one name = Aggregate(...)"))
     c = SQLCompiler(T)
     for (k, v) in qs.annotations

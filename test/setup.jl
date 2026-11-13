@@ -16,9 +16,8 @@ const JSON = Juango.JSON
 const TEST_DB_SETTING = get(ENV, "JUANGO_TEST_DATABASE", ":memory:")
 const IS_POSTGRES = occursin(r"^postgres(ql)?://"i, TEST_DB_SETTING)
 const IS_MYSQL = occursin(r"^(mysql|mariadb)://"i, TEST_DB_SETTING)
-# Load only the driver in use: LibPQ's dependencies invalidate thousands of compiled methods,
-# which costs every test file seconds of recompiling.
-IS_POSTGRES && import LibPQ     # loads the PostgreSQL driver extension
+# Load only the driver in use (PostgreSQL's is built in): MySQL.jl's dependencies invalidate
+# compiled methods, which costs every test file seconds of recompiling.
 IS_MYSQL && import MySQL        # loads the MySQL/MariaDB driver extension
 const TEST_DATABASE = if IS_MYSQL
     name = "juango_test_$(getpid())"
@@ -36,16 +35,15 @@ const TEST_DATABASE = if IS_MYSQL
     replace(TEST_DB_SETTING, r"^((?:mysql|mariadb)://[^/?]*)(/[^?]*)?"i => SubstitutionString("\\1/$name"))
 elseif IS_POSTGRES
     name = "juango_test_$(getpid())"
-    admin = LibPQ.Connection(TEST_DB_SETTING)
-    LibPQ.execute(admin, "SET client_min_messages TO warning")
-    LibPQ.execute(admin, "DROP DATABASE IF EXISTS $name")
-    LibPQ.execute(admin, "CREATE DATABASE $name")
-    close(admin)
+    admin = Juango.pg_connect(TEST_DB_SETTING)
+    Juango.pg_exec(admin, "DROP DATABASE IF EXISTS $name", Any[])
+    Juango.pg_exec(admin, "CREATE DATABASE $name", Any[])
+    Juango.pg_close(admin)
     atexit() do
         Juango.close_connection!()
-        c = LibPQ.Connection(TEST_DB_SETTING)
-        LibPQ.execute(c, "DROP DATABASE IF EXISTS $name WITH (FORCE)")
-        close(c)
+        c = Juango.pg_connect(TEST_DB_SETTING)
+        Juango.pg_exec(c, "DROP DATABASE IF EXISTS $name WITH (FORCE)", Any[])
+        Juango.pg_close(c)
     end
     replace(TEST_DB_SETTING, r"^(postgres(?:ql)?://[^/?]*)(/[^?]*)?" => SubstitutionString("\\1/$name"))
 else
@@ -402,7 +400,7 @@ const urlpatterns = [
     path("files/<path:rest>", (req; rest) -> HttpResponse(rest); name = "files"),
 ]
 
-configure!(DATABASE = TEST_DATABASE, ROOT_URLCONF = urlpatterns, TEMPLATE_DIRS = [TPL], TEMPLATE_CACHE_CHECK_MTIME = true, TEMPLATE_COMPILE = true,
+configure!(DATABASE = TEST_DATABASE, ROOT_URLCONF = urlpatterns, TEMPLATE_DIRS = [TPL], TEMPLATE_CACHE_CHECK_MTIME = true, TEMPLATE_COMPILE = :eager,
            PASSWORD_ITERATIONS = 1000, DEBUG = true)
 migrate(verbose = false)
 
@@ -416,7 +414,7 @@ function tr(src, ctx = Dict())
     t = Template(src)
     out = render(t, ctx)
     old = Juango.COMPILE_TEMPLATES[]          # not configure!: that would reset caches between the renders
-    Juango.COMPILE_TEMPLATES[] = false
+    Juango.COMPILE_TEMPLATES[] = :interpret
     interp = try render(t, ctx) finally Juango.COMPILE_TEMPLATES[] = old end
     out == interp || occursin("lorem", src) || error("compiled and interpreted renders differ for $(repr(src)):\n  compiled:    $(repr(out))\n  interpreted: $(repr(interp))")
     out

@@ -6,7 +6,8 @@
 INSERT (when `obj.id === nothing`) or UPDATE the object. Sets `auto_now` /
 `auto_now_add` timestamps.
 """
-function save!(obj::T; db = nothing) where {T<:Model}
+Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing)
+    T = typeof(obj)
     alias = write_db(obj, db)
     with_db(alias) do
         check_relations_db(obj)
@@ -16,12 +17,12 @@ function save!(obj::T; db = nothing) where {T<:Model}
 end
 
 "Where to write an object: `db`, else the enclosing `using_db` block, else where it came from, else the routers."
-write_db(obj::Model, db) = db !== nothing ? db : db_pinned() ? nothing : something(instance_db(obj), routed_db(typeof(obj), true), Some(nothing))
+Base.@nospecializeinfer write_db(@nospecialize(obj::Model), db) = db !== nothing ? db : db_pinned() ? nothing : something(instance_db(obj), routed_db(typeof(obj), true), Some(nothing))
 
 "Refuse to save an object whose related objects (already loaded) live in another database."
-function check_relations_db(obj::Model)
+Base.@nospecializeinfer function check_relations_db(@nospecialize(obj::Model))
     me = current_alias()
-    for (k, v) in getfield(obj, :_cache)
+    for (k, v) in (getfield(obj, :_cache)::Dict{Symbol,Any})
         v isa Model || continue
         other = instance_db(v)
         (other === nothing || other == me) && continue
@@ -32,8 +33,9 @@ function check_relations_db(obj::Model)
     end
 end
 
-function save_here!(obj::T) where {T<:Model}
-    data = getfield(obj, :_data)
+Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model))
+    T = typeof(obj)
+    data = (getfield(obj, :_data)::Dict{Symbol,Any})
     ts = timezone_now()
     for f in all_fields(T)
         a = attname(f)
@@ -58,8 +60,9 @@ function save_here!(obj::T) where {T<:Model}
 end
 
 "Read back the values the database computed: generated fields, and db_default fields just filled in."
-function refresh_computed!(obj::T) where {T<:Model}
-    data = getfield(obj, :_data)
+Base.@nospecializeinfer function refresh_computed!(@nospecialize(obj::Model))
+    T = typeof(obj)
+    data = (getfield(obj, :_data)::Dict{Symbol,Any})
     fs = [f for f in all_fields(T) if f.generated !== nothing || get(data, attname(f), nothing) === DB_DEFAULT]
     isempty(fs) && return obj
     for tbl in unique(modelmeta(f.model).table for f in fs)
@@ -74,7 +77,7 @@ function refresh_computed!(obj::T) where {T<:Model}
 end
 
 "Write the columns of one table (`M`'s own fields) for an object's data."
-function save_table!(M::Type, data, root::Bool, fresh::Bool = false)
+Base.@nospecializeinfer function save_table!(@nospecialize(M::Type), data, root::Bool, fresh::Bool = false)
     meta = modelmeta(M)
     # deferred fields keep their stored values; generated and not-yet-filled db_default ones are the database's
     fields = [f for f in meta.fields if haskey(data, attname(f)) && f.generated === nothing && data[attname(f)] !== DB_DEFAULT]
@@ -113,29 +116,31 @@ function save_table!(M::Type, data, root::Bool, fresh::Bool = false)
 end
 
 "Delete the object (and cascade to related objects)."
-function Base.delete!(obj::T; db = nothing) where {T<:Model}
+Base.@nospecializeinfer function Base.delete!(@nospecialize(obj::Model); db = nothing)
+    T = typeof(obj)
     id = obj.id
     id === nothing && error("cannot delete an unsaved $(T)")
     with_db(() -> atomic(() -> delete_rows!(T, [id])), write_db(obj, db))
-    getfield(obj, :_data)[:id] = nothing
+    (getfield(obj, :_data)::Dict{Symbol,Any})[:id] = nothing
     obj
 end
 
 "Reload field values from the database."
-function refresh!(obj::T) where {T<:Model}
+Base.@nospecializeinfer function refresh!(@nospecialize(obj::Model))
+    T = typeof(obj)
     db = instance_db(obj)
     fresh = with_db(() -> get(base_objects(T); id = obj.id), db)
-    merge!(getfield(obj, :_data), getfield(fresh, :_data))
-    empty!(getfield(obj, :_cache))
-    db === nothing || (getfield(obj, :_cache)[:__db] = db)
+    merge!((getfield(obj, :_data)::Dict{Symbol,Any}), (getfield(fresh, :_data)::Dict{Symbol,Any}))
+    empty!((getfield(obj, :_cache)::Dict{Symbol,Any}))
+    db === nothing || ((getfield(obj, :_cache)::Dict{Symbol,Any})[:__db] = db)
     obj
 end
 
 "Create and save a new object."
-create(::Type{T}; kw...) where {T<:Model} = save!(T(; kw...))
+Base.@nospecializeinfer create(@nospecialize(T::Type{<:Model}); kw...) = save!(T(; kw...))
 
 "`(obj, created::Bool)` — fetch by lookups or create with lookups + `defaults`."
-function get_or_create(::Type{T}; defaults = Dict{Symbol,Any}(), kw...) where {T<:Model}
+Base.@nospecializeinfer function get_or_create(@nospecialize(T::Type{<:Model}); defaults = Dict{Symbol,Any}(), kw...)
     atomic() do
         o = first(filter(objects(T); kw...))
         o === nothing || return (o, false)
@@ -144,7 +149,7 @@ function get_or_create(::Type{T}; defaults = Dict{Symbol,Any}(), kw...) where {T
 end
 
 "`(obj, created::Bool)` — update the object matching lookups with `defaults`, or create it."
-function update_or_create(::Type{T}; defaults = Dict{Symbol,Any}(), kw...) where {T<:Model}
+Base.@nospecializeinfer function update_or_create(@nospecialize(T::Type{<:Model}); defaults = Dict{Symbol,Any}(), kw...)
     atomic() do
         o = first(filter(objects(T); kw...))
         o === nothing && return (create(T; kw..., pairs_of(defaults)...), true)
@@ -265,7 +270,8 @@ end
 Validate an instance against its field definitions (required, max_length,
 choices, email/slug/url format, custom validators, uniqueness). Empty dict = valid.
 """
-function full_clean(obj::T; exclude = Symbol[], validate_unique::Bool = true, validate_constraints::Bool = true) where {T<:Model}
+Base.@nospecializeinfer function full_clean(@nospecialize(obj::Model); exclude = Symbol[], validate_unique::Bool = true, validate_constraints::Bool = true)
+    T = typeof(obj)
     errors = clean_fields(obj; exclude = exclude)
     # uniqueness and constraints only for fields that are clean and not excluded
     skip = union(Symbol.(exclude), keys(errors))
@@ -281,7 +287,8 @@ merge_errors!(a, b) = (foreach(((k, v),) -> append!(get!(a, k, String[]), v), b)
 Check each editable field's value on its own: required, length, format, choices, ranges and the
 field's validators (the first step of `full_clean`).
 """
-function clean_fields(obj::T; exclude = Symbol[]) where {T<:Model}
+Base.@nospecializeinfer function clean_fields(@nospecialize(obj::Model); exclude = Symbol[])
+    T = typeof(obj)
     errors = Dict{Symbol,Vector{String}}()
     for f in all_fields(T)
         (f.name in exclude || !f.editable) && continue
@@ -299,7 +306,8 @@ end
 Check `unique` fields, `unique_together` and `unique_for_date` / `_month` / `_year` against the
 other rows (Django's `Model.validate_unique`). Errors of whole-row checks are under `:__all__`.
 """
-function validate_unique(obj::T; exclude = Symbol[]) where {T<:Model}
+Base.@nospecializeinfer function validate_unique(@nospecialize(obj::Model); exclude = Symbol[])
+    T = typeof(obj)
     errors = Dict{Symbol,Vector{String}}()
     others(q) = obj.id === nothing ? q : filter(q, !Q(id = obj.id))
     vname = uppercasefirst(string(modelmeta(T).verbose_name))
@@ -340,7 +348,8 @@ Check `Meta(constraints = ...)` (`UniqueConstraint`, `CheckConstraint`, `Exclusi
 where it can be checked) for the object's values, under `:__all__` (Django's `Model.validate_constraints`).
 Constraints that use an excluded field are skipped.
 """
-function validate_constraints(obj::T; exclude = Symbol[]) where {T<:Model}
+Base.@nospecializeinfer function validate_constraints(@nospecialize(obj::Model); exclude = Symbol[])
+    T = typeof(obj)
     values = Dict{Symbol,Any}(f.name => field_data(obj, attname(f)) for f in all_fields(T) if !(f.name in exclude))
     errs = constraint_errors(T, values, obj.id)
     isempty(errs) ? Dict{Symbol,Vector{String}}() : Dict{Symbol,Vector{String}}(:__all__ => errs)
@@ -354,9 +363,10 @@ The next (or previous) object by a date or datetime field, among the rows matchi
 ties are broken by primary key (Django's `get_next_by_FOO`). Throws `DoesNotExist` at the end.
 Also `obj.get_next_by_created` and `obj.get_previous_by_created`.
 """
-get_next_by(obj::Model, field::Symbol; kw...) = adjacent_by(obj, field, true; kw...)
-get_previous_by(obj::Model, field::Symbol; kw...) = adjacent_by(obj, field, false; kw...)
-function adjacent_by(obj::T, field::Symbol, next::Bool; kw...) where {T<:Model}
+Base.@nospecializeinfer get_next_by(@nospecialize(obj::Model), field::Symbol; kw...) = adjacent_by(obj, field, true; kw...)
+Base.@nospecializeinfer get_previous_by(@nospecialize(obj::Model), field::Symbol; kw...) = adjacent_by(obj, field, false; kw...)
+Base.@nospecializeinfer function adjacent_by(@nospecialize(obj::Model), field::Symbol, next::Bool; kw...)
+    T = typeof(obj)
     f = getfield_meta(T, field)
     f.kind in (:date, :datetime) || throw(ArgumentError("get_next_by: $field isn't a date or datetime field"))
     obj.id === nothing && throw(ArgumentError("get_next_by: $T is not saved"))
@@ -371,7 +381,7 @@ function adjacent_by(obj::T, field::Symbol, next::Bool; kw...) where {T<:Model}
 end
 
 "Messages for `Meta(unique_together = ...)` sets that `values` would duplicate."
-function unique_together_errors(::Type{T}, values, id) where {T<:Model}
+Base.@nospecializeinfer function unique_together_errors(@nospecialize(T::Type{<:Model}), values, id)
     errs = String[]
     for u in modelmeta(T).unique_together
         all(n -> haskey(values, n), u) || continue

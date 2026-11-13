@@ -60,7 +60,7 @@ get_group_permissions(u::AbstractUser) = perm_strings(filter(base_objects(Permis
 
 "The permissions of a user's groups and their own (cached on the user object); superusers get every one."
 function model_permissions(u::AbstractUser)
-    get!(getfield(u, :_cache), :_perm_cache) do
+    get!((getfield(u, :_cache)::Dict{Symbol,Any}), :_perm_cache) do
         u.is_superuser ? perm_strings(base_objects(Permission)) :
             perm_strings(filter(base_objects(Permission), Q(user_set = u) | Q(group_set__user_set = u)))
     end

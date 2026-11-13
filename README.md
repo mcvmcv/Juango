@@ -273,7 +273,7 @@ aggregate(objects(Product); total = Sum(:price))[:total] # a Decimal, without bi
 round(dec"2.675"; digits = 2)                            # dec"2.68" (half to even; RoundNearestTiesAway rounds half up)
 ```
 
-- **The `Decimal` type.** `Decimal` is an exact decimal number, like Python's `decimal.Decimal`. Juango includes its own, because the Decimals package that LibPQ needs is too limited (no hashing, inexact division). `+`, `-` and `*` are exact, and `/` gives 28 significant digits. A Decimal keeps its scale: `dec"1.50"` prints as `1.50` and equals `dec"1.5"`. `round(d; digits)` rounds to exactly that many places and pads with zeros. Floats convert through their shortest form, so `Decimal(0.1) == dec"0.1"`.
+- **The `Decimal` type.** `Decimal` is an exact decimal number, like Python's `decimal.Decimal`. Juango includes its own, because the Decimals package is too limited (no hashing, inexact division). `+`, `-` and `*` are exact, and `/` gives 28 significant digits. A Decimal keeps its scale: `dec"1.50"` prints as `1.50` and equals `dec"1.5"`. `round(d; digits)` rounds to exactly that many places and pads with zeros. Floats convert through their shortest form, so `Decimal(0.1) == dec"0.1"`.
 - **Saving and loading.** Values are rounded to `decimal_places` when they are saved and loaded. `full_clean` and forms check `max_digits` and `decimal_places` with Django's messages. The form widget is a number input with `step="0.01"`.
 - **Databases.** Postgres uses `NUMERIC(p, s)` and MySQL/MariaDB `DECIMAL(p, s)`, both exact. SQLite has no exact decimal type. Its `NUMERIC` column stores values as doubles (about 15 significant digits), which is enough for amounts of money. `Sum`, `Min`, `Max` and arithmetic on decimal fields return Decimals. Other computed numbers (`Avg` of an integer field, for example) are `Float64` as before.
 - **Output.** Fixtures store decimals as strings (`"4.95"`), as Django does. Templates print them exactly, including `floatformat`, `localize` and `intcomma`. `JsonResponse` writes them as JSON numbers.
@@ -702,7 +702,7 @@ The ORM talks to the database through a `DatabaseBackend`. Each backend supplies
 configure!(DATABASE = "db.sqlite3")             # SQLite file (the default backend)
 configure!(DATABASE = ":memory:")               # in-memory SQLite
 configure!(DATABASE = "sqlite:///db.sqlite3")   # the same, as a URL
-configure!(DATABASE = "postgresql://user:pass@localhost:5432/mydb")   # PostgreSQL (needs LibPQ, below)
+configure!(DATABASE = "postgresql://user:pass@localhost:5432/mydb")   # PostgreSQL
 configure!(DATABASE = MyBackend(...))           # any DatabaseBackend instance
 ```
 
@@ -771,17 +771,14 @@ An explicit database (`using_db`, `db = ...`) beats a `using_db` block, which be
 
 #### PostgreSQL
 
-PostgreSQL goes through [LibPQ.jl](https://github.com/JuliaDatabases/LibPQ.jl). LibPQ is an optional dependency, so SQLite-only projects never install it. To use Postgres:
-
-```sh
-julia --project -e 'using Pkg; Pkg.add("LibPQ")'
-```
+PostgreSQL works out of the box: Juango talks to libpq, the PostgreSQL client library, directly (it comes with Juango as `LibPQ_jll`). Point `DATABASE` at the server:
 
 ```julia
 using Juango
-using LibPQ          # loads Juango's PostgreSQL driver
 configure!(DATABASE = "postgresql://user:pass@localhost:5432/mydb")
 ```
+
+The URL can be anything libpq accepts, including `"host=/var/run/postgresql dbname=mydb"`, and the usual `PG*` environment variables and `~/.pgpass` apply. Juango doesn't use LibPQ.jl: its dependencies invalidated thousands of compiled methods when they loaded, which made a PostgreSQL project start several times more slowly than an SQLite one. Errors other than constraint violations raise `DatabaseError(msg, sqlstate)`.
 
 The database must already exist (`createdb mydb`). `migrate()` creates the tables. Postgres uses native types: `BOOLEAN`, `TIMESTAMP`, `DATE`, `DOUBLE PRECISION`, `BIGINT` identity primary keys, and `VARCHAR(n)` for `CharField(max_length=n)`. Foreign keys become real constraints (`DEFERRABLE INITIALLY DEFERRED`). Deletes still cascade through the ORM according to `on_delete`, so `:DO_NOTHING` raises `IntegrityError` while referencing rows still exist. Case-insensitive lookups use `ILIKE`.
 
@@ -789,7 +786,7 @@ SQLite stores booleans as 0/1 and timestamps as ISO-8601 text. The ORM converts 
 
 Write raw SQL with `?` placeholders: `Juango.execute("SELECT * FROM post WHERE id = ?", [1])`. Each backend rewrites `?` into its own placeholder style. Constraint violations raise `IntegrityError` on every backend.
 
-To add a backend, subtype `Juango.DatabaseBackend`, implement the driver methods, override any dialect methods that differ from standard SQL, and call `register_backend!("scheme", url -> MyBackend(url))`. The interface is documented at the top of `src/db/connection.jl`. The implementations are in `src/db/backends/`, with the PostgreSQL and MySQL drivers in `ext/`.
+To add a backend, subtype `Juango.DatabaseBackend`, implement the driver methods, override any dialect methods that differ from standard SQL, and call `register_backend!("scheme", url -> MyBackend(url))`. The interface is documented at the top of `src/db/connection.jl`. The implementations are in `src/db/backends/` (the PostgreSQL driver is `libpq.jl`), with the MySQL driver in `ext/`.
 
 Run the test suite against another database with `JUANGO_TEST_DATABASE`:
 
@@ -1445,7 +1442,7 @@ const home = cache_page(home_view; timeout = 60)   # whole GET responses, keyed 
 
   `:serializer => :serialization` in a cache's settings uses Julia's `Serialization` instead, which stores any value. Like Django's pickle, it lets anyone who can write to the cache store (the Redis server, the cache table) make the reader construct arbitrary objects, which can lead to running code. It also can't be read by another Julia version. An entry that can't be read counts as a miss and is deleted.
 - **Page caching.** `cache_page` and the per-site `CacheMiddleware` (`CACHE_MIDDLEWARE_SECONDS`) skip responses that set cookies or vary on `Cookie`, so per-user pages aren't shared.
-- **Templates.** Templates are read once and cached when `DEBUG` is off. With `DEBUG` on, they're read again when their files change, as Django's cached loader does. `TEMPLATE_CACHE_CHECK_MTIME = true` or `false` overrides that. With `DEBUG` off, each template is also compiled into a Julia function the first time it's rendered: text, `{% if %}`, `{% for %}` and `{{ variables|filters }}` become plain Julia code, which renders about twice as fast as interpreting the parsed nodes. Other tags (custom ones included) are called as they are. `TEMPLATE_COMPILE = true` or `false` overrides the default.
+- **Templates.** Templates are read once and cached when `DEBUG` is off. With `DEBUG` on, they're read again when their files change, as Django's cached loader does. `TEMPLATE_CACHE_CHECK_MTIME = true` or `false` overrides that. With `DEBUG` off, each template is also compiled into a Julia function: text, `{% if %}`, `{% for %}` and `{{ variables|filters }}` become plain Julia code, which renders about twice as fast as interpreting the parsed nodes. Other tags (custom ones included) are called as they are. Compiling takes tens to hundreds of milliseconds per template, so it happens in a background task after a template's first render, and the template is interpreted until its function is ready; no request waits for it. `TEMPLATE_COMPILE = true` or `false` overrides the default, and `TEMPLATE_COMPILE = :eager` compiles on the first render instead.
 - **Sessions.** `SESSION_ENGINE = :cache` keeps sessions in the cache only, and `:cached_db` puts the cache in front of the database. The default is `:db`.
 
 ### Background tasks
@@ -1828,7 +1825,7 @@ src/
                 sitemaps, feeds, tasks, staticfiles, gis
   testing/      the test client and testing helpers for your own apps
   assets/       built-in templates, translations, migrations and data
-ext/            database drivers loaded on demand (LibPQ, MySQL)
+ext/            optional integrations loaded on demand (MySQL, Mustache)
 test/           Juango's own test suite: setup.jl + one file per area
 examples/blog/  a complete example app
 ```

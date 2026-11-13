@@ -62,9 +62,9 @@
                 @async Juango.execute("SELECT 1")
             end
             if IS_POSTGRES
-                other = LibPQ.Connection(TEST_DATABASE)
-                LibPQ.execute(other, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()")
-                close(other)
+                other = Juango.pg_connect(TEST_DATABASE)
+                Juango.pg_exec(other, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()", Any[])
+                Juango.pg_close(other)
             else
                 p = Juango.mysql_params(TEST_DATABASE)
                 other = MySQL.DBInterface.connect(MySQL.Connection, p.host, p.user, p.password; port = p.port, db = p.db)

@@ -253,7 +253,7 @@ function authenticate(req = nothing; kw...)
             break
         end
         if u !== nothing
-            getfield(u, :_cache)[:__auth_backend] = backend_name(b)
+            (getfield(u, :_cache)::Dict{Symbol,Any})[:__auth_backend] = backend_name(b)
             return u
         end
     end
@@ -277,7 +277,7 @@ function login!(req::Request, u::AbstractUser; backend = nothing)
     s = req.session
     s isa Session || error("login! requires SessionMiddleware")
     bname = backend !== nothing ? backend_name(backend) :
-            get(getfield(u, :_cache), :__auth_backend, backend_name(first(auth_backends())))
+            get((getfield(u, :_cache)::Dict{Symbol,Any}), :__auth_backend, backend_name(first(auth_backends())))
     if get(s, "_auth_user_id", nothing) != u.id
         s.key === nothing || cycle_key!(s)
     end

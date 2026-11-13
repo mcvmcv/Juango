@@ -187,7 +187,8 @@ end
 A GeoJSON FeatureCollection of a queryset. `properties` are field names (default: all
 non-geometry fields); each feature's `id` is the object's id.
 """
-function geojson(qs::QuerySet{T}; geometry::Symbol, properties = nothing) where {T}
+Base.@nospecializeinfer function geojson(@nospecialize(qs::QuerySet); geometry::Symbol, properties = nothing)
+    T = model_of(qs)
     props = properties === nothing ? [f.name for f in all_fields(T) if f.kind !== :geometry] : Symbol.(properties)
     feats = Any[]
     for o in qs

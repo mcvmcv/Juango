@@ -275,14 +275,29 @@ function with_scope(f, ctx::Context, d = Dict{String,Any}())
 end
 
 "Attribute/key/index lookup used by `{{ a.b.c }}`."
-function getattr(obj, part::AbstractString)
+Base.@nospecializeinfer function getattr(@nospecialize(obj), part::AbstractString)
     sym = Symbol(part)
     getattr(obj, part, sym, Val(sym), all(isdigit, part) && !isempty(part) ? parse(Int, part) + 1 : -1)
 end
 # `sym`, `val` (Val(sym)) and `idx` (1-based index, or -1) are prepared at parse time (Variable).
-function getattr(obj, part::AbstractString, sym::Symbol, val, idx::Int)
+# Dicts (the common case: context data) have their own method; everything else is compiled once,
+# with no specialization on the object or the Val, rather than per type and attribute.
+function getattr(obj::Dict{K,V}, part::AbstractString, sym::Symbol, @nospecialize(val), idx::Int) where {K,V}
+    if String <: K
+        v = get(obj, part, NOTFOUND)
+        v === NOTFOUND || return v
+    end
+    if Symbol <: K
+        v = get(obj, sym, NOTFOUND)
+        v === NOTFOUND || return v
+    end
+    getattr_other(obj, part, sym, val, idx)
+end
+getattr(@nospecialize(obj), part::AbstractString, sym::Symbol, @nospecialize(val), idx::Int) =
+    getattr_other(obj, part, sym, val, idx)
+Base.@nospecializeinfer function getattr_other(@nospecialize(obj), part::AbstractString, sym::Symbol, @nospecialize(val), idx::Int)
     (obj === nothing || obj === UNDEF) && return UNDEF
-    if obj isa AbstractDict
+    if obj isa AbstractDict && !(obj isa Dict)
         haskey(obj, part) && return obj[part]
         haskey(obj, sym) && return obj[sym]
     end
@@ -489,48 +504,116 @@ end
 # --- compiled templates --------------------------------------------------------------------------------
 #
 # With TEMPLATE_COMPILE (default: when DEBUG is off), each list of nodes a template renders (its
-# body, its blocks, an included or parent template) becomes a Julia function the first time it's
-# rendered: text is written directly, `{% if %}` and `{% for %}` become Julia branches and loops,
-# and every other node is a call to its `render!` method on a constant node, so nothing is
-# dispatched at run time. Nodes without a generator (custom tags included) keep their own
-# `render!`, so behaviour and error messages (template name and line) are the same as when
-# interpreting.
+# body, its blocks, an included or parent template) becomes a Julia function: text is written
+# directly, `{% if %}` and `{% for %}` become Julia branches and loops, and every other node is a
+# call to its `render!` method on a constant node, so nothing is dispatched at run time. Nodes
+# without a generator (custom tags included) keep their own `render!`, so behaviour and error
+# messages (template name and line) are the same as when interpreting.
+#
+# Compiling a template (Julia's type inference and code generation) takes tens to hundreds of
+# milliseconds, so by default it happens in a background task after the first render, and the
+# template is interpreted until its function is ready: no request waits for it.
+# `TEMPLATE_COMPILE = :eager` compiles on the first render instead (the tests use it, to check
+# compiled output against interpreted output).
 
 "Where compiled templates' functions live."
 module CompiledTemplates end
 
-# Compiled functions by node list identity (objectid => (weak ref to the list, function)): the
-# weak ref lets a template made from a string at run time be collected, and tells a reused
-# objectid from the list it was compiled for. Entries for collected lists are swept now and then.
-const COMPILED_NODES = Dict{UInt,Tuple{WeakRef,Any}}()
+# Compiled functions by node list identity: the weak ref lets a template made from a string at
+# run time be collected, and tells a reused objectid from the list it was compiled for. Entries
+# for collected lists are swept now and then.
+mutable struct CompiledEntry
+    nodes::WeakRef
+    f::Any                     # the function, or `nothing` while it's being compiled
+end
+const COMPILED_NODES = Dict{UInt,CompiledEntry}()
 const COMPILED_LOCK = ReentrantLock()
 const COMPILED_SWEEP = Ref(1024)
-"Whether templates are compiled: TEMPLATE_COMPILE, or by default when DEBUG is off (kept for speed)."
-const COMPILE_TEMPLATES = Ref(false)
-push!(SETTINGS_CHANGED_HOOKS, () -> (COMPILE_TEMPLATES[] = something(get(settings, :TEMPLATE_COMPILE, nothing), !settings.DEBUG)))
-compile_templates() = COMPILE_TEMPLATES[]
+"How templates run: `:interpret`, `:background` or `:eager` (from TEMPLATE_COMPILE and DEBUG; kept for speed)."
+const COMPILE_TEMPLATES = Ref(:interpret)
+function template_compile_mode()
+    v = something(get(settings, :TEMPLATE_COMPILE, nothing), !settings.DEBUG)
+    v === true ? :background : v === false ? :interpret : v === :eager ? :eager :
+        throw(ImproperlyConfigured("TEMPLATE_COMPILE must be true, false, :eager or nothing, not $(repr(v))"))
+end
+push!(SETTINGS_CHANGED_HOOKS, () -> (COMPILE_TEMPLATES[] = template_compile_mode()))
+compile_templates() = COMPILE_TEMPLATES[] !== :interpret
 
-"Render a list of nodes: through its compiled function when templates are compiled."
+"Render a list of nodes: through its compiled function when templates are compiled and it's ready."
 function run_nodes(io::IO, nodes::Vector{Node}, ctx::Context)
-    compile_templates() || return render_nodes(io, nodes, ctx)
-    Base.invokelatest(compiled_function(nodes), io, ctx)
+    mode = COMPILE_TEMPLATES[]
+    mode === :interpret && return render_nodes(io, nodes, ctx)
+    f = compiled_function(nodes, mode === :eager)
+    f === nothing ? render_nodes(io, nodes, ctx) : Base.invokelatest(f, io, ctx)
     nothing
 end
 
-"The compiled function `(io, ctx) -> nothing` for a node list, compiling it the first time."
-function compiled_function(nodes::Vector{Node})
+"""
+The compiled function `(io, ctx) -> nothing` for a node list. The first time, it's compiled
+now (`eager`) or a background task is started to compile it and `nothing` is returned.
+"""
+function compiled_function(nodes::Vector{Node}, eager::Bool = true)
     id = objectid(nodes)
     lock(COMPILED_LOCK) do
         e = get(COMPILED_NODES, id, nothing)
-        e !== nothing && e[1].value === nodes && return e[2]
+        if e !== nothing && e.nodes.value === nodes
+            (e.f !== nothing || !eager) && return e.f
+        end
         if length(COMPILED_NODES) >= COMPILED_SWEEP[]
-            filter!(kv -> kv[2][1].value !== nothing, COMPILED_NODES)
+            filter!(kv -> kv[2].nodes.value !== nothing, COMPILED_NODES)
             COMPILED_SWEEP[] = max(1024, 2 * length(COMPILED_NODES))
         end
-        f = Core.eval(CompiledTemplates, :((io::IO, ctx) -> ($(gen_nodes(nodes)); nothing)))
-        COMPILED_NODES[id] = (WeakRef(nodes), f)
-        f
+        eager && return (COMPILED_NODES[id] = CompiledEntry(WeakRef(nodes), compile_nodes(nodes))).f
+        COMPILED_NODES[id] = CompiledEntry(WeakRef(nodes), nothing)
+        put!(compile_queue(), (nodes, id))
+        nothing
     end
+end
+
+# One task compiles queued templates, one at a time, so compiling never takes more than one
+# thread from the requests.
+const COMPILE_QUEUE = Ref{Union{Nothing,Channel{Tuple{Vector{Node},UInt}}}}(nothing)
+function compile_queue()
+    q = COMPILE_QUEUE[]
+    (q !== nothing && isopen(q)) && return q
+    q = COMPILE_QUEUE[] = Channel{Tuple{Vector{Node},UInt}}(Inf)
+    errormonitor(Threads.@spawn compile_worker(q))
+    q
+end
+function compile_worker(q::Channel{Tuple{Vector{Node},UInt}})
+    for (nodes, id) in q
+        compile_in_background(nodes, id)
+    end
+end
+
+function compile_nodes(nodes::Vector{Node})
+    f = Core.eval(CompiledTemplates, :((io::IO, ctx) -> ($(gen_nodes(nodes)); nothing)))
+    precompile(f, (IOBuffer, Context))       # infer and generate its code now, not on first use
+    f
+end
+
+function compile_in_background(nodes::Vector{Node}, id::UInt)
+    f::Any = try
+        compile_nodes(nodes)
+    catch e
+        @error "Couldn't compile a template; it will be interpreted" exception = (e, catch_backtrace())
+        nothing
+    end
+    store_compiled!(nodes, id, f)
+end
+Base.@nospecializeinfer function store_compiled!(nodes::Vector{Node}, id::UInt, @nospecialize(f))
+    lock(COMPILED_LOCK)
+    try
+        e = get(COMPILED_NODES, id, nothing)
+        if f === nothing
+            e !== nothing && e.nodes.value === nodes && delete!(COMPILED_NODES, id)   # try again next time
+        elseif e !== nothing && e.nodes.value === nodes
+            e.f = f
+        end
+    finally
+        unlock(COMPILED_LOCK)
+    end
+    nothing
 end
 
 "The Julia code that renders `nodes` (with `io` and `ctx` in scope)."

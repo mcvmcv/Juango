@@ -197,3 +197,13 @@ function within(root::AbstractString, p::AbstractString)
     p = normpath(p)
     p == r || startswith(p, r * Base.Filesystem.path_separator) || (Sys.iswindows() && startswith(p, r * "/"))
 end
+
+"`Vector{Any}` with `v`'s elements, compiled once for every element type."
+Base.@nospecializeinfer function any_vector(@nospecialize(v::AbstractVector))
+    out = Vector{Any}(undef, length(v))
+    i = 0
+    for x in v
+        out[i += 1] = x
+    end
+    out
+end

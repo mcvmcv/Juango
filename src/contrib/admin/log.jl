@@ -19,7 +19,7 @@ end
 const ADDITION, CHANGE, DELETION = 1, 2, 3
 
 "Record an admin action on `obj` by `user` (`ADDITION`, `CHANGE` or `DELETION`)."
-function log_action!(user, obj::Model, flag::Integer, message::AbstractString = "")
+Base.@nospecializeinfer function log_action!(user, @nospecialize(obj::Model), flag::Integer, message::AbstractString = "")
     u = user isa AbstractUser ? user : nothing
     create(LogEntry; user = u, content_type = get_for_model(obj), object_id = pk_string(obj),
            object_repr = first(string(obj), 200), action_flag = flag,

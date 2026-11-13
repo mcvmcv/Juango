@@ -17,10 +17,10 @@
 "A model's natural key (a tuple identifying an object without its id); define a method for your models."
 natural_key(obj) = nothing
 "The object with this natural key; define a method alongside `natural_key`."
-get_by_natural_key(T::Type, args...) = throw(ArgumentError("$(nameof(T)) has no get_by_natural_key method"))
-has_natural_key(T::Type) = hasmethod(natural_key, Tuple{T}) && which(natural_key, Tuple{T}).sig != Tuple{typeof(natural_key),Any}
+Base.@nospecializeinfer get_by_natural_key(@nospecialize(T::Type), args...) = throw(ArgumentError("$(nameof(T)) has no get_by_natural_key method"))
+Base.@nospecializeinfer has_natural_key(@nospecialize(T::Type)) = hasmethod(natural_key, Tuple{T}) && which(natural_key, Tuple{T}).sig != Tuple{typeof(natural_key),Any}
 
-serial_label(T::Type) = lowercase(model_label(T))
+Base.@nospecializeinfer serial_label(@nospecialize(T::Type)) = lowercase(model_label(T))
 
 function serial_value(f::Field, v)
     v === nothing && return nothing
@@ -41,7 +41,8 @@ function serial_value(f::Field, v)
 end
 
 "One object as Django's serialized dict."
-function serialize_object(obj::T; fields = nothing, natural_foreign = false, natural_primary = false) where {T<:Model}
+Base.@nospecializeinfer function serialize_object(@nospecialize(obj::Model); fields = nothing, natural_foreign = false, natural_primary = false)
+    T = typeof(obj)
     d = Dict{String,Any}("model" => serial_label(T))
     if !natural_primary || natural_key(obj) === nothing
         pk = obj.pk
@@ -128,7 +129,7 @@ function deserialize_one(d::AbstractDict)
         m2m[f.name] = Any[resolve_ref(related_model(f), v) for v in fs[string(f.name)]]
     end
     obj = T()
-    od = getfield(obj, :_data)
+    od = (getfield(obj, :_data)::Dict{Symbol,Any})
     for (k, v) in data
         od[k] = v
     end
@@ -166,7 +167,7 @@ signals or `auto_now`, then set its many-to-many values.
 function save!(d::DeserializedObject)
     obj = d.object
     T = typeof(obj)
-    data = getfield(obj, :_data)
+    data = (getfield(obj, :_data)::Dict{Symbol,Any})
     if data[:id] === nothing && !is_composite(T)
         save_here!(obj)                                    # no pk in the fixture: a new row
     else

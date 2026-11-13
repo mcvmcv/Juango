@@ -356,7 +356,7 @@ Messages for the model's constraints that `values` (field name => value, a `Func
 `Dict`) would violate, for the object with `id` (`nothing` if unsaved). Constraints that use
 a field missing from `values` are skipped. Unique constraints are checked with a query.
 """
-function constraint_errors(::Type{T}, values, id) where {T<:Model}
+Base.@nospecializeinfer function constraint_errors(@nospecialize(T::Type{<:Model}), values, id)
     has(name) = values isa AbstractDict ? haskey(values, Symbol(name)) : true
     get_(name) = (v = values isa AbstractDict ? values[Symbol(name)] : values(name); v isa Model ? v.id : v)
     errs = String[]

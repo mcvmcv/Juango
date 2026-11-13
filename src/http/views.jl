@@ -76,7 +76,7 @@ function redirect(to, args...; permanent = false, kwargs...)
 end
 
 "Get one object or raise `Http404`."
-function get_object_or_404(qs, qargs::Q...; kw...)
+Base.@nospecializeinfer function get_object_or_404(@nospecialize(qs), qargs::Q...; kw...)
     try
         get(qs, qargs...; kw...)
     catch e
@@ -85,7 +85,7 @@ function get_object_or_404(qs, qargs::Q...; kw...)
     end
 end
 "Filter, raising `Http404` if nothing matches."
-function get_list_or_404(qs, qargs::Q...; kw...)
+Base.@nospecializeinfer function get_list_or_404(@nospecialize(qs), qargs::Q...; kw...)
     v = collect(filter(qs isa Type ? objects(qs) : qs, qargs...; kw...))
     isempty(v) && throw(Http404("No objects match the given query."))
     v
@@ -115,8 +115,9 @@ struct Paginator
     per_page::Int
     count::Int
     num_pages::Int
+    Paginator(@nospecialize(items), per_page::Int, count::Int, num_pages::Int) = new(items, per_page, count, num_pages)
 end
-function Paginator(items, per_page::Integer)
+Base.@nospecializeinfer function Paginator(@nospecialize(items), per_page::Integer)
     n = items isa QuerySet ? count(items) : length(items)
     Paginator(items, per_page, n, max(1, cld(n, per_page)))
 end
@@ -141,7 +142,7 @@ function page(p::Paginator, n)
     (1 <= num <= p.num_pages) || throw(Http404("Invalid page ($n)"))
     lo = (num - 1) * p.per_page + 1
     hi = min(num * p.per_page, p.count)
-    objs = p.items isa QuerySet ? collect(Any, p.items[lo:max(hi, lo - 1)]) : collect(Any, p.items[lo:hi])
+    objs = p.items isa QuerySet ? any_vector(fetch(p.items[lo:max(hi, lo - 1)])) : collect(Any, p.items[lo:hi])
     Page(objs, num, p, num < p.num_pages, num > 1, p.num_pages > 1,
          num < p.num_pages ? num + 1 : nothing, num > 1 ? num - 1 : nothing,
          p.count == 0 ? 0 : lo, hi, collect(1:p.num_pages))
@@ -201,7 +202,7 @@ opt(v::ViewCall, k, default = nothing) = get(v.opts, k, default)
 Build a generic view: `run(v::ViewCall)` does the work. The access options are applied as
 the matching decorators, so they run before anything else.
 """
-function generic_view(run, kind::Symbol, model, opts; label = string(kind, model === nothing ? "" : "($(nameof(model)))"))
+Base.@nospecializeinfer function generic_view(run, kind::Symbol, @nospecialize(model), opts; label = string(kind, model === nothing ? "" : "($(nameof(model)))"))
     o = Dict{Symbol,Any}(pairs(opts))
     for k in keys(o)
         k in HOOKS || k in GENERIC_OPTIONS || throw(ArgumentError("$kind: unknown option '$k'"))
@@ -325,7 +326,7 @@ function render_view(v::ViewCall, ctx::Dict{String,Any})
 end
 
 "Paginate `v.object_list` into `ctx` (object_list, <model>_list, page_obj, paginator, is_paginated)."
-function list_context!(ctx, v::ViewCall, objs; cname = v.model === nothing ? nothing : "$(model_name(v.model))_list")
+Base.@nospecializeinfer function list_context!(ctx, v::ViewCall, @nospecialize(objs); cname = v.model === nothing ? nothing : "$(model_name(v.model))_list")
     n = opt(v, :paginate_by)
     cname = something(opt(v, :context_object_name), cname, "object_list")
     if n !== nothing
@@ -466,16 +467,16 @@ function dated_queryset(v::ViewCall)
     now_ = is_datetime_field(v) ? timezone_now() : today()
     filter(qs, Q(Symbol(df, "__lte") => now_))
 end
-in_period(v, qs, lo::Date, hi::Date) =
+Base.@nospecializeinfer in_period(v, @nospecialize(qs), lo::Date, hi::Date) =
     filter(qs, Q(Symbol(date_field(v), "__gte") => bound(v, lo)) & Q(Symbol(date_field(v), "__lt") => bound(v, hi)))
-dates_of(v, qs) = Date[d for d in (local_date(x) for x in values_list(qs, date_field(v); flat = true)) if d !== nothing]
+Base.@nospecializeinfer dates_of(v, @nospecialize(qs)) = Date[d for d in (local_date(x) for x in values_list(qs, date_field(v); flat = true)) if d !== nothing]
 
 "The start of the period holding the nearest object after `hi` / before `lo` (nothing if none)."
-function next_period(v, qs, hi::Date, start)
+Base.@nospecializeinfer function next_period(v, @nospecialize(qs), hi::Date, start)
     o = first(order_by(filter(qs, Q(Symbol(date_field(v), "__gte") => bound(v, hi))), string(date_field(v))))
     o === nothing ? nothing : start(local_date(getproperty(o, date_field(v))))
 end
-function previous_period(v, qs, lo::Date, start)
+Base.@nospecializeinfer function previous_period(v, @nospecialize(qs), lo::Date, start)
     o = first(order_by(filter(qs, Q(Symbol(date_field(v), "__lt") => bound(v, lo))), "-" * string(date_field(v))))
     o === nothing ? nothing : start(local_date(getproperty(o, date_field(v))))
 end
@@ -495,7 +496,7 @@ function period_date(v::ViewCall, parts...)
     end
 end
 
-function archive_response(v::ViewCall, objs, ctx::Dict{String,Any})
+Base.@nospecializeinfer function archive_response(v::ViewCall, @nospecialize(objs), ctx::Dict{String,Any})
     nonempty = exists_any(objs)
     opt(v, :allow_empty, false) || nonempty || throw(Http404("No $(nameof(v.model)) objects available"))
     v.object_list = objs

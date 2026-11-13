@@ -41,7 +41,7 @@ CompositePrimaryKey(fields::Union{Symbol,AbstractString}...) = CompositePrimaryK
 Primary key kind of a model's table: an integer identity (`:auto` 64-bit, `:intauto` 32-bit,
 `:smallauto` 16-bit), `:uuid` (`Meta(pk = :uuid)`) or `:composite`.
 """
-function pk_kind(T::Type)
+Base.@nospecializeinfer function pk_kind(@nospecialize(T::Type))
     A = concrete_model(T)
     while (P = table_parent(A)) !== nothing
         A = P
@@ -49,7 +49,7 @@ function pk_kind(T::Type)
     meta_pk_kind(A)
 end
 "The pk kind a root model declares, or the default for its app."
-function meta_pk_kind(@nospecialize(A))
+Base.@nospecializeinfer function meta_pk_kind(@nospecialize(A))
     m = modelmeta(A)
     p = get(m.extra, :pk, nothing)
     p isa CompositePrimaryKey && return :composite
@@ -63,17 +63,17 @@ function default_pk_kind(app)
     a = get(APP_DEFS, app, nothing)
     auto_pk_kind(a === nothing || a.default_auto_field === nothing ? settings.DEFAULT_AUTO_FIELD : a.default_auto_field)
 end
-pk_value(T::Type, v) = (v === nothing || pk_kind(T) !== :uuid || v isa UUID) ? v : UUID(string(v))
+Base.@nospecializeinfer pk_value(@nospecialize(T::Type), v) = (v === nothing || pk_kind(T) !== :uuid || v isa UUID) ? v : UUID(string(v))
 
-is_composite(T::Type) = pk_kind(T) === :composite
+Base.@nospecializeinfer is_composite(@nospecialize(T::Type)) = pk_kind(T) === :composite
 "The fields of a composite primary key, in order."
-pk_fields(T::Type) = Field[getfield_meta(T, n) for n in modelmeta(concrete_model(T)).extra[:pk].fields]
+Base.@nospecializeinfer pk_fields(@nospecialize(T::Type)) = Field[getfield_meta(T, n) for n in modelmeta(concrete_model(T)).extra[:pk].fields]
 "The primary key of rows at `alias`, as SQL: `alias.id`, or a row value `(alias.a, alias.b)`."
 pk_ref(alias, T::Type) = is_composite(T) ? "(" * join([qcol(alias, column(f)) for f in pk_fields(T)], ", ") * ")" : qcol(alias, "id")
 "The primary key column(s) of rows at `alias`, for a SELECT list."
 pk_select(alias, T::Type) = is_composite(T) ? join([qcol(alias, column(f)) for f in pk_fields(T)], ", ") : qcol(alias, "id")
 "A composite key's tuple from an object's data (`nothing` if a part is missing)."
-function composite_pk(T::Type, data)
+Base.@nospecializeinfer function composite_pk(@nospecialize(T::Type), data)
     vals = Any[get(data, attname(f), nothing) for f in pk_fields(T)]
     any(isnothing, vals) ? nothing : Tuple(vals)
 end
@@ -82,7 +82,7 @@ end
 Parse a primary key from text (URLs, form values); `nothing` if it isn't one. A composite
 key is its parts as `pk_string` writes them: `"3,7"`.
 """
-function parse_pk(T::Type, s)
+Base.@nospecializeinfer function parse_pk(@nospecialize(T::Type), s)
     s isa Integer && return is_auto_pk(pk_kind(T)) ? s : nothing
     s isa UUID && return s
     s isa Tuple && return s
@@ -90,7 +90,7 @@ function parse_pk(T::Type, s)
     k === :composite && return parse_composite_pk(T, string(s))
     k === :uuid ? tryparse(UUID, string(s)) : tryparse(Int, string(s))
 end
-function parse_composite_pk(T::Type, s::AbstractString)
+Base.@nospecializeinfer function parse_composite_pk(@nospecialize(T::Type), s::AbstractString)
     fs = pk_fields(T)
     bits = split(s, ',')
     length(bits) == length(fs) || return nothing
@@ -111,7 +111,7 @@ end
 An object's primary key as text for URLs: the id, or a composite key's parts joined with
 commas (each escaped as Django's admin does: `,` becomes `_2C`).
 """
-pk_string(m::Model) = (pk = m.pk; pk isa Tuple ? join((quote_pk(string(x)) for x in pk), ",") : string(pk))
+Base.@nospecializeinfer pk_string(@nospecialize(m::Model)) = (pk = m.pk; pk isa Tuple ? join((quote_pk(string(x)) for x in pk), ",") : string(pk))
 const PK_QUOTE_CHARS = Set(":/_#?;@&=+\$,\"[]<>%\n\\")
 quote_pk(s::AbstractString) = any(in(PK_QUOTE_CHARS), s) ?
     join(c in PK_QUOTE_CHARS ? "_" * uppercase(string(UInt8(c); base = 16, pad = 2)) : string(c) for c in s) : s
@@ -122,7 +122,7 @@ How a model's fields map to row keys: `(field, row key, attribute name)` per fie
 multi-table fields are labelled per table (`__place__name`). Work it out once per query and
 pass it to `from_row` for every row.
 """
-function row_plan(@nospecialize(T::Type))
+Base.@nospecializeinfer function row_plan(@nospecialize(T::Type))::Vector{Tuple{Field,Symbol,Symbol}}
     mytable = modelmeta(T).table
     plan = Tuple{Field,Symbol,Symbol}[]
     for f in all_fields(T)
@@ -132,7 +132,7 @@ function row_plan(@nospecialize(T::Type))
     plan
 end
 
-function from_row(::Type{T}, row::Dict{Symbol,Any}, plan = row_plan(T)) where {T<:Model}
+Base.@nospecializeinfer function from_row(@nospecialize(T::Type{<:Model}), row::Dict{Symbol,Any}, plan::Vector{Tuple{Field,Symbol,Symbol}} = row_plan(T))
     composite = is_composite(T)
     data = Dict{Symbol,Any}()
     sizehint!(data, length(plan) + 1)

@@ -30,7 +30,7 @@ Run `f()` on the default thread pool as a `Task`, carrying over the caller's tas
 settings (database alias, active language and time zone). Inside a transaction it runs at
 once in this task (so it sees, and is part of, the transaction).
 """
-function run_async(@nospecialize(f))
+Base.@nospecializeinfer function run_async(@nospecialize(f))
     if in_atomic()
         r = try
             f()

@@ -16,10 +16,13 @@ A Django-style web framework in Julia. Roadmap: GitHub issues on mcvmcv/Juango.
 - **Run only the part you're working on** while developing: `test/templates.jl`, `orm.jl`,
   `forms.jl`, `views.jl`, `admin.jl`, `services.jl`, `db.jl` or `migrations.jl`, each on its
   own (they share `test/setup.jl`), under the same cap. Run the whole suite once before
-  committing: about 7 minutes on SQLite.
-- Juango has a precompile workload (`src/precompile.jl`). Loading LibPQ invalidates much of
-  it, so the tests load only the driver for the database under test. Keep it that way, and
-  avoid model-type specialization (`@nospecialize`) in model-independent ORM code.
+  committing: about 5 minutes on SQLite.
+- Juango has a precompile workload (`src/precompile.jl`). Code that takes a model, a model type
+  or a queryset is marked `Base.@nospecializeinfer` with `@nospecialize` arguments, so it's
+  compiled once in the workload instead of again for each of a project's models on its first
+  request. Keep new ORM, admin and form code that way, and avoid closures that capture a model
+  type (Julia captures its exact type). Loading MySQL.jl invalidates part of the workload, so
+  the tests load it only for MySQL; the PostgreSQL driver is Juango's own (`libpq.jl`).
 - `JUANGO_TEST_DATABASE` picks the database: unset for in-memory SQLite, or a
   `postgresql://` / `mysql://` URL. A throwaway database is created on that server and
   dropped afterwards.

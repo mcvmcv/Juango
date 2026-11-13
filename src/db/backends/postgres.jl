@@ -1,14 +1,12 @@
 # PostgreSQL backend -----------------------------------------------------------------------------
 #
-# The SQL dialect lives here, so `sqlschema` works without a driver. The driver calls come
-# from the LibPQ package extension (ext/JuangoLibPQExt.jl), which loads when the project
-# does `using LibPQ`. LibPQ is a weak dependency, so SQLite-only projects don't install it.
+# The SQL dialect. The driver (libpq through ccall) is in libpq.jl.
 
 """
     PostgresBackend(url)
 
-PostgreSQL through LibPQ.jl. Selected by `settings.DATABASE = \"postgresql://user:pass@host:5432/dbname\"`
-(or `postgres://`). The project must also do `using LibPQ`.
+PostgreSQL, through libpq. Selected by `settings.DATABASE = \"postgresql://user:pass@host:5432/dbname\"`
+(or `postgres://`, or a libpq `"host=... dbname=..."` string).
 """
 struct PostgresBackend <: DatabaseBackend
     url::String
@@ -16,29 +14,16 @@ end
 
 vendor(::PostgresBackend) = "PostgreSQL"
 
-# Implemented by the LibPQ extension:
-#   pg_connect(url) -> conn
+# The driver (libpq.jl):
+#   pg_connect(url) -> PGConn
 #   pg_close(conn)
 #   pg_exec(conn, sql, params) -> (rows::Vector{Dict{Symbol,Any}}, affected::Int)
-# pg_exec throws IntegrityError for constraint violations.
-function pg_connect end
-function pg_close end
-function pg_exec end
-
-function open_connection(b::PostgresBackend)
-    if isempty(methods(pg_connect))
-        throw(ImproperlyConfigured("the PostgreSQL backend needs LibPQ.jl. Add it to your project " *
-                                   "(julia --project -e 'using Pkg; Pkg.add(\"LibPQ\")') and put `using LibPQ` " *
-                                   "next to `using Juango`."))
-    end
-    pg_connect(b.url)
-end
+# pg_exec throws IntegrityError for constraint violations and DatabaseError for other errors.
+open_connection(b::PostgresBackend) = pg_connect(b.url)
 close_connection(::PostgresBackend, conn) = pg_close(conn)
 supports_pooling(::PostgresBackend) = true
 connection_usable(::PostgresBackend, conn) = pg_usable(conn)
 ping(::PostgresBackend, conn) = pg_ping(conn)
-function pg_usable end
-function pg_ping end
 
 driver_rows(::PostgresBackend, conn, sql, params) = pg_exec(conn, sql, params)[1]
 driver_rowcount(::PostgresBackend, conn, sql, params) = pg_exec(conn, sql, params)[2]

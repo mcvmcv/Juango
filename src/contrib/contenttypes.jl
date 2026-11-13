@@ -33,7 +33,7 @@ push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> empty!(CT_CACHE), CT_LOCK))
 The content type of a model (created on first use). Proxy models share their concrete
 model's content type.
 """
-function get_for_model(T::Type)
+Base.@nospecializeinfer function get_for_model(@nospecialize(T::Type))
     C = concrete_model(T)
     key = (current_alias(), C)
     ct = lock(() -> get(CT_CACHE, key, nothing), CT_LOCK)
@@ -42,7 +42,7 @@ function get_for_model(T::Type)
     ct = first(get_or_create(ContentType; app_label = m.app, model = lowercase(m.name)))
     lock(() -> get!(CT_CACHE, key, ct), CT_LOCK)
 end
-get_for_model(obj::Model) = get_for_model(typeof(obj))
+Base.@nospecializeinfer get_for_model(@nospecialize(obj::Model)) = get_for_model(typeof(obj))
 
 "The model class a content type stands for, or `nothing` if it no longer exists."
 function model_class(ct::ContentType)
@@ -83,13 +83,13 @@ post deletes them.
 GenericRelation(to; content_type_field = :content_type, object_id_field = :object_id) =
     Field(:grel; related = to, through = (Symbol(content_type_field), Symbol(object_id_field)), editable = false, blank = true)
 
-generic_fks(T::Type) = get(modelmeta(concrete_model(T)).extra, :generic_fks, Field[])
-generic_relations(T::Type) = get(modelmeta(concrete_model(T)).extra, :generic_relations, Field[])
+Base.@nospecializeinfer generic_fks(@nospecialize(T::Type)) = get(modelmeta(concrete_model(T)).extra, :generic_fks, Field[])
+Base.@nospecializeinfer generic_relations(@nospecialize(T::Type)) = get(modelmeta(concrete_model(T)).extra, :generic_relations, Field[])
 find_generic(list, name) = (i = findfirst(f -> string(f.name) == string(name), list); i === nothing ? nothing : list[i])
 
-function get_generic(m::Model, f::Field)
+Base.@nospecializeinfer function get_generic(@nospecialize(m::Model), f::Field)
     ctf, fkf = f.related
-    data, cache = getfield(m, :_data), getfield(m, :_cache)
+    data, cache = (getfield(m, :_data)::Dict{Symbol,Any}), (getfield(m, :_cache)::Dict{Symbol,Any})
     ctid, oid = data[Symbol(ctf, :_id)], data[fkf]
     (ctid === nothing || oid === nothing) && return nothing
     c = get(cache, f.name, nothing)
@@ -101,33 +101,33 @@ function get_generic(m::Model, f::Field)
     obj
 end
 
-function set_generic!(m::Model, f::Field, v)
+Base.@nospecializeinfer function set_generic!(@nospecialize(m::Model), f::Field, v)
     ctf, fkf = f.related
-    data = getfield(m, :_data)
+    data = (getfield(m, :_data)::Dict{Symbol,Any})
     if v === nothing
         data[Symbol(ctf, :_id)] = nothing
         data[fkf] = nothing
-        delete!(getfield(m, :_cache), f.name)
+        delete!((getfield(m, :_cache)::Dict{Symbol,Any}), f.name)
     else
         v.id === nothing && throw(ArgumentError("save the $(typeof(v)) before pointing a generic relation at it"))
         data[Symbol(ctf, :_id)] = get_for_model(v).id
         data[fkf] = v.id
-        getfield(m, :_cache)[f.name] = v
+        (getfield(m, :_cache)::Dict{Symbol,Any})[f.name] = v
     end
     v
 end
 
-function generic_queryset(m::Model, f::Field)
+Base.@nospecializeinfer function generic_queryset(@nospecialize(m::Model), f::Field)
     ctf, fkf = f.through
     M = related_model(f)
-    filter(objects(M), Q(Symbol(ctf, :_id) => get_for_model(m).id), Q(fkf => getfield(m, :_data)[:id]))
+    filter(objects(M), Q(Symbol(ctf, :_id) => get_for_model(m).id), Q(fkf => (getfield(m, :_data)::Dict{Symbol,Any})[:id]))
 end
 
 function prefetch_generic_fk!(objs::Vector, f::Field)
     ctf, fkf = f.related
     bytype = Dict{Any,Vector{Any}}()
     for o in objs
-        d = getfield(o, :_data)
+        d = (getfield(o, :_data)::Dict{Symbol,Any})
         (d[Symbol(ctf, :_id)] === nothing || d[fkf] === nothing) && continue
         push!(get!(() -> Any[], bytype, d[Symbol(ctf, :_id)]), d[fkf])
     end
@@ -142,9 +142,9 @@ function prefetch_generic_fk!(objs::Vector, f::Field)
         end
     end
     for o in objs
-        d = getfield(o, :_data)
+        d = (getfield(o, :_data)::Dict{Symbol,Any})
         r = get(found, (d[Symbol(ctf, :_id)], d[fkf]), nothing)
-        r === nothing || (getfield(o, :_cache)[f.name] = r)
+        r === nothing || ((getfield(o, :_cache)::Dict{Symbol,Any})[f.name] = r)
     end
     out
 end
@@ -157,10 +157,10 @@ function prefetch_generic_relation!(objs::Vector, f::Field, qs, to_attr)
                         Q(Symbol(fkf, "__in") => [o.id for o in objs])))
     groups = Dict{Any,Vector{M}}()
     for r in rows
-        push!(get!(() -> M[], groups, getfield(r, :_data)[fkf]), r)
+        push!(get!(() -> M[], groups, (getfield(r, :_data)::Dict{Symbol,Any})[fkf]), r)
     end
     for o in objs
-        getfield(o, :_cache)[something(to_attr, f.name)] = PrefetchedList(get(groups, o.id, M[]))
+        (getfield(o, :_cache)::Dict{Symbol,Any})[something(to_attr, f.name)] = PrefetchedList(get(groups, o.id, M[]))
     end
     rows
 end

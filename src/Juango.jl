@@ -18,6 +18,8 @@ using UUIDs
 import Sockets
 import Serialization
 import TimeZones
+import FileWatching
+using LibPQ_jll: LIBPQ_HANDLE
 import HTTP
 import URIs
 import CodecZlib
@@ -57,6 +59,7 @@ include("core/signing.jl")
 include("db/connection.jl")
 include("db/backends/sqlite.jl")
 include("db/backends/postgres.jl")
+include("db/backends/libpq.jl")
 include("db/backends/mysql.jl")
 include("i18n/timezones.jl")
 include("template/humanize.jl")

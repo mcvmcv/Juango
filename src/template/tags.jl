@@ -237,6 +237,18 @@ function tattr(l::ForLoop, ::Val{S}) where {S}
     S in (:counter, :counter0, :revcounter, :revcounter0, :first, :last, :length, :parentloop) ? getfield(l, S) : NOTFOUND
 end
 Base.getindex(l::ForLoop, k::AbstractString) = getfield(l, Symbol(k))     # forloop["counter"], as with the old Dict
+# `{{ forloop.counter }}` is looked up on every iteration: no dispatch on the Val
+function getattr(l::ForLoop, part::AbstractString, sym::Symbol, @nospecialize(val), idx::Int)
+    sym === :counter && return l.counter
+    sym === :counter0 && return l.counter0
+    sym === :first && return l.first
+    sym === :last && return l.last
+    sym === :revcounter && return l.revcounter
+    sym === :revcounter0 && return l.revcounter0
+    sym === :length && return l.length
+    sym === :parentloop && return l.parentloop
+    getattr_other(l, part, sym, val, idx)
+end
 
 render!(io::IO, n::ForNode, ctx::Context) =
     run_for(io, n, ctx, (io, ctx) -> render_nodes(io, n.body, ctx), (io, ctx) -> render_nodes(io, n.empty, ctx))

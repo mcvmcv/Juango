@@ -36,7 +36,7 @@ ForeignObject(to; from_fields, to_fields = nothing, on_delete = :CASCADE, relate
     Field(:fobj; related = to, through = (Symbol[Symbol(x) for x in from_fields], to_fields === nothing ? nothing : Symbol[Symbol(x) for x in to_fields]),
           on_delete = on_delete, related_name = related_name === nothing ? nothing : Symbol(related_name), editable = false, blank = true)
 
-foreign_objects(T::Type) = get(modelmeta(concrete_model(T)).extra, :foreign_objects, Field[])
+Base.@nospecializeinfer foreign_objects(@nospecialize(T::Type)) = get(modelmeta(concrete_model(T)).extra, :foreign_objects, Field[])
 
 "(this model's attname, its column, the target's attname, its column) for each part of a ForeignObject."
 function fobj_parts(f::Field)
@@ -50,7 +50,8 @@ function fobj_parts(f::Field)
 end
 
 "ForeignObjects pointing at `T`: `(accessor name, model, field)`."
-reverse_foreign_objects(T::Type) = cached_relations(:fobj_reverse, T) do T
+Base.@nospecializeinfer reverse_foreign_objects(@nospecialize(T::Type)) = cached_relations(compute_reverse_fobjs, :fobj_reverse, T)
+Base.@nospecializeinfer function compute_reverse_fobjs(@nospecialize(T::Type))
     out = Tuple{Symbol,Any,Field}[]
     for M in MODEL_LIST, f in foreign_objects(M)
         concrete_model(related_model(f)) === concrete_model(T) || continue
@@ -58,34 +59,34 @@ reverse_foreign_objects(T::Type) = cached_relations(:fobj_reverse, T) do T
     end
     out
 end
-find_reverse_fobj(T::Type, name) = (i = findfirst(r -> string(r[1]) == string(name), reverse_foreign_objects(T));
+Base.@nospecializeinfer find_reverse_fobj(@nospecialize(T::Type), name) = (i = findfirst(r -> string(r[1]) == string(name), reverse_foreign_objects(T));
                                     i === nothing ? nothing : reverse_foreign_objects(T)[i])
 
-function get_fobj(m::Model, f::Field)
+Base.@nospecializeinfer function get_fobj(@nospecialize(m::Model), f::Field)
     parts = fobj_parts(f)
     vals = Any[field_data(m, p[1]) for p in parts]
     any(isnothing, vals) && return nothing
-    cache = getfield(m, :_cache)
+    cache = (getfield(m, :_cache)::Dict{Symbol,Any})
     c = get(cache, f.name, nothing)
-    c !== nothing && all(getfield(c, :_data)[p[3]] == v for (p, v) in zip(parts, vals)) && return c
+    c !== nothing && all((getfield(c, :_data)::Dict{Symbol,Any})[p[3]] == v for (p, v) in zip(parts, vals)) && return c
     M = related_model(f)
     obj = with_db(() -> first(filter(base_objects(M), (Q(p[3] => v) for (p, v) in zip(parts, vals))...)), instance_db(m))
     obj === nothing || (cache[f.name] = obj)
     obj
 end
 
-function set_fobj!(m::Model, f::Field, v)
-    data = getfield(m, :_data)
+Base.@nospecializeinfer function set_fobj!(@nospecialize(m::Model), f::Field, v)
+    data = (getfield(m, :_data)::Dict{Symbol,Any})
     for p in fobj_parts(f)
-        data[p[1]] = v === nothing ? nothing : getfield(v, :_data)[p[3]]
+        data[p[1]] = v === nothing ? nothing : (getfield(v, :_data)::Dict{Symbol,Any})[p[3]]
     end
-    v === nothing ? delete!(getfield(m, :_cache), f.name) : (getfield(m, :_cache)[f.name] = v)
+    v === nothing ? delete!((getfield(m, :_cache)::Dict{Symbol,Any}), f.name) : ((getfield(m, :_cache)::Dict{Symbol,Any})[f.name] = v)
     v
 end
 
 "The rows of `M` whose ForeignObject `f` points at `m`."
-function fobj_queryset(m::Model, M::Type, f::Field)
-    data = getfield(m, :_data)
+Base.@nospecializeinfer function fobj_queryset(@nospecialize(m::Model), M::Type, f::Field)
+    data = (getfield(m, :_data)::Dict{Symbol,Any})
     chain(filter(objects(M), (Q(p[1] => data[p[3]]) for p in fobj_parts(f))...); db = instance_db(m))
 end
 
@@ -106,7 +107,7 @@ function compile_fobj_lookup(c::SQLCompiler, alias, g::Field, M::Type, rest, loo
         return (truthy(value) ? "NOT " * ex : ex, Any[])
     elseif isempty(rest) && lookup == "exact" && !reverse && (value isa Model || value === nothing)
         value === nothing && return compile_fobj_lookup(c, alias, g, M, rest, "isnull", true, negated, reverse, key)
-        return compile_q(c, alias, g.model, Q(:AND, Any[p[1] => getfield(value, :_data)[p[3]] for p in parts], false), negated)
+        return compile_q(c, alias, g.model, Q(:AND, Any[p[1] => (getfield(value, :_data)::Dict{Symbol,Any})[p[3]] for p in parts], false), negated)
     end
     subkey = join(vcat(isempty(rest) ? ["pk"] : rest, lookup), "__")
     if negated
@@ -124,22 +125,22 @@ function compile_fobj_lookup(c::SQLCompiler, alias, g::Field, M::Type, rest, loo
 end
 
 "The rows of `M` whose ForeignObject `f` points at the `T` rows with these keys (nothing if none can)."
-function fobj_referrers(@nospecialize(T), @nospecialize(M), f::Field, keys::Vector)
+Base.@nospecializeinfer function fobj_referrers(@nospecialize(T), @nospecialize(M), f::Field, keys::Vector)
     doomed = fetch(filter(base_objects(T); pk__in = keys))
     isempty(doomed) && return nothing
     parts = fobj_parts(f)
-    filter(base_objects(M), reduce(|, [Q(:AND, Any[p[1] => getfield(o, :_data)[p[3]] for p in parts], false) for o in doomed]))
+    filter(base_objects(M), reduce(|, [Q(:AND, Any[p[1] => (getfield(o, :_data)::Dict{Symbol,Any})[p[3]] for p in parts], false) for o in doomed]))
 end
 
 "Apply `on_delete` to the rows whose ForeignObjects point at `T` rows with these keys."
-function delete_fobj_refs!(T::Type, keys::Vector)
+Base.@nospecializeinfer function delete_fobj_refs!(@nospecialize(T::Type), keys::Vector)
     rels = reverse_foreign_objects(T)
     isempty(rels) && return nothing
     doomed = fetch(filter(base_objects(T); pk__in = keys))
     isempty(doomed) && return nothing
     for (_, M, f) in rels
         parts = fobj_parts(f)
-        conds = [Q(:AND, Any[p[1] => getfield(o, :_data)[p[3]] for p in parts], false) for o in doomed]
+        conds = [Q(:AND, Any[p[1] => (getfield(o, :_data)::Dict{Symbol,Any})[p[3]] for p in parts], false) for o in doomed]
         rel = filter(base_objects(M), reduce(|, conds))
         if f.on_delete === :CASCADE || f.on_delete === :RESTRICT
             delete_ids!(M, row_keys(rel))

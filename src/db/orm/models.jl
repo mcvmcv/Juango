@@ -27,8 +27,18 @@ const RELATION_CACHE = Dict{Tuple{Symbol,Any},Any}()
 const RELATION_LOCK = ReentrantLock()
 invalidate_relations!() = (lock(() -> empty!(RELATION_CACHE), RELATION_LOCK); nothing)
 push!(SETTINGS_CHANGED_HOOKS, invalidate_relations!)
-cached_relations(f, kind::Symbol, @nospecialize(T)) =
-    lock(() -> get!(() -> f(T), RELATION_CACHE, (kind, T)), RELATION_LOCK)
+# (No closures over `T`: they'd capture its exact type, and compile again for every model.)
+Base.@nospecializeinfer function cached_relations(@nospecialize(f), kind::Symbol, @nospecialize(T))
+    key = (kind, T)
+    lock(RELATION_LOCK)
+    try
+        v = get(RELATION_CACHE, key, NOTFOUND)
+        v === NOTFOUND || return v
+        return RELATION_CACHE[key] = f(T)
+    finally
+        unlock(RELATION_LOCK)
+    end
+end
 
 """
 App a model belongs to for migrations: `Meta(app_label=...)`, else `\"juango\"` for Juango's
@@ -37,7 +47,7 @@ built-in models, the label of the `App` whose module defines it, or `\"project\"
 default_app_label(T) = parentmodule(T) === (@__MODULE__) ? "juango" : something(module_app_label(parentmodule(T)), "project")
 
 "Remove a model from the registry (mostly for tests that redefine models)."
-function unregister_model!(T::Type)
+Base.@nospecializeinfer function unregister_model!(@nospecialize(T::Type))
     delete!(MODEL_REGISTRY, T)
     filter!(x -> x !== T, MODEL_LIST)
     invalidate_relations!()
@@ -100,7 +110,7 @@ function parse_model_body(body)
 end
 
 "Abstract models above `T`, outermost first."
-function abstract_bases(T::Type)
+Base.@nospecializeinfer function abstract_bases(@nospecialize(T::Type))
     out = Any[]
     S = supertype(T)
     while S !== Any
@@ -111,7 +121,7 @@ function abstract_bases(T::Type)
 end
 
 "Metadata for a model type."
-function modelmeta(T::Type)
+Base.@nospecializeinfer function modelmeta(@nospecialize(T::Type))
     m = get(MODEL_REGISTRY, T, nothing)
     m === nothing && error("$T is not a registered model")
     m
@@ -128,11 +138,11 @@ function findfield(meta::ModelMeta, name::Symbol)
 end
 
 "The model that owns `T`'s table (a proxy's concrete model, else `T`)."
-concrete_model(T::Type) = (m = modelmeta(T); m.proxy ? concrete_model(m.parent) : T)
+Base.@nospecializeinfer concrete_model(@nospecialize(T::Type)) = (m = modelmeta(T); m.proxy ? concrete_model(m.parent) : T)
 "Multi-table parent of `T` (not for proxies), or `nothing`."
-table_parent(T::Type) = (m = modelmeta(concrete_model(T)); m.parent)
+Base.@nospecializeinfer table_parent(@nospecialize(T::Type)) = (m = modelmeta(concrete_model(T)); m.parent)
 "Multi-table ancestors of `T`, nearest first."
-function ancestors(T::Type)
+Base.@nospecializeinfer function ancestors(@nospecialize(T::Type))
     out = Any[]
     P = table_parent(T)
     while P !== nothing
@@ -142,13 +152,12 @@ function ancestors(T::Type)
     out
 end
 "`T`, its proxy target and its multi-table ancestors: every model whose rows `T`'s rows also are."
-lineage(T::Type) = unique(vcat([T, concrete_model(T)], ancestors(T)))
+Base.@nospecializeinfer lineage(@nospecialize(T::Type)) = unique(vcat(Any[T, concrete_model(T)], ancestors(T)))
 "Multi-table children of `T` (models whose table extends `T`'s)."
-child_models(T::Type) = cached_relations(:children, T) do T
-    Any[C for C in MODEL_LIST if (m = modelmeta(C); !m.proxy && m.parent === concrete_model(T))]
-end
+Base.@nospecializeinfer child_models(@nospecialize(T::Type)) = cached_relations(compute_child_models, :children, T)
+Base.@nospecializeinfer compute_child_models(@nospecialize(T::Type)) = Any[C for C in MODEL_LIST if (m = modelmeta(C); !m.proxy && m.parent === concrete_model(T))]
 "All fields of `T` including inherited multi-table fields, ancestors' first."
-function all_fields(T::Type)
+Base.@nospecializeinfer function all_fields(@nospecialize(T::Type))
     C = concrete_model(T)
     P = table_parent(C)
     P === nothing ? modelmeta(C).fields : vcat(all_fields(P), modelmeta(C).fields)
@@ -156,8 +165,8 @@ end
 "Name of the accessor from a parent instance to its multi-table child (`place.restaurant`)."
 child_accessor(C::Type) = Symbol(lowercase(modelmeta(C).name))
 "Name of the accessor from a child to its parent instance (`restaurant.place_ptr`)."
-parent_accessor(T::Type) = Symbol(lowercase(modelmeta(table_parent(T)).name), :_ptr)
-function getfield_meta(T::Type, name::Symbol)
+Base.@nospecializeinfer parent_accessor(@nospecialize(T::Type)) = Symbol(lowercase(modelmeta(table_parent(T)).name), :_ptr)
+Base.@nospecializeinfer function getfield_meta(@nospecialize(T::Type), name::Symbol)
     f = findfield(modelmeta(T), name)
     f === nothing && throw(LookupError("$T has no field named '$name'"))
     f
@@ -174,7 +183,7 @@ function related_model(f::Field)
     error("ForeignKey target '$r' is not a registered model")
 end
 
-function register_model!(T::Type, fields::Vector, meta::NamedTuple = NamedTuple())
+Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields::Vector, meta::NamedTuple = NamedTuple())
     # inherited from abstract models: their fields come first, their Meta options are defaults
     inherited = Pair{Symbol,Any}[]
     for S in abstract_bases(T)
@@ -247,7 +256,7 @@ end
 target_name(f::Field, owner) = f.related === :self ? string(nameof(owner)) :
                                f.related isa Type ? string(nameof(f.related)) : string(f.related)
 
-function make_through_model(T::Type, m::ModelMeta, f::Field)
+Base.@nospecializeinfer function make_through_model(@nospecialize(T::Type), m::ModelMeta, f::Field)
     table = m.table * "_" * string(f.name)
     tname = target_name(f, T)
     src, dst = lowercase(m.name), lowercase(tname)
@@ -294,8 +303,8 @@ reverse_name(fk::Field) = fk.related_name !== nothing ? fk.related_name :
     fk.one_to_one ? Symbol(lowercase(modelmeta(fk.model).name)) : Symbol(lowercase(modelmeta(fk.model).name), :_set)
 
 "Many-to-many relations reachable from `T`: (name, field, forward::Bool)."
-m2m_relations(T::Type) = cached_relations(compute_m2m_relations, :m2m, T)
-function compute_m2m_relations(T::Type)
+Base.@nospecializeinfer m2m_relations(@nospecialize(T::Type)) = cached_relations(compute_m2m_relations, :m2m, T)
+Base.@nospecializeinfer function compute_m2m_relations(@nospecialize(T::Type))
     out = Tuple{Symbol,Field,Bool}[]
     for f in modelmeta(T).m2m
         push!(out, (f.name, f, true))
@@ -307,7 +316,7 @@ function compute_m2m_relations(T::Type)
     end
     out
 end
-function find_m2m(T::Type, name)
+Base.@nospecializeinfer function find_m2m(@nospecialize(T::Type), name)
     for r in m2m_relations(T)
         string(r[1]) == name && return r
     end
@@ -367,10 +376,10 @@ function default_value(f::Field)
     nothing
 end
 
-function construct(::Type{T}; kwargs...) where {T<:Model}
+Base.@nospecializeinfer function construct(@nospecialize(T::Type{<:Model}); kwargs...)
     meta = modelmeta(T)
     obj = T(Dict{Symbol,Any}(:id => nothing), Dict{Symbol,Any}())
-    data = getfield(obj, :_data)
+    data = (getfield(obj, :_data)::Dict{Symbol,Any})
     kw = Dict{Symbol,Any}(kwargs)
     haskey(kw, :pk) && (kw[:id] = pop!(kw, :pk))
     haskey(kw, :id) && (data[:id] = pop!(kw, :id))
@@ -394,8 +403,8 @@ function construct(::Type{T}; kwargs...) where {T<:Model}
 end
 
 "Reverse FK relations pointing at model `T`: Vector of (name, Model, Field)."
-reverse_relations(T::Type) = cached_relations(compute_reverse_relations, :reverse, T)
-function compute_reverse_relations(T::Type)
+Base.@nospecializeinfer reverse_relations(@nospecialize(T::Type)) = cached_relations(compute_reverse_relations, :reverse, T)
+Base.@nospecializeinfer function compute_reverse_relations(@nospecialize(T::Type))
     out = Tuple{Symbol,Any,Field}[]
     lin = lineage(T)
     for M in MODEL_LIST
@@ -413,8 +422,8 @@ end
 The stored value of a concrete field (by attribute name), loading the object's deferred
 fields (see `only`/`defer`) with one query if it isn't loaded yet.
 """
-function field_data(m::Model, a::Symbol)
-    data = getfield(m, :_data)
+Base.@nospecializeinfer function field_data(@nospecialize(m::Model), a::Symbol)
+    data = (getfield(m, :_data)::Dict{Symbol,Any})
     v = get(data, a, NOTFOUND)
     v === NOTFOUND || return v
     load_deferred!(m)
@@ -422,9 +431,9 @@ function field_data(m::Model, a::Symbol)
 end
 
 "Fetch an object's unloaded fields from the database (keeping the values already loaded)."
-function load_deferred!(m::Model)
+Base.@nospecializeinfer function load_deferred!(@nospecialize(m::Model))
     T = typeof(m)
-    data = getfield(m, :_data)
+    data = (getfield(m, :_data)::Dict{Symbol,Any})
     data[:id] === nothing && throw(ArgumentError("$(nameof(T)) has no value for a deferred field and isn't saved"))
     fresh = getfield(with_db(() -> get(base_objects(T); id = data[:id]), instance_db(m)), :_data)
     for (k, v) in fresh
@@ -434,12 +443,16 @@ function load_deferred!(m::Model)
 end
 
 "The fields of an object that `only`/`defer` (or `raw`) left unloaded."
-deferred_fields(m::Model) = Symbol[attname(f) for f in all_fields(typeof(m)) if !haskey(getfield(m, :_data), attname(f))]
+Base.@nospecializeinfer deferred_fields(@nospecialize(m::Model)) = Symbol[attname(f) for f in all_fields(typeof(m)) if !haskey((getfield(m, :_data)::Dict{Symbol,Any}), attname(f))]
 
-function Base.getproperty(m::Model, s::Symbol)
-    data = getfield(m, :_data)
-    v = get(data, s, NOTFOUND)
-    v === NOTFOUND || return v
+# A field's value is a lookup in the object's Dict; everything else (relations, display
+# values, ...) goes through `model_property`, compiled once for every model.
+function Base.getproperty(m::Model, s::Symbol)        # small: compiled per model
+    v = get((getfield(m, :_data)::Dict{Symbol,Any}), s, NOTFOUND)
+    v === NOTFOUND ? model_property(m, s) : v
+end
+Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symbol)
+    data = (getfield(m, :_data)::Dict{Symbol,Any})
     s === :pk && return data[:id]
     s in (:_data, :_cache) && return getfield(m, s)
     T = typeof(m)
@@ -448,14 +461,14 @@ function Base.getproperty(m::Model, s::Symbol)
     if f !== nothing && f.kind === :fk
         id = field_data(m, attname(f))
         id === nothing && return nothing
-        cache = getfield(m, :_cache)
+        cache = (getfield(m, :_cache)::Dict{Symbol,Any})
         c = get(cache, s, nothing)
-        (c !== nothing && getfield(c, :_data)[:id] == id) && return c
+        (c !== nothing && (getfield(c, :_data)::Dict{Symbol,Any})[:id] == id) && return c
         obj = with_db(() -> get(base_objects(related_model(f)); id = id), instance_db(m))
         cache[s] = obj
         return obj
     end
-    cache = getfield(m, :_cache)
+    cache = (getfield(m, :_cache)::Dict{Symbol,Any})
     pre = get(cache, s, NOTFOUND)
     g = find_generic(generic_fks(T), s)
     g === nothing || return get_generic(m, g)
@@ -503,8 +516,8 @@ function Base.getproperty(m::Model, s::Symbol)
     throw(ArgumentError("$(T) has no attribute '$s'"))
 end
 
-function Base.setproperty!(m::Model, s::Symbol, v)
-    data = getfield(m, :_data)
+Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::Symbol, @nospecialize(v))
+    data = (getfield(m, :_data)::Dict{Symbol,Any})
     s === :pk && (s = :id)
     g = find_generic(generic_fks(typeof(m)), s)
     g === nothing || return set_generic!(m, g, v)
@@ -514,10 +527,10 @@ function Base.setproperty!(m::Model, s::Symbol, v)
     if f !== nothing && f.kind === :fk && s === f.name
         if v === nothing
             data[attname(f)] = nothing
-            delete!(getfield(m, :_cache), s)
+            delete!((getfield(m, :_cache)::Dict{Symbol,Any}), s)
         elseif v isa Model
-            data[attname(f)] = getfield(v, :_data)[:id]
-            getfield(m, :_cache)[s] = v
+            data[attname(f)] = (getfield(v, :_data)::Dict{Symbol,Any})[:id]
+            (getfield(m, :_cache)::Dict{Symbol,Any})[s] = v
         else
             data[attname(f)] = v
         end
@@ -530,12 +543,20 @@ end
 coerce_value(f::Field, v) = v
 coerce_value(f::Field, v::SafeString) = v.s
 
+# `{{ obj.field }}`: a model's fields are a Dict lookup (relations and the rest go the long way, through getattr_other)
+Base.@nospecializeinfer function getattr(@nospecialize(obj::Model), part::AbstractString, sym::Symbol, @nospecialize(val), idx::Int)
+    v = get((getfield(obj, :_data)::Dict{Symbol,Any}), sym, NOTFOUND)
+    v === NOTFOUND ? getattr_other(obj, part, sym, val, idx) : v
+end
+
 # The same for every instance of a model, so worked out once per model (with the relations).
-Base.propertynames(m::Model, private::Bool = false) = propertynames_of(typeof(m))
+Base.@nospecializeinfer Base.propertynames(@nospecialize(m::Model), private::Bool = false) = propertynames_of(typeof(m))
 # `{{ obj.attr }}` asks this for each lookup that isn't a field
-Base.hasproperty(m::Model, s::Symbol) = s in (cached_relations(T -> Set{Symbol}(propertynames_of(T)), :propertyset, typeof(m))::Set{Symbol})
-propertynames_of(@nospecialize(T)) = cached_relations(compute_propertynames, :propertynames, T)
-function compute_propertynames(@nospecialize(T))
+Base.@nospecializeinfer Base.hasproperty(@nospecialize(m::Model), s::Symbol) = s in (cached_relations(property_set, :propertyset, typeof(m))::Set{Symbol})
+Base.@nospecializeinfer propertynames_of(@nospecialize(T)) = cached_relations(compute_propertynames, :propertynames, T)
+Base.@nospecializeinfer compute_propertynames(@nospecialize(T)) = Tuple(property_list(T))
+Base.@nospecializeinfer property_set(@nospecialize(T)) = Set{Symbol}(property_list(T))
+Base.@nospecializeinfer function property_list(@nospecialize(T))
     names = Symbol[:id, :pk]
     for f in all_fields(T)
         push!(names, attname(f))
@@ -549,11 +570,11 @@ function compute_propertynames(@nospecialize(T))
     append!(names, [g.name for g in vcat(generic_fks(T), generic_relations(T), foreign_objects(T))])
     append!(names, first.(reverse_foreign_objects(T)))
     table_parent(T) === nothing || push!(names, parent_accessor(T))
-    Tuple(names)
+    names
 end
 
-Base.:(==)(a::Model, b::Model) = typeof(a) === typeof(b) && a.id !== nothing && a.id == b.id
-Base.hash(m::Model, h::UInt) = m.id === nothing ? objectid(m) ⊻ h : hash((typeof(m), m.id), h)
+Base.@nospecializeinfer Base.:(==)(@nospecialize(a::Model), @nospecialize(b::Model)) = typeof(a) === typeof(b) && a.id !== nothing && a.id == b.id
+Base.@nospecializeinfer Base.hash(@nospecialize(m::Model), h::UInt) = m.id === nothing ? objectid(m) ⊻ h : hash((typeof(m), m.id), h)
 Base.show(io::IO, m::Model) = print(io, nameof(typeof(m)), " object (", something(m.id, "unsaved"), ")")
 function Base.show(io::IO, ::MIME"text/plain", m::Model)
     print(io, "<", nameof(typeof(m)), ": ")
@@ -569,7 +590,7 @@ the admin's "View on site" link). Available in templates as `obj.get_absolute_ur
 """
 get_absolute_url(::Model) = nothing
 "`(field, next)` for `get_next_by_<field>` / `get_previous_by_<field>` on a non-null date field."
-function adjacent_field(@nospecialize(T), s::Symbol)
+Base.@nospecializeinfer function adjacent_field(@nospecialize(T), s::Symbol)
     str = string(s)
     for (pre, next) in (("get_next_by_", true), ("get_previous_by_", false))
         startswith(str, pre) || continue
@@ -580,7 +601,7 @@ function adjacent_field(@nospecialize(T), s::Symbol)
 end
 
 "The field behind `get_<name>_display`, when it has choices."
-function display_field(@nospecialize(T), s::Symbol)
+Base.@nospecializeinfer function display_field(@nospecialize(T), s::Symbol)
     str = string(s)
     (startswith(str, "get_") && endswith(str, "_display")) || return nothing
     f = findfield(modelmeta(T), Symbol(chop(str; head = 4, tail = 8)))
@@ -593,16 +614,16 @@ end
 The label of the field's current value (Django's `obj.get_FOO_display()`), or the value itself
 when it isn't one of the choices. Also `obj.get_status_display`, in Julia and in templates.
 """
-function get_display(m::Model, name::Symbol)
+Base.@nospecializeinfer function get_display(@nospecialize(m::Model), name::Symbol)
     f = findfield(modelmeta(typeof(m)), name)
     f === nothing && throw(ArgumentError("$(typeof(m)) has no field '$name'"))
     v = getproperty(m, attname(f))
     v === nothing ? nothing : choice_label(field_choices(f), v)
 end
 
-function tattr(m::Model, ::Val{:get_absolute_url})
+Base.@nospecializeinfer function tattr(@nospecialize(m::Model), ::Val{:get_absolute_url})
     u = get_absolute_url(m)
     u === nothing ? NOTFOUND : u
 end
-tattr(m::Model, ::Val{:verbose_name}) = modelmeta(typeof(m)).verbose_name
-tattr(m::Model, ::Val{:pk_string}) = pk_string(m)
+Base.@nospecializeinfer tattr(@nospecialize(m::Model), ::Val{:verbose_name}) = modelmeta(typeof(m)).verbose_name
+Base.@nospecializeinfer tattr(@nospecialize(m::Model), ::Val{:pk_string}) = pk_string(m)

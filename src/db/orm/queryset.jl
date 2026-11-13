@@ -35,17 +35,17 @@ The queryset, run against another database (a key of `DATABASES`). Objects it re
 remember it: saving them and following their relations use the same database.
 """
 using_db(qs::QuerySet, alias) = chain(qs; db = string(alias))
-using_db(::Type{T}, alias) where {T<:Model} = using_db(objects(T), alias)
+Base.@nospecializeinfer using_db(@nospecialize(T::Type{<:Model}), alias) = using_db(objects(T), alias)
 using_db(alias::Union{AbstractString,Symbol}) = qs -> using_db(qs, alias)
 
 "The database a queryset runs on (`nothing`: the current one)."
-query_db(qs::QuerySet{T}, write::Bool = false) where {T} = qs.db !== nothing ? qs.db : routed_db(T, write)
+Base.@nospecializeinfer query_db(@nospecialize(qs::QuerySet), write::Bool = false) = qs.db !== nothing ? qs.db : routed_db(model_of(qs), write)
 "Run `f()` on the queryset's database."
-in_db(f, qs::QuerySet, write::Bool = false) = with_db(f, query_db(qs, write))
+Base.@nospecializeinfer in_db(f, @nospecialize(qs::QuerySet), write::Bool = false) = with_db(f, query_db(qs, write))
 
 "The database an object was loaded from or saved to (`nothing` if neither yet)."
-instance_db(m::Model) = get(getfield(m, :_cache), :__db, nothing)
-set_instance_db!(m::Model) = (getfield(m, :_cache)[:__db] = current_alias(); m)
+Base.@nospecializeinfer instance_db(@nospecialize(m::Model)) = get((getfield(m, :_cache)::Dict{Symbol,Any}), :__db, nothing)
+Base.@nospecializeinfer set_instance_db!(@nospecialize(m::Model)) = ((getfield(m, :_cache)::Dict{Symbol,Any})[:__db] = current_alias(); m)
 
 model_of(::QuerySet{T}) where {T} = T
 
@@ -55,7 +55,7 @@ model_of(::QuerySet{T}) where {T} = T
 All objects of a model through its default queryset, `default_queryset(Model)`.
 `objects(Model, :name)` returns a named queryset defined with `Juango.manager`.
 """
-objects(::Type{T}) where {T<:Model} = default_queryset(T)
+Base.@nospecializeinfer objects(@nospecialize(T::Type{<:Model})) = default_queryset(T)
 
 """
     base_objects(Model) -> QuerySet
@@ -63,7 +63,7 @@ objects(::Type{T}) where {T<:Model} = default_queryset(T)
 Every row of the table, ignoring `default_queryset`. Foreign-key access, cascading
 deletes and uniqueness checks use this, like Django's base manager.
 """
-base_objects(::Type{T}) where {T<:Model} = QuerySet{T}(Q[], String[], nothing, 0, false)
+Base.@nospecializeinfer base_objects(@nospecialize(T::Type{<:Model})) = QuerySet{T}(Q[], String[], nothing, 0, false)
 
 """
     default_queryset(::Type{Model})
@@ -73,7 +73,7 @@ relations see, for example to hide soft-deleted rows. Build on `base_objects`:
 
     Juango.default_queryset(::Type{Post}) = filter(base_objects(Post); deleted = false)
 """
-default_queryset(::Type{T}) where {T<:Model} = base_objects(T)
+Base.@nospecializeinfer default_queryset(@nospecialize(T::Type{<:Model})) = base_objects(T)
 
 """
     manager(::Type{Model}, ::Val{name})
@@ -83,19 +83,24 @@ Define a named queryset, available as `objects(Model, :name)`:
     Juango.manager(::Type{Post}, ::Val{:published}) = filter(Post; status = "p")
 """
 manager(::Type{T}, ::Val{N}) where {T,N} = throw(ArgumentError("$T has no manager named :$N (define Juango.manager(::Type{$T}, ::Val{:$N}))"))
-objects(::Type{T}, name::Symbol) where {T<:Model} = manager(T, Val(name))
+Base.@nospecializeinfer objects(@nospecialize(T::Type{<:Model}), name::Symbol) = manager(T, Val(name))
 "An empty queryset."
-none(::Type{T}) where {T<:Model} = QuerySet{T}(Q[], String[], nothing, 0, true)
+Base.@nospecializeinfer none(@nospecialize(T::Type{<:Model})) = QuerySet{T}(Q[], String[], nothing, 0, true)
 none(qs::QuerySet{T}) where {T} = none(T)
 
 """
 A new queryset with some parts replaced. Cached results and the many-to-many context
 never carry over (unless passed explicitly).
 """
-function chain(qs::QuerySet{T}; kw...) where {T}
-    vals = [haskey(kw, f) ? kw[f] : f in (:cache, :owner) ? nothing : getfield(qs, f) for f in fieldnames(QuerySet{T})]
-    QuerySet{T}(vals...)
+#
+# Most queryset functions take `@nospecialize(qs)` under `@nospecializeinfer`: they're compiled
+# and inferred once (in the precompile workload) for every model, instead of again for each of
+# the project's models on its first request. A queryset's model is `model_of(qs)`.
+Base.@nospecializeinfer function chain(@nospecialize(qs::QuerySet); kw...)
+    vals = Any[haskey(kw, f) ? kw[f] : f in (:cache, :owner) ? nothing : getfield(qs, f) for f in QS_FIELDS]
+    QuerySet{model_of(qs)}(vals...)::QuerySet
 end
+const QS_FIELDS = fieldnames(QuerySet)
 
 """
     select_related(qs, :author, :author__profile)
@@ -103,7 +108,8 @@ end
 Fetch the objects behind forward foreign keys in the same query (with JOINs), so
 `post.author` needs no extra query. Paths follow FKs with `__`.
 """
-function select_related(qs::QuerySet{T}, paths...) where {T}
+Base.@nospecializeinfer function select_related(@nospecialize(qs::QuerySet), paths...)
+    T = model_of(qs)
     rel = copy(qs.related)
     for p in paths
         segs = Symbol.(split(string(p), "__"))
@@ -118,7 +124,7 @@ function select_related(qs::QuerySet{T}, paths...) where {T}
     end
     chain(qs; related = rel)
 end
-select_related(::Type{T}, paths...) where {T<:Model} = select_related(objects(T), paths...)
+Base.@nospecializeinfer select_related(@nospecialize(T::Type{<:Model}), paths...) = select_related(objects(T), paths...)
 select_related(paths::Union{AbstractString,Symbol}...) = qs -> select_related(qs, paths...)
 
 """
@@ -129,17 +135,17 @@ After fetching, load related objects with one extra query per lookup: reverse re
 (`:comments__author`). Prefetched reverse relations answer `count`, iteration, `first`
 and `exists` from memory; further filtering queries the database again.
 """
-prefetch_related(qs::QuerySet, lookups...) =
+Base.@nospecializeinfer prefetch_related(@nospecialize(qs::QuerySet), lookups...) =
     chain(qs; prefetch = vcat(qs.prefetch, Prefetch[l isa Prefetch ? l : Prefetch(l) for l in lookups]))
-prefetch_related(::Type{T}, lookups...) where {T<:Model} = prefetch_related(objects(T), lookups...)
+Base.@nospecializeinfer prefetch_related(@nospecialize(T::Type{<:Model}), lookups...) = prefetch_related(objects(T), lookups...)
 prefetch_related(lookups::Union{AbstractString,Symbol,Prefetch}...) = qs -> prefetch_related(qs, lookups...)
 
-function assert_uncombined(qs::QuerySet, what)
+Base.@nospecializeinfer function assert_uncombined(@nospecialize(qs::QuerySet), what)
     qs.combinator === nothing ||
         throw(ArgumentError("cannot $what the result of union/intersection/difference; filter the querysets before combining them"))
 end
 
-function assert_unsliced(qs::QuerySet, what)
+Base.@nospecializeinfer function assert_unsliced(@nospecialize(qs::QuerySet), what)
     (qs.limit === nothing && qs.offset == 0) || error("cannot $what a queryset once it has been sliced")
 end
 
@@ -150,7 +156,7 @@ Keep rows matching all lookups (`field`, `field__lookup`, `fk__field__lookup`).
 Lookups: exact iexact contains icontains startswith istartswith endswith
 iendswith gt gte lt lte in isnull range year month day ne.
 """
-function Base.filter(qs::QuerySet{T}, qargs::Union{Q,Expression}...; kw...) where {T}
+Base.@nospecializeinfer function Base.filter(@nospecialize(qs::QuerySet), qargs::Union{Q,Expression}...; kw...)
     assert_unsliced(qs, "filter")
     assert_uncombined(qs, "filter")
     (isempty(qargs) && isempty(kw)) && return chain(qs)
@@ -158,11 +164,11 @@ function Base.filter(qs::QuerySet{T}, qargs::Union{Q,Expression}...; kw...) wher
     push!(w, Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], false))
     chain(qs; where = w)
 end
-Base.filter(::Type{T}, qargs::Union{Q,Expression}...; kw...) where {T<:Model} = filter(objects(T), qargs...; kw...)
+Base.@nospecializeinfer Base.filter(@nospecialize(T::Type{<:Model}), qargs::Union{Q,Expression}...; kw...) = filter(objects(T), qargs...; kw...)
 Base.filter(qargs::Union{Q,Expression}...; kw...) = qs -> filter(qs, qargs...; kw...)
 
 "Exclude rows matching the lookups."
-function exclude(qs::QuerySet{T}, qargs::Union{Q,Expression}...; kw...) where {T}
+Base.@nospecializeinfer function exclude(@nospecialize(qs::QuerySet), qargs::Union{Q,Expression}...; kw...)
     assert_unsliced(qs, "exclude")
     assert_uncombined(qs, "exclude")
     (isempty(qargs) && isempty(kw)) && return chain(qs)
@@ -170,7 +176,7 @@ function exclude(qs::QuerySet{T}, qargs::Union{Q,Expression}...; kw...) where {T
     push!(w, Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], true))
     chain(qs; where = w)
 end
-exclude(::Type{T}, qargs::Q...; kw...) where {T<:Model} = exclude(objects(T), qargs...; kw...)
+Base.@nospecializeinfer exclude(@nospecialize(T::Type{<:Model}), qargs::Q...; kw...) = exclude(objects(T), qargs...; kw...)
 
 """
     order_by(qs, "field", "-other", ...)
@@ -178,8 +184,8 @@ exclude(::Type{T}, qargs::Q...; kw...) where {T<:Model} = exclude(objects(T), qa
 
 Order the results. Prefix with `-` for descending, `\"?\"` for random order.
 """
-order_by(qs::QuerySet, fields...) = chain(qs; order = String[string(f) for f in fields])
-order_by(::Type{T}, fields...) where {T<:Model} = order_by(objects(T), fields...)
+Base.@nospecializeinfer order_by(@nospecialize(qs::QuerySet), fields...) = chain(qs; order = String[string(f) for f in fields])
+Base.@nospecializeinfer order_by(@nospecialize(T::Type{<:Model}), fields...) = order_by(objects(T), fields...)
 order_by(fields::Union{AbstractString,Symbol}...) = qs -> order_by(qs, fields...)
 
 "ORDER BY clause plus extra SELECT columns (needed with DISTINCT when ordering by joined columns)."
@@ -231,7 +237,7 @@ function order_clause(c::SQLCompiler, order::Vector{String})
     " ORDER BY " * join(parts, ", "), extra
 end
 
-function where_clause(c::SQLCompiler, qs::QuerySet)
+Base.@nospecializeinfer function where_clause(c::SQLCompiler, @nospecialize(qs::QuerySet))
     qs.isnone && return " WHERE " * sql_false(backend()), Any[]
     isempty(qs.where) && return "", Any[]
     parts, ps = String[], Any[]
@@ -287,7 +293,7 @@ this is a subquery (for `OuterRef`).
 queryset_model(::QuerySet{T}) where {T} = T
 
 # Not specialized on the model: one compiled copy serves every model (and lives in the package image).
-function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = true, outer = nothing, idonly = false)
+Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = true, outer = nothing, idonly = false)
     T = queryset_model(qs)
     qs.combinator === nothing || return build_combined(qs; columns = columns, ordered = ordered, idonly = idonly)
     c = SQLCompiler(T; outer = outer)
@@ -437,7 +443,7 @@ end
 
 "SQL for union/intersection/difference: the parts joined by the set operator, wrapped so the
 result can be ordered and sliced the same way on every database."
-function build_combined(@nospecialize(qs::QuerySet); columns = nothing, ordered = true, idonly = false)
+Base.@nospecializeinfer function build_combined(@nospecialize(qs::QuerySet); columns = nothing, ordered = true, idonly = false)
     T = queryset_model(qs)
     op, parts, all_ = qs.combinator
     sqls, ps = String[], Any[]
@@ -463,19 +469,19 @@ function build_combined(@nospecialize(qs::QuerySet); columns = nothing, ordered 
 end
 
 "Is the queryset grouped (aggregate annotations) or in values mode? Then counting wraps the full query."
-needs_wrapping(qs::QuerySet) = qs.values_fields !== nothing || any(p -> contains_aggregate(p.second), qs.annotations)
+Base.@nospecializeinfer needs_wrapping(@nospecialize(qs::QuerySet)) = qs.values_fields !== nothing || any(p -> contains_aggregate(p.second), qs.annotations)
 
-function select_sql(qs::QuerySet; columns = nothing, ordered = true)
+Base.@nospecializeinfer function select_sql(@nospecialize(qs::QuerySet); columns = nothing, ordered = true)
     sql, ps, _, _ = build_select(qs; columns = columns, ordered = ordered)
     sql, ps
 end
 
 "Build a model from columns labelled `prefix*column` (as produced for `select_related`)."
-function from_prefixed_row(::Type{T}, row, prefix) where {T<:Model}
+Base.@nospecializeinfer function from_prefixed_row(@nospecialize(T::Type), row, prefix)
     id = get(row, Symbol(prefix, "id"), nothing)
     id === nothing && return nothing
     obj = T(Dict{Symbol,Any}(:id => pk_value(T, id)), Dict{Symbol,Any}())
-    data = getfield(obj, :_data)
+    data = (getfield(obj, :_data)::Dict{Symbol,Any})
     for f in all_fields(T)                       # inherited fields too (joined from the parent tables)
         data[attname(f)] = from_db(f, get(row, Symbol(prefix, column(f)), nothing))
     end
@@ -483,9 +489,10 @@ function from_prefixed_row(::Type{T}, row, prefix) where {T<:Model}
 end
 
 "Execute the query and return a `Vector` of model instances."
-fetch(qs::QuerySet) = in_db(() -> fetch_here(qs), qs)
+Base.@nospecializeinfer fetch(@nospecialize(qs::QuerySet)) = in_db(() -> fetch_here(qs), qs)
 
-function fetch_here(qs::QuerySet{T}) where {T}
+Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
+    T = model_of(qs)
     qs.cache === nothing || return Vector{T}(qs.cache)
     qs.for_update === nothing || in_atomic() ||
         throw(TransactionManagementError("select_for_update() must be evaluated inside atomic()"))
@@ -494,23 +501,25 @@ function fetch_here(qs::QuerySet{T}) where {T}
     sql, ps, _, related = build_select(qs)
     rows = execute(sql, ps)
     plan = row_plan(T)
-    objs = T[from_row(T, r, plan) for r in rows]
-    foreach(set_instance_db!, objs)
+    objs = Vector{T}(undef, length(rows))
+    for i in eachindex(rows)
+        objs[i] = set_instance_db!(from_row(T, rows[i], plan))
+    end
     for (k, v) in qs.annotations, (o, r) in zip(objs, rows)
         is_filtered_relation(v) && continue
-        getfield(o, :_data)[k] = expr_value(T, v, get(r, k, nothing))
+        (getfield(o, :_data)::Dict{Symbol,Any})[k] = expr_value(T, v, get(r, k, nothing))
     end
     if !isempty(related)
         for (obj, row) in zip(objs, rows)
             for (path, M, alias) in related
                 parent = obj
                 for s in path[1:end-1]
-                    parent = get(getfield(parent, :_cache), s, nothing)
+                    parent = get((getfield(parent, :_cache)::Dict{Symbol,Any}), s, nothing)
                     parent === nothing && break
                 end
                 parent === nothing && continue
                 r = from_prefixed_row(M, row, alias * "__")
-                r === nothing || (getfield(parent, :_cache)[path[end]] = r)
+                r === nothing || ((getfield(parent, :_cache)::Dict{Symbol,Any})[path[end]] = r)
             end
         end
     end
@@ -521,7 +530,8 @@ function fetch_here(qs::QuerySet{T}) where {T}
 end
 
 "Rows of a `values()` queryset, with column values converted like model fields."
-function fetch_values(qs::QuerySet{T}) where {T}
+Base.@nospecializeinfer function fetch_values(@nospecialize(qs::QuerySet))
+    T = model_of(qs)
     qs.isnone && return Dict{Symbol,Any}[]
     sql, ps, c, _ = build_select(qs)
     convs = Dict{Symbol,Any}()
@@ -546,7 +556,7 @@ function fetch_values(qs::QuerySet{T}) where {T}
     out
 end
 
-function do_prefetch!(objs::Vector, p::Prefetch)
+Base.@nospecializeinfer function do_prefetch!(@nospecialize(objs::Vector), p::Prefetch)
     segs = Symbol.(split(p.path, "__"))
     level = objs
     for (i, s) in enumerate(segs)
@@ -557,7 +567,7 @@ function do_prefetch!(objs::Vector, p::Prefetch)
 end
 
 "Load relation `name` for all `objs` with one query; return the related objects."
-function prefetch_level!(objs::Vector, name::Symbol, qs, to_attr)
+Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), name::Symbol, @nospecialize(qs), to_attr)
     isempty(objs) && return Any[]
     T = typeof(first(objs))
     f = findfield(modelmeta(T), name)
@@ -570,9 +580,9 @@ function prefetch_level!(objs::Vector, name::Symbol, qs, to_attr)
             id = field_data(o, attname(f))
             r = id === nothing ? nothing : get(byid, id, nothing)
             if to_attr !== nothing
-                getfield(o, :_cache)[to_attr] = r
+                (getfield(o, :_cache)::Dict{Symbol,Any})[to_attr] = r
             elseif r !== nothing
-                getfield(o, :_cache)[name] = r
+                (getfield(o, :_cache)::Dict{Symbol,Any})[name] = r
             end
         end
         return rel
@@ -593,75 +603,76 @@ function prefetch_level!(objs::Vector, name::Symbol, qs, to_attr)
         push!(get!(() -> M[], groups, field_data(r, attname(rf))), r)
     end
     for o in objs
-        getfield(o, :_cache)[something(to_attr, rn)] = PrefetchedList(get(groups, o.id, M[]))
+        (getfield(o, :_cache)::Dict{Symbol,Any})[something(to_attr, rn)] = PrefetchedList(get(groups, o.id, M[]))
     end
     rows
 end
 
-Base.collect(qs::QuerySet) = fetch(qs)
+Base.@nospecializeinfer Base.collect(@nospecialize(qs::QuerySet)) = fetch(qs)
 Base.eltype(::Type{QuerySet{T}}) where {T} = T
 Base.IteratorSize(::Type{<:QuerySet}) = Base.SizeUnknown()
-function Base.iterate(qs::QuerySet)
+Base.@nospecializeinfer function Base.iterate(@nospecialize(qs::QuerySet))
     v = fetch(qs)
     r = iterate(v)
     r === nothing ? nothing : (r[1], (v, r[2]))
 end
-function Base.iterate(::QuerySet, st)
+Base.@nospecializeinfer function Base.iterate(@nospecialize(::QuerySet), st)
     r = iterate(st[1], st[2])
     r === nothing ? nothing : (r[1], (st[1], r[2]))
 end
 
 "Number of matching rows (a `SELECT COUNT(*)`)."
-Base.count(qs::QuerySet) = in_db(() -> count_here(qs), qs)
-function count_here(qs::QuerySet{T}) where {T}
+Base.@nospecializeinfer Base.count(@nospecialize(qs::QuerySet)) = in_db(() -> count_here(qs), qs)
+Base.@nospecializeinfer function count_here(@nospecialize(qs::QuerySet))
+    T = model_of(qs)
     qs.cache === nothing || return length(qs.cache)
     qs.isnone && return 0
     sql, ps = needs_wrapping(qs) ? select_sql(qs; ordered = false) : select_sql(qs; columns = pk_select(modelmeta(T).table, T), ordered = false)
     execute("SELECT COUNT(*) AS n FROM ($sql) AS juango_sub", ps)[1][:n]
 end
-Base.count(::Type{T}) where {T<:Model} = count(objects(T))
-Base.length(qs::QuerySet) = count(qs)
+Base.@nospecializeinfer Base.count(@nospecialize(T::Type{<:Model})) = count(objects(T))
+Base.@nospecializeinfer Base.length(@nospecialize(qs::QuerySet)) = count(qs)
 
 "Whether any row matches."
-exists(qs::QuerySet) = in_db(() -> exists_here(qs), qs)
-function exists_here(qs::QuerySet{T}) where {T}
+Base.@nospecializeinfer exists(@nospecialize(qs::QuerySet)) = in_db(() -> exists_here(qs), qs)
+Base.@nospecializeinfer function exists_here(@nospecialize(qs::QuerySet))
     qs.cache === nothing || return !isempty(qs.cache)
     qs.isnone && return false
     sql, ps = select_sql(chain(qs; limit = 1); columns = "1", ordered = false)
     !isempty(execute(sql, ps))
 end
-Base.isempty(qs::QuerySet) = !exists(qs)
-truthy(qs::QuerySet) = exists(qs)
+Base.@nospecializeinfer Base.isempty(@nospecialize(qs::QuerySet)) = !exists(qs)
+Base.@nospecializeinfer truthy(@nospecialize(qs::QuerySet)) = exists(qs)
 
-function Base.getindex(qs::QuerySet, r::AbstractUnitRange{<:Integer})
+Base.@nospecializeinfer function Base.getindex(@nospecialize(qs::QuerySet), r::AbstractUnitRange{<:Integer})
     first(r) >= 1 || throw(ArgumentError("queryset slices are 1-based"))
     n = length(r)
     qs.limit !== nothing && (n = max(0, min(n, qs.limit - (first(r) - 1))))
     chain(qs; offset = qs.offset + first(r) - 1, limit = n)
 end
-function Base.getindex(qs::QuerySet, i::Integer)
+Base.@nospecializeinfer function Base.getindex(@nospecialize(qs::QuerySet), i::Integer)
     qs.cache === nothing || return qs.cache[i]
     v = fetch(qs[i:i])
     isempty(v) && throw(BoundsError(qs, i))
     v[1]
 end
 
-default_order(qs::QuerySet{T}) where {T} = isempty(qs.order) ? (isempty(modelmeta(T).ordering) ? ["id"] : modelmeta(T).ordering) : qs.order
+Base.@nospecializeinfer default_order(@nospecialize(qs::QuerySet)) = isempty(qs.order) ? (isempty(modelmeta(model_of(qs)).ordering) ? ["id"] : modelmeta(model_of(qs)).ordering) : qs.order
 
 "First object (by the queryset's ordering, or by id), or `nothing`."
-function Base.first(qs::QuerySet)
+Base.@nospecializeinfer function Base.first(@nospecialize(qs::QuerySet))
     qs.cache === nothing || return isempty(qs.cache) ? nothing : qs.cache[1]
     v = fetch(chain(qs[1:1]; order = default_order(qs)))
     isempty(v) ? nothing : v[1]
 end
 "Last object, or `nothing`."
-function Base.last(qs::QuerySet)
+Base.@nospecializeinfer function Base.last(@nospecialize(qs::QuerySet))
     assert_unsliced(qs, "take last of")
     flipped = [startswith(o, "-") ? o[2:end] : "-" * o for o in default_order(qs)]
     first(chain(qs; order = flipped))
 end
-Base.first(::Type{T}) where {T<:Model} = first(objects(T))
-Base.last(::Type{T}) where {T<:Model} = last(objects(T))
+Base.@nospecializeinfer Base.first(@nospecialize(T::Type{<:Model})) = first(objects(T))
+Base.@nospecializeinfer Base.last(@nospecialize(T::Type{<:Model})) = last(objects(T))
 
 # --- only/defer, distinct, latest/earliest, in_bulk, dates, raw, explain -----------------------
 
@@ -679,25 +690,27 @@ end
 Leave these fields out of the query; reading one later loads the object's deferred fields
 with one more query. `defer(qs, nothing)` clears the list.
 """
-function defer(qs::QuerySet{T}, fields...) where {T}
+Base.@nospecializeinfer function defer(@nospecialize(qs::QuerySet), fields...)
+    T = model_of(qs)
     fields == (nothing,) && return chain(qs; deferred = Symbol[])
     names = Symbol[Symbol(f) for f in fields]
     check_deferrable(T, names)
     chain(qs; deferred = unique(vcat(qs.deferred, names)))
 end
-defer(::Type{T}, fields...) where {T<:Model} = defer(objects(T), fields...)
+Base.@nospecializeinfer defer(@nospecialize(T::Type{<:Model}), fields...) = defer(objects(T), fields...)
 
 """
     only(qs, :title, :author)
 
 (Extends `Base.only`.) Load only these fields (and the id); the others are deferred, as with `defer`.
 """
-function Base.only(qs::QuerySet{T}, field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...) where {T}
+Base.@nospecializeinfer function Base.only(@nospecialize(qs::QuerySet), field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...)
+    T = model_of(qs)
     keep = Symbol[Symbol(field); Symbol.(collect(fields))]
     check_deferrable(T, keep)
     chain(qs; deferred = Symbol[f.name for f in modelmeta(concrete_model(T)).fields if !(f.name in keep)])
 end
-Base.only(::Type{T}, field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...) where {T<:Model} =
+Base.@nospecializeinfer Base.only(@nospecialize(T::Type{<:Model}), field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...) =
     only(objects(T), field, fields...)
 
 """
@@ -708,9 +721,10 @@ Remove duplicate rows (`SELECT DISTINCT`). With fields, keep the first row of ea
 equal values: order by those fields first.
 """
 distinct(qs::QuerySet, fields::Union{Symbol,AbstractString}...) = chain(qs; distinct_fields = String[string(f) for f in fields])
-distinct(::Type{T}, fields::Union{Symbol,AbstractString}...) where {T<:Model} = distinct(objects(T), fields...)
+Base.@nospecializeinfer distinct(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...) = distinct(objects(T), fields...)
 
-function latest_order(qs::QuerySet{T}, fields, what) where {T}
+Base.@nospecializeinfer function latest_order(@nospecialize(qs::QuerySet), fields, what)
+    T = model_of(qs)
     fs = isempty(fields) ? get(modelmeta(T).extra, :get_latest_by, nothing) : fields
     fs === nothing && throw(ArgumentError("$what needs field names or Meta(get_latest_by = ...) on $(nameof(T))"))
     String[string(f) for f in (fs isa Union{Symbol,AbstractString} ? (fs,) : fs)]
@@ -722,19 +736,21 @@ end
 The object with the largest (smallest) value of the fields, which default to the model's
 `Meta(get_latest_by = ...)`. Throws `DoesNotExist` when there are no objects.
 """
-function latest(qs::QuerySet{T}, fields::Union{Symbol,AbstractString}...) where {T}
+Base.@nospecializeinfer function latest(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
+    T = model_of(qs)
     order = [startswith(o, "-") ? o[2:end] : "-" * o for o in latest_order(qs, fields, "latest")]
     o = first(chain(qs; order = order))
     o === nothing && throw(DoesNotExist(T, "latest"))
     o
 end
-function earliest(qs::QuerySet{T}, fields::Union{Symbol,AbstractString}...) where {T}
+Base.@nospecializeinfer function earliest(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
+    T = model_of(qs)
     o = first(chain(qs; order = latest_order(qs, fields, "earliest")))
     o === nothing && throw(DoesNotExist(T, "earliest"))
     o
 end
-latest(::Type{T}, fields...) where {T<:Model} = latest(objects(T), fields...)
-earliest(::Type{T}, fields...) where {T<:Model} = earliest(objects(T), fields...)
+Base.@nospecializeinfer latest(@nospecialize(T::Type{<:Model}), fields...) = latest(objects(T), fields...)
+Base.@nospecializeinfer earliest(@nospecialize(T::Type{<:Model}), fields...) = earliest(objects(T), fields...)
 
 """
     in_bulk(qs)                          # Dict id => object
@@ -744,7 +760,8 @@ earliest(::Type{T}, fields...) where {T<:Model} = earliest(objects(T), fields...
 The objects as a `Dict` keyed by `field_name` (which must be unique), optionally limited to
 those keys.
 """
-function in_bulk(qs::QuerySet{T}, keys = nothing; field_name = :id) where {T}
+Base.@nospecializeinfer function in_bulk(@nospecialize(qs::QuerySet), keys = nothing; field_name = :id)
+    T = model_of(qs)
     field_name = Symbol(field_name)
     if !(field_name in (:id, :pk))
         f = findfield(modelmeta(T), field_name)
@@ -755,7 +772,7 @@ function in_bulk(qs::QuerySet{T}, keys = nothing; field_name = :id) where {T}
     q = keys === nothing ? qs : filter(qs; Symbol(field_name, "__in") => collect(keys))
     Dict{Any,T}(getproperty(o, field_name) => o for o in fetch(q))
 end
-in_bulk(::Type{T}, keys = nothing; kw...) where {T<:Model} = in_bulk(objects(T), keys; kw...)
+Base.@nospecializeinfer in_bulk(@nospecialize(T::Type{<:Model}), keys = nothing; kw...) = in_bulk(objects(T), keys; kw...)
 
 const DATE_KINDS = (:year, :month, :week, :day)
 const DATETIME_KINDS = (:year, :month, :week, :day, :hour, :minute, :second)
@@ -791,7 +808,7 @@ which the objects' date or datetime field falls.
 """
 dates(qs::QuerySet, field, kind = :day; order = :asc) =
     Date.(distinct_dates(qs, field, kind, order, DATE_KINDS, "dates"))
-dates(::Type{T}, args...; kw...) where {T<:Model} = dates(objects(T), args...; kw...)
+Base.@nospecializeinfer dates(@nospecialize(T::Type{<:Model}), args...; kw...) = dates(objects(T), args...; kw...)
 
 """
     datetimes(qs, :created, :hour; order = :asc) -> Vector{DateTime}
@@ -801,7 +818,7 @@ Aware values are converted to the current time zone first.
 """
 datetimes(qs::QuerySet, field, kind = :day; order = :asc) =
     distinct_dates(qs, field, kind, order, DATETIME_KINDS, "datetimes")
-datetimes(::Type{T}, args...; kw...) where {T<:Model} = datetimes(objects(T), args...; kw...)
+Base.@nospecializeinfer datetimes(@nospecialize(T::Type{<:Model}), args...; kw...) = datetimes(objects(T), args...; kw...)
 
 """
     raw(Model, sql, params = [])
@@ -810,9 +827,9 @@ Run hand-written SQL (with `?` placeholders) and build model instances from the 
 rows must include `id`; fields missing from them are deferred, and extra columns become
 attributes, like annotations.
 """
-raw(::Type{T}, sql::AbstractString, params = Any[]; db = nothing) where {T<:Model} =
+Base.@nospecializeinfer raw(@nospecialize(T::Type{<:Model}), sql::AbstractString, params = Any[]; db = nothing) =
     with_db(() -> raw_here(T, sql, params), something(db, routed_db(T, false), Some(nothing)))
-function raw_here(::Type{T}, sql::AbstractString, params = Any[]) where {T<:Model}
+Base.@nospecializeinfer function raw_here(@nospecialize(T::Type{<:Model}), sql::AbstractString, params = Any[])
     rows = execute(sql, collect(Any, params))
     known = Set{Symbol}([:id; [attname(f) for f in all_fields(T)]])
     out = T[]
@@ -821,7 +838,7 @@ function raw_here(::Type{T}, sql::AbstractString, params = Any[]) where {T<:Mode
         is_composite(T) || haskey(r, :id) || throw(ArgumentError("raw(): the query must select the id column"))
         o = set_instance_db!(from_row(T, r, plan))
         for (k, v) in r
-            k in known || (getfield(o, :_data)[k] = v)
+            k in known || ((getfield(o, :_data)::Dict{Symbol,Any})[k] = v)
         end
         push!(out, o)
     end

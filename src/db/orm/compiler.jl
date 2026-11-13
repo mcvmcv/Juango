@@ -28,7 +28,7 @@ mutable struct SQLCompiler
     uses_window::Bool           # set when a condition refers to a window annotation (-> wrapping query)
     join_params::Vector{Any}    # parameters in JOIN ... ON clauses (FilteredRelation conditions)
 end
-function SQLCompiler(@nospecialize(T::Type); outer = nothing)
+Base.@nospecializeinfer function SQLCompiler(@nospecialize(T::Type); outer = nothing)
     table = modelmeta(T).table
     counter = outer === nothing ? Ref(0) : outer.counter
     c = SQLCompiler(T, table, table, String[], Dict{Any,String}(), Set{String}(), counter, false, 0,
@@ -73,7 +73,7 @@ end
 The relation of FilteredRelation annotation `name` on `T`: `(model, related column, base column)`,
 joined as related.col = base.col.
 """
-function filtered_target(T::Type, fr)
+Base.@nospecializeinfer function filtered_target(@nospecialize(T::Type), fr)
     rel = fr.relation
     occursin("__", rel) && throw(ArgumentError("FilteredRelation('$rel'): nested relations are not supported"))
     f = findfield(modelmeta(T), Symbol(rel))
@@ -96,7 +96,7 @@ Join FilteredRelation annotation `name` (once per query) and return `(alias, mod
 condition goes in the ON clause, so rows of the base model without a match survive
 (LEFT JOIN) and aggregates see only matching related rows.
 """
-function filtered_join!(c::SQLCompiler, alias, @nospecialize(T::Type), name::Symbol)
+Base.@nospecializeinfer function filtered_join!(c::SQLCompiler, alias, @nospecialize(T::Type), name::Symbol)
     key = (alias, :__filtered, name)
     fr = c.annotations[name]::FilteredRelation
     M, childcol, parentcol, reverse = filtered_target(T, fr)
@@ -130,7 +130,7 @@ function field_alias!(c::SQLCompiler, alias, T::Type, f::Field)
     alias
 end
 
-function find_reverse(T::Type, name)
+Base.@nospecializeinfer function find_reverse(@nospecialize(T::Type), name)
     for (rn, M, rf) in reverse_relations(T)
         (string(rn) == name || !startswith(string(rn), "+") && lowercase(modelmeta(M).name) == name) && return (rn, M, rf)
     end
@@ -144,7 +144,7 @@ function lookup_error(T, fname)
 end
 
 "Compile one `field__path__lookup = value` against model `T` whose table is reachable as `alias`."
-function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nospecialize(value), negated::Bool)
+Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nospecialize(value), negated::Bool)
     parts = split(string(key), "__")
     lookup = "exact"
     (length(parts) > 1 && is_lookup_name(parts[end])) && (lookup = String(pop!(parts)))
@@ -328,7 +328,7 @@ end
 
 const COMPARISON_OPS = Dict("exact" => "=", "ne" => "!=", "gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=")
 
-function lookup_condition(c::SQLCompiler, col, lookup, @nospecialize(value), @nospecialize(conv))
+Base.@nospecializeinfer function lookup_condition(c::SQLCompiler, col, lookup, @nospecialize(value), @nospecialize(conv))
     if value isa SearchQuery && lookup == "exact"
         q, qps = compile_expr(c, value)
         return "$col @@ $q", qps
@@ -371,7 +371,7 @@ function lookup_condition(c::SQLCompiler, col, lookup, @nospecialize(value), @no
     throw(LookupError("unsupported lookup '$lookup'"))
 end
 
-function compile_q(c::SQLCompiler, alias, @nospecialize(T::Type), q::Q, negated::Bool)
+Base.@nospecializeinfer function compile_q(c::SQLCompiler, alias, @nospecialize(T::Type), q::Q, negated::Bool)
     neg = negated ⊻ q.negated
     parts = String[]
     params = Any[]

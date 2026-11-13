@@ -225,7 +225,7 @@ function cache_encode(v::AbstractDict)
 end
 function cache_encode(m::Model)
     T = typeof(m)
-    data = getfield(m, :_data)
+    data = (getfield(m, :_data)::Dict{Symbol,Any})
     fields = Dict{String,Any}()
     for f in all_fields(T)
         a = attname(f)

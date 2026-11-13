@@ -9,7 +9,7 @@ Base.showerror(io::IO, e::TransactionManagementError) = print(io, "TransactionMa
 function prepare_for_insert!(objs, T)
     ts = timezone_now()
     for o in objs
-        data = getfield(o, :_data)
+        data = (getfield(o, :_data)::Dict{Symbol,Any})
         for f in all_fields(T)
             a = attname(f)
             if f.auto_now || (f.auto_now_add && get(data, a, nothing) === nothing)
@@ -62,13 +62,13 @@ function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_
     prepare_for_insert!(objs, T)
     fields = [f for f in meta.fields if f.generated === nothing]
     if isempty(fields)                       # nothing to put in VALUES: one row at a time
-        foreach(o -> (save_table!(concrete_model(T), getfield(o, :_data), true); refresh_computed!(o)), objs)
+        foreach(o -> (save_table!(concrete_model(T), (getfield(o, :_data)::Dict{Symbol,Any}), true); refresh_computed!(o)), objs)
         return objs
     end
     tbl = qname(meta.table)
-    isdef(o, f) = get(getfield(o, :_data), attname(f), nothing) === DB_DEFAULT
+    isdef(o, f) = get((getfield(o, :_data)::Dict{Symbol,Any}), attname(f), nothing) === DB_DEFAULT
     for with_id in (true, false)
-        group = [o for o in objs if (getfield(o, :_data)[:id] !== nothing) == with_id]
+        group = [o for o in objs if ((getfield(o, :_data)::Dict{Symbol,Any})[:id] !== nothing) == with_id]
         isempty(group) && continue
         n = batch_size === nothing ? max(1, 999 ÷ (length(fields) + 1)) : Int(batch_size)
         returning = !with_id && conflict == "" && verb == "INSERT INTO" && supports_insert_returning(b) && !is_composite(T)
@@ -81,7 +81,7 @@ function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_
             cols = vcat(with_id ? [qname("id")] : String[], [qname(column(f)) for f in bf])
             ps, rows_sql = Any[], String[]
             for o in batch
-                data = getfield(o, :_data)
+                data = (getfield(o, :_data)::Dict{Symbol,Any})
                 marks = String[]
                 with_id && (push!(ps, data[:id]); push!(marks, "?"))
                 for f in bf
@@ -95,11 +95,11 @@ function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_
             end
             sql = isempty(cols) ? "$verb $tbl DEFAULT VALUES" :
                   "$verb $tbl (" * join(cols, ", ") * ") VALUES " * join(rows_sql, ", ") * conflict
-            isempty(cols) && length(batch) > 1 && (foreach(o -> save_table!(concrete_model(T), getfield(o, :_data), true), batch); continue)
+            isempty(cols) && length(batch) > 1 && (foreach(o -> save_table!(concrete_model(T), (getfield(o, :_data)::Dict{Symbol,Any}), true), batch); continue)
             if returning
                 rows = execute(sql * " RETURNING " * qname("id"), ps)
                 for (o, r) in zip(batch, rows)
-                    getfield(o, :_data)[:id] = pk_value(T, r[:id])
+                    (getfield(o, :_data)::Dict{Symbol,Any})[:id] = pk_value(T, r[:id])
                 end
             else
                 execute_changes(sql, ps)
@@ -107,7 +107,7 @@ function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_
         end
         with_id && sync_sequence(b, meta.table)
     end
-    is_composite(T) && foreach(o -> (getfield(o, :_data)[:id] = composite_pk(T, getfield(o, :_data))), objs)
+    is_composite(T) && foreach(o -> ((getfield(o, :_data)::Dict{Symbol,Any})[:id] = composite_pk(T, (getfield(o, :_data)::Dict{Symbol,Any}))), objs)
     objs
 end
 
@@ -178,7 +178,7 @@ function iterator(qs::QuerySet; chunk_size::Integer = 2000)
     any(o -> lstrip(o, '-') in ("id", "pk"), order) || (order = vcat(order, ["id"]))
     QuerySetIterator(qs.combinator === nothing ? chain(qs; order = order) : qs, Int(chunk_size))
 end
-iterator(::Type{T}; kw...) where {T<:Model} = iterator(objects(T); kw...)
+Base.@nospecializeinfer iterator(@nospecialize(T::Type{<:Model}); kw...) = iterator(objects(T); kw...)
 Base.IteratorSize(::Type{QuerySetIterator}) = Base.SizeUnknown()
 Base.eltype(it::QuerySetIterator) = it.qs.values_fields === nothing ? model_of(it.qs) : Dict{Symbol,Any}
 function Base.iterate(it::QuerySetIterator, st = (Any[], 1, 0, false))
@@ -205,9 +205,10 @@ function select_for_update(qs::QuerySet; nowait = false, skip_locked = false, of
     nowait && skip_locked && throw(ArgumentError("select_for_update: nowait and skip_locked can't both be set"))
     chain(qs; for_update = (nowait = nowait, skip_locked = skip_locked, of = collect(of)))
 end
-select_for_update(::Type{T}; kw...) where {T<:Model} = select_for_update(objects(T); kw...)
+Base.@nospecializeinfer select_for_update(@nospecialize(T::Type{<:Model}); kw...) = select_for_update(objects(T); kw...)
 
-function combine(op, qs::QuerySet{T}, others; keep_all = false) where {T}
+Base.@nospecializeinfer function combine(op, @nospecialize(qs::QuerySet), others; keep_all = false)
+    T = model_of(qs)
     isempty(others) && return qs
     parts = QuerySet[]
     for q in (qs, others...)
@@ -255,7 +256,8 @@ Base.showerror(io::IO, e::MultipleObjectsReturned) = print(io, nameof(e.model), 
 
 Exactly one matching object. Throws `DoesNotExist` or `MultipleObjectsReturned`.
 """
-function Base.get(qs::QuerySet{T}, qargs::Q...; kw...) where {T}
+Base.@nospecializeinfer function Base.get(@nospecialize(qs::QuerySet), qargs::Q...; kw...)
+    T = model_of(qs)
     q = filter(qs, qargs...; kw...)
     v = fetch(chain(q; limit = 2))
     desc = join(["$k=$(repr(v))" for (k, v) in kw], ", ")
@@ -263,7 +265,7 @@ function Base.get(qs::QuerySet{T}, qargs::Q...; kw...) where {T}
     length(v) > 1 && throw(MultipleObjectsReturned(T, desc))
     v[1]
 end
-Base.get(::Type{T}, qargs::Q...; kw...) where {T<:Model} = get(objects(T), qargs...; kw...)
+Base.@nospecializeinfer Base.get(@nospecialize(T::Type{<:Model}), qargs::Q...; kw...) = get(objects(T), qargs...; kw...)
 
 """
     update!(qs; field=value, ...) -> Int
@@ -272,7 +274,8 @@ Bulk SQL UPDATE of all matching rows; returns the number of rows changed.
 Does not call `save!` or touch `auto_now` fields.
 """
 update!(qs::QuerySet; kw...) = in_db(() -> update_here!(qs; kw...), qs, true)
-function update_here!(qs::QuerySet{T}; kw...) where {T}
+Base.@nospecializeinfer function update_here!(@nospecialize(qs::QuerySet); kw...)
+    T = model_of(qs)
     qs.isnone && return 0
     meta = modelmeta(T)
     sets, ps = String[], Any[]
@@ -322,7 +325,7 @@ Every row a deletion reaches through cascades (model => keys), and the `:RESTRIC
 meets on the way. As in Django, a restricted row may be deleted only when the rows pointing at it
 are deleted by the same operation.
 """
-function deletion_closure!(seen::IdDict{Any,Set{Any}}, restricts, @nospecialize(T), ids)
+Base.@nospecializeinfer function deletion_closure!(seen::IdDict{Any,Set{Any}}, restricts, @nospecialize(T), ids)
     T = concrete_model(T)
     new = setdiff(Set{Any}(ids), get!(Set{Any}, seen, T))
     isempty(new) && return
@@ -354,7 +357,7 @@ function deletion_closure!(seen::IdDict{Any,Set{Any}}, restricts, @nospecialize(
 end
 
 "Raise `RestrictedError` if deleting these rows would orphan rows behind a `:RESTRICT` key."
-function check_restricted(@nospecialize(T), ids)
+Base.@nospecializeinfer function check_restricted(@nospecialize(T), ids)
     seen, restricts = IdDict{Any,Set{Any}}(), Any[]
     deletion_closure!(seen, restricts, T, ids)
     for (R, M, f, rel) in restricts
@@ -364,7 +367,7 @@ function check_restricted(@nospecialize(T), ids)
 end
 
 "Delete rows by key, with `on_delete` handling: the entry point of `delete!`."
-delete_rows!(@nospecialize(T), ids) = ((isempty(ids) || !any_restrict()) || check_restricted(T, ids); delete_ids!(T, ids))
+Base.@nospecializeinfer delete_rows!(@nospecialize(T), ids) = ((isempty(ids) || !any_restrict()) || check_restricted(T, ids); delete_ids!(T, ids))
 "Whether any relation uses `on_delete = :RESTRICT` (otherwise deleting needs no look-ahead)."
 any_restrict() = cached_relations(:any_restrict, Model) do _
     any(f -> f.kind in (:fk, :fobj) && f.on_delete === :RESTRICT, (f for M in MODEL_LIST for f in vcat(all_fields(M), foreign_objects(M))))
@@ -377,7 +380,7 @@ function on_delete_value(f::Field)
     v isa Model ? v.id : v
 end
 
-function delete_ids!(T::Type, ids::Vector)
+Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector)
     isempty(ids) && return 0
     T = concrete_model(T)
     delete_fobj_refs!(T, ids)
@@ -418,10 +421,10 @@ function delete_ids!(T::Type, ids::Vector)
 end
 
 "The primary keys of a queryset's rows: ids, or tuples for a composite key."
-row_keys(qs::QuerySet{T}) where {T} = is_composite(T) ? Any[o.pk for o in fetch(qs)] : values_list(qs, :id; flat = true)
+Base.@nospecializeinfer row_keys(@nospecialize(qs::QuerySet)) = is_composite(model_of(qs)) ? Any[o.pk for o in fetch(qs)] : values_list(qs, :id; flat = true)
 
 "Delete rows of a model with a composite primary key (only ForeignObjects can refer to them; see `delete_fobj_refs!`)."
-function delete_composite!(T::Type, keys::Vector)
+Base.@nospecializeinfer function delete_composite!(@nospecialize(T::Type), keys::Vector)
     signal = has_receivers(pre_delete, T) || has_receivers(post_delete, T)
     doomed = signal ? fetch(filter(base_objects(T); pk__in = keys)) : T[]
     foreach(o -> send(pre_delete, T; instance = o), doomed)
@@ -435,11 +438,12 @@ function delete_composite!(T::Type, keys::Vector)
 end
 
 "Delete all matching rows (with `on_delete` handling for related objects). Returns the count."
-Base.delete!(qs::QuerySet{T}) where {T} =
-    in_db(() -> atomic(() -> delete_rows!(T, row_keys(qs))), qs, true)
+Base.@nospecializeinfer Base.delete!(@nospecialize(qs::QuerySet)) =
+    in_db(() -> atomic(() -> delete_rows!(model_of(qs), row_keys(qs))), qs, true)
 
 Base.show(io::IO, qs::QuerySet{T}) where {T} = print(io, "<QuerySet{", nameof(T), "}>")
-function Base.show(io::IO, ::MIME"text/plain", qs::QuerySet{T}) where {T}
+Base.@nospecializeinfer function Base.show(io::IO, ::MIME"text/plain", @nospecialize(qs::QuerySet))
+    T = model_of(qs)
     items = fetch(qs[1:min(something(qs.limit, 21), 21)])
     print(io, "<QuerySet [", join([repr(x) for x in first(items, 20)], ", "), length(items) > 20 ? ", ...(remaining elements truncated)..." : "", "]>")
 end

@@ -74,11 +74,11 @@ A select of model objects for any form (a `ModelForm` makes these for foreign ke
 cleaned value is the object; `to_field_name` submits another unique field instead of the primary
 key. The queryset is read when the form is rendered and validated.
 """
-ModelChoiceField(qs; to_field_name = nothing, empty_label = "---------", label_from_instance = nothing, kw...) =
+Base.@nospecializeinfer ModelChoiceField(@nospecialize(qs); to_field_name = nothing, empty_label = "---------", label_from_instance = nothing, kw...) =
     Field(:modelchoice; related = ModelChoiceSpec(qs, to_field_name === nothing ? nothing : Symbol(to_field_name),
                                                   empty_label === nothing ? nothing : string(empty_label), label_from_instance), kw...)
 "A multiple select of model objects; the cleaned value is a vector of objects."
-ModelMultipleChoiceField(qs; to_field_name = nothing, label_from_instance = nothing, kw...) =
+Base.@nospecializeinfer ModelMultipleChoiceField(@nospecialize(qs); to_field_name = nothing, label_from_instance = nothing, kw...) =
     Field(:modelmultichoice; related = ModelChoiceSpec(qs, to_field_name === nothing ? nothing : Symbol(to_field_name), nothing,
                                                        label_from_instance), kw...)
 
@@ -146,7 +146,7 @@ end
 "Hook for cross-field validation of `@form`-defined forms (dispatch on `Val{:FormName}`)."
 clean_form(f::Form, ::Val) = nothing
 "Hook run by `save!(form)` on the instance before it is saved (dispatch on `Val{:FormName}`)."
-form_save_hook(f::Form, ::Val, obj) = nothing
+Base.@nospecializeinfer form_save_hook(f::Form, ::Val, @nospecialize(obj)) = nothing
 
 """
     ModelForm(Model; data=nothing, instance=nothing, fields=nothing, exclude=[], initial=Dict(), widgets=Dict())
@@ -154,11 +154,11 @@ form_save_hook(f::Form, ::Val, obj) = nothing
 A form generated from a model's fields. `save!(form)` writes the cleaned data
 into the instance (creating one if needed) and saves it.
 """
-function ModelForm(::Type{T}; data = nothing, files = nothing, instance = nothing, fields = nothing, exclude = Symbol[],
+Base.@nospecializeinfer function ModelForm(@nospecialize(T::Type{<:Model}); data = nothing, files = nothing, @nospecialize(instance = nothing), fields = nothing, exclude = Symbol[],
                    initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
                    labels = Dict{Symbol,String}(), help_texts = Dict{Symbol,String}(),
                    widgets = Dict{Symbol,Symbol}(), field_classes = Dict{Symbol,Any}(),
-                   formfield_callback = nothing) where {T<:Model}
+                   formfield_callback = nothing)
     meta = modelmeta(T)
     chosen = fields === nothing ? vcat([f.name for f in all_fields(T) if f.editable], [f.name for f in meta.m2m if f.editable]) :
              Symbol.(collect(fields))
@@ -420,7 +420,7 @@ function initial_for(f::Form, fld::Field)
     v
 end
 
-normalized(x::Model) = x.id
+Base.@nospecializeinfer normalized(@nospecialize(x::Model)) = x.id
 normalized(x::AbstractVector) = Set(normalized.(x))
 normalized(x::AbstractString) = isempty(x) ? nothing : String(x)
 normalized(x) = x

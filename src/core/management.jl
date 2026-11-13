@@ -496,7 +496,7 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
             DEBUG = get(ENV, "JUANGO_DEBUG", "true") == "true",
             SECRET_KEY = get(ENV, "JUANGO_SECRET_KEY", "$secret"),
             ALLOWED_HOSTS = ["localhost", "127.0.0.1"],
-            # For PostgreSQL: Pkg.add("LibPQ"), add `using LibPQ` to project.jl, then
+            # For PostgreSQL:
             # DATABASE = "postgresql://user:password@localhost:5432/$name",
             DATABASE = joinpath(BASE_DIR, "db.sqlite3"),
             # Your apps (`julia --project manage.jl startapp blog`) go here too, e.g. Blog.APP

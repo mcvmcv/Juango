@@ -186,7 +186,7 @@ schema_kind(kind::Symbol) = kind in STRING_KINDS || kind in (:file, :image, :fil
 ref_table(name) = name == "__user_model__" ? modelmeta(get_user_model()).table : name
 
 "`Column.of` for a foreign key: the target's key type when it isn't the default 64-bit integer."
-function fk_of(@nospecialize(R))
+Base.@nospecializeinfer function fk_of(@nospecialize(R))
     k = pk_kind(R)
     k === :uuid ? :uuid : k === :intauto ? :int : k === :smallauto ? :smallint : nothing
 end
@@ -217,7 +217,7 @@ db_default_value(v::Expression) = throw(ArgumentError("db_default takes a value 
 db_default_value(v) = v
 
 "The snapshot `Table` for a model."
-function table_state(T::Type)
+Base.@nospecializeinfer function table_state(@nospecialize(T::Type))
     m = modelmeta(T)
     col(n) = (f = findfield(m, Symbol(n)); f === nothing ? error("$(m.name): Meta names unknown field '$n'") : column(f))
     P = table_parent(T)
