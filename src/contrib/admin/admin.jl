@@ -239,10 +239,7 @@ function raw_cell(ma::ModelAdmin, obj, col)
     col === :__str__ && return string(obj)
     f = findfield(modelmeta(ma.model), Symbol(col))
     val = getproperty(obj, Symbol(col))
-    if f !== nothing && f.choices !== nothing
-        i = findfirst(c -> string(c.first) == string(val), f.choices)
-        i === nothing || return f.choices[i].second
-    end
+    f !== nothing && f.choices !== nothing && return Juango.choice_label(Juango.field_choices(f), val)
     val
 end
 cell_value(ma::ModelAdmin, obj, col) = format_value(raw_cell(ma, obj, col))
@@ -276,7 +273,7 @@ function filter_specs(req::Request, ma::ModelAdmin)
         if f.kind === :bool
             append!(opts_, [("Yes", "1"), ("No", "0")])
         elseif f.choices !== nothing
-            append!(opts_, [(c.second, string(c.first)) for c in f.choices])
+            append!(opts_, [(string(c.second), string(c.first)) for c in Juango.field_choices(f)])
         elseif f.kind === :fk
             append!(opts_, [(string(o), string(o.id)) for o in objects(related_model(f))[1:100]])
         else
@@ -490,10 +487,7 @@ function readonly_value(obj, f::Field)
     obj === nothing && return "-"
     v = getproperty(obj, f.name)
     f.kind === :m2m && return join(string.(collect(v)), ", ")
-    if f.choices !== nothing
-        i = findfirst(c -> string(c.first) == string(v), f.choices)
-        i === nothing || return f.choices[i].second
-    end
+    f.choices !== nothing && v !== nothing && return string(Juango.choice_label(Juango.field_choices(f), v))
     format_value(v)
 end
 readonly_row(ma, obj, name) = (f = findfield(modelmeta(ma.model), name);

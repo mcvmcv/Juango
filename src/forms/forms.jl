@@ -510,14 +510,18 @@ function widget_html(bf::BoundField)
         print(io, "</select>")
         return String(take!(io))
     elseif fld.kind === :fk || fld.choices !== nothing || fld.kind === :filepath
-        opts = fld.kind === :fk ? Pair{Any,String}[o.id => string(o) for o in objects(related_model(fld))] :
-               fld.kind === :filepath ? filepath_choices(fld) : fld.choices
+        groups = fld.kind === :fk ? [(nothing, Pair{Any,Any}[o.id => string(o) for o in objects(related_model(fld))])] :
+                 fld.kind === :filepath ? [(nothing, filepath_choices(fld))] : choice_groups(fld)
         io = IOBuffer()
         print(io, "<select$attrs>")
         (fld.blank || fld.kind === :fk) && print(io, "<option value=\"\">---------</option>")
-        for (k, lbl) in opts
-            sel = val !== nothing && string(val) == string(k) ? " selected" : ""
-            print(io, "<option value=\"", escape_html(string(k)), "\"", sel, ">", escape_html(lbl), "</option>")
+        for (glabel, opts) in groups
+            glabel === nothing || print(io, "<optgroup label=\"", escape_html(string(glabel)), "\">")
+            for (k, lbl) in opts
+                sel = val !== nothing && string(val) == string(k) ? " selected" : ""
+                print(io, "<option value=\"", escape_html(string(k)), "\"", sel, ">", escape_html(string(lbl)), "</option>")
+            end
+            glabel === nothing || print(io, "</optgroup>")
         end
         print(io, "</select>")
         return String(take!(io))

@@ -21,6 +21,7 @@ function from_db(f::Field, v)
 end
 
 to_db(f::Field, v::Model) = v.id      # (other values: see fields_extra.jl)
+to_db(f::Field, c::Choice) = to_db(f, c.value)
 
 """
     CompositePrimaryKey(:order, :product)

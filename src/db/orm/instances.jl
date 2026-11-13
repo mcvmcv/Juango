@@ -247,7 +247,8 @@ function validate_field(f::Field, v)
         v < lo && push!(errs, interpolate(gettext("Ensure this value is greater than or equal to %(limit_value)s."), Dict("limit_value" => lo)))
         v > hi && push!(errs, interpolate(gettext("Ensure this value is less than or equal to %(limit_value)s."), Dict("limit_value" => hi)))
     end
-    if f.choices !== nothing && !any(c -> value_eq(c.first, v) || string(c.first) == string(v), f.choices)
+    cs = field_choices(f)
+    if cs !== nothing && !any(c -> value_eq(c.first, v) || string(c.first) == string(v), cs)
         push!(errs, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v)))
     end
     for val in f.validators

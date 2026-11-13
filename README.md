@@ -180,6 +180,32 @@ union(filter(Post; featured = true), filter(Post; views__gt = 1000))     # inter
 
 `bulk_create` and `bulk_update` don't call `save!` or send signals. Combined querysets can be ordered, sliced and counted but not filtered further.
 
+#### Choices
+
+```julia
+@choices Status begin
+    DRAFT = "d", "Draft"                         # value, label (gettext_lazy("Draft") translates it)
+    PUBLISHED = "p", "Published"
+    ARCHIVED = "a"                               # the label comes from the name: "Archived"
+end
+
+@model struct Post
+    status = CharField(max_length = 1, choices = Status, default = Status.DRAFT)
+    medium = CharField(max_length = 10, blank = true,
+                       choices = ["Audio" => ["vinyl" => "Vinyl", "cd" => "CD"], "Video" => ["vhs" => "VHS"]])
+    shelf  = CharField(max_length = 10, choices = () -> [s.code => s.name for s in shelves()])   # read when needed
+end
+
+filter(Post; status = Status.PUBLISHED)
+post.status == Status.DRAFT                     # members equal their values
+post.get_status_display                         # "Draft" (also get_display(post, :status), and in templates)
+Status.choices; Status.values; Status.label("p")
+```
+
+- **Members** are `Choice`s with `.value`, `.label` and `.name`. They equal and hash like their values, so they work as query values and Dict keys. Loading from the database gives back the plain value, as in Django.
+- **Grouped choices** become optgroups in forms.
+- **A function** as `choices` is called each time the choices are needed, both for validation and for forms (Django 5's callable choices).
+
 #### What deleting does: on_delete
 
 ```julia

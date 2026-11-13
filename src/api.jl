@@ -37,7 +37,7 @@ export Model, @model, @abstract_model, Field, CharField, TextField, EmailField, 
        DateTimeRangeField, ValueRange, FileField, ImageField, UploadedFile, FileExtensionValidator,
        MaxFileSizeValidator, ForeignKey, OneToOneField, ManyToManyField, ForeignObject, GeneratedField,
        DB_DEFAULT, CompositePrimaryKey, CheckConstraint, UniqueConstraint, Index, get_absolute_url,
-       Decimal, @dec_str
+       Decimal, @dec_str, @choices, Choice, ChoiceSet, get_display
 export ContentType, GenericForeignKey, GenericRelation
 # querysets
 export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_list, annotate, aggregate,

@@ -494,6 +494,8 @@ function Base.getproperty(m::Model, s::Symbol)
         return get(base_objects(table_parent(T)); id = data[:id])
     end
     pre === NOTFOUND || return pre isa PrefetchedList ? pre.items : pre    # Prefetch(...; to_attr)
+    df = display_field(T, s)
+    df === nothing || return get_display(m, df.name)                     # obj.get_status_display
     r = tattr(m, Val(s))
     r === NOTFOUND || return r
     throw(ArgumentError("$(T) has no attribute '$s'"))
@@ -531,6 +533,7 @@ function Base.propertynames(m::Model, private::Bool = false)
     for f in all_fields(typeof(m))
         push!(names, attname(f))
         f.kind === :fk && push!(names, f.name)
+        f.choices === nothing || push!(names, Symbol("get_", f.name, "_display"))
     end
     append!(names, [r[1] for r in reverse_relations(typeof(m)) if !startswith(string(r[1]), "+")])
     append!(names, first.(m2m_relations(typeof(m))))
@@ -557,6 +560,27 @@ Override for your models to give them a canonical URL (used by generic views and
 the admin's "View on site" link). Available in templates as `obj.get_absolute_url`.
 """
 get_absolute_url(::Model) = nothing
+"The field behind `get_<name>_display`, when it has choices."
+function display_field(@nospecialize(T), s::Symbol)
+    str = string(s)
+    (startswith(str, "get_") && endswith(str, "_display")) || return nothing
+    f = findfield(modelmeta(T), Symbol(chop(str; head = 4, tail = 8)))
+    f !== nothing && f.choices !== nothing ? f : nothing
+end
+
+"""
+    get_display(obj, :field)
+
+The label of the field's current value (Django's `obj.get_FOO_display()`), or the value itself
+when it isn't one of the choices. Also `obj.get_status_display`, in Julia and in templates.
+"""
+function get_display(m::Model, name::Symbol)
+    f = findfield(modelmeta(typeof(m)), name)
+    f === nothing && throw(ArgumentError("$(typeof(m)) has no field '$name'"))
+    v = getproperty(m, attname(f))
+    v === nothing ? nothing : choice_label(field_choices(f), v)
+end
+
 function tattr(m::Model, ::Val{:get_absolute_url})
     u = get_absolute_url(m)
     u === nothing ? NOTFOUND : u

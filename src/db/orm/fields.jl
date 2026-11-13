@@ -33,7 +33,7 @@ mutable struct Field
     default::Any
     unique::Bool
     max_length::Union{Nothing,Int}
-    choices::Union{Nothing,Vector{Pair{Any,String}}}
+    choices::Any        # nothing, a vector of value => label (labels may be lazy), with groups, or a function returning one
     related::Any
     on_delete::Any                    # :CASCADE, :SET_NULL, :PROTECT, :RESTRICT, :SET_DEFAULT, :DO_NOTHING or SET(...)
     related_name::Union{Nothing,Symbol}
@@ -96,8 +96,129 @@ function norm_on_delete(x)
     s
 end
 
+# --- choices ---------------------------------------------------------------------------------------
+#
+#     @choices Status begin
+#         DRAFT = "d", "Draft"                 # value, label (gettext_lazy("Draft") to translate it)
+#         PUBLISHED = "p", "Published"
+#         ARCHIVED = "a"                       # label from the name: "Archived"
+#     end
+#     status = CharField(max_length = 1, choices = Status, default = Status.DRAFT)
+#     filter(Post; status = Status.PUBLISHED); post.status == Status.DRAFT; post.get_status_display
+#
+# Choices can also be value => label pairs, grouped (`"Audio" => ["vinyl" => "Vinyl", ...]`), or a
+# function returning them, called when they're needed (Django 5's callable choices).
+
+"""
+One member of a `@choices` enumeration: `Status.DRAFT.value`, `.label`, `.name`. It equals (and
+hashes like) its value, so `post.status == Status.DRAFT` and `filter(Post; status = Status.DRAFT)` work.
+"""
+struct Choice{T}
+    name::Symbol
+    value::T
+    label::Any              # an AbstractString, possibly a lazy translation
+end
+Base.:(==)(a::Choice, b::Choice) = a.value == b.value
+Base.:(==)(a::Choice, b) = a.value == b
+Base.:(==)(a, b::Choice) = a == b.value
+Base.:(==)(::Choice, ::Missing) = missing
+Base.:(==)(::Missing, ::Choice) = missing
+Base.isequal(a::Choice, b::Choice) = isequal(a.value, b.value)
+Base.isequal(a::Choice, b) = isequal(a.value, b)
+Base.isequal(a, b::Choice) = isequal(a, b.value)
+Base.hash(c::Choice, h::UInt) = hash(c.value, h)
+adapt_param(b::DatabaseBackend, x::Choice) = adapt_param(b, x.value)     # a query parameter is its value
+Base.print(io::IO, c::Choice) = print(io, c.value)
+Base.show(io::IO, c::Choice) = print(io, c.name, " (", repr(c.value), " => ", repr(string(c.label)), ")")
+
+"""
+    @choices Name begin
+        MEMBER = value, label
+        OTHER = value                  # label from the name
+    end
+
+An enumeration of choices (Django's `TextChoices` / `IntegerChoices`): a constant `Name` whose
+members are `Name.MEMBER` (a `Choice`), with `Name.choices` (value => label), `Name.values`,
+`Name.labels`, `Name.members` and `Name.label(value)`. Pass it to a field as `choices = Name`.
+"""
+macro choices(name, block)
+    name isa Symbol || error("@choices expects a name: @choices Status begin ... end")
+    items = Expr[]
+    for ex in block.args
+        ex isa LineNumberNode && continue
+        (ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol) || error("@choices: each line is `NAME = value` or `NAME = value, label`")
+        m, rhs = ex.args[1], ex.args[2]
+        value, label = rhs isa Expr && rhs.head === :tuple ? (rhs.args[1], rhs.args[2]) :
+                       (rhs, titlecase(replace(lowercase(string(m)), "_" => " ")))
+        push!(items, :($(GlobalRef(@__MODULE__, :Choice))($(QuoteNode(m)), $(esc(value)), $(esc(label)))))
+    end
+    :(const $(esc(name)) = $(GlobalRef(@__MODULE__, :ChoiceSet))($(QuoteNode(name)), Choice[$(items...)]))
+end
+
+"The enumeration `@choices` defines: members by name, plus `choices`, `values`, `labels`, `members`, `label(v)`."
+struct ChoiceSet
+    name::Symbol
+    members::Vector{Choice}
+end
+function Base.getproperty(cs::ChoiceSet, s::Symbol)
+    s in (:name, :members) && return getfield(cs, s)
+    ms = getfield(cs, :members)
+    s === :choices && return Pair{Any,Any}[m.value => m.label for m in ms]
+    s === :values && return [m.value for m in ms]
+    s === :labels && return Any[m.label for m in ms]
+    s === :label && return v -> choice_label(cs.choices, v)
+    i = findfirst(m -> m.name === s, ms)
+    i === nothing && throw(ArgumentError("$(getfield(cs, :name)) has no member $s"))
+    ms[i]
+end
+Base.propertynames(cs::ChoiceSet) = (:name, :members, :choices, :values, :labels, :label, (m.name for m in getfield(cs, :members))...)
+Base.iterate(cs::ChoiceSet, i = 1) = i > length(getfield(cs, :members)) ? nothing : (getfield(cs, :members)[i], i + 1)
+Base.length(cs::ChoiceSet) = length(getfield(cs, :members))
+Base.show(io::IO, cs::ChoiceSet) = print(io, getfield(cs, :name), "(", join(string.(m.name for m in getfield(cs, :members)), ", "), ")")
+
+"A choice's label (`v` itself when it isn't one of the choices)."
+function choice_label(cs, v)
+    cs === nothing && return v
+    i = findfirst(c -> value_eq(c.first, v) || string(c.first) == string(v), cs)
+    i === nothing ? v : cs[i].second
+end
+
+"A group of choices (`\"Audio\" => [\"vinyl\" => \"Vinyl\", ...]`), shown as an optgroup."
+struct ChoiceGroup
+    label::Any
+    choices::Vector{Pair{Any,Any}}
+end
+choice_pair(c::Choice) = c.value => c.label
+choice_pair(c::Pair) = c.first => c.second
+choice_pair(c) = c => string(c)
+is_group(c) = c isa Pair && c.second isa AbstractVector && !(c.second isa AbstractString)
+
 normchoices(::Nothing) = nothing
-normchoices(cs) = Pair{Any,String}[c isa Pair ? (c.first => string(c.second)) : (c => string(c)) for c in cs]
+normchoices(cs::ChoiceSet) = cs.choices
+normchoices(f::Function) = f                                   # called when the choices are needed
+normchoices(cs) = any(is_group, cs) ?
+    Any[is_group(c) ? ChoiceGroup(c.first, Pair{Any,Any}[choice_pair(x) for x in c.second]) : choice_pair(c) for c in cs] :
+    Pair{Any,Any}[choice_pair(c) for c in cs]
+
+"A field's choices in groups: `(group label or nothing, value => label pairs)`."
+function choice_groups(f::Field)
+    cs = f.choices
+    cs === nothing && return nothing
+    cs isa Function && (cs = normchoices(cs()))
+    out = Tuple{Any,Vector{Pair{Any,Any}}}[]
+    for c in cs
+        if c isa ChoiceGroup
+            push!(out, (c.label, c.choices))
+        elseif isempty(out) || out[end][1] !== nothing
+            push!(out, (nothing, Pair{Any,Any}[c]))
+        else
+            push!(out[end][2], c)
+        end
+    end
+    out
+end
+"A field's choices as one flat list of value => label pairs (nothing without choices)."
+field_choices(f::Field) = (g = choice_groups(f); g === nothing ? nothing : Pair{Any,Any}[c for (_, cs) in g for c in cs])
 
 function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, unique = false,
                max_length = nothing, choices = nothing, related = nothing, on_delete = :CASCADE,

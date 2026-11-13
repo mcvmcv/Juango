@@ -230,6 +230,25 @@ end
     Meta(permissions = [("publish_memo", "Can publish memos")])
 end
 
+# choices: enumerations, groups and callables
+@choices Phase begin
+    DRAFT = "d", "Draft"
+    REVIEW = "r", gettext_lazy("In review")
+    IN_PRINT = "p"
+end
+@choices Priority begin
+    LOW = 1
+    HIGH = 3, "High!"
+end
+const SHELVES = ["a", "b"]
+@model struct Chapter
+    phase = CharField(max_length = 1, choices = Phase, default = Phase.DRAFT)
+    priority = IntegerField(choices = Priority, default = Priority.LOW)
+    medium = CharField(max_length = 10, blank = true,
+                       choices = ["Audio" => ["vinyl" => "Vinyl", "cd" => "CD"], "Video" => ["vhs" => "VHS"], "unknown" => "Unknown"])
+    shelf = CharField(max_length = 10, blank = true, choices = () -> [s => uppercase(s) for s in SHELVES])
+end
+
 # on_delete = :RESTRICT, :SET_DEFAULT and SET(...) (Django's documentation example)
 @model struct Band
     name = CharField(max_length = 20)

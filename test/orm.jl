@@ -1420,3 +1420,38 @@ end
     refresh!(g)
     @test g.venue.name == "TBA" && g.backup.name == "TBA"
 end
+
+@testset "choices: enumerations, groups, callables, get_FOO_display" begin
+    @test Phase.DRAFT.value == "d" && Phase.IN_PRINT.label == "In Print" && Phase.values == ["d", "r", "p"]
+    @test Phase.DRAFT == "d" && "d" == Phase.DRAFT && Phase.DRAFT != Phase.REVIEW && hash(Phase.DRAFT) == hash("d")
+    @test Phase.label("r") == "In review" && Phase.label("zz") == "zz" && Priority.HIGH == 3 && string(Phase.DRAFT) == "d"
+    @test Dict(Phase.DRAFT => 1)["d"] == 1
+
+    c = create(Chapter; medium = "cd")
+    @test c.phase == Phase.DRAFT && c.priority == Priority.LOW
+    refresh!(c)
+    @test c.phase == "d" && c.phase == Phase.DRAFT && c.priority == 1
+    c.phase = Phase.REVIEW; c.priority = Priority.HIGH; c.shelf = "b"; save!(c)
+    @test get(Chapter; phase = Phase.REVIEW).id == c.id && count(filter(Chapter; priority = Priority.HIGH)) == 1
+    refresh!(c)
+    @test c.get_phase_display == "In review" && get_display(c, :priority) == "High!" && c.get_medium_display == "CD"
+    @test c.get_shelf_display == "B"
+    with_language("de") do
+        @test string(c.get_phase_display) == "In review"            # (no German catalogue entry: unchanged)
+    end
+    @test render(Template("{{ c.get_phase_display }} / {{ c.get_priority_display }}"), Dict("c" => c)) == "In review / High!"
+
+    @test isempty(full_clean(c))
+    c.medium = "tape"; c.shelf = "z"
+    errs = full_clean(c)
+    @test haskey(errs, :medium) && haskey(errs, :shelf)
+    push!(SHELVES, "z")                                                # callable choices are read each time
+    @test !haskey(full_clean(c), :shelf)
+
+    html = Juango.widget_html(ModelForm(Chapter; fields = [:medium])[:medium])
+    @test occursin("<optgroup label=\"Audio\"><option value=\"vinyl\">Vinyl</option><option value=\"cd\">CD</option></optgroup>", html)
+    @test occursin("<option value=\"unknown\">Unknown</option>", html)
+    @test occursin("<option value=\"z\">Z</option>", Juango.widget_html(ModelForm(Chapter; fields = [:shelf])[:shelf]))
+    @test occursin("<option value=\"r\">In review</option>", Juango.widget_html(ModelForm(Chapter; fields = [:phase])[:phase]))
+    @test Juango.column_state(Juango.getfield_meta(Chapter, :phase)).default == "d"
+end
