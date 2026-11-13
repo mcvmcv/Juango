@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}<h1>{{ title|upper }}</h1>
+<table>{% for r in rows %}
+<tr class="{% cycle 'odd' 'even' %}"><td>{{ forloop.counter }}</td><td>{{ r.name|title }}</td><td>{% if r.score > 50 %}<b>{{ r.score }}</b>{% else %}{{ r.score }}{% endif %}</td><td>{{ r.tags|join:", " }}</td></tr>{% endfor %}
+</table>{% endblock %}

@@ -530,20 +530,25 @@ end
 coerce_value(f::Field, v) = v
 coerce_value(f::Field, v::SafeString) = v.s
 
-function Base.propertynames(m::Model, private::Bool = false)
+# The same for every instance of a model, so worked out once per model (with the relations).
+Base.propertynames(m::Model, private::Bool = false) = propertynames_of(typeof(m))
+# `{{ obj.attr }}` asks this for each lookup that isn't a field
+Base.hasproperty(m::Model, s::Symbol) = s in (cached_relations(T -> Set{Symbol}(propertynames_of(T)), :propertyset, typeof(m))::Set{Symbol})
+propertynames_of(@nospecialize(T)) = cached_relations(compute_propertynames, :propertynames, T)
+function compute_propertynames(@nospecialize(T))
     names = Symbol[:id, :pk]
-    for f in all_fields(typeof(m))
+    for f in all_fields(T)
         push!(names, attname(f))
         f.kind === :fk && push!(names, f.name)
         f.choices === nothing || push!(names, Symbol("get_", f.name, "_display"))
         f.kind in (:date, :datetime) && !f.null && push!(names, Symbol("get_next_by_", f.name), Symbol("get_previous_by_", f.name))
     end
-    append!(names, [r[1] for r in reverse_relations(typeof(m)) if !startswith(string(r[1]), "+")])
-    append!(names, first.(m2m_relations(typeof(m))))
-    append!(names, child_accessor.(child_models(typeof(m))))
-    append!(names, [g.name for g in vcat(generic_fks(typeof(m)), generic_relations(typeof(m)), foreign_objects(typeof(m)))])
-    append!(names, first.(reverse_foreign_objects(typeof(m))))
-    table_parent(typeof(m)) === nothing || push!(names, parent_accessor(typeof(m)))
+    append!(names, [r[1] for r in reverse_relations(T) if !startswith(string(r[1]), "+")])
+    append!(names, first.(m2m_relations(T)))
+    append!(names, child_accessor.(child_models(T)))
+    append!(names, [g.name for g in vcat(generic_fks(T), generic_relations(T), foreign_objects(T))])
+    append!(names, first.(reverse_foreign_objects(T)))
+    table_parent(T) === nothing || push!(names, parent_accessor(T))
     Tuple(names)
 end
 

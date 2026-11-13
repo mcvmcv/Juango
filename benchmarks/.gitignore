@@ -1,0 +1,7 @@
+.venv/
+.loadgen
+data/
+results/.req-*
+results/*.log
+juango/Manifest.toml
+__pycache__/

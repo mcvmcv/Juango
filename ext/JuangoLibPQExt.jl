@@ -44,13 +44,74 @@ catch e
     0
 end
 
-function Juango.pg_exec(conn, sql::String, params::Vector{Any})
-    # async_execute waits cooperatively, so other Julia tasks run while the server works
-    res = try
-        fetch(LibPQ.async_execute(conn, sql, params; throw_error = false, type_map = TYPE_MAP, not_null = false))
-    catch e
-        e isa TaskFailedException ? throw(e.task.exception) : rethrow()
+# Running a query: it's sent without blocking, then for the first millisecond the result is waited
+# for with poll(2) (a GC-safe call, so it holds up only this thread, never the garbage collector),
+# and after that cooperatively, so other tasks on the thread run while a slow query works.
+# LibPQ.async_execute waits cooperatively from the start, which adds about 2 ms of wake-up latency
+# to every query (where a simple one takes 0.1 ms).
+const C = LibPQ.libpq_c
+struct PollFD
+    fd::Cint
+    events::Cshort
+    revents::Cshort
+end
+const POLLIN = Cshort(1)
+const FAST_WAIT_NS = 1_000_000
+
+"Wait up to `ms` milliseconds for the socket to be readable, blocking only this thread."
+function poll_readable(fd::Cint, ms::Int)
+    pfd = Ref(PollFD(fd, POLLIN, 0))
+    @static if VERSION >= v"1.12"
+        @ccall gc_safe = true poll(pfd::Ptr{PollFD}, 1::Culong, ms::Cint)::Cint
+    else
+        @ccall poll(pfd::Ptr{PollFD}, 1::Culong, ms::Cint)::Cint
     end
+end
+
+function exec_params(conn::LibPQ.Connection, sql::String, params::Vector{Any})
+    strs = LibPQ.string_parameters(params)
+    ptrs = LibPQ.parameter_pointers(strs)
+    lock(conn) do
+        pg = conn.conn
+        sent = GC.@preserve strs ptrs sql C.PQsendQueryParams(pg, sql, length(ptrs), C_NULL, ptrs, C_NULL, C_NULL, 0)
+        sent == 1 || throw(LibPQ.Errors.PQConnectionError(conn))
+        t0 = time_ns()
+        watcher = nothing
+        try
+            while true
+                C.PQconsumeInput(pg) == 1 || throw(LibPQ.Errors.PQConnectionError(conn))
+                C.PQisBusy(pg) == 0 && break
+                if !Sys.iswindows() && time_ns() - t0 < FAST_WAIT_NS
+                    poll_readable(C.PQsocket(pg), 1)
+                else
+                    watcher === nothing && (watcher = LibPQ.FileWatching.FDWatcher(LibPQ.socket(conn), true, false))
+                    wait(watcher)
+                end
+            end
+        finally
+            watcher === nothing || close(watcher)
+        end
+        # the last result is the statement's (earlier ones, if any, are dropped)
+        ptr = C.PQgetResult(pg)
+        while true
+            next = C.PQgetResult(pg)
+            next == C_NULL && break
+            C.PQclear(ptr)
+            ptr = next
+        end
+        ptr == C_NULL && throw(LibPQ.Errors.PQConnectionError(conn))
+        LibPQ.Result{false}(ptr, conn; type_map = TYPE_MAP, not_null = false)
+    end
+end
+
+function read_column!(rows, name::Symbol, res, j::Int, ::Type{P}, parse, numeric::Bool) where {P}
+    for i in eachindex(rows)
+        rows[i][name] = LibPQ.isnull(res, i, j) ? nothing : numeric ? parse_numeric(parse(P(res, i, j))) : parse(P(res, i, j))
+    end
+end
+
+function Juango.pg_exec(conn, sql::String, params::Vector{Any})
+    res = exec_params(conn, sql, params)
     try
         st = LibPQ.status(res)
         if st in (LibPQ.libpq_c.PGRES_FATAL_ERROR, LibPQ.libpq_c.PGRES_BAD_RESPONSE)
@@ -59,15 +120,13 @@ function Juango.pg_exec(conn, sql::String, params::Vector{Any})
             throw(err)
         end
         names = Symbol.(LibPQ.column_names(res))
-        numeric = [o == LibPQ.oid(:numeric) for o in LibPQ.column_oids(res)]
-        rows = Vector{Dict{Symbol,Any}}(undef, LibPQ.num_rows(res))
-        for i in eachindex(rows)
-            d = Dict{Symbol,Any}()
+        rows = Dict{Symbol,Any}[sizehint!(Dict{Symbol,Any}(), length(names)) for _ in 1:LibPQ.num_rows(res)]
+        if !isempty(rows)
+            oids = LibPQ.column_oids(res)
             for (j, n) in enumerate(names)
-                v = res[i, j]
-                d[n] = v === missing ? nothing : numeric[j] ? parse_numeric(v) : v
+                # once per column: the value type and parser (res[i, j] works them out for every cell)
+                read_column!(rows, n, res, j, LibPQ.PQValue{oids[j]}, res.column_funcs[j], oids[j] == LibPQ.oid(:numeric))
             end
-            rows[i] = d
         end
         affected = st == LibPQ.libpq_c.PGRES_COMMAND_OK ? affected_rows(res) : length(rows)
         return rows, affected

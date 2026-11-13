@@ -25,6 +25,7 @@ function to_http(resp::HttpResponse)
 end
 
 function log_request(req::Request, resp::HttpResponse)
+    settings.ACCESS_LOG === false && return
     ts = Dates.format(now(), "dd/u/yyyy HH:MM:SS")
     size = is_streaming(resp) ? something(getheader(resp, "Content-Length"), "-") : string(length(resp.body))
     line = "[$ts] \"$(req.method) $(full_path(req)) HTTP/1.1\" $(resp.status) $size"

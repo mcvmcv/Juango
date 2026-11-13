@@ -1696,6 +1696,10 @@ EXPOSE 8000
 CMD ["julia", "--project", "-J", "build/juango.so", "manage.jl", "runserver", "0.0.0.0:8000"]
 ```
 
+**Logging requests.** `runserver` prints a line to stderr for each request. `ACCESS_LOG = false` turns that off, for example behind a proxy that logs requests itself.
+
+**Performance.** `benchmarks/` has the same small app in Juango and Django, plus a script that measures both: throughput, latency, start-up time and memory. On a 4-core desktop, Juango served 3-10x as many requests per second as Django under gunicorn, depending on the page. Its start-up and first requests are much slower without a system image, and it uses several times the memory. See `benchmarks/README.md` for the numbers.
+
 ## Settings
 
 Set them with `configure!(...)` and read them with `settings.NAME`. Request limits, as in Django: `DATA_UPLOAD_MAX_MEMORY_SIZE` (2.5 MB, for bodies that aren't file uploads), `DATA_UPLOAD_MAX_NUMBER_FIELDS` (1000 GET and POST parameters) and Juango's `FILE_UPLOAD_MAX_SIZE` (100 MB, for multipart uploads, which Juango holds in memory). A request over a limit gets 400 Bad Request; `nothing` turns a limit off. The main ones: `DEBUG`, `SECRET_KEY`, `DATABASE` (a SQLite path, `":memory:"`, a `scheme://` URL, or a backend instance), `INSTALLED_APPS`, `APP_DIRS`, `ROOT_URLCONF`, `TEMPLATE_DIRS`, `STATIC_URL`, `STATIC_DIRS`, `STATIC_ROOT`, `ALLOWED_HOSTS`, `MIDDLEWARE`, `CONTEXT_PROCESSORS`, `LOGIN_URL`, `LOGIN_REDIRECT_URL`, `APPEND_SLASH`, `SESSION_COOKIE_AGE`, `PASSWORD_ITERATIONS`, `SQL_DEBUG`. Any extra keyword becomes a custom setting.

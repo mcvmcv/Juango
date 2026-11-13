@@ -45,6 +45,7 @@ function default_settings()
         :CACHES => Dict("default" => Dict(:backend => :locmem)),
         :CACHE_MIDDLEWARE_SECONDS => 600,
         :TEMPLATE_CACHE_CHECK_MTIME => nothing,        # read templates again when they change (nothing: only with DEBUG)
+        :ACCESS_LOG => true,                           # runserver prints a line to stderr for each request
         :TEMPLATE_COMPILE => nothing,                  # compile templates into Julia functions (nothing: when DEBUG is off)
         :TEMPLATES => nothing,                         # template engines (nothing: Juango's, with TEMPLATE_DIRS)
         :TEMPLATE_STRING_IF_INVALID => "",             # what unknown variables render as ("%s" is the name)
