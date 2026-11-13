@@ -90,6 +90,7 @@ post.author.name                 # FK traversal (lazy)
 count(ann.posts)                 # reverse relation
 filter(Post; author__name="Ann", title__icontains="hel") |> order_by("-created")
 filter(Post, Q(status="p") | Q(published=true))
+filter(Post, Q(container__isnull=true) ⊻ Q(material__isnull=true))   # xor: an odd number true (also in CheckConstraints)
 exclude(Post; status="d")[1:10]  # slicing → LIMIT/OFFSET
 get(Post; slug="hello")          # throws DoesNotExist / MultipleObjectsReturned
 update!(filter(Post; author=ann); published=true)
@@ -196,7 +197,15 @@ get_next_by(post, :created)                   # also get_previous_by, with filte
 post.get_next_by_created                      # Django's get_next_by_FOO, for non-null date fields
 ```
 
-- **`full_clean`** runs `clean_fields` (each field on its own), then `validate_unique` (`unique`, `unique_together`, `unique_for_*`), then `validate_constraints` (`Meta(constraints = ...)`). It skips fields that already have errors, as Django does.
+- **`full_clean`** runs `clean_fields` (each field on its own), then the model's own `Juango.clean`, then `validate_unique` (`unique`, `unique_together`, `unique_for_*`), then `validate_constraints` (`Meta(constraints = ...)`). It skips fields that already have errors, as Django does.
+- **`Juango.clean(obj)`** is Django's `Model.clean`, for rules across fields or rows. Throw `ValidationError("message")` for the whole object or `ValidationError(Dict(:field => ["message"]))` for fields. ModelForms call it too (on the instance with the form's data applied), so the admin and the generic edit views apply it. A form's own `clean` function may throw `ValidationError` as well.
+
+  ```julia
+  function Juango.clean(b::NumberBlock)
+      b.first > b.last && throw(ValidationError("The first number comes after the last."))
+  end
+  ```
+- **Partial saves.** `save!(obj; update_fields = [:status, :approved_at])` writes only those columns, so another request's change to a different field isn't overwritten. `auto_now` fields are set only if they're listed, an empty list saves nothing, and `pre_save`/`post_save` get `update_fields` (a `Set`, or `nothing`).
 - **`get_next_by` and `get_previous_by`** break ties by primary key, and throw `DoesNotExist` at the end.
 
 #### Choices
@@ -604,11 +613,15 @@ order_by(annotate(Post; sim = TrigramSimilarity(:title, "julia")), "-sim")    # 
 - `ExclusionConstraint` (GiST or SP-GiST, with an optional `condition`) is enforced by Postgres only. `full_clean` checks it there when the operators are `=` and `&&`. `=` on a plain column inside GiST needs the `btree_gist` extension.
 - The trigram lookups and expressions need `pg_trgm`, and `unaccent` needs the `unaccent` extension. Create extensions in a migration with `CreateExtension("name")` or `HStoreExtension()`, `TrigramExtension()`, `UnaccentExtension()`, `BtreeGistExtension()`, `BtreeGinExtension()`, `CITextExtension()`. These operations do nothing on other databases.
 
-Computed attributes for templates (and `obj.name` in Julia) use `tattr`:
+Computed attributes for templates (and `obj.name` in Julia) use `tattr`, and `tattr!` makes one settable, in assignments and constructors (`Sample(well = "B3")`, `create`, `bulk_create`):
 
 ```julia
 Juango.tattr(p::Post, ::Val{:summary}) = first(p.body, 100)
+Juango.tattr(s::Sample, ::Val{:well}) = well_name(s.position)
+Juango.tattr!(s::Sample, ::Val{:well}, v) = (s.position = well_position(v))
 ```
+
+Values that aren't fields and aren't saved go in `instance_cache(obj)`, a `Dict` on the object that `obj.name` and `{{ obj.name }}` read after the fields and relations: `get!(() -> expensive_total(order), instance_cache(order), :total)`. Assigning to a name that's neither a field nor a `tattr!` is still an error, so typos don't pass silently.
 
 ### Apps
 

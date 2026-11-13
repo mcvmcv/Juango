@@ -1,19 +1,41 @@
 # --- instance operations ----------------------------------------------------------------
 
 """
-    save!(obj) -> obj
+    save!(obj; db = nothing, update_fields = nothing) -> obj
 
 INSERT (when `obj.id === nothing`) or UPDATE the object. Sets `auto_now` /
 `auto_now_add` timestamps.
+
+`update_fields = [:status, :approved_at]` writes only those columns (Django's
+`save(update_fields=...)`), so concurrent changes to other fields aren't overwritten:
+`auto_now` fields are set only if listed, an empty list saves nothing (and sends no signals),
+an unknown name is an error, and so is a row that no longer exists. `pre_save` and
+`post_save` receive `update_fields` (a `Set{Symbol}`, or `nothing`).
 """
-Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing)
+Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, update_fields = nothing)
     T = typeof(obj)
+    only = update_fields === nothing ? nothing : update_field_set(T, update_fields)
+    only !== nothing && isempty(only) && return obj
+    only !== nothing && (getfield(obj, :_data)::Dict{Symbol,Any})[:id] === nothing &&
+        throw(ArgumentError("save!(::$(nameof(T)); update_fields) needs an object that's already saved"))
     alias = write_db(obj, db)
     with_db(alias) do
         check_relations_db(obj)
-        save_here!(obj)
+        save_here!(obj, only)
         set_instance_db!(obj)
     end
+end
+
+"The attribute names (`author_id` for `author`) of the fields in `update_fields`, checked."
+Base.@nospecializeinfer function update_field_set(@nospecialize(T::Type), names)
+    out = Set{Symbol}()
+    for n in names
+        s = Symbol(n)
+        f = findfirst(f -> f.name === s || attname(f) === s, all_fields(T))
+        f === nothing && throw(ArgumentError("$(nameof(T)) has no field '$s' (in update_fields)"))
+        push!(out, attname(all_fields(T)[f]))
+    end
+    out
 end
 
 "Where to write an object: `db`, else the enclosing `using_db` block, else where it came from, else the routers."
@@ -33,18 +55,19 @@ Base.@nospecializeinfer function check_relations_db(@nospecialize(obj::Model))
     end
 end
 
-Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model))
+Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Union{Nothing,Set{Symbol}} = nothing)
     T = typeof(obj)
     data = (getfield(obj, :_data)::Dict{Symbol,Any})
     ts = timezone_now()
     for f in all_fields(T)
         a = attname(f)
+        only === nothing || a in only || continue
         if f.auto_now || (f.auto_now_add && (data[:id] === nothing || get(data, a, missing) === nothing))
             data[a] = auto_now_value(f, ts)
         end
     end
     created = data[:id] === nothing
-    has_receivers(pre_save, T) && send(pre_save, T; instance = obj, created = created)
+    has_receivers(pre_save, T) && send(pre_save, T; instance = obj, created = created, update_fields = only)
     store_uploaded_files!(obj, data)
     chain_ = reverse(vcat([concrete_model(T)], ancestors(T)))     # root table first
     fresh = false
@@ -52,10 +75,16 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model))
         data[:id] = uuid4()           # UUID keys are made here, so the row is inserted directly
         fresh = true
     end
-    length(chain_) == 1 ? save_table!(chain_[1], data, true, fresh) :
-        atomic(() -> foreach(M -> save_table!(M, data, M === chain_[1], fresh), chain_))
+    if only !== nothing
+        # only the tables with a listed field; the row must be there
+        tables = [M for M in chain_ if any(f -> attname(f) in only, modelmeta(M).fields)]
+        atomic(() -> foreach(M -> update_columns!(M, data, only), tables))
+    else
+        length(chain_) == 1 ? save_table!(chain_[1], data, true, fresh) :
+            atomic(() -> foreach(M -> save_table!(M, data, M === chain_[1], fresh), chain_))
+    end
     refresh_computed!(obj)
-    has_receivers(post_save, T) && send(post_save, T; instance = obj, created = created)
+    has_receivers(post_save, T) && send(post_save, T; instance = obj, created = created, update_fields = only)
     obj
 end
 
@@ -74,6 +103,23 @@ Base.@nospecializeinfer function refresh_computed!(@nospecialize(obj::Model))
         end
     end
     obj
+end
+
+"UPDATE some columns of one table's row for `save!(...; update_fields)`; the row must exist."
+Base.@nospecializeinfer function update_columns!(@nospecialize(M::Type), data, only::Set{Symbol})
+    fields = [f for f in modelmeta(M).fields if attname(f) in only && haskey(data, attname(f)) &&     # (not deferred)
+                                               f.generated === nothing && data[attname(f)] !== DB_DEFAULT]
+    isempty(fields) && return
+    sets = join(["$(qname(column(f))) = ?" for f in fields], ", ")
+    vals = Any[to_db(f, data[attname(f)]) for f in fields]
+    if is_composite(M)
+        cond = join([qname(column(f)) * " = ?" for f in pk_fields(M)], " AND ")
+        n = execute_changes("UPDATE $(qname(modelmeta(M).table)) SET $sets WHERE $cond", vcat(vals, collect(Any, data[:id])))
+    else
+        n = execute_changes("UPDATE $(qname(modelmeta(M).table)) SET $sets WHERE $(qname("id")) = ?", vcat(vals, data[:id]))
+    end
+    n == 0 && throw(ArgumentError("save!(...; update_fields) didn't affect any rows: no $(nameof(M)) with key $(repr(data[:id]))"))
+    nothing
 end
 
 "Write the columns of one table (`M`'s own fields) for an object's data."
@@ -265,6 +311,51 @@ function validate_field(f::Field, v)
 end
 
 """
+    ValidationError(msg)
+    ValidationError([msg, ...])
+    ValidationError(Dict(:field => ["msg", ...], ...))
+
+Raised by validation hooks such as a model's `Juango.clean` (and accepted from form `clean`
+functions). A message on its own belongs to the whole object (`:__all__`); a Dict names fields.
+"""
+struct ValidationError <: Exception
+    errors::Dict{Symbol,Vector{String}}
+end
+ValidationError(msg::AbstractString) = ValidationError(Dict(:__all__ => [String(msg)]))
+ValidationError(msgs::AbstractVector) = ValidationError(Dict(:__all__ => String[string(m) for m in msgs]))
+ValidationError(d::AbstractDict) =
+    ValidationError(Dict{Symbol,Vector{String}}(Symbol(k) => (v isa AbstractString ? [String(v)] : String[string(x) for x in v]) for (k, v) in d))
+Base.showerror(io::IO, e::ValidationError) =
+    print(io, "ValidationError: ", join([k === :__all__ ? join(v, " ") : "$k: " * join(v, " ") for (k, v) in e.errors], "; "))
+
+"""
+    Juango.clean(obj)
+
+A model's own validation, for rules across fields or rows (Django's `Model.clean`). Define it
+for your model and `throw(ValidationError(...))`; it may also adjust the object's values.
+`full_clean` calls it after checking each field (even when some have errors), and ModelForms
+call it, so the admin and generic edit views apply it too. A shared rule on an abstract model
+runs for its subtypes; a subtype can add its own and call the shared one with
+`invoke(Juango.clean, Tuple{MyBase}, obj)`.
+
+    function Juango.clean(b::NumberBlock)
+        b.first > b.last && throw(ValidationError("The first number comes after the last."))
+    end
+"""
+clean(@nospecialize(obj::Model)) = nothing
+
+"The errors of `clean(obj)`: a Dict, empty when it passes."
+Base.@nospecializeinfer function model_clean_errors(@nospecialize(obj::Model))
+    try
+        clean(obj)
+        Dict{Symbol,Vector{String}}()
+    catch e
+        e isa ValidationError || rethrow()
+        e.errors
+    end
+end
+
+"""
     full_clean(obj; exclude=Symbol[]) -> Dict{Symbol,Vector{String}}
 
 Validate an instance against its field definitions (required, max_length,
@@ -273,6 +364,7 @@ choices, email/slug/url format, custom validators, uniqueness). Empty dict = val
 Base.@nospecializeinfer function full_clean(@nospecialize(obj::Model); exclude = Symbol[], validate_unique::Bool = true, validate_constraints::Bool = true)
     T = typeof(obj)
     errors = clean_fields(obj; exclude = exclude)
+    merge_errors!(errors, model_clean_errors(obj))
     # uniqueness and constraints only for fields that are clean and not excluded
     skip = union(Symbol.(exclude), keys(errors))
     merge_errors!(errors, validate_unique ? Juango.validate_unique(obj; exclude = skip) : Dict{Symbol,Vector{String}}())

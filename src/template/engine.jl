@@ -39,6 +39,18 @@ through `obj.name`). Return `Juango.NOTFOUND` when not applicable.
 """
 tattr(obj, ::Val) = NOTFOUND
 
+"""
+    tattr!(obj, ::Val{name}, value)
+
+The setter to go with a computed `tattr`: for models, `obj.name = value` and `Model(; name = value)`
+(constructors, `create`, `bulk_create` lists) call it for names that aren't fields. Store the value
+in the object's fields; return anything but `Juango.NOTFOUND`.
+
+    Juango.tattr(s::Sample, ::Val{:well}) = well_name(s.position)
+    Juango.tattr!(s::Sample, ::Val{:well}, v) = (s.position = well_position(v))
+"""
+tattr!(obj, ::Val, v) = NOTFOUND
+
 # --- tokens ---------------------------------------------------------------------------
 
 struct Token

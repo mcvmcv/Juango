@@ -374,7 +374,8 @@ function is_valid(f::Form)
         isempty(errs) && (f.cleaned_data[fld.name] = v)
     end
     f.model !== nothing && isempty(f.errors) && model_form_constraint_errors!(f)
-    f.clean === nothing || f.clean(f)
+    f.model !== nothing && model_form_clean!(f)
+    f.clean === nothing || form_clean_hook(f)
     clean_form(f, Val(Symbol(f.name)))
     f.validated = true
     isempty(f.errors)
@@ -400,6 +401,39 @@ function model_form_constraint_errors!(f::Form)
     id = inst === nothing ? nothing : inst.id
     for e in vcat(unique_together_errors(T, values, id), constraint_errors(T, values, id))
         add_error!(f, nothing, e)
+    end
+end
+
+"""
+Run the model's `Juango.clean` (if it has one) on the instance with the form's cleaned data
+applied, as Django's ModelForm does: its errors go to the named fields, or to the form when the
+field isn't on it.
+"""
+function model_form_clean!(f::Form)
+    T = f.model
+    which(clean, Tuple{T}).sig === Tuple{typeof(clean),Model} && return       # no clean of its own
+    obj = f.instance === nothing ? T() : f.instance
+    for (k, v) in f.cleaned_data
+        (k === :__all__ || findfield(modelmeta(T), k) === nothing) && continue
+        setproperty!(obj, k, v)
+    end
+    f.instance === nothing && (f.instance = obj)
+    names = Set(fld.name for fld in f.fields)
+    for (k, msgs) in model_clean_errors(obj), m in msgs
+        add_error!(f, k in names ? k : nothing, m)
+    end
+end
+
+"A form's `clean` function; a `ValidationError` it throws becomes form errors."
+function form_clean_hook(f::Form)
+    try
+        f.clean(f)
+    catch e
+        e isa ValidationError || rethrow()
+        names = Set(fld.name for fld in f.fields)
+        for (k, msgs) in e.errors, m in msgs
+            add_error!(f, k in names ? k : nothing, m)
+        end
     end
 end
 

@@ -1603,3 +1603,120 @@ end
         foreach(Juango.unregister_model!, filter(T -> parentmodule(T) === m, Juango.all_models()))
     end
 end
+
+# --- from porting a Django app (#104, #105, #106, #109) -----------------------------------------
+
+@model struct EcBlock
+    first = PositiveIntegerField()
+    last = PositiveIntegerField()
+    position = PositiveSmallIntegerField(default = 0)
+    container = CharField(max_length = 10, null = true, blank = true)
+    material = CharField(max_length = 10, null = true, blank = true)
+    Meta(table = "ec_block", app_label = "ectest", constraints = [
+        CheckConstraint(condition = xor(Q(container__isnull = true), Q(material__isnull = true)), name = "ec_one_of")])
+end
+function Juango.clean(b::EcBlock)
+    b.first > b.last && throw(ValidationError("The first number comes after the last."))
+    exists(filter(exclude(objects(EcBlock); id = b.id), first__lte = b.last, last__gte = b.first)) &&
+        throw(ValidationError(Dict(:last => ["The numbers overlap another block."])))
+end
+const EC_ROWS = "ABCDEFGH"
+Juango.tattr(b::EcBlock, ::Val{:well}) = string(EC_ROWS[b.position ÷ 12 + 1], b.position % 12 + 1)
+Juango.tattr!(b::EcBlock, ::Val{:well}, v) = (b.position = (findfirst(v[1], EC_ROWS) - 1) * 12 + parse(Int, v[2:end]) - 1)
+
+@testset "Django porting: clean hook, update_fields, setters, instance_cache, Q xor" begin
+    quiet(f) = redirect_stdout(f, devnull)
+    quiet(() -> Juango.sync_models!([EcBlock]))
+    try
+        # #105: Juango.clean in full_clean and ModelForms
+        b = EcBlock(first = 5, last = 1, container = "box")
+        @test full_clean(b)[:__all__] == ["The first number comes after the last."]
+        @test haskey(full_clean(EcBlock(first = 5, last = 1)), :__all__)          # runs with field errors too
+        create(EcBlock; first = 1, last = 10, container = "box")
+        @test full_clean(EcBlock(first = 5, last = 20, container = "box"))[:last] == ["The numbers overlap another block."]
+        @test isempty(full_clean(EcBlock(first = 11, last = 20, container = "box")))
+        F = ModelForm(EcBlock; fields = [:first, :last, :container], data = Dict("first" => "30", "last" => "25", "container" => "x"))
+        @test !is_valid(F) && F.errors[:__all__] == ["The first number comes after the last."]
+        F = ModelForm(EcBlock; fields = [:first, :last, :container], data = Dict("first" => "5", "last" => "25", "container" => "x"))
+        @test !is_valid(F) && F.errors[:last] == ["The numbers overlap another block."]
+        F = ModelForm(EcBlock; fields = [:first, :last, :container], data = Dict("first" => "30", "last" => "35", "container" => "x"))
+        @test is_valid(F) && save!(F).id !== nothing
+        @test sprint(showerror, ValidationError(Dict(:last => "bad"))) == "ValidationError: last: bad"
+        # a form clean function may throw ValidationError too
+        G = ModelForm(EcBlock; fields = [:first, :last, :container], data = Dict("first" => "40", "last" => "45", "container" => "x"),
+                      clean = f -> throw(ValidationError("Not today.")))
+        @test !is_valid(G) && G.errors[:__all__] == ["Not today."]
+
+        # #106: computed setters, in constructors and assignment; instance_cache
+        w = EcBlock(first = 50, last = 60, container = "plate", well = "B3")
+        @test w.position == 14 && w.well == "B3"
+        w.well = "C1"
+        @test w.position == 24
+        save!(w)
+        @test get(EcBlock; id = w.id).well == "C1"
+        @test_throws ArgumentError (w.wel = "A1")                                 # typos still fail
+        @test occursin("instance_cache", sprint(showerror, try w.wel = 1 catch e e end))
+        @test_throws ArgumentError EcBlock(first = 1, last = 2, colour = "red")
+        get!(() -> 42, instance_cache(w), :total)
+        @test w.total == 42 && hasproperty(w, :total) && tr("{{ b.total }} {{ b.well }}", Dict("b" => w)) == "42 C1"
+        @test_throws ArgumentError get(EcBlock; id = w.id).total                  # per instance, never saved
+
+        # #104: update_fields
+        au = create(Author; name = "UF Author")
+        a = create(Article; title = "uf", author = au, views = 1)
+        stamp = a.updated
+        sleep(0.01)
+        log = Any[]
+        rec(sender; update_fields, kw...) = push!(log, update_fields)
+        connect!(pre_save, rec; sender = Article)
+        try
+            other = get(Article; id = a.id)
+            other.title = "changed elsewhere"; save!(other)
+            a.views = 5; a.title = "stale title"
+            save!(a; update_fields = [:views])
+            fresh = get(Article; id = a.id)
+            @test fresh.views == 5 && fresh.title == "changed elsewhere"         # the other change survives
+            @test fresh.updated == get(Article; id = a.id).updated && log[end] == Set([:views])
+            save!(a; update_fields = [:views, :updated])                         # auto_now only when listed
+            @test get(Article; id = a.id).updated != stamp
+            n = length(log)
+            save!(a; update_fields = Symbol[])                                   # nothing, no signals
+            @test length(log) == n
+            save!(a)
+            @test log[end] === nothing
+            @test_throws ArgumentError save!(a; update_fields = [:nonexistent])
+            a.author = au; save!(a; update_fields = [:author])                   # field name or attname
+            save!(a; update_fields = [:author_id])
+            @test_throws ArgumentError save!(Article(title = "new", author = au); update_fields = [:title])
+            gone = get(Article; id = a.id); delete!(get(Article; id = a.id))
+            @test_throws ArgumentError save!(gone; update_fields = [:views])     # no row
+        finally
+            disconnect!(pre_save, rec; sender = Article)
+        end
+        # multi-table inheritance: only the tables with listed fields
+        p = create(Pizzeria; name = "UF Pizza", oven = "gas")
+        p.oven = "wood"; p.name = "not saved"
+        save!(p; update_fields = [:oven])
+        q = get(Pizzeria; id = p.id)
+        @test q.oven == "wood" && q.name == "UF Pizza"
+
+        # #109: xor in filters, check constraints and Julia-side validation
+        delete!(objects(EcBlock))
+        create(EcBlock; first = 1, last = 2, container = "box")
+        create(EcBlock; first = 3, last = 4, material = "steel")
+        @test count(filter(EcBlock, xor(Q(container = "box"), Q(first = 1)))) == 0
+        @test count(filter(EcBlock, Q(container = "box") ⊻ Q(first = 3))) == 2
+        @test count(filter(EcBlock, xor(Q(first = 1), Q(last = 2), Q(container = "box")))) == 1   # odd count
+        @test count(exclude(EcBlock, Q(container = "box") ⊻ Q(first = 3))) == 0
+        @test count(filter(EcBlock, !(Q(container = "box") ⊻ Q(first = 3)))) == 0
+        @test haskey(full_clean(EcBlock(first = 7, last = 8, container = "a", material = "b")), :__all__)
+        @test isempty(Juango.validate_constraints(EcBlock(first = 7, last = 8, material = "b")))
+        @test_throws IntegrityError create(EcBlock; first = 9, last = 10)                         # neither: the CHECK
+        @test_throws IntegrityError create(EcBlock; first = 9, last = 10, container = "a", material = "b")
+        sub = filter(Author; name = "UF Author")
+        @test count(filter(EcBlock, xor(Q(container = "box"), Exists(sub)))) == 1
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "ectest", Juango.all_models()))
+        Juango.execute("DROP TABLE IF EXISTS " * Juango.quote_name(Juango.backend(), "ec_block"))
+    end
+end

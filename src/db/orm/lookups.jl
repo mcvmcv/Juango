@@ -6,7 +6,8 @@ abstract type Expression end
 """
     Q(; lookups...)
 
-Composable query condition. Combine with `|`, `&` and negate with `!` (or `~`).
+Composable query condition. Combine with `|`, `&` and `xor` (`⊻`: an odd number true), and
+negate with `!` (or `~`).
 
     filter(Post, Q(title__icontains="julia") | Q(body__icontains="julia"))
 """
@@ -21,6 +22,10 @@ Base.:|(a::Q, b::Q) = Q(:OR, Any[a, b], false)
 Base.:&(a::Q, b::Q) = Q(:AND, Any[a, b], false)
 Base.:!(a::Q) = Q(a.connector, a.children, !a.negated)
 Base.:~(a::Q) = !a
+# xor(a, b, ...) / a ⊻ b: true when an odd number of the conditions are (Django's Q ^ Q)
+xor_children(q::Q) = q.connector === :XOR && !q.negated ? q.children : Any[q]
+xor_children(e) = Any[e]
+Base.xor(a::Q, b::Q, rest::Q...) = Q(:XOR, Any[c for x in (a, b, rest...) for c in xor_children(x)], false)
 
 const LOOKUPS = Set(["exact", "iexact", "contains", "icontains", "startswith", "istartswith",
                      "endswith", "iendswith", "gt", "gte", "lt", "lte", "in", "isnull", "range",

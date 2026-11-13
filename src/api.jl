@@ -27,7 +27,7 @@ export EventStreamResponse, sse_event, websocket, ws_send, ws_receive, ws_close,
 # urls
 export path, re_path, include_urls, reverse_url, resolve
 # templates
-export Template, render_to_string, get_template, mark_safe, SafeString, escape_html, format_html, format_html_join, tattr,
+export Template, render_to_string, get_template, mark_safe, SafeString, escape_html, format_html, format_html_join, tattr, tattr!, instance_cache,
        register_filter!, register_tag!, TagLibrary, simple_tag!, inclusion_tag!, tag!, TemplateSyntaxError
 # models and fields
 export Model, @model, @abstract_model, Field, CharField, TextField, EmailField, SlugField, URLField,
@@ -47,7 +47,7 @@ export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_lis
        difference, create, get_or_create, update_or_create, update!, save!, refresh!, full_clean,
        clean_fields, validate_unique, validate_constraints, get_next_by, get_previous_by, bulk_create,
        bulk_update, add!, remove!, set!, clear!, atomic, on_commit, using_db,
-       DoesNotExist, MultipleObjectsReturned, ProtectedError, RestrictedError, SET, IntegrityError, DatabaseError, TransactionManagementError
+       DoesNotExist, MultipleObjectsReturned, ProtectedError, RestrictedError, SET, IntegrityError, DatabaseError, ValidationError, TransactionManagementError
 export run_async, sync_to_async, aget, acreate, acount, aexists, afirst, alast, acollect, aget_or_create,
        aupdate_or_create, abulk_create, abulk_update, aaggregate, ain_bulk, aupdate!, adelete!, asave!,
        arefresh!, aauthenticate, aiterator
@@ -109,7 +109,7 @@ export runserver, execute_from_command_line
 # --- public, not exported ----------------------------------------------------------------------------
 
 # requests, responses and streaming
-public header, text, render_response!, process_template_response, temporary_file_path, TemporaryUploadedFile,
+public clean, header, text, render_response!, process_template_response, temporary_file_path, TemporaryUploadedFile,
        MemoryFileUploadHandler, TemporaryFileUploadHandler, upload_file, sse_comment, WebSocketView, is_streaming, build_absolute_uri, handle_request
 # templates
 public render_form, TemplateFormRenderer, JuangoTemplates, MustacheTemplates, engine_template

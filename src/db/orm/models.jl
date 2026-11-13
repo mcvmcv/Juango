@@ -398,8 +398,28 @@ Base.@nospecializeinfer function construct(@nospecialize(T::Type{<:Model}); kwar
     for g in foreign_objects(T)
         haskey(kw, g.name) && set_fobj!(obj, g, pop!(kw, g.name))
     end
+    for k in collect(keys(kw))                   # computed attributes with a setter (tattr!)
+        tattr!(obj, Val(k), kw[k]) === NOTFOUND || delete!(kw, k)
+    end
     isempty(kw) || throw(ArgumentError("$T got unexpected field(s): $(join(keys(kw), ", "))"))
     obj
+end
+
+"""
+    instance_cache(obj) -> Dict{Symbol,Any}
+
+A place on one model object for values that aren't fields and are never saved: memoised
+results, or values a view computes for its template. `obj.name` and `{{ obj.name }}` find them
+after the fields and relations.
+
+    get!(() -> expensive_total(order), instance_cache(order), :total)
+    instance_cache(post)[:comment_count] = n            # then {{ post.comment_count }}
+"""
+Base.@nospecializeinfer instance_cache(@nospecialize(m::Model)) =
+    get!(Dict{Symbol,Any}, (getfield(m, :_cache)::Dict{Symbol,Any}), :__extra)::Dict{Symbol,Any}
+Base.@nospecializeinfer function extra_value(@nospecialize(m::Model), s::Symbol)
+    x = get((getfield(m, :_cache)::Dict{Symbol,Any}), :__extra, nothing)
+    x === nothing ? NOTFOUND : get(x::Dict{Symbol,Any}, s, NOTFOUND)
 end
 
 "Reverse FK relations pointing at model `T`: Vector of (name, Model, Field)."
@@ -507,6 +527,8 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
         return get(base_objects(table_parent(T)); id = data[:id])
     end
     pre === NOTFOUND || return pre isa PrefetchedList ? pre.items : pre    # Prefetch(...; to_attr)
+    x = extra_value(m, s)
+    x === NOTFOUND || return x                                             # instance_cache(obj)
     df = display_field(T, s)
     df === nothing || return get_display(m, df.name)                     # obj.get_status_display
     nb = adjacent_field(T, s)
@@ -536,7 +558,12 @@ Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::S
         end
         return v
     end
-    (f !== nothing || s === :id) || throw(ArgumentError("$(typeof(m)) has no field '$s'"))
+    if f === nothing && s !== :id
+        tattr!(m, Val(s), v) === NOTFOUND && throw(ArgumentError(
+            "$(typeof(m)) has no field '$s' (for a value that isn't saved use Juango.instance_cache(obj)[:$s] = v; " *
+            "for a computed attribute define Juango.tattr!(::$(nameof(typeof(m))), ::Val{:$s}, v))"))
+        return v
+    end
     data[s] = f === nothing ? v : coerce_value(f, v)
 end
 
@@ -546,13 +573,16 @@ coerce_value(f::Field, v::SafeString) = v.s
 # `{{ obj.field }}`: a model's fields are a Dict lookup (relations and the rest go the long way, through getattr_other)
 Base.@nospecializeinfer function getattr(@nospecialize(obj::Model), part::AbstractString, sym::Symbol, @nospecialize(val), idx::Int)
     v = get((getfield(obj, :_data)::Dict{Symbol,Any}), sym, NOTFOUND)
+    v === NOTFOUND || return v
+    v = extra_value(obj, sym)
     v === NOTFOUND ? getattr_other(obj, part, sym, val, idx) : v
 end
 
 # The same for every instance of a model, so worked out once per model (with the relations).
 Base.@nospecializeinfer Base.propertynames(@nospecialize(m::Model), private::Bool = false) = propertynames_of(typeof(m))
 # `{{ obj.attr }}` asks this for each lookup that isn't a field
-Base.@nospecializeinfer Base.hasproperty(@nospecialize(m::Model), s::Symbol) = s in (cached_relations(property_set, :propertyset, typeof(m))::Set{Symbol})
+Base.@nospecializeinfer Base.hasproperty(@nospecialize(m::Model), s::Symbol) =
+    s in (cached_relations(property_set, :propertyset, typeof(m))::Set{Symbol}) || extra_value(m, s) !== NOTFOUND
 Base.@nospecializeinfer propertynames_of(@nospecialize(T)) = cached_relations(compute_propertynames, :propertynames, T)
 Base.@nospecializeinfer compute_propertynames(@nospecialize(T)) = Tuple(property_list(T))
 Base.@nospecializeinfer property_set(@nospecialize(T)) = Set{Symbol}(property_list(T))

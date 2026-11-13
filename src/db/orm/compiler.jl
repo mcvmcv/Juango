@@ -372,6 +372,7 @@ Base.@nospecializeinfer function lookup_condition(c::SQLCompiler, col, lookup, @
 end
 
 Base.@nospecializeinfer function compile_q(c::SQLCompiler, alias, @nospecialize(T::Type), q::Q, negated::Bool)
+    q.connector === :XOR && return compile_xor(c, alias, T, q)
     neg = negated ⊻ q.negated
     parts = String[]
     params = Any[]
@@ -404,3 +405,20 @@ Prefetch(path; queryset = nothing, to_attr = nothing) =
 struct PrefetchedList
     items::Vector
 end
+
+# XOR as Django's rewrite on every database, an odd count of true operands: MySQL's own XOR is NULL
+# when an operand is NULL, where this counts it as false, so results are the same everywhere
+Base.@nospecializeinfer function compile_xor(c::SQLCompiler, alias, @nospecialize(T::Type), q::Q)
+    parts = String[]
+    params = Any[]
+    for ch in q.children
+        sql, ps = ch isa Q ? compile_q(c, alias, T, ch, false) :
+                  ch isa Expression ? compile_expr(c, ch) :
+                  compile_lookup(c, alias, T, Symbol(ch.first), ch.second, false)
+        push!(parts, sql)
+        append!(params, ps)
+    end
+    sql = xor_sql(backend(), parts)
+    q.negated ? "NOT $sql" : sql, params
+end
+xor_sql(::DatabaseBackend, parts) = "((" * join(["CASE WHEN $p THEN 1 ELSE 0 END" for p in parts], " + ") * ") % 2 = 1)"

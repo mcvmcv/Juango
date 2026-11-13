@@ -171,6 +171,8 @@ struct Exists <: Expression
 end
 Exists(qs) = Exists(qs, false)
 Base.:!(e::Exists) = Exists(e.qs, !e.negated)
+Base.xor(a::Union{Q,Exists}, b::Union{Q,Exists}, rest::Union{Q,Exists}...) =
+    Q(:XOR, Any[c for x in (a, b, rest...) for c in xor_children(x)], false)
 
 "A window function: `RowNumber()`, `Rank()`, `DenseRank()`, `Lag(x)`, `Lead(x)`."
 struct WindowFunc <: Expression

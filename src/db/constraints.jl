@@ -230,7 +230,7 @@ function condition_sql(b::DatabaseBackend, q::Q)
         push!(parts, sql)
     end
     isempty(parts) && push!(parts, b isa SQLiteBackend ? "1" : "TRUE")
-    s = join(parts, q.connector === :OR ? " OR " : " AND ")
+    s = q.connector === :XOR ? xor_sql(b, parts) : join(parts, q.connector === :OR ? " OR " : " AND ")
     q.negated ? "NOT (" * s * ")" : s
 end
 
@@ -285,7 +285,7 @@ end
 
 "Three-valued (`missing` = unknown) value of a condition over field names, for `values`."
 function condition_value(T, q::Q, value)
-    acc = q.connector === :OR ? false : true
+    acc = q.connector === :AND
     for c in q.children
         r = if c isa Q
             condition_value(T, c, value)
@@ -297,7 +297,7 @@ function condition_value(T, q::Q, value)
             v isa F && (v = value(v.name))
             lookup_value(x, lookup, v)
         end
-        acc = q.connector === :OR ? (acc | r) : (acc & r)
+        acc = q.connector === :OR ? (acc | r) : q.connector === :XOR ? xor(acc, r) : (acc & r)
     end
     q.negated ? !acc : acc
 end
