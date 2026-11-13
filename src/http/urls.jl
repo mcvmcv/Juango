@@ -74,6 +74,11 @@ struct Include
     namespace::Union{Nothing,String}
 end
 
+"A URL pattern (or a whole included set) with every view wrapped by `f` (e.g. a permission check)."
+wrap_view(p::URLPattern, f) = URLPattern(p.route, p.regex, p.params, f(p.view), p.name, p.defaults)
+wrap_view(r::URLResolver, f) = URLResolver(r.route, r.regex, r.params, Any[wrap_view(x, f) for x in r.patterns], r.namespace)
+wrap_view(x, f) = x
+
 """
     include_urls(patterns; namespace=nothing)
 
@@ -260,6 +265,13 @@ end
 Base.showerror(io::IO, e::NoReverseMatch) = print(io, "NoReverseMatch: ", e.msg)
 
 """
+The instance namespace in use for an application namespace while a request is handled, as
+`app => instance` (Django's `current_app`): an admin site named "staff" sets `"admin" => "staff"`,
+so `reverse_url("admin:index")` and `{% url 'admin:index' %}` find that site's pages.
+"""
+const CURRENT_APP = Base.ScopedValues.ScopedValue{Union{Nothing,Pair{String,String}}}(nothing)
+
+"""
     reverse_url(name, args...; urlconf=settings.ROOT_URLCONF, query=nothing, kwargs...)
 
 Build the URL for the named pattern. Use `"namespace:name"` for included patterns.
@@ -270,6 +282,11 @@ Build the URL for the named pattern. Use `"namespace:name"` for included pattern
 function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLCONF, query = nothing, kwargs...)
     idx = lock(REVERSE_LOCK) do
         get!(() -> build_reverse_index!(Dict{String,Vector{ReverseEntry}}(), urlconf, "", nothing), REVERSE_CACHE, urlconf)
+    end
+    app = CURRENT_APP[]
+    if app !== nothing && startswith(name, app.first * ":")
+        alias = app.second * name[length(app.first)+1:end]
+        haskey(idx, alias) && (name = alias)
     end
     entries = get(idx, name, nothing)
     entries === nothing && throw(NoReverseMatch("'$name' is not a valid view name"))

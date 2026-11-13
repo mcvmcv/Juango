@@ -11,7 +11,7 @@
     <form method="get" class="toolbar">
       <input type="text" name="q" value="{{ q }}" placeholder="{% translate "Search" %}" autofocus>
       <input type="submit" value="{% translate "Search" %}">
-      {% if q %}<span class="muted">{{ result_count }} result{{ result_count|pluralize }} (<a href="?">{{ total }} total</a>)</span>{% endif %}
+      {% if q %}<span class="muted">{{ result_count }} result{{ result_count|pluralize }} (<a href="?">{% if show_full_count %}{{ total }} total{% else %}Show all{% endif %}</a>)</span>{% endif %}
     </form>
     {% endif %}
     {% if date_hierarchy %}

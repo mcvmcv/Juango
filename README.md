@@ -1451,6 +1451,37 @@ Admin.register!(Post;
 - **Change history.** Every add, change and delete is recorded as a `LogEntry` with a message like "Changed title. Added comment “Nice”." Each object has a history page, and the index lists your recent actions. Record your own entries with `log_action!(user, obj, CHANGE, "Published.")`.
 - **Permissions apply** to actions (`permission = :change` by default) and to inlines (add, change and delete on the inline model).
 
+**Filters, permissions per object, and request-dependent options:**
+
+```julia
+decade = Admin.ListFilter("decade born", "decade";                     # Django's SimpleListFilter
+    lookups = (req, admin) -> ["80s" => "in the eighties", "90s" => "in the nineties"],
+    queryset = (req, qs, v) -> filter(qs; born__year__range = v == "80s" ? (1980, 1989) : (1990, 1999)))
+
+Admin.register!(Person;
+    list_filter = [decade, :is_active, :email => :empty, :team => :related_only],
+    has_change_permission = (req, obj) -> obj === nothing || obj.owner_id == req.user.id,   # also view, add, delete
+    queryset = req -> filter(objects(Person); company = req.user.company),
+    get_list_display = req -> req.user.is_superuser ? [:name, :salary] : [:name],          # get_list_filter, get_search_fields,
+    get_readonly_fields = (req, obj) -> obj === nothing ? [] : [:email],                   # get_ordering, get_fields too
+    list_select_related = [:team], show_full_result_count = false,
+    urls = [path("<str:id>/promote/", promote; name = "person_promote")])                 # admin/person/3/promote/
+```
+
+- **Filters.** `:field => :empty` filters on empty values and `:fk => :related_only` lists only the related objects in use.
+- **Permissions per object.** `has_*_permission(req, obj)` is asked for the model (with `obj = nothing`) and for each object, so a change page can be view-only for some objects. Custom views in `urls` run behind the admin's login and permission checks.
+
+**More than one admin site:**
+
+```julia
+staff = Admin.AdminSite("staff"; site_header = "Staff area", has_permission = req -> req.user.is_staff,
+                        urls = [path("stats/", stats; name = "stats")])
+Admin.register!(Order; site = staff)
+urlpatterns = [path("admin/", Admin.urls()), path("staff/", Admin.urls(staff))]
+```
+
+Each site has its own registry, titles, permission check and URL namespace (`"staff:index"`). Its pages use the same templates. While a site handles a request, `admin:` URL names resolve to that site, so `{% url 'admin:changelist' ... %}` in a template points at the right one (Django's `current_app`).
+
 ### Admin documentation
 
 Add `"juango.admindocs"` to `INSTALLED_APPS` and `path("admin/doc/", admindocs_urls())` before the admin's URLs. Staff then get pages listing the models (fields, relations, docstrings), the URL patterns with their views' docstrings, and the template tags and filters. Docstrings are rendered as Markdown (Django renders reStructuredText).

@@ -68,7 +68,7 @@ mutable struct ModelAdmin
     slug::String
     list_display::Vector{Any}
     search_fields::Vector{Symbol}
-    list_filter::Vector{Symbol}
+    list_filter::Vector{Any}             # field names, :field => :empty / :related_only, or ListFilter(...)
     ordering::Vector{String}
     fields::Union{Nothing,Vector{Symbol}}
     exclude::Vector{Symbol}
@@ -86,13 +86,79 @@ mutable struct ModelAdmin
     date_hierarchy::Union{Nothing,Symbol}
     save_as::Bool
     add_form::Any                        # nothing, or (data, files) -> Form for the add page
+    has_view_permission::Any             # nothing, or (req, obj_or_nothing) -> Bool
+    has_change_permission::Any
+    has_add_permission::Any
+    has_delete_permission::Any
+    list_select_related::Any             # nothing (the foreign keys in list_display), true, false or field names
+    show_full_result_count::Bool
+    extra_urls::Vector{Any}              # path(...)s under the model's URL, wrapped in the admin's checks
+    get_list_display::Any                # nothing, or req -> columns (Django's get_list_display)
+    get_list_filter::Any
+    get_search_fields::Any
+    get_ordering::Any
+    get_readonly_fields::Any             # nothing, or (req, obj) -> names
+    get_fields::Any                      # nothing, or (req, obj) -> names
 end
+
+"""
+    Admin.ListFilter(title, parameter; lookups, queryset)
+
+A custom change-list filter (Django's `SimpleListFilter`): `lookups(req, admin)` returns the
+choices as `value => label` pairs, and `queryset(req, qs, value)` filters by the chosen value
+(a string from the URL parameter `parameter`).
+
+    decade = Admin.ListFilter("decade born", "decade";
+        lookups = (req, ma) -> ["80s" => "in the eighties", "90s" => "in the nineties"],
+        queryset = (req, qs, v) -> v == "80s" ? filter(qs; birthday__year__range = (1980, 1989)) :
+                                               filter(qs; birthday__year__range = (1990, 1999)))
+    Admin.register!(Person; list_filter = [decade, :is_active, :email => :empty, :team => :related_only])
+"""
+struct ListFilter
+    title::String
+    parameter::String
+    lookups::Function
+    queryset::Function
+end
+ListFilter(title, parameter; lookups, queryset) = ListFilter(string(title), string(parameter), lookups, queryset)
+
+"""
+    Admin.AdminSite(name = "admin"; site_header, site_title, index_title, has_permission, urls = [])
+
+An admin site: its own registry of models, titles, permission check and URL namespace. The
+default one is `Admin.site`; make others for, say, a staff area with fewer models:
+
+    staff = Admin.AdminSite("staff"; site_header = "Staff area", has_permission = req -> req.user.is_staff)
+    Admin.register!(Order; site = staff)
+    urlpatterns = [path("admin/", Admin.urls()), path("staff/", Admin.urls(staff))]
+
+`urls` adds site-wide views (`path("stats/", stats_view; name = "stats")`), behind the same
+login and permission checks, reversed as `"staff:stats"` (or `"admin:stats"` from its pages).
+"""
+mutable struct AdminSite
+    name::String
+    registry::Dict{String,ModelAdmin}
+    order::Vector{String}
+    site_header::Union{Nothing,String}
+    site_title::Union{Nothing,String}
+    index_title::Union{Nothing,String}
+    has_permission::Any                  # nothing (active staff users), or req -> Bool
+    extra_urls::Vector{Any}
+end
+AdminSite(name::AbstractString = "admin"; site_header = nothing, site_title = nothing, index_title = nothing,
+          has_permission = nothing, urls = Any[], registry = Dict{String,ModelAdmin}(), order = String[]) =
+    AdminSite(String(name), registry, order, site_header, site_title, index_title, has_permission, collect(Any, urls))
 
 "The objects this admin shows: `objects(Model)` or the `queryset` option."
 admin_queryset(ma::ModelAdmin, req) = ma.queryset === nothing ? objects(ma.model) : ma.queryset(req)
 
 const REGISTRY = Dict{String,ModelAdmin}()
 const ORDER = String[]
+"The default admin site (`Admin.urls()`); its registry is `REGISTRY`."
+const site = AdminSite("admin"; registry = REGISTRY, order = ORDER)
+"The site handling the current request (`Admin.site` outside one)."
+const CURRENT_SITE = Base.ScopedValues.ScopedValue{AdminSite}(site)
+current_site() = CURRENT_SITE[]
 
 """
     Admin.register!(Model; list_display=[:__str__], search_fields=[], list_filter=[], ordering=[],
@@ -126,7 +192,10 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    inlines = InlineAdmin[], readonly_fields = Symbol[], fieldsets = Pair{String,Vector{Symbol}}[],
                    prepopulated_fields = Dict{Symbol,Vector{Symbol}}(), raw_id_fields = Symbol[],
                    autocomplete_fields = Symbol[], list_editable = Symbol[], date_hierarchy = nothing, save_as = false,
-                   add_form = nothing)
+                   add_form = nothing, site::AdminSite = Admin.site, has_view_permission = nothing, has_change_permission = nothing,
+                   has_add_permission = nothing, has_delete_permission = nothing, list_select_related = nothing,
+                   show_full_result_count = true, urls = Any[], get_list_display = nothing, get_list_filter = nothing,
+                   get_search_fields = nothing, get_ordering = nothing, get_readonly_fields = nothing, get_fields = nothing)
     modelmeta(T)  # validates T is a model
     slug = model_name(T)
     acts = AdminAction[to_action(a) for a in actions]
@@ -135,27 +204,33 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
     for f in list_editable
         Symbol(f) in Symbol.(collect(list_display)) || throw(ArgumentError("list_editable field '$f' must also be in list_display"))
     end
-    REGISTRY[slug] = ModelAdmin(T, slug, collect(Any, list_display), Symbol.(search_fields), Symbol.(list_filter),
+    site.registry[slug] = ModelAdmin(T, slug, collect(Any, list_display), Symbol.(search_fields),
+                                Any[x isa Union{AbstractString,Symbol} ? Symbol(x) : x for x in list_filter],
                                 String.(string.(ordering)), fields === nothing ? nothing : Symbol.(fields),
                                 Symbol.(exclude), list_per_page, Symbol.(password_fields), queryset, acts,
                                 collect(InlineAdmin, inlines), Symbol.(readonly_fields),
                                 Pair{String,Vector{Symbol}}[string(k) => Symbol.(collect(v)) for (k, v) in fieldsets],
                                 Dict{Symbol,Vector{Symbol}}(Symbol(k) => Symbol.(collect(v)) for (k, v) in prepopulated_fields),
                                 Symbol.(raw_id_fields), Symbol.(autocomplete_fields), Symbol.(list_editable),
-                                date_hierarchy === nothing ? nothing : Symbol(date_hierarchy), save_as, add_form)
-    filter!(!=(slug), ORDER)
-    push!(ORDER, slug)
+                                date_hierarchy === nothing ? nothing : Symbol(date_hierarchy), save_as, add_form,
+                                has_view_permission, has_change_permission, has_add_permission, has_delete_permission,
+                                list_select_related, show_full_result_count, collect(Any, urls), get_list_display,
+                                get_list_filter, get_search_fields, get_ordering, get_readonly_fields, get_fields)
+    filter!(!=(slug), site.order)
+    push!(site.order, slug)
     T
 end
 
-"Remove a model from the admin."
-function unregister!(T::Type)
+"Remove a model from the admin (`site` defaults to `Admin.site`)."
+function unregister!(T::Type; site::AdminSite = Admin.site)
     slug = model_name(T)
-    delete!(REGISTRY, slug)
-    filter!(!=(slug), ORDER)
+    delete!(site.registry, slug)
+    filter!(!=(slug), site.order)
     nothing
 end
-is_registered(T::Type) = haskey(REGISTRY, model_name(T))
+is_registered(T::Type; site::AdminSite = Admin.site) = haskey(site.registry, model_name(T))
+"The `ModelAdmin` of a model on the current site (for custom admin views)."
+model_admin(T::Type) = get_admin(model_name(T))
 
 function register_builtin!()
     register_user_model!()
@@ -178,7 +253,15 @@ function register_user_model!(T = Juango.get_user_model(); kw...)
               add_form = (data, files) -> Juango.UserCreationForm(data), kw...)
 end
 
-get_admin(slug) = (ma = get(REGISTRY, slug, nothing); ma === nothing ? throw(Http404("No admin for model '$slug'")) : ma)
+get_admin(slug) = (ma = get(current_site().registry, slug, nothing); ma === nothing ? throw(Http404("No admin for model '$slug'")) : ma)
+
+# options that can depend on the request (Django's get_list_display & co.)
+list_display(ma::ModelAdmin, req) = ma.get_list_display === nothing ? ma.list_display : collect(Any, ma.get_list_display(req))
+list_filter(ma::ModelAdmin, req) = ma.get_list_filter === nothing ? ma.list_filter :
+    Any[x isa Union{AbstractString,Symbol} ? Symbol(x) : x for x in ma.get_list_filter(req)]
+search_fields(ma::ModelAdmin, req) = ma.get_search_fields === nothing ? ma.search_fields : Symbol.(collect(ma.get_search_fields(req)))
+ordering(ma::ModelAdmin, req) = ma.get_ordering === nothing ? ma.ordering : String.(string.(collect(ma.get_ordering(req))))
+readonly_fields(ma::ModelAdmin, req, obj) = ma.get_readonly_fields === nothing ? ma.readonly_fields : Symbol.(collect(ma.get_readonly_fields(req, obj)))
 
 opts(ma::ModelAdmin) = (m = modelmeta(ma.model);
     Dict{String,Any}("slug" => ma.slug, "verbose_name" => m.verbose_name, "verbose_name_plural" => m.verbose_name_plural,
@@ -186,31 +269,43 @@ opts(ma::ModelAdmin) = (m = modelmeta(ma.model);
 
 # --- permissions: superusers may do everything; staff need the model's permissions ----------------
 
-can(req, ma::ModelAdmin, action) = Juango.has_perm(req.user, Juango.perm_name(ma.model, action))
+"""
+Whether the user may `action` (:view, :change, :add, :delete) the model, or one object: the
+ModelAdmin's `has_<action>_permission(req, obj)` when given, else the model permission.
+"""
+function can(req, ma::ModelAdmin, action, obj = nothing)
+    hook = action === :view ? ma.has_view_permission : action === :change ? ma.has_change_permission :
+           action === :add ? ma.has_add_permission : action === :delete ? ma.has_delete_permission : nothing
+    hook === nothing ? Juango.has_perm(req.user, Juango.perm_name(ma.model, action)) : Bool(hook(req, obj))
+end
 can_model(req, T::Type, action) = Juango.has_perm(req.user, Juango.perm_name(T, action))
-can_view(req, ma) = can(req, ma, :view) || can(req, ma, :change)
-"Throw 403 unless the user may do one of `actions` on the model."
-require_perm(req, ma, actions...) = any(a -> can(req, ma, a), actions) ||
+can_view(req, ma, obj = nothing) = can(req, ma, :view, obj) || can(req, ma, :change, obj)
+"Throw 403 unless the user may do one of `actions` on the model (or on `obj`)."
+require_perm(req, ma, actions...; obj = nothing) = any(a -> can(req, ma, a, obj), actions) ||
     throw(Juango.PermissionDenied("You don't have permission to $(join(string.(actions), " or ")) $(modelmeta(ma.model).verbose_name_plural)."))
-visible_models(req) = [s for s in ORDER if can_view(req, REGISTRY[s]) || can(req, REGISTRY[s], :add)]
+visible_models(req) = (st = current_site(); [s for s in st.order if can_view(req, st.registry[s]) || can(req, st.registry[s], :add)])
 
-base_context(req, title) = Dict{String,Any}(
-    "title" => title, "site_header" => settings.SITE_NAME * " administration",
-    "site_title" => settings.SITE_NAME * " site admin",
-    "models" => [opts(REGISTRY[s]) for s in visible_models(req)])
+function base_context(req, title)
+    st = current_site()
+    Dict{String,Any}(
+        "title" => title, "site_header" => something(st.site_header, settings.SITE_NAME * " administration"),
+        "site_title" => something(st.site_title, settings.SITE_NAME * " site admin"),
+        "models" => [opts(st.registry[s]) for s in visible_models(req)])
+end
 
 # --- views -------------------------------------------------------------------------------------
 
 admin_url_for(e::LogEntry) = (e.content_type === nothing || e.object_id === nothing || e.action_flag == DELETION) ? nothing :
-    (T = Juango.model_class(e.content_type); T === nothing || !is_registered(T) ? nothing :
+    (T = Juango.model_class(e.content_type); T === nothing || !is_registered(T; site = current_site()) ? nothing :
      reverse_url("admin:change"; model = model_name(T), id = e.object_id))
 
 function index(req::Request)
-    ctx = base_context(req, gettext("Site administration"))
-    ctx["model_list"] = [merge(opts(REGISTRY[s]), Dict{String,Any}(
-                             "count" => can_view(req, REGISTRY[s]) ? count(admin_queryset(REGISTRY[s], req)) : nothing,
-                             "can_add" => can(req, REGISTRY[s], :add), "can_view" => can_view(req, REGISTRY[s]),
-                             "can_change" => can(req, REGISTRY[s], :change)))
+    st = current_site()
+    ctx = base_context(req, something(st.index_title, gettext("Site administration")))
+    ctx["model_list"] = [merge(opts(st.registry[s]), Dict{String,Any}(
+                             "count" => can_view(req, st.registry[s]) ? count(admin_queryset(st.registry[s], req)) : nothing,
+                             "can_add" => can(req, st.registry[s], :add), "can_view" => can_view(req, st.registry[s]),
+                             "can_change" => can(req, st.registry[s], :change)))
                          for s in visible_models(req)]
     recent = req.user isa AbstractUser ? collect(select_related(filter(LogEntry; user = req.user), :content_type)[1:10]) : LogEntry[]
     ctx["recent_actions"] = [Dict{String,Any}("entry" => e, "url" => admin_url_for(e),
@@ -262,27 +357,61 @@ function query_with(req::Request, changes::Pair...)
     isempty(s) ? "?" : "?" * s
 end
 
-function filter_specs(req::Request, ma::ModelAdmin)
-    specs = Any[]
-    for name in ma.list_filter
-        f = findfield(modelmeta(ma.model), name)
+"""
+The change list's filters, each as `(title, key, options, apply)`: `options` are `(label, value)`
+pairs for the URL parameter `key` (value `nothing` is "All"), and `apply(qs, value)` filters.
+"""
+function list_filters(req::Request, ma::ModelAdmin)
+    out = Any[]
+    meta = modelmeta(ma.model)
+    for entry in list_filter(ma, req)
+        if entry isa ListFilter
+            opts_ = Tuple{String,Any}[(string(l), string(v)) for (v, l) in entry.lookups(req, ma)]
+            push!(out, (entry.title, entry.parameter, opts_, (qs, v) -> something(entry.queryset(req, qs, v), qs)))
+            continue
+        end
+        name, mode = entry isa Pair ? (Symbol(entry.first), Symbol(entry.second)) : (entry, :field)
+        f = findfield(meta, name)
         f === nothing && continue
+        if mode === :empty                     # Django's EmptyFieldListFilter
+            key = string(attname(f), "__isempty")
+            text = f.kind in Juango.STRING_KINDS
+            empty_q = text ? Q(Symbol(attname(f), "__isnull") => true) | Q(attname(f) => "") : Q(Symbol(attname(f), "__isnull") => true)
+            push!(out, (label(f), key, [("Empty", "1"), ("Not empty", "0")],
+                        (qs, v) -> v == "1" ? filter(qs, empty_q) : filter(qs, !empty_q)))
+            continue
+        end
         key = string(attname(f))
-        cur = get(req.GET, key, nothing)
-        opts_ = Tuple{String,Any}[("All", nothing)]
+        opts_ = Tuple{String,Any}[]
         if f.kind === :bool
             append!(opts_, [("Yes", "1"), ("No", "0")])
         elseif f.choices !== nothing
             append!(opts_, [(string(c.second), string(c.first)) for c in Juango.field_choices(f)])
+        elseif f.kind === :fk && mode === :related_only          # RelatedOnlyFieldListFilter: only the ones in use
+            ids = unique(x for x in values_list(admin_queryset(ma, req), attname(f); flat = true) if x !== nothing)
+            append!(opts_, [(string(o), string(o.id)) for o in filter(objects(related_model(f)); id__in = ids)])
         elseif f.kind === :fk
             append!(opts_, [(string(o), string(o.id)) for o in objects(related_model(f))[1:100]])
         else
             vals = unique(values_list(order_by(admin_queryset(ma, req), string(name)), name; flat = true))
             append!(opts_, [(string(v), string(v)) for v in first(vals, 50) if v !== nothing])
         end
+        apply = f.kind === :bool ? ((qs, v) -> filter(qs, Q(f.name => v == "1"))) :
+                f.kind === :fk ? ((qs, v) -> filter(qs, Q(attname(f) => Juango.parse_pk(related_model(f), v)))) :
+                ((qs, v) -> filter(qs, Q(f.name => v)))
+        push!(out, (label(f), key, opts_, apply))
+    end
+    out
+end
+
+function filter_specs(req::Request, ma::ModelAdmin, filters = list_filters(req, ma))
+    specs = Any[]
+    for (title, key, opts_, _) in filters
+        cur = get(req.GET, key, nothing)
         choices = [Dict{String,Any}("label" => l, "url" => query_with(req, key => v),
-                                    "selected" => (v === nothing ? cur === nothing : cur == v)) for (l, v) in opts_]
-        push!(specs, Dict{String,Any}("title" => label(f), "choices" => choices))
+                                    "selected" => (v === nothing ? cur === nothing : cur == v))
+                   for (l, v) in vcat(Tuple{String,Any}[("All", nothing)], opts_)]
+        push!(specs, Dict{String,Any}("title" => title, "choices" => choices))
     end
     specs
 end
@@ -355,7 +484,7 @@ An action that downloads the selected objects as CSV (the `list_display` columns
 `Admin.register!(Post; actions = [Admin.export_csv])`.
 """
 const export_csv = action((ma, req, qs) -> begin
-        cols = ma.list_display
+        cols = list_display(ma, req)
         lines = [join([csv_cell(header_label(ma, c)) for c in cols], ",")]
         for o in qs
             push!(lines, join([csv_cell(c === :__str__ ? string(o) : raw_cell(ma, o, c)) for c in cols], ","))
@@ -401,22 +530,25 @@ function changelist(req::Request; model)
     end
     qs = admin_queryset(ma, req)
     q = strip(get(req.GET, "q", ""))
-    if !isempty(q) && !isempty(ma.search_fields)
-        qs = filter(qs, reduce(|, [Q(Symbol(f, "__icontains") => q) for f in ma.search_fields]))
+    sfields = search_fields(ma, req)
+    if !isempty(q) && !isempty(sfields)
+        qs = filter(qs, reduce(|, [Q(Symbol(f, "__icontains") => q) for f in sfields]))
     end
-    for name in ma.list_filter
-        f = findfield(meta, name)
-        f === nothing && continue
-        v = get(req.GET, string(attname(f)), nothing)
+    filters = list_filters(req, ma)
+    for (_, key, _, apply) in filters
+        v = get(req.GET, key, nothing)
         (v === nothing || isempty(v)) && continue
-        qs = f.kind === :bool ? filter(qs, Q(f.name => v == "1")) :
-             f.kind === :fk ? filter(qs, Q(attname(f) => Juango.parse_pk(related_model(f), v))) :
-             filter(qs, Q(f.name => v))
+        qs = apply(qs, v)
     end
     qs, drill = date_drilldown(req, ma, qs)
-    isempty(ma.ordering) || (qs = order_by(qs, ma.ordering...))
-    # Load the objects behind foreign-key columns in the same query (no query per row).
-    fks = [c for c in ma.list_display if c isa Symbol && (f = findfield(meta, c)) !== nothing && f.kind === :fk && f.name === c]
+    ords = ordering(ma, req)
+    isempty(ords) || (qs = order_by(qs, ords...))
+    cols = list_display(ma, req)
+    # Load the objects behind foreign-key columns in the same query (no query per row): list_select_related
+    sr = ma.list_select_related
+    fks = sr === false ? Symbol[] : sr === true ? Symbol[f.name for f in meta.fields if f.kind === :fk] :
+          sr !== nothing ? Symbol.(collect(sr)) :
+          Symbol[c for c in cols if c isa Symbol && (f = findfield(meta, c)) !== nothing && f.kind === :fk && f.name === c]
     isempty(fks) || (qs = Juango.select_related(qs, fks...))
     p = Paginator(qs, ma.list_per_page)
     pg = try
@@ -449,7 +581,7 @@ function changelist(req::Request; model)
     rows = Any[]
     for (k, o) in enumerate(objs)
         cells = Any[]
-        for c in ma.list_display
+        for c in cols
             if fs !== nothing && c isa Symbol && c in ma.list_editable
                 bf = forms[k][c]
                 errs = get(forms[k].errors, c, String[])
@@ -465,9 +597,10 @@ function changelist(req::Request; model)
     ctx = base_context(req, interpolate(can(req, ma, :change) ? gettext("Select %(model)s to change") : gettext("Select %(model)s to view"),
                                         Dict("model" => meta.verbose_name)))
     merge!(ctx, Dict{String,Any}(
-        "opts" => opts(ma), "headers" => [header_label(ma, c) for c in ma.list_display], "rows" => rows,
-        "page_obj" => pg, "paginator" => p, "q" => q, "has_search" => !isempty(ma.search_fields),
-        "filters" => filter_specs(req, ma), "total" => count(admin_queryset(ma, req)), "result_count" => p.count,
+        "opts" => opts(ma), "headers" => [header_label(ma, c) for c in cols], "rows" => rows,
+        "page_obj" => pg, "paginator" => p, "q" => q, "has_search" => !isempty(sfields),
+        "filters" => filter_specs(req, ma, filters), "result_count" => p.count,
+        "show_full_count" => ma.show_full_result_count, "total" => ma.show_full_result_count ? count(admin_queryset(ma, req)) : nothing,
         "can_add" => can(req, ma, :add), "can_delete" => can(req, ma, :delete),
         "actions" => [Dict("name" => a.name, "description" => a.description) for a in ma.actions if can(req, ma, a.permission)],
         "list_editable" => fs !== nothing, "management_form" => fs === nothing ? "" : management_form(fs),
@@ -479,9 +612,13 @@ end
 
 # --- change form ---------------------------------------------------------------------------------------
 
-admin_fields(ma::ModelAdmin) = (ma.fields !== nothing ? ma.fields :
-    [f.name for f in vcat(Juango.all_fields(ma.model), modelmeta(ma.model).m2m)
-     if f.editable && !(f.name in ma.exclude) && !(f.name in ma.password_fields)]) |> fs -> [f for f in fs if !(f in ma.readonly_fields)]
+function admin_fields(ma::ModelAdmin, req = nothing, obj = nothing)
+    fs = ma.get_fields !== nothing ? Symbol.(collect(ma.get_fields(req, obj))) : ma.fields !== nothing ? ma.fields :
+         [f.name for f in vcat(Juango.all_fields(ma.model), modelmeta(ma.model).m2m)
+          if f.editable && !(f.name in ma.exclude) && !(f.name in ma.password_fields)]
+    ro = req === nothing ? ma.readonly_fields : readonly_fields(ma, req, obj)
+    [f for f in fs if !(f in ro)]
+end
 
 function readonly_value(obj, f::Field)
     obj === nothing && return "-"
@@ -496,14 +633,14 @@ readonly_row(ma, obj, name) = (f = findfield(modelmeta(ma.model), name);
                      "value" => f === nothing ? format_value(obj === nothing ? nothing : getproperty(obj, name)) : readonly_value(obj, f)))
 
 "The change form as groups of rows (fieldsets), each row a bound field or a read-only value."
-function form_groups(ma::ModelAdmin, form, obj, editable; locked = Symbol[])
+function form_groups(ma::ModelAdmin, form, obj, editable; locked = Symbol[], readonly = ma.readonly_fields)
     row(name) = if editable && any(f -> f.name === name, form.fields)
         Dict{String,Any}("readonly" => false, "field" => form[name])
     else
         readonly_row(ma, obj, name)
     end
     layout = isempty(ma.fieldsets) ?
-        ["" => vcat(locked, [f.name for f in form.fields], ma.readonly_fields)] : ma.fieldsets
+        ["" => vcat(locked, [f.name for f in form.fields], readonly)] : ma.fieldsets
     [Dict{String,Any}("name" => name, "rows" => [row(n) for n in names]) for (name, names) in layout]
 end
 
@@ -559,15 +696,16 @@ function change_form(req::Request, ma::ModelAdmin, obj)
     save_as_new = req.method == "POST" && ma.save_as && haskey(req.POST, "_saveasnew")
     save_as_new && (obj = nothing)
     adding = obj === nothing
-    adding ? require_perm(req, ma, :add) : require_perm(req, ma, :view, :change)
-    editable = adding || can(req, ma, :change)
-    req.method == "POST" && !editable && require_perm(req, ma, :change)
+    adding ? require_perm(req, ma, :add) : require_perm(req, ma, :view, :change; obj = obj)
+    editable = adding || can(req, ma, :change, obj)
+    req.method == "POST" && !editable && require_perm(req, ma, :change; obj = obj)
+    ro = readonly_fields(ma, req, obj)
     data = req.method == "POST" ? req.POST : nothing
     custom_add = adding && ma.add_form !== nothing
     locked = adding || !Juango.is_composite(T) ? Symbol[] : Symbol[f.name for f in Juango.pk_fields(T)]   # a key can't change
     form = configure_widgets!(ma, custom_add ? ma.add_form(data, req.FILES) :
                                   Juango.ModelForm(T; data = data, files = req.FILES, instance = obj,
-                                                   fields = filter(!in(locked), admin_fields(ma))))
+                                                   fields = filter(!in(locked), admin_fields(ma, req, obj))))
     pfs = custom_add ? Symbol[] : ma.password_fields
     inlines = save_as_new || custom_add ? Any[] : inline_formsets(ma, req, obj, data)
     if req.method == "POST" && is_valid(form) && all(x -> is_valid(x[2]), inlines)
@@ -605,16 +743,16 @@ function change_form(req::Request, ma::ModelAdmin, obj)
     end
     auto_readonly = adding ? Any[] :
         [Dict{String,Any}("label" => label(f), "value" => format_value(getproperty(obj, attname(f))))
-         for f in Juango.all_fields(T) if !f.editable && !(f.name in ma.readonly_fields)]
+         for f in Juango.all_fields(T) if !f.editable && !(f.name in ro)]
     ctx = base_context(req, interpolate(adding ? gettext("Add %(model)s") : editable ? gettext("Change %(model)s") : gettext("View %(model)s"),
                                         Dict("model" => meta.verbose_name)))
     prepop = adding ? [Dict("target" => "id_" * string(k), "sources" => ["id_" * string(s) for s in v])
                        for (k, v) in ma.prepopulated_fields] : Any[]
     merge!(ctx, Dict{String,Any}(
-        "editable" => editable, "can_delete" => !adding && can(req, ma, :delete), "can_add" => can(req, ma, :add),
+        "editable" => editable, "can_delete" => !adding && can(req, ma, :delete, obj), "can_add" => can(req, ma, :add),
         "opts" => opts(ma), "form" => form, "object" => obj, "adding" => adding, "readonly" => auto_readonly,
         "groups" => custom_add ? [Dict{String,Any}("name" => "", "rows" => [Dict{String,Any}("readonly" => false, "field" => form[f.name]) for f in form.fields])] :
-                    form_groups(ma, form, obj, editable; locked = locked),
+                    form_groups(ma, form, obj, editable; locked = locked, readonly = ro),
         "inlines" => editable ? [inline_context(ia, fs) for (ia, fs) in inlines] : Any[],
         "prepopulated" => Juango.JSON.json(prepop), "save_as" => ma.save_as && !adding && can(req, ma, :add),
         "password_fields" => [Dict("name" => string(pf), "label" => uppercasefirst(string(pf))) for pf in pfs],
@@ -636,8 +774,8 @@ change_view(req::Request; model, id) = (ma = get_admin(model); change_form(req, 
 function delete_view(req::Request; model, id)
     ma = get_admin(model)
     meta = modelmeta(ma.model)
-    require_perm(req, ma, :delete)
     obj = admin_object(ma, req, id)
+    require_perm(req, ma, :delete; obj = obj)
     if req.method == "POST"
         name = string(obj)
         try
@@ -674,8 +812,8 @@ end
 "The change history of one object."
 function history_view(req::Request; model, id)
     ma = get_admin(model)
-    require_perm(req, ma, :view, :change)
     obj = admin_object(ma, req, id)
+    require_perm(req, ma, :view, :change; obj = obj)
     entries = collect(select_related(order_by(filter(LogEntry; content_type = get_for_model(ma.model), object_id = Juango.pk_string(obj)),
                                               "action_time", "id"), :user))
     ctx = base_context(req, interpolate(gettext("Change history: %(object)s"), Dict("object" => obj)))
@@ -687,33 +825,58 @@ end
 function autocomplete_view(req::Request; model)
     ma = get_admin(model)
     require_perm(req, ma, :view, :change)
-    isempty(ma.search_fields) && throw(Http404("$(ma.slug) has no search_fields for autocomplete"))
+    sfields = search_fields(ma, req)
+    isempty(sfields) && throw(Http404("$(ma.slug) has no search_fields for autocomplete"))
     term = strip(get(req.GET, "term", ""))
     qs = admin_queryset(ma, req)
-    isempty(term) || (qs = filter(qs, reduce(|, [Q(Symbol(f, "__icontains") => term) for f in ma.search_fields])))
+    isempty(term) || (qs = filter(qs, reduce(|, [Q(Symbol(f, "__icontains") => term) for f in sfields])))
     Dict("results" => [Dict("id" => Juango.pk_string(o), "text" => string(o)) for o in qs[1:20]])
 end
 
 """
-    Admin.urls()
-
-URL patterns for the admin, namespaced `admin`: `path("admin/", Admin.urls())`.
+A view of `site`: runs with the site as the current one (its registry, titles, and `admin:` URL
+names resolving to its namespace) and, unless `public`, only for users the site admits.
 """
-function urls()
+function site_view(st::AdminSite, view; public = false)
+    checked = public ? view : st.has_permission === nothing ? staff_member_required(view) :
+        function (req; kw...)
+            (Juango.is_authenticated(req.user) && req.user.is_active && st.has_permission(req)) ||
+                return Juango.redirect_to_login(req, reverse_url("admin:login"))
+            view(req; kw...)
+        end
+    function (req; kw...)
+        Base.ScopedValues.with(CURRENT_SITE => st, Juango.CURRENT_APP => ("admin" => st.name)) do
+            checked(req; kw...)
+        end
+    end
+end
+
+"""
+    Admin.urls(site = Admin.site)
+
+URL patterns for an admin site, namespaced by its name: `path("admin/", Admin.urls())`.
+A ModelAdmin's `urls = [path("<str:id>/publish/", publish; name = "post_publish")]` are added
+under the model's URL (`admin/post/3/publish/`), and the site's own `urls` at its root; both
+go through the site's login and permission checks.
+"""
+function urls(st::AdminSite = site)
     Juango.require_app("admin", "Admin.urls()")
-    register_user_model!()
-    s(v) = staff_member_required(v)
-    include_urls([
+    st === site && register_user_model!()
+    s(v) = site_view(st, v)
+    wrap(p) = Juango.wrap_view(p, s)
+    custom = Any[path(ma.slug * "/", include_urls([wrap(p) for p in ma.extra_urls])) for ma in values(st.registry) if !isempty(ma.extra_urls)]
+    include_urls(vcat(Any[
         path("", s(index); name = "index"),
-        path("login/", admin_login; name = "login"),
-        path("logout/", admin_logout; name = "logout"),
+        path("login/", site_view(st, admin_login; public = true); name = "login"),
+        path("logout/", site_view(st, admin_logout; public = true); name = "logout")],
+        Any[wrap(p) for p in st.extra_urls], custom, Any[
         path("<slug:model>/", s(changelist); name = "changelist"),
         path("<slug:model>/add/", s(add_view); name = "add"),
         path("<slug:model>/autocomplete/", s(autocomplete_view); name = "autocomplete"),
         path("<slug:model>/<str:id>/change/", s(change_view); name = "change"),
         path("<slug:model>/<str:id>/delete/", s(delete_view); name = "delete"),
         path("<slug:model>/<str:id>/history/", s(history_view); name = "history"),
-    ]; namespace = "admin")
+    ]); namespace = st.name)
 end
 
 end # module Admin

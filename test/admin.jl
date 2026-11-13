@@ -243,3 +243,56 @@ end
     r = get(rc, "/admin/user/$(bare.id)/change/")
     @test occursin("name=\"groups\"", text(r)) && occursin("name=\"user_permissions\"", text(r))
 end
+
+@testset "admin sites, custom list filters, custom views, per-object permissions" begin
+    root_user()
+    c = Client(); force_login!(c, get(User; username = "root"))
+    staff = Admin.AdminSite("staff"; site_header = "Staff area", index_title = "Staff home",
+                            has_permission = req -> req.user.username == "root",
+                            urls = [path("stats/", req -> HttpResponse("stats for " * req.user.username); name = "stats")])
+    popular = Admin.ListFilter("popularity", "pop"; lookups = (req, ma) -> ["hot" => "Hot", "cold" => "Cold"],
+                               queryset = (req, qs, v) -> v == "hot" ? filter(qs; views__gte = 100) : filter(qs; views__lt = 100))
+    publish(req; id) = HttpResponse("publishing $id at " * reverse_url("admin:changelist"; model = "article"))
+    Admin.register!(Article; site = staff, search_fields = [:title], list_filter = [popular, :author => :related_only, :slug => :empty],
+                    has_change_permission = (req, obj) -> obj === nothing || obj.views < 1000,
+                    has_delete_permission = (req, obj) -> false, list_select_related = false, show_full_result_count = false,
+                    get_list_display = req -> [:title, :views], urls = [path("<str:id>/publish/", publish; name = "article_publish")])
+    @test Admin.is_registered(Article; site = staff) && !Admin.is_registered(Author; site = staff)
+    old = settings.ROOT_URLCONF
+    configure!(ROOT_URLCONF = vcat(old, [path("staff/", Admin.urls(staff))]))
+    try
+        au = create(Author; name = "Site author")
+        hot = create(Article; title = "SA hot", author = au, views = 500)
+        cold = create(Article; title = "SA cold", author = au, views = 5, slug = "x")
+        big = create(Article; title = "SA big", author = au, views = 5000)
+        r = get(c, "/staff/")
+        @test r.status == 200 && occursin("Staff area", text(r)) && occursin("Staff home", text(r))
+        @test occursin("/staff/article/", text(r)) && !occursin("/staff/user/", text(r)) && !occursin("/admin/article/", text(r))
+        r = get(c, "/staff/article/?pop=hot&q=SA")
+        @test occursin("SA hot", text(r)) && occursin("SA big", text(r)) && !occursin("SA cold", text(r))
+        @test occursin("popularity", text(r)) && occursin("Show all", text(r)) && occursin(">Views<", text(r))
+        r = get(c, "/staff/article/?slug__isempty=0&q=SA")
+        @test occursin("SA cold", text(r)) && !occursin("SA hot", text(r))
+        @test occursin("Site author", text(get(c, "/staff/article/")))                    # related_only lists authors in use
+
+        # per-object permissions
+        r = get(c, "/staff/article/$(big.id)/change/")
+        @test r.status == 200 && occursin("View article", text(r))
+        @test post(c, "/staff/article/$(big.id)/change/", Dict("title" => "x")).status == 403
+        @test occursin("Change article", text(get(c, "/staff/article/$(hot.id)/change/")))
+        @test get(c, "/staff/article/$(hot.id)/delete/").status == 403
+
+        # custom views go through the site's checks and reverse within the site
+        @test text(get(c, "/staff/article/$(hot.id)/publish/")) == "publishing $(hot.id) at /staff/article/"
+        @test text(get(c, "/staff/stats/")) == "stats for root"
+        @test reverse_url("staff:article_publish"; id = 3) == "/staff/article/3/publish/" && reverse_url("admin:index") == "/admin/"
+        other = create_user("staffer2", "pw12345pw"; is_staff = true)
+        c2 = Client(); force_login!(c2, other)
+        r = get(c2, "/staff/")
+        @test r.status == 302 && startswith(getheader(r, "Location"), "/staff/login/")
+        @test get(c2, "/staff/stats/").status == 302 && get(c2, "/staff/article/$(hot.id)/publish/").status == 302
+        @test occursin("Site administration", text(get(c, "/admin/")))              # the default site is unchanged
+    finally
+        configure!(ROOT_URLCONF = old)
+    end
+end
