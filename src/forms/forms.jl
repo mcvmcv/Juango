@@ -164,7 +164,7 @@ function to_julia(fld::Field, raw)
         return (raw !== nothing && lowercase(string(raw)) in ("on", "true", "1", "yes")), nothing
     end
     s = raw === nothing ? "" : (widget_kind(fld.widget) === :password ? string(raw) : strip(string(raw)))
-    isempty(s) && return (k in STRING_KINDS && !fld.null ? "" : nothing), nothing
+    isempty(s) && return ((k in STRING_KINDS || k === :filepath) && !fld.null ? "" : nothing), nothing
     if k in STRING_KINDS
         return String(s), nothing
     elseif k in INT_KINDS
@@ -186,6 +186,13 @@ function to_julia(fld::Field, raw)
     elseif k === :date
         v = tryparse(Date, s, dateformat"yyyy-mm-dd")
         return v, v === nothing ? gettext("Enter a valid date.") : nothing
+    elseif k === :ipaddress
+        r = clean_ip(s, fld.related.protocol, fld.related.unpack_ipv4)
+        return r isa Tuple ? (nothing, r[1]) : (r, nothing)
+    elseif k === :filepath
+        any(c -> c.first == s, filepath_choices(fld)) ||
+            return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
+        return String(s), nothing
     elseif k === :time
         v = parse_time(s)
         return v, v === nothing ? gettext("Enter a valid time.") : nothing
@@ -502,8 +509,9 @@ function widget_html(bf::BoundField)
         end
         print(io, "</select>")
         return String(take!(io))
-    elseif fld.kind === :fk || fld.choices !== nothing
-        opts = fld.kind === :fk ? Pair{Any,String}[o.id => string(o) for o in objects(related_model(fld))] : fld.choices
+    elseif fld.kind === :fk || fld.choices !== nothing || fld.kind === :filepath
+        opts = fld.kind === :fk ? Pair{Any,String}[o.id => string(o) for o in objects(related_model(fld))] :
+               fld.kind === :filepath ? filepath_choices(fld) : fld.choices
         io = IOBuffer()
         print(io, "<select$attrs>")
         (fld.blank || fld.kind === :fk) && print(io, "<option value=\"\">---------</option>")

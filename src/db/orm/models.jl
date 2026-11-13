@@ -362,7 +362,7 @@ function default_value(f::Field)
     d isa NoDefault && f.db_default !== nothing && return DB_DEFAULT
     d isa NoDefault || return d isa Function || d isa Type ? d() : d
     f.null && return nothing
-    f.kind in STRING_KINDS && return ""
+    (f.kind in STRING_KINDS || f.kind === :filepath) && return ""
     f.kind === :bool && return false
     nothing
 end

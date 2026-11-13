@@ -241,6 +241,20 @@ aggregate(objects(Shift); total = Sum(:length))
 - **Storage.** Postgres stores `TIME` and `INTERVAL` and does the arithmetic natively. MySQL/MariaDB use `TIME(6)`, SQLite stores times as text, and both store durations as a number of microseconds. `datetime ± duration` and `datetime - datetime` get the right SQL on each database.
 - **Text forms.** Templates and forms show durations as Django does (`1 day, 2:03:00`), and form inputs accept that, `1 02:03:00`, a number of seconds, or ISO 8601 (`P1DT2H`). Fixtures write times as `06:30:00` and durations as `1 02:03:00`.
 
+#### Binary data, IP addresses and file paths
+
+```julia
+@model struct Device
+    ip     = GenericIPAddressField(null = true, blank = true)   # protocol = "IPv4" / "IPv6", unpack_ipv4 = true
+    key    = BinaryField(max_length = 32)                       # Vector{UInt8}
+    script = FilePathField(path = "/srv/scripts", match = r"\.sh$", recursive = true)
+end
+```
+
+- **`GenericIPAddressField`** stores addresses in their normal form (`2001:DB8::0:1` becomes `2001:db8::1`) and rejects invalid ones with Django's messages. Postgres uses `INET`, the other databases `CHAR(39)`. A blank value is stored as NULL, so `blank = true` needs `null = true`.
+- **`BinaryField`** holds raw bytes: `BYTEA`, `LONGBLOB` or `BLOB`. It isn't editable in forms, and fixtures carry it as base64.
+- **`FilePathField`** stores a path. Forms offer the matching files (or folders, with `allow_folders = true`) under `path` as a select, and refuse any other value.
+
 #### Many-to-many
 
 ```julia

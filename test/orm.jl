@@ -1350,3 +1350,42 @@ end
     f = ModelForm(Tally; fields = [:small, :count], data = Dict("small" => "99999", "count" => "3"))
     @test !is_valid(f) && f.errors[:small] == ["Ensure this value is less than or equal to 32767."]
 end
+
+@testset "BinaryField, GenericIPAddressField, FilePathField" begin
+    @test Juango.clean_ip("2001:DB8:0:0:0:0:0:1") == "2001:db8::1" && Juango.clean_ip(" 10.0.0.1 ") == "10.0.0.1"
+    @test Juango.clean_ip("::ffff:1.2.3.4", "both", true) == "1.2.3.4" && Juango.clean_ip("300.1.1.1") == ("Enter a valid IPv4 or IPv6 address.",)
+    @test Juango.clean_ip("10.0.0.1", "IPv6") == ("Enter a valid IPv6 address.",)
+    @test_throws ArgumentError GenericIPAddressField(protocol = "IPv4", unpack_ipv4 = true)
+
+    bytes = UInt8[0x00, 0xff, 0x10, 0x80, 0x5c, 0x27]          # NUL, high bytes, a backslash and a quote
+    d = create(Device; name = "r1", ip = "2001:DB8::0:1", ip6 = "::1", mapped = "::ffff:10.1.2.3", blob = bytes,
+               script = joinpath(FILEPATH_DIR, "a.txt"))
+    create(Device; name = "r2", ip = "192.168.0.7")
+    refresh!(d)
+    @test d.ip == "2001:db8::1" && d.ip6 == "::1" && d.mapped == "10.1.2.3"
+    @test d.blob == bytes && d.blob isa Vector{UInt8}
+    @test get(Device; ip = "192.168.0.7").name == "r2" && get(Device; ip = "2001:db8::0:1").name == "r1"
+    @test get(Device; name = "r2").ip6 === nothing && get(Device; name = "r2").blob === nothing
+    @test full_clean(Device(name = "x", ip = "nope"))[:ip] == ["Enter a valid IPv4 or IPv6 address."]
+    @test full_clean(Device(name = "x", ip6 = "1.2.3.4"))[:ip6] == ["Enter a valid IPv6 address."]
+    @test Juango.validate_field(Juango.getfield_meta(Device, :blob), zeros(UInt8, 17)) == ["Ensure this value has at most 16 bytes (it has 17)."]
+    @test Juango.clean_ip("1.2.3") == ("Enter a valid IPv4 or IPv6 address.",) && Juango.clean_ip("01.2.3.4") isa Tuple
+    @test isempty(full_clean(Device(name = "x", ip = "::1")))
+
+    # forms: the binary field isn't editable; file paths are a select of the matching files
+    f = ModelForm(Device)
+    @test !(:blob in [x.name for x in f.fields])
+    html = Juango.widget_html(f[:script])
+    @test occursin("<select", html) && occursin(">a.txt</option>", html) && occursin(">b.txt</option>", html) && !occursin("c.log", html)
+    @test occursin(joinpath("sub", "d.txt"), Juango.widget_html(f[:tree])) && !occursin("d.txt", html)
+    ok = ModelForm(Device; fields = [:name, :ip, :script], data = Dict("name" => "f", "ip" => "::FFFF:1:2", "script" => joinpath(FILEPATH_DIR, "b.txt")))
+    @test is_valid(ok) && cleaned_data(ok)[:ip] == "::ffff:1:2"
+    bad = ModelForm(Device; fields = [:name, :ip, :script], data = Dict("name" => "f", "ip" => "1.2.3", "script" => "/etc/passwd"))
+    @test !is_valid(bad) && haskey(bad.errors, :ip) && haskey(bad.errors, :script)
+
+    # fixtures carry bytes as base64
+    js = Juango.serialize(:json, filter(Device; name = "r1"))
+    @test occursin("\"blob\":\"AP8QgFwn\"", js)
+    @test only(Juango.deserialize(:json, js)).object.blob == bytes
+    @test only(Juango.deserialize(:xml, Juango.serialize(:xml, filter(Device; name = "r1")))).object.blob == bytes
+end

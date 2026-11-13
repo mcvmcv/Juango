@@ -124,6 +124,12 @@ function to_db(f::Field, v)
     k in RANGE_KINDS && return encode_range(backend(), v)
     k === :uuid && return string(v)
     k === :time && return time_string(to_time(v))
+    k === :binary && return dbparam(Vector{UInt8}(v isa AbstractString ? codeunits(v) : v))
+    if k === :ipaddress
+        v == "" && return dbparam(nothing)
+        ip = clean_ip(string(v), f.related.protocol, f.related.unpack_ipv4)
+        return ip isa Tuple ? string(v) : ip            # invalid values go as typed (full_clean reports them)
+    end
     k === :duration && return encode_duration(backend(), duration_us(v isa Duration ? v : to_duration(v)))
     k === :decimal && return string(f.decimal_places === nothing ? to_decimal(v) : round(to_decimal(v); digits = f.decimal_places))
     k === :geometry && return encode_geometry(v)

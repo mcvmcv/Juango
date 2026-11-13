@@ -190,6 +190,70 @@ end
 BooleanField(; default = false, kw...) = Field(:bool; default = default, blank = true, kw...)
 DateTimeField(; kw...) = Field(:datetime; kw...)
 DateField(; kw...) = Field(:date; kw...)
+"""
+    BinaryField(; max_length = nothing)
+
+Raw bytes (`Vector{UInt8}`): `BYTEA` on PostgreSQL, `LONGBLOB` on MySQL, `BLOB` on SQLite. Not
+editable in forms by default; fixtures carry it as base64.
+"""
+BinaryField(; editable = false, kw...) = Field(:binary; editable = editable, kw...)
+
+"""
+    GenericIPAddressField(; protocol = "both", unpack_ipv4 = false)
+
+An IPv4 or IPv6 address, stored as text in its normal form (`::1`, `2001:db8::1`): `INET` on
+PostgreSQL, `CHAR(39)` elsewhere. `protocol` is `"both"`, `"IPv4"` or `"IPv6"`; `unpack_ipv4`
+turns `::ffff:1.2.3.4` into `1.2.3.4`. A blank value is stored as NULL, so `blank = true` needs
+`null = true`.
+"""
+function GenericIPAddressField(; protocol = "both", unpack_ipv4::Bool = false, kw...)
+    p = lowercase(string(protocol))
+    p in ("both", "ipv4", "ipv6") || throw(ArgumentError("GenericIPAddressField: protocol must be \"both\", \"IPv4\" or \"IPv6\""))
+    unpack_ipv4 && p != "both" && throw(ArgumentError("GenericIPAddressField: unpack_ipv4 needs protocol = \"both\""))
+    Field(:ipaddress; related = (protocol = p, unpack_ipv4 = unpack_ipv4), max_length = 39, kw...)
+end
+
+"Where a `FilePathField` looks for its choices."
+struct FilePathSpec
+    path::Any                       # a directory, or a function returning one
+    match::Union{Nothing,Regex}     # matched against file names
+    recursive::Bool
+    allow_files::Bool
+    allow_folders::Bool
+end
+"""
+    FilePathField(; path, match = nothing, recursive = false, allow_files = true, allow_folders = false, max_length = 100)
+
+A path chosen from the files (and/or folders) under `path` (a directory or a function returning
+one) whose names match `match`. Stored as text; forms offer the matching paths as a select.
+"""
+function FilePathField(; path, match = nothing, recursive::Bool = false, allow_files::Bool = true,
+                       allow_folders::Bool = false, max_length = 100, kw...)
+    (allow_files || allow_folders) || throw(ArgumentError("FilePathField needs allow_files or allow_folders"))
+    Field(:filepath; related = FilePathSpec(path, match === nothing ? nothing : match isa Regex ? match : Regex(string(match)),
+                                            recursive, allow_files, allow_folders), max_length = max_length, kw...)
+end
+
+"The paths a `FilePathField` offers: full path => label (relative to the directory)."
+function filepath_choices(f::Field)
+    s = f.related
+    root = s.path isa Function ? s.path() : string(s.path)
+    out = Pair{Any,String}[]
+    ok(name) = s.match === nothing || occursin(s.match, name)
+    if s.recursive
+        for (dir, dirs, files) in walkdir(root)
+            s.allow_files && foreach(n -> ok(n) && push!(out, joinpath(dir, n) => relpath(joinpath(dir, n), root)), files)
+            s.allow_folders && foreach(n -> ok(n) && push!(out, joinpath(dir, n) => relpath(joinpath(dir, n), root)), dirs)
+        end
+    else
+        for n in readdir(root)
+            p = joinpath(root, n)
+            ((isdir(p) ? s.allow_folders : s.allow_files) && ok(n)) && push!(out, p => n)
+        end
+    end
+    sort!(out; by = last)
+end
+
 "A time of day (`Dates.Time`); `auto_now`/`auto_now_add` use the current time in the current time zone."
 TimeField(; kw...) = Field(:time; kw...)
 """

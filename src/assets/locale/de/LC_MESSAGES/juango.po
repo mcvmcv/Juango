@@ -561,3 +561,19 @@ msgstr "Dieser Wert muss größer oder gleich %(limit_value)s sein."
 #: db/orm/instances.jl
 msgid "Ensure this value is less than or equal to %(limit_value)s."
 msgstr "Dieser Wert muss kleiner oder gleich %(limit_value)s sein."
+
+#: db/orm/instances.jl
+msgid "Enter a valid IPv4 address."
+msgstr "Bitte eine gültige IPv4-Adresse eingeben."
+
+#: db/orm/instances.jl
+msgid "Enter a valid IPv6 address."
+msgstr "Bitte eine gültige IPv6-Adresse eingeben."
+
+#: db/orm/instances.jl
+msgid "Enter a valid IPv4 or IPv6 address."
+msgstr "Bitte eine gültige IPv4- oder IPv6-Adresse eingeben."
+
+#: db/orm/instances.jl
+msgid "Ensure this value has at most %(max)d bytes (it has %(len)d)."
+msgstr "Bitte sicherstellen, dass der Wert höchstens %(max)d Bytes hat (er hat %(len)d)."

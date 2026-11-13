@@ -30,6 +30,7 @@ function serial_value(f::Field, v)
     v isa Date && return string(v)
     v isa UUID && return string(v)
     v isa Dates.Time && return time_string(v)
+    f.kind === :binary && return base64encode(v)                      # as Django
     v isa Duration && return duration_string(v; serial = true)   # Django's "1 02:00:00"
     v isa Decimal && return string(v)                  # as Django: "19.90", exactly
     v isa FieldFile && return v.name
@@ -114,6 +115,8 @@ function deserialize_one(d::AbstractDict)
         elseif f.kind in RANGE_KINDS && v isa AbstractDict
             conv(x) = x === nothing ? nothing : f.kind === :intrange ? Int(x) : f.kind === :daterange ? Date(x) : todatetime(x)
             data[attname(f)] = ValueRange(conv(get(v, "lower", nothing)), conv(get(v, "upper", nothing)); bounds = get(v, "bounds", "[)"))
+        elseif f.kind === :binary && v isa AbstractString
+            data[attname(f)] = base64decode(v)
         elseif f.kind === :array && v isa AbstractVector
             data[attname(f)] = collect(v)
         else

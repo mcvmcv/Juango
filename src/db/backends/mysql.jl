@@ -49,6 +49,7 @@ driver_insert_id(::MySQLBackend, conn, sql, params) = Int(mysql_exec(conn, sql, 
 
 quote_name(::MySQLBackend, s) = "`" * replace(string(s), "`" => "``") * "`"
 adapt_param(::MySQLBackend, x::Bool) = Int(x)
+adapt_param(::MySQLBackend, x::Vector{UInt8}) = x
 
 function column_type(::MySQLBackend, kind::Symbol, max_length)
     kind === :int && return "INT"
@@ -66,6 +67,8 @@ function column_type(::MySQLBackend, kind::Symbol, max_length)
     kind === :citext && return "VARCHAR($(something(max_length, 255)))"
     kind === :decimal && return "DECIMAL(65, 30)"
     kind === :time && return "TIME(6)"
+    kind === :binary && return "LONGBLOB"
+    kind === :ipaddress && return "CHAR(39)"
     kind === :duration && return "BIGINT"
     max_length === nothing ? "LONGTEXT" : "VARCHAR($max_length)"
 end

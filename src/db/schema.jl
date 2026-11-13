@@ -180,7 +180,7 @@ hascolumn(t::Table, name) = any(c -> c.name == name, t.columns)
 const SchemaState = Dict{String,Table}
 copy_state(s::SchemaState) = SchemaState(k => copy(v) for (k, v) in s)
 
-schema_kind(kind::Symbol) = kind in STRING_KINDS || kind in (:file, :image) ? :string : kind
+schema_kind(kind::Symbol) = kind in STRING_KINDS || kind in (:file, :image, :filepath) ? :string : kind
 
 "The table a column references: `\"__user_model__\"` (a `ForeignKey(USER_MODEL)`) is the AUTH_USER_MODEL's."
 ref_table(name) = name == "__user_model__" ? modelmeta(get_user_model()).table : name
@@ -203,7 +203,7 @@ function column_state(f::Field)
         throw(ArgumentError("$(nameof(f.model)).$(f.name): foreign keys to $(nameof(related_model(f))) has a composite primary key; point at it with ForeignObject(...; from_fields = ...)"))
     of = f.kind === :array ? f.related : f.kind === :geometry ? geo_of(f) : f.kind === :fk ? fk_of(related_model(f)) : nothing
     Column(column(f), schema_kind(f.kind); null = f.null, default = d, unique = f.unique,
-           index = f.db_index, max_length = schema_kind(f.kind) in (:string, :citext) || (f.kind === :array && f.related === :string) ? f.max_length : nothing,
+           index = f.db_index, max_length = schema_kind(f.kind) in (:string, :citext, :binary) || (f.kind === :array && f.related === :string) ? f.max_length : nothing,
            references = ref, of = of, generated = gen, comment = f.db_comment,
            max_digits = f.kind === :decimal ? f.max_digits : nothing, decimal_places = f.kind === :decimal ? f.decimal_places : nothing)
 end

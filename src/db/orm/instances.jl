@@ -161,6 +161,32 @@ const EMAIL_RE = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 const SLUG_RE = r"^[-a-zA-Z0-9_]+$"
 const URL_RE = r"^https?://[^\s/$.?#].[^\s]*$"i
 
+"""
+    clean_ip(s, protocol = "both", unpack_ipv4 = false) -> String or (error,)
+
+An IP address in its normal form (`2001:DB8::0:1` → `2001:db8::1`), or a one-element tuple
+holding Django's error message.
+"""
+function clean_ip(s::AbstractString, protocol = "both", unpack_ipv4 = false)
+    p = lowercase(string(protocol))
+    msg = p == "ipv4" ? gettext("Enter a valid IPv4 address.") : p == "ipv6" ? gettext("Enter a valid IPv6 address.") :
+          gettext("Enter a valid IPv4 or IPv6 address.")
+    t = strip(s)
+    # IPv4 must be a full dotted quad (the parser also takes the BSD shorthand "1.2.3")
+    occursin(':', t) || occursin(r"^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$", t) || return (msg,)
+    ip = try
+        parse(Sockets.IPAddr, t)
+    catch
+        return (msg,)
+    end
+    ip isa Sockets.IPv4 && p == "ipv6" && return (msg,)
+    ip isa Sockets.IPv6 && p == "ipv4" && return (msg,)
+    if ip isa Sockets.IPv6 && unpack_ipv4 && (ip.host >> 32) == 0xffff
+        ip = Sockets.IPv4(UInt32(ip.host & 0xffffffff))
+    end
+    string(ip)
+end
+
 "The value an `auto_now` field gets: the timestamp, or its date or time in the current time zone."
 function auto_now_value(f::Field, ts)
     f.kind in (:date, :time) || return ts
@@ -202,7 +228,14 @@ function validate_field(f::Field, v)
         (!f.blank && f.kind !== :bool) && push!(errs, gettext("This field is required."))
         return errs
     end
-    if f.max_length !== nothing && v isa AbstractString && length(v) > f.max_length
+    if f.kind === :ipaddress
+        r = clean_ip(string(v), f.related.protocol, f.related.unpack_ipv4)
+        r isa Tuple && return [r[1]]
+    end
+    if f.kind === :binary && f.max_length !== nothing && v isa AbstractVector{UInt8} && length(v) > f.max_length
+        push!(errs, interpolate(gettext("Ensure this value has at most %(max)d bytes (it has %(len)d)."), Dict("max" => f.max_length, "len" => length(v))))
+    end
+    if f.max_length !== nothing && v isa AbstractString && f.kind !== :ipaddress && length(v) > f.max_length
         push!(errs, interpolate(gettext("Ensure this value has at most %(max)d characters (it has %(len)d)."), Dict("max" => f.max_length, "len" => length(v))))
     end
     f.kind === :email && !occursin(EMAIL_RE, string(v)) && push!(errs, gettext("Enter a valid email address."))

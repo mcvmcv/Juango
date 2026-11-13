@@ -146,6 +146,8 @@ function field_for(col)
     occursin(r"^time(\(\d\))?( without time zone)?$", t) && return "TimeField()", ""
     occursin(r"^json", t) && return "JSONField()", ""
     t == "uuid" && return "UUIDField()", ""
+    occursin(r"^(bytea|blob|longblob|mediumblob|tinyblob|binary|varbinary)", t) && return "BinaryField()", ""
+    t == "inet" && return "GenericIPAddressField()", ""
     "TextField()", "  # TODO: check the type (was $(t))"
 end
 

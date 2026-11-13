@@ -374,7 +374,8 @@ const XML_TYPE_NAMES = Dict(:char => "CharField", :text => "TextField", :int => 
                             :datetimerange => "DateTimeRangeField", :decimal => "DecimalField", :time => "TimeField",
                             :duration => "DurationField", :bigint => "BigIntegerField", :smallint => "SmallIntegerField",
                             :posint => "PositiveIntegerField", :posbigint => "PositiveBigIntegerField",
-                            :possmallint => "PositiveSmallIntegerField")
+                            :possmallint => "PositiveSmallIntegerField", :binary => "BinaryField",
+                            :ipaddress => "GenericIPAddressField", :filepath => "FilePathField")
 
 function xml_text(f::Field, v)
     v isa Bool && return v ? "True" : "False"

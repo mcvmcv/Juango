@@ -230,6 +230,20 @@ end
     Meta(permissions = [("publish_memo", "Can publish memos")])
 end
 
+const FILEPATH_DIR = mktempdir()
+foreach(n -> write(joinpath(FILEPATH_DIR, n), "x"), ["a.txt", "b.txt", "c.log"])
+mkpath(joinpath(FILEPATH_DIR, "sub")); write(joinpath(FILEPATH_DIR, "sub", "d.txt"), "x")
+
+@model struct Device
+    name = CharField(max_length = 20)
+    ip = GenericIPAddressField(null = true, blank = true)
+    ip6 = GenericIPAddressField(protocol = "IPv6", null = true, blank = true)
+    mapped = GenericIPAddressField(unpack_ipv4 = true, null = true, blank = true)
+    blob = BinaryField(null = true, max_length = 16)
+    script = FilePathField(path = FILEPATH_DIR, match = r"\.txt$", blank = true)
+    tree = FilePathField(path = FILEPATH_DIR, recursive = true, match = r"\.txt$", blank = true, max_length = 200)
+end
+
 @model struct Tally
     small = SmallIntegerField(default = 0)
     big = BigIntegerField(default = 0)

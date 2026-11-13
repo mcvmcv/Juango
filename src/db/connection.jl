@@ -106,6 +106,7 @@ adapt_param(::DatabaseBackend, x::AbstractString) = String(x)
 adapt_param(::DatabaseBackend, x::UUID) = string(x)
 adapt_param(::DatabaseBackend, x::Decimal) = string(x)
 adapt_param(::DatabaseBackend, x::Dates.Time) = time_string(x)
+adapt_param(::DatabaseBackend, x::Vector{UInt8}) = "\\x" * bytes2hex(x)      # bytea's hex input (SQLite and MySQL bind bytes)
 adapt_param(b::DatabaseBackend, x::Duration) = encode_duration(b, duration_us(x))
 "A duration as a parameter: an interval literal (PostgreSQL), else microseconds."
 encode_duration(::DatabaseBackend, us::Integer) = "$us microseconds"
@@ -131,6 +132,8 @@ function column_type(::DatabaseBackend, kind::Symbol, max_length)
     kind === :datetimerange && return "TSRANGE"
     kind === :decimal && return "NUMERIC"
     kind === :time && return "TIME"
+    kind === :binary && return "BYTEA"
+    kind === :ipaddress && return "INET"
     kind === :duration && return "INTERVAL"
     max_length === nothing ? "TEXT" : "VARCHAR($max_length)"
 end

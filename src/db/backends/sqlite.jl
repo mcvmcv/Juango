@@ -59,6 +59,7 @@ end
 
 # SQLite has no native bool/date types: store 0/1 and ISO-8601 text.
 adapt_param(::SQLiteBackend, x::Bool) = Int(x)
+adapt_param(::SQLiteBackend, x::Vector{UInt8}) = x
 adapt_param(::SQLiteBackend, x::DateTime) = Dates.format(x, "yyyy-mm-ddTHH:MM:SS.sss")
 adapt_param(::SQLiteBackend, x::Date) = string(x)
 
@@ -66,6 +67,7 @@ function column_type(::SQLiteBackend, kind::Symbol, max_length)
     (kind in INT_KINDS || kind in (:bool, :fk, :duration)) && return "INTEGER"
     kind === :float && return "REAL"
     kind === :citext && return "TEXT COLLATE NOCASE"
+    kind === :binary && return "BLOB"
     kind === :decimal && return "DECIMAL"      # NUMERIC affinity: compares as numbers
     "TEXT"
 end
