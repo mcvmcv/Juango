@@ -180,6 +180,25 @@ union(filter(Post; featured = true), filter(Post; views__gt = 1000))     # inter
 
 `bulk_create` and `bulk_update` don't call `save!` or send signals. Combined querysets can be ordered, sliced and counted but not filtered further.
 
+#### Validation and neighbours
+
+```julia
+errors = full_clean(post)                     # Dict(:field => messages, :__all__ => row-wide messages); empty when valid
+clean_fields(post); validate_unique(post); validate_constraints(post; exclude = [:slug])
+full_clean(post; validate_unique = false)
+
+@model struct Bulletin
+    slug     = SlugField(unique_for_date = :pub_date)       # also unique_for_month, unique_for_year
+    pub_date = DateTimeField()
+end
+
+get_next_by(post, :created)                   # also get_previous_by, with filters: get_next_by(post, :created; published = true)
+post.get_next_by_created                      # Django's get_next_by_FOO, for non-null date fields
+```
+
+- **`full_clean`** runs `clean_fields` (each field on its own), then `validate_unique` (`unique`, `unique_together`, `unique_for_*`), then `validate_constraints` (`Meta(constraints = ...)`). It skips fields that already have errors, as Django does.
+- **`get_next_by` and `get_previous_by`** break ties by primary key, and throw `DoesNotExist` at the end.
+
 #### Choices
 
 ```julia

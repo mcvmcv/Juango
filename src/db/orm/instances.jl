@@ -265,26 +265,109 @@ end
 Validate an instance against its field definitions (required, max_length,
 choices, email/slug/url format, custom validators, uniqueness). Empty dict = valid.
 """
-function full_clean(obj::T; exclude = Symbol[]) where {T<:Model}
+function full_clean(obj::T; exclude = Symbol[], validate_unique::Bool = true, validate_constraints::Bool = true) where {T<:Model}
+    errors = clean_fields(obj; exclude = exclude)
+    # uniqueness and constraints only for fields that are clean and not excluded
+    skip = union(Symbol.(exclude), keys(errors))
+    merge_errors!(errors, validate_unique ? Juango.validate_unique(obj; exclude = skip) : Dict{Symbol,Vector{String}}())
+    merge_errors!(errors, validate_constraints ? Juango.validate_constraints(obj; exclude = skip) : Dict{Symbol,Vector{String}}())
+    errors
+end
+merge_errors!(a, b) = (foreach(((k, v),) -> append!(get!(a, k, String[]), v), b); a)
+
+"""
+    clean_fields(obj; exclude = Symbol[]) -> Dict{Symbol,Vector{String}}
+
+Check each editable field's value on its own: required, length, format, choices, ranges and the
+field's validators (the first step of `full_clean`).
+"""
+function clean_fields(obj::T; exclude = Symbol[]) where {T<:Model}
     errors = Dict{Symbol,Vector{String}}()
     for f in all_fields(T)
         (f.name in exclude || !f.editable) && continue
         v = getproperty(obj, attname(f))
         v === DB_DEFAULT && continue                  # the database supplies it
         errs = validate_field(f, v)
-        if isempty(errs) && f.unique && v !== nothing
-            q = filter(base_objects(f.model), Q(attname(f) => v))
-            obj.id === nothing || (q = filter(q, !Q(id = obj.id)))
-            exists(q) && push!(errs, interpolate(gettext("%(model)s with this %(field)s already exists."), Dict("model" => uppercasefirst(string(modelmeta(T).verbose_name)), "field" => label(f))))
-        end
         isempty(errs) || (errors[f.name] = errs)
     end
-    # constraints and unique_together, when their fields are clean and not excluded
-    skip = Set(string.(union(exclude, keys(errors))))
-    values = Dict{Symbol,Any}(f.name => field_data(obj, attname(f)) for f in all_fields(T) if !(string(f.name) in skip))
-    errs = vcat(unique_together_errors(T, values, obj.id), constraint_errors(T, values, obj.id))
+    errors
+end
+
+"""
+    validate_unique(obj; exclude = Symbol[]) -> Dict{Symbol,Vector{String}}
+
+Check `unique` fields, `unique_together` and `unique_for_date` / `_month` / `_year` against the
+other rows (Django's `Model.validate_unique`). Errors of whole-row checks are under `:__all__`.
+"""
+function validate_unique(obj::T; exclude = Symbol[]) where {T<:Model}
+    errors = Dict{Symbol,Vector{String}}()
+    others(q) = obj.id === nothing ? q : filter(q, !Q(id = obj.id))
+    vname = uppercasefirst(string(modelmeta(T).verbose_name))
+    for f in all_fields(T)
+        f.name in exclude && continue
+        v = field_data(obj, attname(f))
+        (v === nothing || v === DB_DEFAULT) && continue
+        if f.unique && exists(others(filter(base_objects(f.model), Q(attname(f) => v))))
+            push!(get!(errors, f.name, String[]), interpolate(gettext("%(model)s with this %(field)s already exists."),
+                                                              Dict("model" => vname, "field" => label(f))))
+        end
+        if f.unique_for !== nothing
+            kind, dname = f.unique_for
+            dname in exclude && continue
+            df = getfield_meta(T, dname)
+            d = field_data(obj, attname(df))
+            d === nothing && continue
+            d isa TimeZones.ZonedDateTime && (d = make_naive(d))
+            parts = Any[Symbol(dname, "__year") => Dates.year(d)]
+            kind in (:date, :month) && push!(parts, Symbol(dname, "__month") => Dates.month(d))
+            kind === :date && push!(parts, Symbol(dname, "__day") => Dates.day(d))
+            if exists(others(filter(base_objects(f.model), Q(attname(f) => v), Q(:AND, parts, false))))
+                push!(get!(errors, f.name, String[]), interpolate(gettext("%(field_label)s must be unique for %(date_field_label)s %(lookup_type)s."),
+                    Dict("field_label" => label(f), "date_field_label" => label(df), "lookup_type" => string(kind))))
+            end
+        end
+    end
+    values = Dict{Symbol,Any}(f.name => field_data(obj, attname(f)) for f in all_fields(T) if !(f.name in exclude))
+    errs = unique_together_errors(T, values, obj.id)
     isempty(errs) || append!(get!(errors, :__all__, String[]), errs)
     errors
+end
+
+"""
+    validate_constraints(obj; exclude = Symbol[]) -> Dict{Symbol,Vector{String}}
+
+Check `Meta(constraints = ...)` (`UniqueConstraint`, `CheckConstraint`, `ExclusionConstraint`
+where it can be checked) for the object's values, under `:__all__` (Django's `Model.validate_constraints`).
+Constraints that use an excluded field are skipped.
+"""
+function validate_constraints(obj::T; exclude = Symbol[]) where {T<:Model}
+    values = Dict{Symbol,Any}(f.name => field_data(obj, attname(f)) for f in all_fields(T) if !(f.name in exclude))
+    errs = constraint_errors(T, values, obj.id)
+    isempty(errs) ? Dict{Symbol,Vector{String}}() : Dict{Symbol,Vector{String}}(:__all__ => errs)
+end
+
+"""
+    get_next_by(obj, :field; filters...)
+    get_previous_by(obj, :field; filters...)
+
+The next (or previous) object by a date or datetime field, among the rows matching `filters`;
+ties are broken by primary key (Django's `get_next_by_FOO`). Throws `DoesNotExist` at the end.
+Also `obj.get_next_by_created` and `obj.get_previous_by_created`.
+"""
+get_next_by(obj::Model, field::Symbol; kw...) = adjacent_by(obj, field, true; kw...)
+get_previous_by(obj::Model, field::Symbol; kw...) = adjacent_by(obj, field, false; kw...)
+function adjacent_by(obj::T, field::Symbol, next::Bool; kw...) where {T<:Model}
+    f = getfield_meta(T, field)
+    f.kind in (:date, :datetime) || throw(ArgumentError("get_next_by: $field isn't a date or datetime field"))
+    obj.id === nothing && throw(ArgumentError("get_next_by: $T is not saved"))
+    v = field_data(obj, attname(f))
+    v === nothing && throw(ArgumentError("get_next_by: $field is NULL"))
+    op = next ? "gt" : "lt"
+    q = Q(Symbol(field, "__", op) => v) | Q(:AND, Any[field => v, Symbol("id__", op) => obj.id], false)
+    qs = filter(filter(base_objects(T), q); kw...) |> order_by(next ? string(field) : "-" * string(field), next ? "id" : "-id")
+    o = first(qs)
+    o === nothing && throw(DoesNotExist(T, "$(next ? "next" : "previous") by $field"))
+    o
 end
 
 "Messages for `Meta(unique_together = ...)` sets that `values` would duplicate."

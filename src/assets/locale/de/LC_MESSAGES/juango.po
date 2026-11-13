@@ -577,3 +577,7 @@ msgstr "Bitte eine gültige IPv4- oder IPv6-Adresse eingeben."
 #: db/orm/instances.jl
 msgid "Ensure this value has at most %(max)d bytes (it has %(len)d)."
 msgstr "Bitte sicherstellen, dass der Wert höchstens %(max)d Bytes hat (er hat %(len)d)."
+
+#: db/orm/instances.jl
+msgid "%(field_label)s must be unique for %(date_field_label)s %(lookup_type)s."
+msgstr "%(field_label)s muss für %(date_field_label)s %(lookup_type)s eindeutig sein."

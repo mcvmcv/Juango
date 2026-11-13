@@ -44,7 +44,8 @@ export ContentType, GenericForeignKey, GenericRelation
 export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_list, annotate, aggregate,
        select_related, prefetch_related, Prefetch, FilteredRelation, defer, distinct, latest, earliest,
        none, in_bulk, dates, datetimes, raw, explain, iterator, select_for_update, intersection,
-       difference, create, get_or_create, update_or_create, update!, save!, refresh!, full_clean, bulk_create,
+       difference, create, get_or_create, update_or_create, update!, save!, refresh!, full_clean,
+       clean_fields, validate_unique, validate_constraints, get_next_by, get_previous_by, bulk_create,
        bulk_update, add!, remove!, set!, clear!, atomic, on_commit, using_db,
        DoesNotExist, MultipleObjectsReturned, ProtectedError, RestrictedError, SET, IntegrityError, TransactionManagementError
 export run_async, sync_to_async, aget, acreate, acount, aexists, afirst, alast, acollect, aget_or_create,

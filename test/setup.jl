@@ -232,6 +232,15 @@ end
     Meta(permissions = [("publish_memo", "Can publish memos")])
 end
 
+@model struct Bulletin
+    slug = SlugField(unique_for_date = :pub_date)
+    pub_date = DateTimeField()
+    title = CharField(max_length = 20, unique_for_year = :day)
+    day = DateField()
+    score = IntegerField(default = 0)
+    Meta(constraints = [CheckConstraint(condition = Q(score__gte = 0), name = "bulletin_score_positive")])
+end
+
 # choices: enumerations, groups and callables
 @choices Phase begin
     DRAFT = "d", "Draft"

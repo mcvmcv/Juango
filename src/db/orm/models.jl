@@ -496,6 +496,8 @@ function Base.getproperty(m::Model, s::Symbol)
     pre === NOTFOUND || return pre isa PrefetchedList ? pre.items : pre    # Prefetch(...; to_attr)
     df = display_field(T, s)
     df === nothing || return get_display(m, df.name)                     # obj.get_status_display
+    nb = adjacent_field(T, s)
+    nb === nothing || return adjacent_by(m, nb[1], nb[2])                  # obj.get_next_by_created
     r = tattr(m, Val(s))
     r === NOTFOUND || return r
     throw(ArgumentError("$(T) has no attribute '$s'"))
@@ -534,6 +536,7 @@ function Base.propertynames(m::Model, private::Bool = false)
         push!(names, attname(f))
         f.kind === :fk && push!(names, f.name)
         f.choices === nothing || push!(names, Symbol("get_", f.name, "_display"))
+        f.kind in (:date, :datetime) && !f.null && push!(names, Symbol("get_next_by_", f.name), Symbol("get_previous_by_", f.name))
     end
     append!(names, [r[1] for r in reverse_relations(typeof(m)) if !startswith(string(r[1]), "+")])
     append!(names, first.(m2m_relations(typeof(m))))
@@ -560,6 +563,17 @@ Override for your models to give them a canonical URL (used by generic views and
 the admin's "View on site" link). Available in templates as `obj.get_absolute_url`.
 """
 get_absolute_url(::Model) = nothing
+"`(field, next)` for `get_next_by_<field>` / `get_previous_by_<field>` on a non-null date field."
+function adjacent_field(@nospecialize(T), s::Symbol)
+    str = string(s)
+    for (pre, next) in (("get_next_by_", true), ("get_previous_by_", false))
+        startswith(str, pre) || continue
+        f = findfield(modelmeta(T), Symbol(str[length(pre)+1:end]))
+        f !== nothing && f.kind in (:date, :datetime) && !f.null && return (f.name, next)
+    end
+    nothing
+end
+
 "The field behind `get_<name>_display`, when it has choices."
 function display_field(@nospecialize(T), s::Symbol)
     str = string(s)

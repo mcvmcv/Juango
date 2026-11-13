@@ -1537,3 +1537,33 @@ end
     @test [x.name for x in filter(qs; name__iregex = "^FN C")] == ["fn carol"] && isempty(filter(qs; name__regex = "^FN"))
     @test [x.name for x in exclude(qs; name__regex = r"o")] == ["fn Alice"]
 end
+
+@testset "validate_unique, validate_constraints, unique_for_date, get_next_by" begin
+    b1 = create(Bulletin; slug = "news", pub_date = DateTime(2026, 3, 1, 10), title = "Spring", day = Date(2026, 1, 5))
+    b2 = create(Bulletin; slug = "more", pub_date = DateTime(2026, 3, 2, 9), title = "Summer", day = Date(2026, 2, 1))
+    b3 = create(Bulletin; slug = "tie", pub_date = DateTime(2026, 3, 2, 9), title = "Autumn", day = Date(2026, 3, 1))
+
+    same_day = Bulletin(slug = "news", pub_date = DateTime(2026, 3, 1, 18), title = "Other", day = Date(2025, 1, 1))
+    @test validate_unique(same_day)[:slug] == ["Slug must be unique for Pub date date."]
+    @test isempty(validate_unique(Bulletin(slug = "news", pub_date = DateTime(2026, 3, 3), title = "x", day = Date(2025, 1, 1))))
+    @test validate_unique(Bulletin(slug = "x", pub_date = DateTime(2026, 5, 1), title = "Spring", day = Date(2026, 12, 31)))[:title] ==
+          ["Title must be unique for Day year."]
+    @test isempty(validate_unique(b1))                                  # itself doesn't count
+    @test isempty(validate_unique(same_day; exclude = [:slug]))
+    @test full_clean(same_day)[:slug] == ["Slug must be unique for Pub date date."] && isempty(full_clean(same_day; validate_unique = false))
+    bad = Bulletin(slug = "neg", pub_date = DateTime(2026, 6, 1), title = "Neg", day = Date(2026, 6, 1), score = -1)
+    @test validate_constraints(bad) == Dict(:__all__ => ["Constraint “bulletin_score_positive” is violated."])
+    @test isempty(validate_constraints(bad; exclude = [:score])) && isempty(clean_fields(bad))
+    with_language("de") do
+        @test validate_unique(same_day)[:slug] == ["Slug muss für Pub date date eindeutig sein."]
+    end
+
+    # next and previous by date, ties broken by primary key
+    @test get_next_by(b1, :pub_date).id == b2.id && get_next_by(b2, :pub_date).id == b3.id
+    @test_throws DoesNotExist get_next_by(b3, :pub_date)
+    @test get_previous_by(b3, :pub_date).id == b2.id && get_previous_by(b2, :pub_date).id == b1.id
+    @test get_next_by(b1, :pub_date; title = "Autumn").id == b3.id
+    @test b1.get_next_by_pub_date.id == b2.id && b3.get_previous_by_pub_date.id == b2.id
+    @test get_next_by(b1, :day).id == b2.id
+    @test_throws ArgumentError get_next_by(b1, :title)
+end

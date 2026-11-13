@@ -54,6 +54,7 @@ mutable struct Field
     db_comment::Union{Nothing,String}   # a comment on the column in the database
     max_digits::Union{Nothing,Int}      # DecimalField: digits in total
     decimal_places::Union{Nothing,Int}  # DecimalField: digits after the point
+    unique_for::Any                     # nothing, or (:date / :month / :year, date field name): unique_for_date = :pub_date
     att::Symbol         # attname for the name in `attfor` (see `attname`)
     col::String         # string(att): the column name
     attfor::Symbol      # the name `att` and `col` were worked out for
@@ -226,7 +227,8 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                help_text = "", validators = Any[], widget = nothing, editable = true,
                db_index = false, required = nothing, label = nothing, through = nothing, one_to_one = false,
                db_default = nothing, generated = nothing, symmetrical = false, db_comment = nothing,
-               max_digits = nothing, decimal_places = nothing)
+               max_digits = nothing, decimal_places = nothing, unique_for_date = nothing, unique_for_month = nothing,
+               unique_for_year = nothing)
     required === nothing || (blank = !required)
     label === nothing || (verbose_name = string(label))
     if auto_now || auto_now_add
@@ -240,6 +242,8 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           widget isa Union{AbstractString,Symbol} ? Symbol(widget) : widget, editable, db_index, nothing, through, one_to_one,
           db_default, generated, symmetrical, db_comment === nothing ? nothing : string(db_comment),
           max_digits === nothing ? nothing : Int(max_digits), decimal_places === nothing ? nothing : Int(decimal_places),
+          unique_for_date !== nothing ? (:date, Symbol(unique_for_date)) : unique_for_month !== nothing ? (:month, Symbol(unique_for_month)) :
+          unique_for_year !== nothing ? (:year, Symbol(unique_for_year)) : nothing,
           field_att(kind, :_), string(field_att(kind, :_)), :_)
 end
 
