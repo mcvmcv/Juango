@@ -1014,6 +1014,53 @@ end
 - **Messages:** after an htmx request, messages still queued are appended to the HTML response as `<div id="messages" hx-swap-oob="true">`. Give your base template a `<div id="messages">` for them to replace. The markup is `juango/htmx_messages.html` (override it in your templates), and `HTMX_OOB_MESSAGES = false` turns it off. This, and the `Vary` header, are done by `HtmxMiddleware`, which is in the default `MIDDLEWARE`.
 - **Tests:** `get(client, "/posts/"; htmx = true)` sends `HX-Request`. `htmx = (target = "results", boosted = true)` adds other headers. `assert_htmx(resp; redirect = "/done/", trigger = "post-saved")` checks the response headers.
 
+#### Live views (experimental)
+
+Live views are server-rendered pages that stay connected, in the manner of Phoenix LiveView. The page is
+rendered as ordinary HTML, so it works without JavaScript and can be indexed. Then a small script
+(`juango/live.js`) opens a WebSocket to the same URL. The server keeps a view for the page in a
+task: each browser event updates its state, and the server renders the `{% liveview %}` part again,
+which the browser morphs into the page (with the vendored Idiomorph, so focus and typing survive).
+
+```julia
+Base.@kwdef mutable struct Chat <: LiveView         # fields are the template's variables
+    room::String = ""
+    lines::Vector{String} = String[]
+end
+function Juango.mount(v::Chat, req, params)       # for the page, and when the socket (re)connects
+    v.room = params["room"]                       # URL parameters and the query string
+    subscribe("chat:" * v.room)
+end
+function Juango.handle_event(v::Chat, name, params)
+    name == "say" && publish("chat:" * v.room, params["text"])   # to every open page in the room
+    name == "leave" && return live_redirect("/")
+end
+Juango.handle_info(v::Chat, line) = push!(v.lines, line)
+
+urlpatterns = [live("chat/<str:room>/", Chat, "chat.html"; name = "chat")]
+```
+
+```
+{% extends "base.html" %}
+{% block content %}{% liveview %}
+  <ul>{% for line in lines %}<li>{{ line }}</li>{% endfor %}</ul>
+  <form j-submit="say"><input name="text" autocomplete="off"><button>Send</button></form>
+{% endliveview %}{% endblock %}
+```
+
+- **Bindings:**
+  - `j-click="name"` sends the element's `j-value-*` attributes as parameters.
+  - `j-submit="name"` on a form sends its fields.
+  - `j-change="name"` fires on input in a field, or in any field of a form that has the attribute. It sends the form's fields and `_target`, debounced by `j-debounce` milliseconds (150 by default).
+  - `j-keydown="name"` sends `key` and `value`; add `j-key="Enter"` to fire only for that key.
+- **Pub-sub:** `subscribe(topic)` in `mount` delivers `publish(topic, msg)` to `handle_info` while the page is open. It works within one process for now.
+- **Connections:** the WebSocket has the session and `req.user`, as usual, and the browser's `Origin` must be this site. Throwing `Http404` or `PermissionDenied` in `mount` refuses the socket. A dropped connection reconnects with backoff and mounts a fresh view (form fields keep what was typed). A failing handler closes the socket, so the page reconnects and remounts.
+- **Tests:** `lt = live_test(Chat, "chat.html"; params = Dict("room" => "a"), user = u)`. Then `live_event!(lt, "say", Dict("text" => "hi"))`, `live_info!(lt, msg)` and `live_flush!(lt)` (for published messages) each return the live part's HTML. `lt.view` is the view and `lt.redirect` the last redirect.
+- **Costs and limits:**
+  - Each open page holds a task, a view and its request.
+  - Every change re-renders and sends the whole live part. Sending only the changed parts is planned.
+  - With several server processes, pub-sub doesn't cross them yet, and a load balancer must keep each socket on one process (any process can mount a view, since state is rebuilt on reconnect).
+
 ### Forms
 
 ```julia

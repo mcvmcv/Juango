@@ -881,7 +881,7 @@ end
     write(joinpath(src, "css", "base.css"), "body { color: red }")
     write(joinpath(src, "css", "site.css"), """@import "base.css";\n.logo { background: url("../img/logo.png") } .x { background: url(data:image/png;base64,AAA) }""")
     override_settings(STATIC_DIRS = [src], STATIC_ROOT = root, STATICFILES_STORAGE = :manifest) do
-        @test collectstatic() == 5                                         # and Juango's htmx.min.js and its licence
+        @test collectstatic() == 3 + length(readdir(joinpath(Juango.ASSETS_DIR, "static", "juango")))   # with Juango's own (htmx, live views)
         paths = JSON.parse(read(joinpath(root, "staticfiles.json"), String))["paths"]
         logo, site, base = paths["img/logo.png"], paths["css/site.css"], paths["css/base.css"]
         @test haskey(paths, "juango/htmx.min.js")
@@ -1213,5 +1213,97 @@ end
     finally
         configure!(ROOT_URLCONF = old_urls)
         rm(joinpath(TPL, "hx_page.html"); force = true); rm(joinpath(TPL, "hx_form.html"); force = true)
+    end
+end
+
+Base.@kwdef mutable struct LiveCounter <: LiveView
+    count::Int = 0
+    step::Int = 1
+    room::String = ""
+    log::Vector{String} = String[]
+end
+function Juango.mount(v::LiveCounter, req, params)
+    get(params, "start", "") == "forbidden" && throw(PermissionDenied())
+    v.count = parse(Int, get(params, "start", "0"))
+    v.room = string(get(params, "room", "lobby"))
+    subscribe("room:" * v.room)
+end
+function Juango.handle_event(v::LiveCounter, name, params)
+    name == "inc" && (v.count += parse(Int, get(params, "by", string(v.step))))
+    name == "leave" && return live_redirect("/bye/")
+    name == "boom" && error("boom")
+    nothing
+end
+Juango.handle_info(v::LiveCounter, msg) = push!(v.log, string(msg))
+
+@testset "live views" begin
+    write(joinpath(TPL, "live_counter.html"), "<html><h1>Counter</h1>{% liveview %}<p id=\"n\">{{ count }}</p>" *
+          "<button j-click=\"inc\" j-value-by=\"5\">+5</button><ul>{% for m in log %}<li>{{ m }}</li>{% endfor %}</ul>{% endliveview %}</html>")
+    old_urls = settings.ROOT_URLCONF
+    configure!(ROOT_URLCONF = [live("live/<str:room>/", LiveCounter, "live_counter.html"; name = "counter")])
+    try
+        # the page: ordinary HTML with the live part and the scripts; the page's view doesn't stay subscribed
+        c = Client()
+        r = get(c, "/live/kitchen/?start=3")
+        @test r.status == 200 && occursin("<div id=\"j-live\" data-j-live=\"/live/kitchen/\"><p id=\"n\">3</p>", text(r))
+        @test occursin("juango/live.js", text(r)) && occursin("juango/idiomorph.min.js", text(r)) && occursin("<h1>Counter</h1>", text(r))
+        @test publish("room:kitchen", "nobody") == 0
+        @test get(c, "/live/kitchen/?start=forbidden").status == 403
+        @test reverse_url("counter"; room = "x") == "/live/x/"
+        @test get(c, settings.STATIC_URL * "juango/live.js").status == 200
+
+        # without a browser: events, messages, redirects
+        lt = live_test(LiveCounter, "live_counter.html"; params = Dict("start" => "1", "room" => "t"))
+        @test occursin("<p id=\"n\">1</p>", lt.html) && !occursin("<h1>", lt.html) && startswith(lt.html, "<div id=\"j-live\"")
+        @test occursin("<p id=\"n\">6</p>", live_event!(lt, "inc", Dict("by" => "5")))
+        live_event!(lt, "inc")
+        @test lt.view.count == 7
+        @test occursin("<li>hello</li>", live_info!(lt, "hello"))
+        @test publish("room:t", "from elsewhere") == 1 && publish("room:other", "x") == 0
+        @test occursin("<li>from elsewhere</li>", live_flush!(lt))
+        live_event!(lt, "leave")
+        @test lt.redirect == "/bye/"
+        close(lt)
+        @test publish("room:t", "gone") == 0
+        @test_throws ArgumentError subscribe("x")              # only inside a live view
+
+        # over a real socket
+        H = Juango.HTTP
+        port = let s = Juango.Sockets.listen(Juango.Sockets.localhost, 0)
+            p = Int(Juango.Sockets.getsockname(s)[2]); close(s); p
+        end
+        server = runserver("127.0.0.1", port; block = false, quiet = true)
+        try
+            msgs = H.WebSockets.open("ws://127.0.0.1:$port/live/den/") do ws
+                out = Any[]
+                ws_send(ws, Dict("type" => "join", "params" => Dict("start" => "10")))
+                push!(out, Juango.JSON.parse(ws_receive(ws)))
+                ws_send(ws, Dict("type" => "event", "event" => "inc", "params" => Dict("by" => "5")))
+                push!(out, Juango.JSON.parse(ws_receive(ws)))
+                sleep(0.2)
+                push!(out, publish("room:den", "news"))                # delivered to this page's view
+                push!(out, Juango.JSON.parse(ws_receive(ws)))
+                ws_send(ws, Dict("type" => "event", "event" => "leave", "params" => Dict()))
+                push!(out, Juango.JSON.parse(ws_receive(ws)))
+                out
+            end
+            @test msgs[1]["type"] == "render" && occursin("<p id=\"n\">10</p>", msgs[1]["html"])
+            @test occursin("<p id=\"n\">15</p>", msgs[2]["html"])
+            @test msgs[3] == 1 && occursin("<li>news</li>", msgs[4]["html"])
+            @test msgs[5] == Dict("type" => "redirect", "url" => "/bye/")
+            sleep(0.3)
+            @test publish("room:den", "after close") == 0                    # unsubscribed when the page closed
+            # a refused mount closes the socket with 4403
+            code = H.WebSockets.open("ws://127.0.0.1:$port/live/den/") do ws
+                ws_send(ws, Dict("type" => "join", "params" => Dict("start" => "forbidden")))
+                try ws_receive(ws); nothing catch e; e end
+            end
+            @test code isa H.WebSockets.WebSocketError && code.message.code == 4403
+        finally
+            close(server)
+        end
+    finally
+        configure!(ROOT_URLCONF = old_urls)
+        rm(joinpath(TPL, "live_counter.html"); force = true)
     end
 end

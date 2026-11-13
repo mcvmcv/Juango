@@ -82,6 +82,7 @@ export User, AbstractUser, AnonymousUser, USER_MODEL, get_user_model, authentica
 export message!, get_messages
 export HtmxDetails, is_htmx, hx_redirect, hx_refresh, hx_location, hx_stop_polling, hx_push_url, hx_replace_url,
        hx_retarget, hx_reswap, hx_reselect, hx_trigger, form_status, HtmxMiddleware, HTMX_STOP_POLLING
+export LiveView, live, mount, handle_event, handle_info, live_context, live_redirect, subscribe, unsubscribe, publish
 # signals
 export Signal, connect!, disconnect!, receiver, send, pre_save, post_save, pre_delete, post_delete,
        m2m_changed, request_started, request_finished, user_logged_in, user_logged_out,
@@ -153,11 +154,13 @@ module Testing
 using ..Juango: Client, RequestFactory, request, post, force_login!, text, outbox, rollback_after,
     capture_on_commit_callbacks, with_live_server, live_server_url, override_settings, assert_contains,
     assert_not_contains, assert_redirects, assert_template_used, assert_template_not_used,
-    assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx
+    assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx,
+    live_test, live_event!, live_info!, live_flush!
 export Client, RequestFactory, request, post, force_login!, text, outbox, rollback_after,
     capture_on_commit_callbacks, with_live_server, live_server_url, override_settings, assert_contains,
     assert_not_contains, assert_redirects, assert_template_used, assert_template_not_used,
-    assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx
+    assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx,
+    live_test, live_event!, live_info!, live_flush!
 end
 
 module Functions
