@@ -185,6 +185,12 @@ schema_kind(kind::Symbol) = kind in STRING_KINDS || kind in (:file, :image) ? :s
 "The table a column references: `\"__user_model__\"` (a `ForeignKey(USER_MODEL)`) is the AUTH_USER_MODEL's."
 ref_table(name) = name == "__user_model__" ? modelmeta(get_user_model()).table : name
 
+"`Column.of` for a foreign key: the target's key type when it isn't the default 64-bit integer."
+function fk_of(@nospecialize(R))
+    k = pk_kind(R)
+    k === :uuid ? :uuid : k === :intauto ? :int : k === :smallauto ? :smallint : nothing
+end
+
 "The snapshot `Column` for a model field."
 function column_state(f::Field)
     d = f.default isa NoDefault || f.default isa Function || f.default isa Type ? nothing : f.default
@@ -195,8 +201,7 @@ function column_state(f::Field)
     ref = f.kind !== :fk ? nothing : f.related === :__user_model__ ? "__user_model__" : modelmeta(related_model(f)).table
     f.kind === :fk && is_composite(related_model(f)) &&
         throw(ArgumentError("$(nameof(f.model)).$(f.name): foreign keys to $(nameof(related_model(f))) has a composite primary key; point at it with ForeignObject(...; from_fields = ...)"))
-    of = f.kind === :array ? f.related : f.kind === :geometry ? geo_of(f) :
-         f.kind === :fk && pk_kind(related_model(f)) === :uuid ? :uuid : nothing
+    of = f.kind === :array ? f.related : f.kind === :geometry ? geo_of(f) : f.kind === :fk ? fk_of(related_model(f)) : nothing
     Column(column(f), schema_kind(f.kind); null = f.null, default = d, unique = f.unique,
            index = f.db_index, max_length = schema_kind(f.kind) in (:string, :citext) || (f.kind === :array && f.related === :string) ? f.max_length : nothing,
            references = ref, of = of, generated = gen, comment = f.db_comment,
@@ -224,7 +229,8 @@ function table_state(T::Type)
                          ix.condition === nothing ? nothing : condition_to_columns(T, ix.condition),
                          String[col(c) for c in ix.include], ix.opclasses))
     end
-    pk = get(modelmeta(root).extra, :pk, :auto)
+    pk = get(modelmeta(root).extra, :pk, nothing)
+    pk isa CompositePrimaryKey || (pk = meta_pk_kind(root))
     pkcols = String[]
     if pk isa CompositePrimaryKey
         (P === nothing && isempty(child_models(T))) ||
@@ -252,7 +258,7 @@ lit(b::DatabaseBackend, v) = v === nothing ? "NULL" : sql_literal(b, adapt_param
 function backfill_value(c::Column)
     c.default !== nothing && return c.default
     c.null && return nothing
-    c.kind === :string ? "" : c.kind in (:int,) ? 0 : c.kind === :float ? 0.0 : c.kind === :bool ? false :
+    c.kind === :string ? "" : c.kind in INT_KINDS ? 0 : c.kind === :float ? 0.0 : c.kind === :bool ? false :
     c.kind === :datetime ? DateTime(1970) : c.kind === :date ? Date(1970) : nothing
 end
 
@@ -261,7 +267,7 @@ function column_type_for(b::DatabaseBackend, c::Column)
     c.kind === :decimal && return decimal_column_type(b, c.max_digits, c.decimal_places)
     c.kind === :array && return array_column_type(b, c.of, c.max_length)
     c.kind === :geometry && return geometry_column_type(b, c.of)
-    c.kind === :fk && c.of === :uuid && return column_type(b, :uuid, nothing)
+    c.kind === :fk && c.of !== nothing && return column_type(b, c.of, nothing)        # uuid, int or smallint keys
     column_type(b, c.kind === :string ? :char : c.kind, c.max_length)
 end
 
@@ -276,6 +282,7 @@ function column_sql(b::DatabaseBackend, c::Column; adding = false, inline_fk = i
     d = c.default
     (d === nothing && adding && !c.null) && (d = backfill_value(c))
     d === nothing || (s *= " DEFAULT " * lit(b, d))
+    is_positive_kind(c.kind) && positive_check(b) && (s *= " CHECK (" * quote_name(b, c.name) * " >= 0)")
     (c.references !== nothing && inline_fk) && (s *= " REFERENCES $(quote_name(b, ref_table(c.references))) ($(quote_name(b, "id")))")
     (c.comment !== nothing && b isa MySQLBackend) && (s *= " COMMENT " * lit(b, c.comment))
     s
@@ -362,10 +369,27 @@ end
 
 "The `id` column: an identity, a UUID, or (multi-table child) a copy of the parent's id."
 function pk_column_sql(b::DatabaseBackend, t::Table)
-    t.parent === nothing && t.pk === :auto && return autoincrement_pk(b)
-    s = quote_name(b, "id") * " " * column_type(b, t.pk === :uuid ? :uuid : :int, nothing) * " NOT NULL PRIMARY KEY"
+    t.parent === nothing && is_auto_pk(t.pk) && return autoincrement_pk(b, auto_pk_int(t.pk))
+    s = quote_name(b, "id") * " " * column_type(b, t.pk === :uuid ? :uuid : auto_pk_int(t.pk), nothing) * " NOT NULL PRIMARY KEY"
     (t.parent !== nothing && inline_foreign_keys(b)) && (s *= " REFERENCES $(quote_name(b, t.parent)) ($(quote_name(b, "id")))")
     s
+end
+
+"""
+Statements that give a table's `id` (and the foreign keys pointing at it) the integer size the
+schema state `st` has for it.
+"""
+function alter_pk_sql(b::DatabaseBackend, st, table)
+    t = st[table]
+    stmts = [alter_column_type_sql(b, table, "id", column_type(b, auto_pk_int(t.pk), nothing))]
+    for x in values(st)
+        x.parent == table && push!(stmts, alter_column_type_sql(b, x.name, "id", column_type(b, auto_pk_int(t.pk), nothing)))
+        for c in x.columns
+            c.kind === :fk && c.references !== nothing && ref_table(c.references) == table &&
+                push!(stmts, alter_column_type_sql(b, x.name, c.name, column_type_for(b, c)))
+        end
+    end
+    stmts
 end
 
 "CREATE INDEX for a `Meta(indexes=...)` entry (nothing where the method isn't supported)."
@@ -462,6 +486,11 @@ function alter_column_sql(b::DatabaseBackend, old::Table, new::Table, name, defe
     (c0.unique, c0.index) != (c1.unique, c1.index) && append!(stmts, drop_index_sql(b, old.name, c0))
     ty0, ty1 = column_type_for(b, c0), column_type_for(b, c1)
     ty0 != ty1 && push!(stmts, alter_column_type_sql(b, new.name, name, ty1))
+    p0, p1 = is_positive_kind(c0.kind), is_positive_kind(c1.kind)
+    if positive_check(b) && p0 != p1           # the CHECK (col >= 0) of positive integer fields
+        cname = quote_name(b, positive_check_name(new.name, name))
+        push!(stmts, p1 ? "ALTER TABLE $t ADD CONSTRAINT $cname CHECK ($col >= 0)" : "ALTER TABLE $t DROP CONSTRAINT IF EXISTS $cname")
+    end
     if !isequal(c0.default, c1.default)
         push!(stmts, "ALTER TABLE $t ALTER COLUMN $col " * (c1.default === nothing ? "DROP DEFAULT" : "SET DEFAULT " * lit(b, c1.default)))
     end

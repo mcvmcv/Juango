@@ -63,7 +63,7 @@ adapt_param(::SQLiteBackend, x::DateTime) = Dates.format(x, "yyyy-mm-ddTHH:MM:SS
 adapt_param(::SQLiteBackend, x::Date) = string(x)
 
 function column_type(::SQLiteBackend, kind::Symbol, max_length)
-    kind in (:int, :bool, :fk, :duration) && return "INTEGER"
+    (kind in INT_KINDS || kind in (:bool, :fk, :duration)) && return "INTEGER"
     kind === :float && return "REAL"
     kind === :citext && return "TEXT COLLATE NOCASE"
     kind === :decimal && return "DECIMAL"      # NUMERIC affinity: compares as numbers
@@ -73,7 +73,7 @@ end
 encode_duration(::SQLiteBackend, us::Integer) = us
 duration_param_sql(::SQLiteBackend) = "?"
 
-autoincrement_pk(b::SQLiteBackend) = quote_name(b, "id") * " INTEGER PRIMARY KEY AUTOINCREMENT"
+autoincrement_pk(b::SQLiteBackend, int = :bigint) = quote_name(b, "id") * " INTEGER PRIMARY KEY AUTOINCREMENT"
 
 sql_literal(::SQLiteBackend, p::Bool) = p ? "1" : "0"
 inline_foreign_keys(::SQLiteBackend) = true   # SQLite can't add constraints to an existing table

@@ -131,7 +131,48 @@ TextField(; kw...) = Field(:text; kw...)
 EmailField(; max_length = 254, kw...) = Field(:email; max_length = max_length, kw...)
 SlugField(; max_length = 50, kw...) = Field(:slug; max_length = max_length, db_index = true, kw...)
 URLField(; max_length = 200, kw...) = Field(:url; max_length = max_length, kw...)
+"A 32-bit integer (`INTEGER`), validated to -2147483648..2147483647."
 IntegerField(; kw...) = Field(:int; kw...)
+"A 64-bit integer (`BIGINT`)."
+BigIntegerField(; kw...) = Field(:bigint; kw...)
+"A 16-bit integer (`SMALLINT`), -32768..32767."
+SmallIntegerField(; kw...) = Field(:smallint; kw...)
+"An integer from 0 to 2147483647 (`INTEGER` with a check, or `INT UNSIGNED` on MySQL)."
+PositiveIntegerField(; kw...) = Field(:posint; kw...)
+"An integer from 0 to 9223372036854775807."
+PositiveBigIntegerField(; kw...) = Field(:posbigint; kw...)
+"An integer from 0 to 32767."
+PositiveSmallIntegerField(; kw...) = Field(:possmallint; kw...)
+
+const INT_KINDS = (:int, :bigint, :smallint, :posint, :posbigint, :possmallint)
+const INT_RANGES = Dict(:int => (-2147483648, 2147483647), :bigint => (typemin(Int64), typemax(Int64)),
+                        :smallint => (-32768, 32767), :posint => (0, 2147483647),
+                        :posbigint => (0, typemax(Int64)), :possmallint => (0, 32767))
+is_positive_kind(k) = k in (:posint, :posbigint, :possmallint)
+
+"""
+    AutoField(), BigAutoField(), SmallAutoField()
+
+The automatic integer primary key's size, for `Meta(pk = AutoField())` or the
+`DEFAULT_AUTO_FIELD` setting (`:BigAutoField`, the default, `:AutoField` or `:SmallAutoField`).
+"""
+struct AutoPK
+    kind::Symbol      # :auto (64-bit), :intauto (32-bit), :smallauto (16-bit)
+end
+AutoField() = AutoPK(:intauto)
+BigAutoField() = AutoPK(:auto)
+SmallAutoField() = AutoPK(:smallauto)
+const AUTO_PK_KINDS = (:auto, :intauto, :smallauto)
+is_auto_pk(k) = k in AUTO_PK_KINDS
+"The pk kind for `AutoField()`, `:AutoField`, `\"BigAutoField\"` (also dotted, as Django writes it)."
+auto_pk_kind(x::AutoPK) = x.kind
+function auto_pk_kind(x::Union{Symbol,AbstractString})
+    n = last(split(string(x), '.'))
+    n == "AutoField" ? :intauto : n == "BigAutoField" ? :auto : n == "SmallAutoField" ? :smallauto :
+        throw(ImproperlyConfigured("DEFAULT_AUTO_FIELD must be AutoField, BigAutoField or SmallAutoField, not $(repr(x))"))
+end
+"The integer column kind of an automatic key (`:bigint` for `:auto`)."
+auto_pk_int(k) = k === :intauto ? :int : k === :smallauto ? :smallint : :bigint
 FloatField(; kw...) = Field(:float; kw...)
 """
     DecimalField(; max_digits, decimal_places, kw...)

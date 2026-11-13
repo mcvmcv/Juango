@@ -230,6 +230,14 @@ end
     Meta(permissions = [("publish_memo", "Can publish memos")])
 end
 
+@model struct Tally
+    small = SmallIntegerField(default = 0)
+    big = BigIntegerField(default = 0)
+    count = PositiveIntegerField(default = 0)
+    tiny = PositiveSmallIntegerField(default = 0)
+    huge = PositiveBigIntegerField(default = 0)
+end
+
 @model struct Shift
     name = CharField(max_length = 20)
     starts = TimeField()

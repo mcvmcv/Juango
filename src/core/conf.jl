@@ -103,6 +103,7 @@ function default_settings()
         :PASSWORD_ITERATIONS => 260_000,
         :SQL_DEBUG => false,
         :MIGRATIONS_DIR => "migrations",
+        :DEFAULT_AUTO_FIELD => :BigAutoField,          # the automatic primary key: AutoField, BigAutoField or SmallAutoField
         :MIGRATION_MODULES => Dict{String,String}(),
         :SITE_NAME => "Juango",
     )

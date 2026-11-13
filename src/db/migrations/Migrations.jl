@@ -25,7 +25,7 @@ using ..Juango: Column, Table, Index, ConstraintSpec, Q, F, Value, CombinedExpre
     rename_column_sql, alter_column_sql, backfill_value, quote_name, VERSION_STRING, Decimal, @dec_str
 
 export Migration, CreateModel, DeleteModel, RenameModel, AddField, RemoveField, AlterField, RenameField,
-       AlterUniqueTogether, AddIndex, RemoveIndex, AddConstraint, RemoveConstraint, RunSQL, RunJulia, Column, Index,
+       AlterUniqueTogether, AlterPrimaryKey, AddIndex, RemoveIndex, AddConstraint, RemoveConstraint, RunSQL, RunJulia, Column, Index,
        AlterModelTableComment, CreateExtension, HStoreExtension, TrigramExtension, UnaccentExtension, BtreeGistExtension, BtreeGinExtension, CITextExtension,
        ConstraintSpec, Q, F, Value, CombinedExpression, Func, get_model, objects, save!, create, update!,
        Decimal, @dec_str

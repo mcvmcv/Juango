@@ -38,6 +38,7 @@ mutable struct App
     commands::Dict{String,Tuple{String,Function}}
     requires::Vector{String}
     is_ready::Bool
+    default_auto_field::Any     # nothing (settings.DEFAULT_AUTO_FIELD), or :AutoField / :BigAutoField / :SmallAutoField
 end
 
 "Every app defined so far, by label (INSTALLED_APPS may name them by label or name)."
@@ -46,11 +47,12 @@ const APP_DEFS = Dict{String,App}()
 const MODULE_APPS = IdDict{Module,String}()
 
 function App(label::AbstractString; mod = nothing, path = nothing, verbose_name = nothing, ready = nothing, urls = nothing,
-             commands = Dict{String,Tuple{String,Function}}(), requires = String[], name = label)
+             commands = Dict{String,Tuple{String,Function}}(), requires = String[], name = label, default_auto_field = nothing)
     occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", label) || throw(ImproperlyConfigured("app label '$label' must be a valid identifier"))
     cmds = Dict{String,Tuple{String,Function}}(string(k) => (string(v[1]), v[2]) for (k, v) in commands)
     a = App(String(label), String(name), something(verbose_name, titlecase(replace(String(label), "_" => " "))),
-            mod, path === nothing ? nothing : abspath(string(path)), ready, urls, cmds, String[string(r) for r in requires], false)
+            mod, path === nothing ? nothing : abspath(string(path)), ready, urls, cmds, String[string(r) for r in requires], false,
+            default_auto_field)
     APP_DEFS[a.label] = a
     mod === nothing || (MODULE_APPS[mod] = a.label)
     a

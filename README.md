@@ -180,6 +180,28 @@ union(filter(Post; featured = true), filter(Post; views__gt = 1000))     # inter
 
 `bulk_create` and `bulk_update` don't call `save!` or send signals. Combined querysets can be ordered, sliced and counted but not filtered further.
 
+#### Integer sizes and primary keys
+
+```julia
+@model struct Stats
+    visits = PositiveBigIntegerField(default = 0)   # also BigIntegerField, SmallIntegerField,
+    rank   = SmallIntegerField(null = true)         # PositiveIntegerField, PositiveSmallIntegerField
+end
+
+configure!(DEFAULT_AUTO_FIELD = :BigAutoField)      # the automatic `id`: :BigAutoField (default), :AutoField, :SmallAutoField
+const APP = App("shop"; default_auto_field = :AutoField)     # per app
+@model struct Tag
+    name = CharField(max_length = 20)
+    Meta(pk = SmallAutoField())                    # per model
+end
+```
+
+- **Sizes.** `IntegerField` is a 32-bit `INTEGER`, as in Django. The other integer fields are `BIGINT` and `SMALLINT`, and `full_clean` and forms check their ranges.
+- **Positive fields.** They get `CHECK (col >= 0)` on Postgres and SQLite, and `UNSIGNED` columns on MySQL/MariaDB.
+- **Primary keys and foreign keys.** Foreign keys use the size of the key they point at.
+- **Changing the key size.** Changing `DEFAULT_AUTO_FIELD`, an app's `default_auto_field` or `Meta(pk = ...)` makes `makemigrations` write an `AlterPrimaryKey`. It changes the key and the foreign keys pointing at it; on MySQL it drops and re-adds those foreign keys.
+- **Juango's own apps** always use 64-bit keys.
+
 #### Decimals
 
 ```julia

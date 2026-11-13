@@ -371,7 +371,10 @@ const XML_TYPE_NAMES = Dict(:char => "CharField", :text => "TextField", :int => 
                             :uuid => "UUIDField", :file => "FileField", :image => "ImageField", :array => "ArrayField",
                             :hstore => "HStoreField", :citext => "CICharField", :geometry => "GeometryField",
                             :intrange => "BigIntegerRangeField", :daterange => "DateRangeField",
-                            :datetimerange => "DateTimeRangeField")
+                            :datetimerange => "DateTimeRangeField", :decimal => "DecimalField", :time => "TimeField",
+                            :duration => "DurationField", :bigint => "BigIntegerField", :smallint => "SmallIntegerField",
+                            :posint => "PositiveIntegerField", :posbigint => "PositiveBigIntegerField",
+                            :possmallint => "PositiveSmallIntegerField")
 
 function xml_text(f::Field, v)
     v isa Bool && return v ? "True" : "False"
@@ -502,7 +505,7 @@ end
 function xml_field_value(f::Field, s::AbstractString)
     k = f.kind
     k === :bool && return s in ("True", "true", "1", "t")
-    k === :int && return parse(Int, s)
+    k in INT_KINDS && return parse(Int, s)
     k === :float && return parse(Float64, s)
     k in XML_JSON_KINDS && k !== :json && return JSON.parse(s)
     String(s)
@@ -510,7 +513,7 @@ end
 
 xml_ref_value(e::XMLElement) = (nat = xml_elements(e, "natural"); isempty(nat) ? xml_text(e) : Any[xml_text(x) for x in nat])
 function xml_pk(R::Type, s::AbstractString)
-    pk_kind(R) === :auto ? parse(Int, s) : pk_kind(R) === :composite ? JSON.parse(s) : s
+    is_auto_pk(pk_kind(R)) ? parse(Int, s) : pk_kind(R) === :composite ? JSON.parse(s) : s
 end
 
 "The JSON-format dicts for a `<django-objects>` document."

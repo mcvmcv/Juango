@@ -209,6 +209,11 @@ function validate_field(f::Field, v)
     f.kind === :slug && !occursin(SLUG_RE, string(v)) && push!(errs, gettext("Enter a valid “slug” consisting of letters, numbers, underscores or hyphens."))
     f.kind === :url && !occursin(URL_RE, string(v)) && push!(errs, gettext("Enter a valid URL."))
     f.kind === :decimal && append!(errs, decimal_errors(f, v))
+    if f.kind in INT_KINDS && v isa Integer
+        lo, hi = INT_RANGES[f.kind]
+        v < lo && push!(errs, interpolate(gettext("Ensure this value is greater than or equal to %(limit_value)s."), Dict("limit_value" => lo)))
+        v > hi && push!(errs, interpolate(gettext("Ensure this value is less than or equal to %(limit_value)s."), Dict("limit_value" => hi)))
+    end
     if f.choices !== nothing && !any(c -> value_eq(c.first, v) || string(c.first) == string(v), f.choices)
         push!(errs, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v)))
     end

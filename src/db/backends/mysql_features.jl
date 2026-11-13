@@ -2,6 +2,24 @@
 
 # durations are microseconds
 temporal_value_sql(::MySQLBackend, kind, sql) = sql
+# MySQL/MariaDB won't change a column that a foreign key references, so the foreign keys
+# pointing at the table are dropped first and added again afterwards.
+function alter_pk_sql(b::MySQLBackend, st, table)
+    t = st[table]
+    ty = column_type(b, auto_pk_int(t.pk), nothing)
+    q = s -> quote_name(b, s)
+    refs = [(x, c) for x in values(st) for c in x.columns
+            if c.kind === :fk && c.references !== nothing && ref_table(c.references) == table]
+    children = [x for x in values(st) if x.parent == table]
+    drops = String["ALTER TABLE $(q(x.name)) DROP FOREIGN KEY $(q(n))" for (x, c) in refs for n in foreign_key_names(b, x.name, c.name)]
+    append!(drops, ["ALTER TABLE $(q(x.name)) DROP FOREIGN KEY $(q(n))" for x in children for n in foreign_key_names(b, x.name, "id")])
+    stmts = vcat(drops, ["ALTER TABLE $(q(table)) MODIFY $(q("id")) $ty NOT NULL" * (t.parent === nothing ? " AUTO_INCREMENT" : "")])
+    append!(stmts, ["ALTER TABLE $(q(x.name)) MODIFY $(q("id")) $ty NOT NULL" for x in children])
+    append!(stmts, ["ALTER TABLE $(q(x.name)) MODIFY " * column_sql(b, c; inline_fk = false) for (x, c) in refs])
+    append!(stmts, [s for (x, c) in refs for s in fk_sql(b, x.name, c)])
+    append!(stmts, [foreign_key_sql(b, x.name, "id", table) for x in children])
+    stmts
+end
 datetime_add_sql(::MySQLBackend, op, a, d) = (op == "+" ? "DATE_ADD" : "DATE_SUB") * "($a, INTERVAL ($d) MICROSECOND)"
 datetime_diff_sql(::MySQLBackend, ka, a, kb, b) = "TIMESTAMPDIFF(MICROSECOND, $b, $a)"
 

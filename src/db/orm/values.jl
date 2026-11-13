@@ -7,7 +7,7 @@ function from_db(f::Field, v)
     k = f.kind
     k === :fk && pk_kind(related_model(f)) === :uuid && return v isa UUID ? v : UUID(string(v))
     k === :bool && return v isa Bool ? v : v != 0
-    k === :int && return v isa Integer ? Int(v) : parse(Int, string(v))
+    k in INT_KINDS && return v isa Integer ? Int(v) : parse(Int, string(v))
     k === :fk && return Int(v)
     k === :float && return Float64(v)
     k === :time && return to_time(v)
@@ -34,14 +34,31 @@ struct CompositePrimaryKey
 end
 CompositePrimaryKey(fields::Union{Symbol,AbstractString}...) = CompositePrimaryKey(Symbol[Symbol(f) for f in fields])
 
-"Primary key kind of a model's table: `:auto` (integer identity), `:uuid` (`Meta(pk = :uuid)`) or `:composite`."
+"""
+Primary key kind of a model's table: an integer identity (`:auto` 64-bit, `:intauto` 32-bit,
+`:smallauto` 16-bit), `:uuid` (`Meta(pk = :uuid)`) or `:composite`.
+"""
 function pk_kind(T::Type)
     A = concrete_model(T)
     while (P = table_parent(A)) !== nothing
         A = P
     end
-    p = get(modelmeta(A).extra, :pk, :auto)
-    p isa CompositePrimaryKey ? :composite : p
+    meta_pk_kind(A)
+end
+"The pk kind a root model declares, or the default for its app."
+function meta_pk_kind(@nospecialize(A))
+    m = modelmeta(A)
+    p = get(m.extra, :pk, nothing)
+    p isa CompositePrimaryKey && return :composite
+    p isa AutoPK && return p.kind
+    p === nothing || return p
+    default_pk_kind(m.app)
+end
+"The automatic key of an app's models: the App's `default_auto_field`, else `DEFAULT_AUTO_FIELD` (Juango's own apps: 64-bit)."
+function default_pk_kind(app)
+    (app in BUILTIN_LABELS || app in ("juango", "admindocs")) && return :auto
+    a = get(APP_DEFS, app, nothing)
+    auto_pk_kind(a === nothing || a.default_auto_field === nothing ? settings.DEFAULT_AUTO_FIELD : a.default_auto_field)
 end
 pk_value(T::Type, v) = (v === nothing || pk_kind(T) !== :uuid || v isa UUID) ? v : UUID(string(v))
 
@@ -63,7 +80,7 @@ Parse a primary key from text (URLs, form values); `nothing` if it isn't one. A 
 key is its parts as `pk_string` writes them: `"3,7"`.
 """
 function parse_pk(T::Type, s)
-    s isa Integer && return pk_kind(T) === :auto ? s : nothing
+    s isa Integer && return is_auto_pk(pk_kind(T)) ? s : nothing
     s isa UUID && return s
     s isa Tuple && return s
     k = pk_kind(T)
@@ -77,7 +94,7 @@ function parse_composite_pk(T::Type, s::AbstractString)
     vals = Any[]
     for (f, b) in zip(fs, bits)
         b = unquote_pk(b)
-        v = f.kind === :fk ? parse_pk(related_model(f), b) : f.kind === :int ? tryparse(Int, b) :
+        v = f.kind === :fk ? parse_pk(related_model(f), b) : f.kind in INT_KINDS ? tryparse(Int, b) :
             f.kind === :uuid ? tryparse(UUID, b) : f.kind === :date ? tryparse(Date, b) : String(b)
         v === nothing && return nothing
         push!(vals, v)

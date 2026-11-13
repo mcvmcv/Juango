@@ -24,6 +24,17 @@ to_table(op::CreateModel, app) = Table(op.table, app, op.model, copy(op.columns)
                                        parent = op.parent, pk = op.pk, indexes = copy(op.indexes), constraints = copy(op.constraints),
                                        pk_columns = copy(op.pk_columns), comment = op.comment)
 
+"""
+Change the size of a table's automatic integer key (`:auto` 64-bit, `:intauto` 32-bit,
+`:smallauto` 16-bit), after `DEFAULT_AUTO_FIELD`, an app's `default_auto_field` or
+`Meta(pk = ...)` changed. Foreign keys pointing at the table change with it.
+"""
+struct AlterPrimaryKey <: Operation
+    table::String
+    pk::Symbol
+    AlterPrimaryKey(table, pk) = new(string(table), Symbol(pk))
+end
+
 "Set or remove (`nothing`) a table's comment (`Meta(db_table_comment = ...)`)."
 struct AlterModelTableComment <: Operation
     table::String
@@ -205,6 +216,18 @@ end
 
 state_forwards!(op::CreateModel, st, app) = (st[op.table] = to_table(op, app); st)
 state_forwards!(op::AlterModelTableComment, st, app) = (table!(st, op.table).comment = op.comment; st)
+function state_forwards!(op::AlterPrimaryKey, st, app)
+    table!(st, op.table).pk = op.pk
+    of = op.pk === :intauto ? :int : op.pk === :smallauto ? :smallint : nothing
+    for t in values(st)
+        t.parent == op.table && (t.pk = op.pk)            # multi-table children share the key
+        for (i, c) in enumerate(t.columns)
+            c.kind === :fk && c.references !== nothing && Juango.ref_table(c.references) == op.table &&
+                (t.columns[i] = with_column(c; of = of))
+        end
+    end
+    st
+end
 state_forwards!(op::AddIndex, st, app) = (push!(table!(st, op.table).indexes, op.index); st)
 state_forwards!(op::RemoveIndex, st, app) = (filter!(i -> i.name != op.name, table!(st, op.table).indexes); st)
 function state_forwards!(op::AddConstraint, st, app)
@@ -267,6 +290,8 @@ backwards(op::CreateModel, b, from, to, deferred) = drop_table_sql(b, to[op.tabl
 forwards(op::DeleteModel, b, from, to, deferred) = drop_table_sql(b, from[op.table])
 backwards(op::DeleteModel, b, from, to, deferred) = forwards(CreateModel(op.table), b, to, from, deferred)
 
+forwards(op::AlterPrimaryKey, b, from, to, deferred) = Juango.alter_pk_sql(b, to, op.table)
+backwards(op::AlterPrimaryKey, b, from, to, deferred) = Juango.alter_pk_sql(b, from, op.table)
 forwards(op::AlterModelTableComment, b, from, to, deferred) = Juango.table_comment_sql(b, op.table, op.comment)
 backwards(op::AlterModelTableComment, b, from, to, deferred) = Juango.table_comment_sql(b, op.table, from[op.table].comment)
 forwards(op::AddIndex, b, from, to, deferred) = Juango.index_spec_sql(b, op.table, op.index)
@@ -328,6 +353,7 @@ describe(op::RemoveField) = "Remove field $(op.name) from $(op.table)"
 describe(op::AlterField) = "Alter field $(op.column.name) on $(op.table)"
 describe(op::RenameField) = "Rename field $(op.old) on $(op.table) to $(op.new)"
 describe(op::AlterUniqueTogether) = "Alter unique_together for $(op.table)"
+describe(op::AlterPrimaryKey) = "Alter the primary key of $(op.table) to $(op.pk)"
 describe(op::AlterModelTableComment) = "Alter the comment of table $(op.table)"
 describe(op::AddIndex) = "Create index $(op.index.name) on $(op.table)"
 describe(op::RemoveIndex) = "Remove index $(op.name) from $(op.table)"

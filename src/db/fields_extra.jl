@@ -236,7 +236,7 @@ end
 
 function convert_elem(kind::Symbol, x)
     (x === nothing || x === missing) && return nothing
-    kind in (:int, :fk) && return x isa Integer ? Int(x) : parse(Int, string(x))
+    (kind in INT_KINDS || kind === :fk) && return x isa Integer ? Int(x) : parse(Int, string(x))
     kind === :float && return x isa Real ? Float64(x) : parse(Float64, string(x))
     kind === :bool && return x isa Bool ? x : x isa Integer ? x != 0 : string(x) in ("t", "true")
     kind === :date && return x isa Date ? x : Date(string(x)[1:10])
@@ -252,7 +252,7 @@ function decode_array(f::Field, v)
     Any[convert_elem(kind, x) for x in items]
 end
 
-range_elem_kind(k) = k === :intrange ? :int : k === :daterange ? :date : :datetime
+range_elem_kind(k) = k === :intrange ? :bigint : k === :daterange ? :date : :datetime
 
 function decode_range(f::Field, v)
     ek = range_elem_kind(f.kind)

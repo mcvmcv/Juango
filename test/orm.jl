@@ -1321,3 +1321,32 @@ end
     @test back.starts == Dates.Time(6, 30) && back.length == Hour(8) + Minute(30)
     @test render(Template("{{ s.starts }} {{ s.starts|time:\"H:i\" }} {{ s.length }}"), Dict("s" => s)) == "06:30:00 06:30 8:30:00"
 end
+
+@testset "integer sizes" begin
+    b = Juango.backend()
+    ty(n) = Juango.column_type_for(b, Juango.column_state(Juango.getfield_meta(Tally, n)))
+    if IS_MYSQL
+        @test (ty(:small), ty(:big), ty(:count), ty(:tiny), ty(:huge)) == ("SMALLINT", "BIGINT", "INT UNSIGNED", "SMALLINT UNSIGNED", "BIGINT UNSIGNED")
+    elseif IS_POSTGRES
+        @test (ty(:small), ty(:big), ty(:count), ty(:tiny), ty(:huge)) == ("SMALLINT", "BIGINT", "INTEGER", "SMALLINT", "BIGINT")
+    end
+    @test Juango.column_type_for(b, Juango.column_state(Juango.getfield_meta(Article, :views))) == (IS_MYSQL ? "INT" : IS_POSTGRES ? "INTEGER" : "INTEGER")
+    t = create(Tally; small = -32768, big = typemax(Int64), count = 2147483647, tiny = 32767, huge = typemax(Int64))
+    refresh!(t)
+    @test t.big == typemax(Int64) && t.small == -32768 && t.count == 2147483647
+    @test isempty(full_clean(Tally(small = 5, count = 0)))
+    errs = full_clean(Tally(small = 40000, count = -1, tiny = 32768, huge = -5))
+    @test errs[:small] == ["Ensure this value is less than or equal to 32767."]
+    @test errs[:count] == ["Ensure this value is greater than or equal to 0."] && haskey(errs, :tiny) && haskey(errs, :huge)
+    @test full_clean(Article(title = "x", author = create(Author; name = "Range author"), views = 2^31))[:views] ==
+          ["Ensure this value is less than or equal to 2147483647."]
+    with_language("de") do
+        @test full_clean(Tally(count = -1))[:count] == ["Dieser Wert muss größer oder gleich 0 sein."]
+    end
+    # the database refuses negative values in positive fields too (CHECK, or UNSIGNED on MySQL)
+    @test_throws Exception Juango.execute("INSERT INTO " * Juango.qname("tally") * " (" *
+        join(Juango.qname.(["small", "big", "count", "tiny", "huge"]), ", ") * ") VALUES (0, 0, -1, 0, 0)")
+    @test occursin("min=\"0\"", Juango.widget_html(ModelForm(Tally; fields = [:count])[:count]))
+    f = ModelForm(Tally; fields = [:small, :count], data = Dict("small" => "99999", "count" => "3"))
+    @test !is_valid(f) && f.errors[:small] == ["Ensure this value is less than or equal to 32767."]
+end

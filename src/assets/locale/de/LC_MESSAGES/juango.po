@@ -553,3 +553,11 @@ msgstr "Bitte eine gültige Uhrzeit eingeben."
 #: forms/forms.jl
 msgid "Enter a valid duration."
 msgstr "Bitte eine gültige Zeitspanne eingeben."
+
+#: db/orm/instances.jl
+msgid "Ensure this value is greater than or equal to %(limit_value)s."
+msgstr "Dieser Wert muss größer oder gleich %(limit_value)s sein."
+
+#: db/orm/instances.jl
+msgid "Ensure this value is less than or equal to %(limit_value)s."
+msgstr "Dieser Wert muss kleiner oder gleich %(limit_value)s sein."

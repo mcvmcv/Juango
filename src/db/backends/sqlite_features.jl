@@ -2,6 +2,7 @@
 
 # durations are microseconds; datetimes are text in the format Juango writes (2026-01-02T03:04:05.000)
 temporal_value_sql(::SQLiteBackend, kind, sql) = sql
+alter_pk_sql(::SQLiteBackend, st, table) = String[]          # every integer is INTEGER
 datetime_add_sql(::SQLiteBackend, op, a, d) = "strftime('%Y-%m-%dT%H:%M:%f', julianday($a) $op ($d) / 86400000000.0)"
 datetime_diff_sql(::SQLiteBackend, ka, a, kb, b) = "CAST(ROUND((julianday($a) - julianday($b)) * 86400000000.0) AS INTEGER)"
 

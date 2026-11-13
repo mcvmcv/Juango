@@ -127,7 +127,12 @@ function field_for(col)
     m !== nothing && return "CharField(max_length = $(something(col.max_length, m[1] === nothing ? nothing : parse(Int, m[1]), 255)))", ""
     occursin(r"^tinyint\(1\)|^bool", t) && return "BooleanField()", ""
     t == "interval" && return "DurationField()", ""               # before "int"
-    occursin(r"int|serial", t) && return "IntegerField()", ""
+    if occursin(r"int|serial", t)
+        pos = occursin("unsigned", t)                       # MySQL
+        occursin(r"^(smallint|int2|smallserial|tinyint|mediumint)", t) && return (pos ? "PositiveSmallIntegerField()" : "SmallIntegerField()"), ""
+        occursin(r"^(bigint|int8|bigserial)", t) && return (pos ? "PositiveBigIntegerField()" : "BigIntegerField()"), ""
+        return (pos ? "PositiveIntegerField()" : "IntegerField()"), ""
+    end
     occursin(r"^(text|clob|longtext|mediumtext|tinytext|citext)", t) && return "TextField()", ""
     if occursin(r"^(numeric|decimal)", t)
         m = match(r"\((\d+)\s*,\s*(\d+)\)", t)          # SQLite and MySQL spell it out in the type

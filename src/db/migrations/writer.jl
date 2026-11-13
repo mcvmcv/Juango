@@ -33,6 +33,7 @@ op_code(op::CreateModel) = "CreateModel($(jl(op.table)); model = $(jl(op.model))
     (op.comment === nothing ? "" : ", comment = $(jl(op.comment))") *
     (isempty(op.indexes) ? "" : ", indexes = [" * join(index_code.(op.indexes), ", ") * "]") *
     (isempty(op.constraints) ? "" : ", constraints = [\n" * join(["            " * Juango.constraint_code(c) * ",\n" for c in op.constraints]) * "        ]") * ")"
+op_code(op::AlterPrimaryKey) = "AlterPrimaryKey($(jl(op.table)), :$(op.pk))"
 op_code(op::AlterModelTableComment) = "AlterModelTableComment($(jl(op.table)), $(jl(op.comment)))"
 op_code(op::AddIndex) = "AddIndex($(jl(op.table)), $(index_code(op.index)))"
 op_code(op::AddConstraint) = "AddConstraint($(jl(op.table)), $(Juango.constraint_code(op.constraint)))"
@@ -78,6 +79,7 @@ function suggest_name(ops, initial)
     part(op::AlterField) = "alter_" * op.table * "_" * op.column.name
     part(op::RenameField) = "rename_" * op.table * "_" * op.old * "_" * op.new
     part(op::AlterUniqueTogether) = "alter_" * op.table * "_unique_together"
+    part(op::AlterPrimaryKey) = "alter_" * op.table * "_pk"
     part(op::AlterModelTableComment) = "alter_" * op.table * "_table_comment"
     part(op::AddIndex) = op.table * "_" * op.index.name
     part(op::RemoveIndex) = "remove_" * op.name

@@ -51,7 +51,12 @@ quote_name(::MySQLBackend, s) = "`" * replace(string(s), "`" => "``") * "`"
 adapt_param(::MySQLBackend, x::Bool) = Int(x)
 
 function column_type(::MySQLBackend, kind::Symbol, max_length)
-    kind in (:int, :fk) && return "BIGINT"
+    kind === :int && return "INT"
+    kind === :posint && return "INT UNSIGNED"
+    kind in (:bigint, :fk) && return "BIGINT"
+    kind === :posbigint && return "BIGINT UNSIGNED"
+    kind === :smallint && return "SMALLINT"
+    kind === :possmallint && return "SMALLINT UNSIGNED"
     kind === :bool && return "BOOLEAN"
     kind === :float && return "DOUBLE"
     kind === :datetime && return "DATETIME(6)"
@@ -68,9 +73,10 @@ array_column_type(::MySQLBackend, of, max_length) = "JSON"
 encode_duration(::MySQLBackend, us::Integer) = us
 duration_param_sql(::MySQLBackend) = "?"
 decimal_column_type(::MySQLBackend, max_digits, decimal_places) = "DECIMAL($max_digits, $decimal_places)"
-autoincrement_pk(b::MySQLBackend) = quote_name(b, "id") * " BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY"
+autoincrement_pk(b::MySQLBackend, int = :bigint) = quote_name(b, "id") * " " * column_type(b, int, nothing) * " NOT NULL AUTO_INCREMENT PRIMARY KEY"
+positive_check(::MySQLBackend) = false
 "Type names CAST accepts."
-cast_type(b::MySQLBackend, kind::Symbol) = kind in (:int, :fk) ? "SIGNED" : kind === :float ? "DOUBLE" :
+cast_type(b::MySQLBackend, kind::Symbol) = kind in INT_KINDS || kind === :fk ? "SIGNED" : kind === :float ? "DOUBLE" :
     kind === :date ? "DATE" : kind === :datetime ? "DATETIME(6)" : "CHAR"
 length_function(::MySQLBackend) = "CHAR_LENGTH"
 random_function(::MySQLBackend) = "RAND()"

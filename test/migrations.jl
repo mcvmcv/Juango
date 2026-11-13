@@ -703,6 +703,56 @@ end
     end
 end
 
+@testset "automatic key sizes: DEFAULT_AUTO_FIELD, Meta(pk = ...)" begin
+    dir = mktempdir()
+    configure!(MIGRATION_MODULES = Dict("migauto" => dir), DEFAULT_AUTO_FIELD = :AutoField)
+    quiet(f) = redirect_stdout(f, devnull)
+    coltype(t, c) = (IS_POSTGRES || IS_MYSQL) ? only(filter(x -> x.name == c, Juango.introspect_columns(t))).type : "integer"
+    try
+        @eval @model struct AutoOwner
+            name = CharField(max_length = 20)
+            Meta(table = "auto_owner", app_label = "migauto")
+        end
+        @eval @model struct AutoPet
+            owner = ForeignKey(:AutoOwner, on_delete = :CASCADE)
+            Meta(table = "auto_pet", app_label = "migauto", pk = SmallAutoField())
+        end
+        @test Juango.pk_kind(AutoOwner) === :intauto && Juango.pk_kind(AutoPet) === :smallauto && Juango.pk_kind(Author) === :intauto
+        @test Juango.pk_kind(Juango.User) === :auto                                    # Juango's own apps keep 64-bit keys
+        p1 = only(quiet(() -> makemigrations(app = "migauto", questioner = _ -> false)))
+        src = read(p1, String)
+        @test occursin("CreateModel(\"auto_owner\"", src) && occursin("pk = :intauto", src) && occursin("pk = :smallauto", src)
+        @test occursin("Column(\"owner_id\", :fk; index = true, references = \"auto_owner\", of = :int)", src)
+        quiet(() -> migrate())
+        if IS_POSTGRES || IS_MYSQL
+            @test startswith(coltype("auto_owner", "id"), "int") && startswith(coltype("auto_pet", "owner_id"), "int") &&
+                  startswith(coltype("auto_pet", "id"), "smallint")
+        end
+        o = create(AutoOwner; name = "Ann")
+        pet = create(AutoPet; owner = o)
+        @test pet.owner.name == "Ann" && pet.id isa Integer
+
+        # switching DEFAULT_AUTO_FIELD: the keys and the foreign keys pointing at them change size
+        configure!(DEFAULT_AUTO_FIELD = :BigAutoField)
+        Juango.invalidate_relations!()
+        p2 = only(quiet(() -> makemigrations(app = "migauto", questioner = _ -> false)))
+        src2 = read(p2, String)
+        @test occursin("AlterPrimaryKey(\"auto_owner\", :auto)", src2) && !occursin("auto_pet\", :auto", src2)
+        @test findfirst("AlterPrimaryKey", src2)[1] < something(findfirst("AlterField", src2), [typemax(Int)])[1]
+        quiet(() -> migrate())
+        (IS_POSTGRES || IS_MYSQL) && @test startswith(coltype("auto_owner", "id"), "bigint") && startswith(coltype("auto_pet", "owner_id"), "bigint")
+        @test get(AutoPet; id = pet.id).owner.name == "Ann"
+        @test quiet(() -> makemigrations(app = "migauto", questioner = _ -> false)) == String[]
+        quiet(() -> migrate(app = "migauto", target = "0001"))
+        (IS_POSTGRES || IS_MYSQL) && @test startswith(coltype("auto_owner", "id"), "int") && startswith(coltype("auto_pet", "owner_id"), "int")
+        quiet(() -> migrate(app = "migauto", target = "zero"))
+        @test_throws Juango.ImproperlyConfigured Juango.auto_pk_kind(:HugeAutoField)
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "migauto", Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}(), DEFAULT_AUTO_FIELD = :BigAutoField)
+    end
+end
+
 @testset "composite primary keys" begin
     dir = mktempdir()
     configure!(MIGRATION_MODULES = Dict("migcomp" => dir))

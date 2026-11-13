@@ -48,10 +48,16 @@ function detect_changes(g::Graph, app; questioner = ask)
                                pk_columns = t.pk_columns, comment = t.comment))
     end
 
+    # the size of automatic keys first, so foreign keys follow
+    for name in sort(collect(intersect(keys(old), keys(new))))
+        o, n = old[name], new[name]
+        (o.pk != n.pk && Juango.is_auto_pk(o.pk) && Juango.is_auto_pk(n.pk)) && push!(ops, AlterPrimaryKey(name, n.pk))
+    end
+
     # columns of tables that exist in both
     for name in sort(collect(intersect(keys(old), keys(new))))
         o, n = old[name], new[name]
-        (o.parent != n.parent || o.pk != n.pk || o.pk_columns != n.pk_columns) &&
+        (o.parent != n.parent || (o.pk != n.pk && !(Juango.is_auto_pk(o.pk) && Juango.is_auto_pk(n.pk))) || o.pk_columns != n.pk_columns) &&
             throw(MigrationError("changing the parent model or primary key type of table '$name' isn't supported; create a new model and move the data"))
         ocols = Dict(c.name => c for c in o.columns)
         ncols = Dict(c.name => c for c in n.columns)
