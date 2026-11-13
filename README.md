@@ -1650,6 +1650,52 @@ configure!(SILENCED_SYSTEM_CHECKS = ["billing.W001", "security.W004"])
 
 Juango's own checks use Django's ids where Django has the same check (`security.W004` for HSTS, `security.W009` for `SECRET_KEY`, and so on).
 
+## Deployment
+
+**Starting fast.** A freshly started Julia compiles code the first time it runs it, so a new server answers its first requests slowly; the example blog takes about 12 seconds from `runserver` to its first page on a laptop. `manage.jl build` makes a system image of the project's packages (with PackageCompiler.jl, which it installs into a shared `@juango-build` environment the first time) while running a workload taken from the project. The workload requests every URL without parameters through the test client, against an in-memory copy of the schema, and parses every template:
+
+```sh
+julia --project manage.jl build                       # build/juango.so (.dylib on macOS, .dll on Windows)
+julia --project manage.jl build --workload tests      # also run test/runtests.jl while compiling
+julia --project manage.jl build --dry-run             # write the workload and print the command
+julia --project -J build/juango.so manage.jl runserver 0.0.0.0:8000
+```
+
+Building takes several minutes and needs about 8 GB of free memory (compiling the image is the expensive step). Rebuild after changing the project's dependencies. Juango's own code is in the image too, so rebuild after upgrading Juango.
+
+**Running in production.** Set `DEBUG = false`, a long random `SECRET_KEY` and `ALLOWED_HOSTS`, run `manage.jl check --deploy`, and put the server behind a reverse proxy that terminates TLS and serves static and media files:
+
+```ini
+# /etc/systemd/system/blog.service
+[Service]
+WorkingDirectory=/srv/blog
+Environment=JUANGO_DEBUG=false JUANGO_SECRET_KEY=... JULIA_NUM_THREADS=auto,1
+ExecStart=/usr/local/bin/julia --project -J build/juango.so manage.jl runserver 127.0.0.1:8000
+Restart=always
+User=www-data
+```
+
+```nginx
+location /static/ { alias /srv/blog/staticfiles/; }     # manage.jl collectstatic
+location /media/  { alias /srv/blog/media/; }
+location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;        # with SECURE_PROXY_SSL_HEADER
+    proxy_http_version 1.1;                            # WebSockets:
+    proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";
+}
+```
+
+```dockerfile
+FROM julia:1.12
+WORKDIR /app
+COPY . .
+RUN julia --project -e 'using Pkg; Pkg.instantiate()' && julia --project manage.jl build
+EXPOSE 8000
+CMD ["julia", "--project", "-J", "build/juango.so", "manage.jl", "runserver", "0.0.0.0:8000"]
+```
+
 ## Settings
 
 Set them with `configure!(...)` and read them with `settings.NAME`. Request limits, as in Django: `DATA_UPLOAD_MAX_MEMORY_SIZE` (2.5 MB, for bodies that aren't file uploads), `DATA_UPLOAD_MAX_NUMBER_FIELDS` (1000 GET and POST parameters) and Juango's `FILE_UPLOAD_MAX_SIZE` (100 MB, for multipart uploads, which Juango holds in memory). A request over a limit gets 400 Bad Request; `nothing` turns a limit off. The main ones: `DEBUG`, `SECRET_KEY`, `DATABASE` (a SQLite path, `":memory:"`, a `scheme://` URL, or a backend instance), `INSTALLED_APPS`, `APP_DIRS`, `ROOT_URLCONF`, `TEMPLATE_DIRS`, `STATIC_URL`, `STATIC_DIRS`, `STATIC_ROOT`, `ALLOWED_HOSTS`, `MIDDLEWARE`, `CONTEXT_PROCESSORS`, `LOGIN_URL`, `LOGIN_REDIRECT_URL`, `APPEND_SLASH`, `SESSION_COOKIE_AGE`, `PASSWORD_ITERATIONS`, `SQL_DEBUG`. Any extra keyword becomes a custom setting.

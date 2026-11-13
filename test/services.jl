@@ -1146,3 +1146,23 @@ end
     quiet(() -> Juango.remove_stale_contenttypes(include_stale_apps = true, confirm = _ -> true))
     @test !exists(filter(ContentType; id = other.id)) && exists(filter(ContentType; app_label = "project", model = "article"))
 end
+
+@testset "manage.jl build (dry run)" begin
+    dir = mktempdir()
+    pf = joinpath(dir, "project.jl")
+    write(pf, "using Juango\n")
+    out = joinpath(dir, "build", "app.so")
+    cmd = Juango.build(; project_file = pf, output = out, packages = ["Juango"], dry_run = true)
+    @test cmd isa Base.AbstractCmd
+    script = cmd.exec[end]
+    @test occursin("create_sysimage([\"Juango\"]", script) && occursin(repr(out), script)
+    @test any(e -> e == "JULIA_LOAD_PATH=@:@juango-build:@stdlib", cmd.env)
+    wl = read(joinpath(dir, "build", "precompile_workload.jl"), String)
+    @test occursin("include($(repr(pf)))", wl) && occursin("all_routes()", wl) && occursin("DATABASE = \":memory:\"", wl)
+    @test !occursin("runtests", wl)
+    Juango.build(; project_file = pf, output = out, workload = :tests, packages = ["Juango"], dry_run = true)
+    @test occursin("runtests.jl", read(joinpath(dir, "build", "precompile_workload.jl"), String))
+    @test_throws ArgumentError Juango.build(; project_file = joinpath(dir, "missing.jl"), output = out, dry_run = true)
+    @test_throws ArgumentError Juango.build(; project_file = pf, output = out, workload = :everything, dry_run = true)
+    @test "child.html" in Juango.template_names()
+end

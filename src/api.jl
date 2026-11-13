@@ -141,7 +141,7 @@ public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, sitema
        sitemap_index_view, flatpage, flatpage_urls, FlatpageFallbackMiddleware, RequestSite,
        clear_site_cache!, Redirect, RedirectFallbackMiddleware, background, TaskDef, db_worker
 # apps, settings, commands
-public CheckMessage, register_check!, run_checks, diffsettings, sendtestemail, findstatic,
+public build, build_workload, CheckMessage, register_check!, run_checks, diffsettings, sendtestemail, findstatic,
        remove_stale_contenttypes, installed_apps, is_installed, get_app, model_label, app_models, static_dirs, default_settings,
        startproject, startapp, collectstatic, register_command!, slugify
 

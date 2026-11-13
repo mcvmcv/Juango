@@ -388,6 +388,12 @@ for (n, h, f) in (
     ("createcachetable", "Create the table for database caches (CACHES backend :db)", _ -> foreach(create_cache_table, keys(settings.CACHES))),
     ("sqlschema", "Print the SQL schema for all models", _ -> println(schema_sql())),
     ("check", "Run the system checks: check [--deploy] [--tag security,models]", cmd_check),
+    ("build", "Build a system image that starts fast: build [--output PATH] [--workload urls|tests|none] [--dry-run]", function (args)
+        _, f = parse_flags(args)
+        r = build(; output = get(f, "output", nothing), workload = Symbol(get(f, "workload", "urls")), dry_run = haskey(f, "dry-run"))
+        haskey(f, "dry-run") && println("JULIA_LOAD_PATH='@:$BUILD_ENV:@stdlib' ", Base.shell_escape(r.exec...))
+        r
+    end),
     ("diffsettings", "Show the settings that differ from the defaults: diffsettings [--all]",
      function (args)
         _, f = parse_flags(args)

@@ -28,6 +28,7 @@ import SQLite
 import DBInterface
 import JSON
 import Markdown
+import TOML
 
 const VERSION_STRING = "0.1.0"
 
@@ -126,6 +127,7 @@ include("db/dbtools.jl")
 include("contrib/staticfiles.jl")
 include("i18n/jscatalog.jl")
 include("core/management.jl")
+include("core/build.jl")
 
 include("api.jl")           # exports, public names, Juango.Testing / GIS / Postgres
 include("precompile.jl")    # last: the workload needs the exports above
