@@ -24,7 +24,7 @@ Base.:~(a::Q) = !a
 
 const LOOKUPS = Set(["exact", "iexact", "contains", "icontains", "startswith", "istartswith",
                      "endswith", "iendswith", "gt", "gte", "lt", "lte", "in", "isnull", "range",
-                     "year", "month", "day", "ne", "contained_by", "overlap", "has_key", "has_keys",
+                     "ne", "contained_by", "overlap", "has_key", "has_keys",
                      "has_any_keys", "search", "intersects", "within", "covers", "coveredby", "disjoint", "touches",
                      "crosses", "overlaps", "equals", "distance_lt", "distance_lte", "distance_gt", "distance_gte", "dwithin"])
 
@@ -100,7 +100,12 @@ is_lookup_name(s) = s in LOOKUPS || haskey(CUSTOM_LOOKUPS, s)
 function apply_transforms(col::String, kind, names)
     for n in names
         t = find_custom(CUSTOM_TRANSFORMS, n, kind)
-        t === nothing && return nothing
+        if t === nothing                    # the built-in date transforms: year, hour, date, week_day, ...
+            d = date_transform(col, kind, n)
+            d === nothing && return nothing
+            col, kind = d
+            continue
+        end
         col = t.sql(col)::AbstractString
         t.output === nothing || (kind = t.output)
     end

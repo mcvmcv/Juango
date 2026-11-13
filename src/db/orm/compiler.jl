@@ -365,8 +365,6 @@ function lookup_condition(c::SQLCompiler, col, lookup, @nospecialize(value), @no
     elseif lookup == "range"
         lo, hi = value
         return ("$col BETWEEN ? AND ?", Any[conv(lo), conv(hi)])
-    elseif lookup in ("year", "month", "day")
-        return lookup_sql(backend(), Val(Symbol(lookup)), col, value)
     end
     throw(LookupError("unsupported lookup '$lookup'"))
 end

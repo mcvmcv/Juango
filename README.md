@@ -259,6 +259,20 @@ round(dec"2.675"; digits = 2)                            # dec"2.68" (half to ev
 - **Databases.** Postgres uses `NUMERIC(p, s)` and MySQL/MariaDB `DECIMAL(p, s)`, both exact. SQLite has no exact decimal type. Its `NUMERIC` column stores values as doubles (about 15 significant digits), which is enough for amounts of money. `Sum`, `Min`, `Max` and arithmetic on decimal fields return Decimals. Other computed numbers (`Avg` of an integer field, for example) are `Float64` as before.
 - **Output.** Fixtures store decimals as strings (`"4.95"`), as Django does. Templates print them exactly, including `floatformat`, `localize` and `intcomma`. `JsonResponse` writes them as JSON numbers.
 
+#### Dates and times in queries
+
+```julia
+filter(Post; created__year = 2026, created__hour__gte = 9)          # transforms chain into lookups
+filter(Post; created__date = Date(2026, 3, 1), created__week_day = 2)
+filter(Post; created__quarter = 1, created__iso_year = 2026, created__time__lt = Dates.Time(12))
+annotate(Post; q = ExtractQuarter(:created), month = TruncMonth(:created))
+annotate(values(annotate(Post; month = TruncMonth(:created)), :month); n = Count(:id))   # posts per month
+```
+
+- **Transforms:** `year`, `quarter`, `month`, `week` (ISO), `week_day` (1 = Sunday, as Django), `iso_week_day` (1 = Monday), `iso_year`, `day`, `hour`, `minute`, `second`, `date` and `time`. They work on date, datetime and time fields, and chain into any lookup (`created__month__in = [6, 7]`).
+- **Functions:** `Extract(x, part)` and `ExtractYear` … `ExtractSecond` give integers. `Trunc(x, kind)` and `TruncYear`, `TruncQuarter`, `TruncMonth`, `TruncWeek`, `TruncDay`, `TruncHour`, `TruncMinute`, `TruncSecond` give datetimes (or dates for a date field). `TruncDate` and `TruncTime` give the date or time of a datetime.
+- **Time zones.** With `USE_TZ`, datetimes are converted to the current time zone first, as in Django: Postgres uses `AT TIME ZONE`, and SQLite uses two functions Juango registers on its connections. MySQL/MariaDB uses `CONVERT_TZ`, which needs the server's time zone tables (`mysql_tzinfo_to_sql`); without them, only `TIME_ZONE = "UTC"` works there.
+
 #### Times of day and durations
 
 ```julia

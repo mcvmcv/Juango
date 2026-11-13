@@ -135,7 +135,7 @@ end
     g = GenericSQL()
     @test B.column_type(g, :bool, nothing) == "BOOLEAN" && B.column_type(g, :char, 20) == "VARCHAR(20)"
     @test B.limit_offset_sql(g, 10, 0) == " LIMIT 10" && B.limit_offset_sql(g, nothing, 5) == " OFFSET 5"
-    @test B.lookup_sql(g, Val(:year), "c", 2024) == ("EXTRACT(YEAR FROM c) = ?", Any[2024])
+    @test B.date_part_expr(g, :year, "c", :date) == "CAST(EXTRACT(YEAR FROM c) AS INTEGER)"
     @test B.lookup_sql(g, Val(:startswith), "c", "a_b") == ("c LIKE ? ESCAPE '\\'", Any["a\\_b%"])
     @test B.insert_sql(g, "t", String[]) == "INSERT INTO t DEFAULT VALUES"
     @test B.sql_literal(g, true) == "TRUE" && B.sql_literal(g, "it's") == "'it''s'"

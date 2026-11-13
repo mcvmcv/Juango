@@ -65,10 +65,12 @@ _sq(b::NumberedSQLite) = _SQ(b.path)
 Juango.placeholder(::NumberedSQLite, i::Int) = "?$i"
 struct GenericSQL <: Juango.DatabaseBackend end   # inherits only the standard-SQL defaults
 for f in (:open_connection, :close_connection, :driver_rows, :driver_rowcount, :driver_insert_id,
-          :translate_error, :autoincrement_pk, :limit_offset_sql, :date_part_sql,
+          :translate_error, :autoincrement_pk, :limit_offset_sql,
           :table_exists, :table_columns, :inline_foreign_keys, :array_column_type)
     @eval Juango.$f(b::NumberedSQLite, args...) = Juango.$f(_sq(b), args...)
 end
+Juango.date_part_expr(b::NumberedSQLite, part::Symbol, col, kind) = Juango.date_part_expr(_sq(b), part, col, kind)
+Juango.trunc_expr(b::NumberedSQLite, kind::Symbol, col, ink) = Juango.trunc_expr(_sq(b), kind, col, ink)
 for T in (Bool, DateTime, Date)
     @eval Juango.adapt_param(b::NumberedSQLite, x::$T) = Juango.adapt_param(_sq(b), x)
 end

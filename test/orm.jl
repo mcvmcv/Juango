@@ -1455,3 +1455,41 @@ end
     @test occursin("<option value=\"r\">In review</option>", Juango.widget_html(ModelForm(Chapter; fields = [:phase])[:phase]))
     @test Juango.column_state(Juango.getfield_meta(Chapter, :phase)).default == "d"
 end
+
+@testset "date and time transforms, Extract and Trunc" begin
+    create(Shift; name = "tz1", starts = Dates.Time(9, 15, 30), opened = DateTime(2026, 3, 1, 23, 30, 45))   # a Sunday
+    create(Shift; name = "tz2", starts = Dates.Time(18), opened = DateTime(2026, 7, 15, 6))
+    base = filter(Shift; name__startswith = "tz")
+    nm(qs) = sort([x.name for x in qs])
+    @test nm(filter(base; opened__year = 2026)) == ["tz1", "tz2"] && nm(filter(base; opened__month__gte = 6)) == ["tz2"]
+    @test nm(filter(base; opened__quarter = 1, opened__day = 1, opened__hour = 23, opened__minute = 30, opened__second = 45)) == ["tz1"]
+    @test nm(filter(base; opened__week = 9, opened__week_day = 1, opened__iso_week_day = 7, opened__iso_year = 2026)) == ["tz1"]
+    @test nm(filter(base; opened__date = Date(2026, 7, 15))) == ["tz2"] && nm(filter(base; opened__date__lt = Date(2026, 5, 1))) == ["tz1"]
+    @test nm(filter(base; opened__time__gt = Dates.Time(12))) == ["tz1"] && nm(filter(base; starts__hour__lt = 10)) == ["tz1"]
+    @test nm(exclude(base; opened__month = 3)) == ["tz2"] && nm(filter(base; opened__year__in = [2025, 2026], opened__day__range = (10, 20))) == ["tz2"]
+
+    r = only(values(annotate(filter(base; name = "tz1"); y = ExtractYear(:opened), q = ExtractQuarter(:opened), w = ExtractWeek(:opened),
+                             wd = ExtractWeekDay(:opened), iwd = ExtractIsoWeekDay(:opened), h = ExtractHour(:opened), s = ExtractSecond(:opened),
+                             m = TruncMonth(:opened), d = TruncDate(:opened), t = TruncTime(:opened), wk = TruncWeek(:opened),
+                             hr = TruncHour(:opened), qu = TruncQuarter(:opened), sh = ExtractHour(:starts)), :name))
+    @test (r[:y], r[:q], r[:w], r[:wd], r[:iwd], r[:h], r[:s], r[:sh]) == (2026, 1, 9, 1, 7, 23, 45, 9)
+    @test r[:m] == DateTime(2026, 3, 1) && r[:d] == Date(2026, 3, 1) && r[:t] == Dates.Time(23, 30, 45)
+    @test r[:wk] == DateTime(2026, 2, 23) && r[:hr] == DateTime(2026, 3, 1, 23) && r[:qu] == DateTime(2026, 1, 1)
+    counts = Dict(x[:m] => x[:n] for x in annotate(values(annotate(base; m = TruncMonth(:opened)), :m); n = Count(:id)))
+    @test counts == Dict(DateTime(2026, 3, 1) => 1, DateTime(2026, 7, 1) => 1)
+    @test_throws ArgumentError Trunc(:opened, :fortnight)
+
+    # with USE_TZ, in the current time zone (MySQL needs its time zone tables for that)
+    tz_ok = !IS_MYSQL || Juango.execute("SELECT CONVERT_TZ('2026-01-01 00:00:00', '+00:00', 'Pacific/Auckland') AS x")[1][:x] !== nothing
+    if tz_ok
+        configure!(USE_TZ = true, TIME_ZONE = "Pacific/Auckland")           # UTC+13 in March: Monday the 2nd, 12:30
+        try
+            @test nm(filter(base; opened__day = 2, opened__hour = 12, opened__week_day = 2)) == ["tz1"]
+            @test nm(filter(base; opened__date = Date(2026, 3, 2))) == ["tz1"]
+            r = only(values(annotate(filter(base; name = "tz1"); d = TruncDay(:opened), h = ExtractHour(:opened)), :name))
+            @test r[:h] == 12 && r[:d] == Juango.TimeZones.ZonedDateTime(2026, 3, 2, Juango.TimeZones.tz"Pacific/Auckland")
+        finally
+            configure!(USE_TZ = false, TIME_ZONE = "UTC")
+        end
+    end
+end

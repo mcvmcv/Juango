@@ -215,8 +215,6 @@ function limit_offset_sql(::DatabaseBackend, limit, offset)
     s
 end
 
-"Integer year/month/day of a date expression."
-extract_sql(::DatabaseBackend, part::Symbol, expr) = "EXTRACT($(uppercase(string(part))) FROM $expr)"
 
 "Whether the database supports an index method (`:btree`, `:gin`)."
 supports_index_method(::DatabaseBackend, m::Symbol) = m in (:btree, :gin)
@@ -243,7 +241,7 @@ sql_true(::DatabaseBackend) = "1 = 1"
     lookup_sql(b, Val(lookup), col, value) -> (sql, params)
 
 SQL for the string and date lookups whose spelling differs between databases:
-`iexact contains icontains startswith istartswith endswith iendswith year month day`.
+`iexact contains icontains startswith istartswith endswith iendswith` (date parts: datefunctions.jl).
 `col` is the qualified, quoted column. The comparison lookups (`exact`, `gt`, `in`, ...)
 are standard SQL and are built by the ORM directly.
 """
@@ -254,11 +252,6 @@ lookup_sql(b::DatabaseBackend, ::Val{:startswith}, col, v) = ("$col LIKE ? ESCAP
 lookup_sql(b::DatabaseBackend, ::Val{:istartswith}, col, v) = ("LOWER($col) LIKE ? ESCAPE '\\'", Any[escape_like(lowercase(string(v))) * "%"])
 lookup_sql(b::DatabaseBackend, ::Val{:endswith}, col, v) = ("$col LIKE ? ESCAPE '\\'", Any["%" * escape_like(string(v))])
 lookup_sql(b::DatabaseBackend, ::Val{:iendswith}, col, v) = ("LOWER($col) LIKE ? ESCAPE '\\'", Any["%" * escape_like(lowercase(string(v)))])
-for part in (:year, :month, :day)
-    @eval lookup_sql(b::DatabaseBackend, ::Val{$(QuoteNode(part))}, col, v) = date_part_sql(b, $(QuoteNode(part)), col, v)
-end
-"`year`/`month`/`day` lookups: compare part of a date column with an integer."
-date_part_sql(::DatabaseBackend, part, col, v) = ("EXTRACT($(uppercase(string(part))) FROM $col) = ?", Any[Int(v)])
 
 escape_like(s) = replace(s, "\\" => "\\\\", "%" => "\\%", "_" => "\\_")
 

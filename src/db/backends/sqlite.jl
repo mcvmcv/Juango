@@ -18,7 +18,7 @@ function open_connection(b::SQLiteBackend)
         SQLite.execute(db, "PRAGMA journal_mode=WAL")
     end
     SQLite.execute(db, "PRAGMA foreign_keys=OFF")   # cascades are done by the ORM (on_delete)
-    db
+    register_sqlite_functions!(db)                  # juango_datepart, juango_trunc (datefunctions.jl)
 end
 
 close_connection(::SQLiteBackend, db) = DBInterface.close!(db)
@@ -93,13 +93,6 @@ function lookup_sql(b::SQLiteBackend, ::Val{:endswith}, col, v)
     s = string(v)
     isempty(s) ? (sql_true(b), Any[]) : ("substr($col, -?) = ?", Any[length(s), s])
 end
-function date_part_sql(::SQLiteBackend, part, col, v)
-    fmt = Dict(:year => "%Y", :month => "%m", :day => "%d")[part]
-    ("CAST(strftime('$fmt', $col) AS INTEGER) = ?", Any[Int(v)])
-end
-
-extract_sql(::SQLiteBackend, part::Symbol, expr) =
-    "CAST(strftime('$(Dict(:year => "%Y", :month => "%m", :day => "%d")[part])', $expr) AS INTEGER)"
 
 supports_index_method(::SQLiteBackend, m::Symbol) = m === :btree
 

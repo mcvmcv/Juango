@@ -306,6 +306,9 @@ function build_select(@nospecialize(qs::QuerySet); columns = nothing, ordered = 
     elseif qs.values_fields !== nothing
         for f in qs.values_fields
             if haskey(c.annotations, Symbol(f))
+                a = c.annotations[Symbol(f)]
+                # values(annotate(qs; m = TruncMonth(:created)), :m): group by the computed value (its alias)
+                is_filtered_relation(a) || contains_aggregate(a) || push!(group, qname(string(f)))
                 continue
             end
             col, _ = resolve_path(c, c.base, T, f)

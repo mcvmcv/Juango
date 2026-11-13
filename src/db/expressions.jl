@@ -83,10 +83,6 @@ Concat(xs...) = Func(:concat, Any[ref(x) for x in xs])
 Cast(x, kind::Symbol) = Func(:cast, Any[ref(x), kind])
 "The current local date and time (Julia's `now()`, the same clock `auto_now` uses)."
 Now() = Func(:now, Any[])
-"Year, month or day of a date column."
-ExtractYear(x) = Func(:extract, Any[ref(x), :year])
-ExtractMonth(x) = Func(:extract, Any[ref(x), :month])
-ExtractDay(x) = Func(:extract, Any[ref(x), :day])
 
 "An aggregate: `Count`, `Sum`, `Avg`, `Min`, `Max`."
 struct Aggregate <: Expression
@@ -300,6 +296,10 @@ function temporal_kind(c::SQLCompiler, e::F)
     end
     f isa Field && f.kind in (:datetime, :date, :time, :duration) ? f.kind : nothing
 end
+function temporal_kind(c::SQLCompiler, e::Func)
+    e.name === :trunc || return nothing
+    trunc_output(e.args[2], something(temporal_kind(c, e.args[1]), :datetime))
+end
 temporal_kind(c::SQLCompiler, e::Value) = e.value isa Union{DateTime,TimeZones.ZonedDateTime} ? :datetime :
     e.value isa Date ? :date : e.value isa Dates.Time ? :time : e.value isa Duration ? :duration : nothing
 function temporal_kind(c::SQLCompiler, e::Aggregate)
@@ -343,7 +343,8 @@ function compile_expr(c::SQLCompiler, e::Func)
     n === :concat && return "(" * join(["COALESCE(CAST($s AS $(cast_type(b, :text))), '')" for s in sqls], " || ") * ")", ps
     n === :cast && return "CAST($(sqls[1]) AS $(cast_type(b, e.args[2] === :string ? :text : e.args[2])))", ps
     n === :now && return "?", Any[timezone_now()]     # Julia's clock and local time, like the DateTimes Juango stores
-    n === :extract && return extract_sql(b, e.args[2], sqls[1]), ps
+    n === :extract && return date_part_expr(b, e.args[2], sqls[1], something(temporal_kind(c, e.args[1]), :datetime)), ps
+    n === :trunc && return trunc_expr(b, e.args[2], sqls[1], something(temporal_kind(c, e.args[1]), :datetime)), ps
     n in (:similarity, :word_similarity, :strict_word_similarity, :unaccent) &&
         return uppercase(string(n)) * "(" * join(sqls, ", ") * ")", ps
     throw(ArgumentError("unknown function $n"))
@@ -504,10 +505,12 @@ numbers as Float64.
 """
 function expr_value(@nospecialize(T), e, v)
     v === nothing && return nothing
-    if e isa Union{CombinedExpression,Aggregate}
+    if e isa Union{CombinedExpression,Aggregate} || (e isa Func && e.name === :trunc)
         k = try temporal_kind(SQLCompiler(T), e) catch; nothing end
         k === :duration && return to_duration(v)
-        k === :datetime && e isa CombinedExpression && return from_db(DATETIME_RESULT, v)
+        k === :datetime && e isa Union{CombinedExpression,Func} && return from_db(DATETIME_RESULT, v)
+        k === :date && e isa Func && return v isa Date ? v : Date(todatetime(v))
+        k === :time && e isa Func && return to_time(v)
     end
     f = decimal_source(T, e)
     if f !== nothing
