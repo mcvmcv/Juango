@@ -1047,7 +1047,7 @@ Juango.upload_file(::RefusingUploads, field, name, ctype, data) = endswith(name,
     extra = [path("atomic/", make_then_fail), path("nonatomic/", non_atomic_requests(req -> make_then_fail(req))),
              path("tplresp/", req -> TemplateResponse(req, "child.html", Dict("name" => "Plain"))),
              path("upload/", csrf_exempt(files_view)), path("deny/", req -> throw(PermissionDenied("nope")))]
-    old = (settings.ROOT_URLCONF, settings.MIDDLEWARE)
+    old = (settings.ROOT_URLCONF, settings.MIDDLEWARE, settings.DEBUG)
     configure!(ROOT_URLCONF = vcat(extra, old[1]), ATOMIC_REQUESTS = true, DEBUG = false)
     try
         c = Client()
@@ -1104,7 +1104,7 @@ Juango.upload_file(::RefusingUploads, field, name, ctype, data) = endswith(name,
         name = Juango.save_upload(st, "docs/a.txt", Juango.TemporaryUploadedFile("a.txt", tmpf))
         @test read(joinpath(dir, name), String) == "on disk" && (filemode(joinpath(dir, name)) & 0o777) == 0o600
     finally
-        configure!(ROOT_URLCONF = old[1], MIDDLEWARE = old[2], ATOMIC_REQUESTS = false, HANDLER404 = nothing,
+        configure!(ROOT_URLCONF = old[1], MIDDLEWARE = old[2], DEBUG = old[3], ATOMIC_REQUESTS = false, HANDLER404 = nothing,
                    HANDLER403 = nothing, HANDLER500 = nothing, FILE_UPLOAD_MAX_MEMORY_SIZE = 2_621_440,
                    FILE_UPLOAD_HANDLERS = Any[Juango.MemoryFileUploadHandler(), Juango.TemporaryFileUploadHandler()],
                    FILE_UPLOAD_PERMISSIONS = 0o644)

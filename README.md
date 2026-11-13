@@ -955,6 +955,22 @@ filter!((v, _) -> round(Int, 100v), lib, "cents")      # {% load shop %}{{ x|cen
 
 Output is HTML-escaped unless you mark it safe (`mark_safe`, `|safe`). A syntax error names the template file and line, and in DEBUG the error page shows the lines around it.
 
+#### Building HTML, unknown variables and other engines
+
+```julia
+format_html("<a href=\"{}\">{}</a>", url, title)                   # arguments are escaped unless already safe
+format_html_join("\n", "<li>{}: {}</li>", [(k, v) for (k, v) in pairs(d)])
+
+configure!(TEMPLATE_STRING_IF_INVALID = "MISSING(%s)")             # debugging: unknown variables show up
+
+using Mustache                                                    # a second template engine
+configure!(TEMPLATES = [Juango.JuangoTemplates(), Juango.MustacheTemplates(dirs = ["mustache"])])
+render(req, "emails/welcome.mustache", Dict("name" => user.username))
+```
+
+- **Engines.** `TEMPLATES` lists the engines to search, in order, and the first one that finds the name renders it. `JuangoTemplates(; dirs, app_dirs)` is Juango's own language, and the default uses `TEMPLATE_DIRS`. `MustacheTemplates(; dirs, extension = ".mustache")` uses Mustache.jl once you load it. Context processors work in both.
+- **Your own engine.** Give its type a method `Juango.engine_template(engine, name, tried)` that returns a template or `nothing`. Its templates need a `name` and `render(t, context; request)`.
+
 #### humanize
 
 `{% load humanize %}` adds `intcomma` (`1,234,567`, with the active language's separator), `intword` (`1.2 million`), `apnumber` (`four`), `ordinal` (`22nd`), `naturalday` (`today`, `yesterday`, `tomorrow`, else the date) and `naturaltime` (`3 minutes ago`, `an hour from now`).
@@ -1337,7 +1353,7 @@ const home = cache_page(home_view; timeout = 60)   # whole GET responses, keyed 
 
   `:serializer => :serialization` in a cache's settings uses Julia's `Serialization` instead, which stores any value. Like Django's pickle, it lets anyone who can write to the cache store (the Redis server, the cache table) make the reader construct arbitrary objects, which can lead to running code. It also can't be read by another Julia version. An entry that can't be read counts as a miss and is deleted.
 - **Page caching.** `cache_page` and the per-site `CacheMiddleware` (`CACHE_MIDDLEWARE_SECONDS`) skip responses that set cookies or vary on `Cookie`, so per-user pages aren't shared.
-- **Templates.** `TEMPLATE_CACHE_CHECK_MTIME = false` reads each template once instead of checking its file on every render. Use it in production.
+- **Templates.** Templates are read once and cached when `DEBUG` is off. With `DEBUG` on, they're read again when their files change, as Django's cached loader does. `TEMPLATE_CACHE_CHECK_MTIME = true` or `false` overrides that.
 - **Sessions.** `SESSION_ENGINE = :cache` keeps sessions in the cache only, and `:cached_db` puts the cache in front of the database. The default is `:db`.
 
 ### Background tasks

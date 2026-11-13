@@ -81,6 +81,29 @@ function write_value(io::IO, x, autoescape::Bool)
     nothing
 end
 
+"""
+    format_html(fmt, args...; kwargs...) -> SafeString
+
+Build HTML safely (Django's `format_html`): `{}` (or `{1}`, `{name}`) placeholders in `fmt` are
+replaced by the arguments, HTML-escaped unless they're already safe; `fmt` itself is trusted.
+
+    format_html("<a href=\"{}\">{}</a>", url, title)
+"""
+function format_html(fmt::AbstractString, args...; kwargs...)
+    kw = Dict(string(k) => v for (k, v) in kwargs)
+    i = 0
+    out = replace(fmt, r"\{(\w*)\}" => function (m)
+        key = m[2:end-1]
+        v = isempty(key) ? args[i += 1] : all(isdigit, key) ? args[parse(Int, key) + 1] : kw[key]
+        v isa SafeString ? v.s : escape_html(display_string(v))
+    end)
+    SafeString(out)
+end
+
+"`format_html_join(sep, fmt, rows)`: `format_html(fmt, row...)` for each row (a tuple or a value), joined by `sep`."
+format_html_join(sep::AbstractString, fmt::AbstractString, rows) =
+    SafeString(join([format_html(fmt, (r isa Tuple ? r : (r,))...).s for r in rows], escape_html(sep)))
+
 "How values are turned into text in templates."
 display_string(::Nothing) = ""
 display_string(x::AbstractString) = String(x)

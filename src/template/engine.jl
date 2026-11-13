@@ -434,7 +434,16 @@ Base.show(io::IO, t::Template) = print(io, "<Template ", repr(t.name), ">")
 # --- rendering ------------------------------------------------------------------------
 
 render!(io::IO, n::TextNode, ::Context) = write(io, n.s)
-render!(io::IO, n::VarNode, ctx::Context) = write_value(io, eval_fe(n.fe, ctx), ctx.autoescape)
+"`TEMPLATE_STRING_IF_INVALID`: what an unknown variable renders as (`%s` is its name), kept for speed."
+const STRING_IF_INVALID = Ref("")
+push!(SETTINGS_CHANGED_HOOKS, () -> (STRING_IF_INVALID[] = string(something(get(settings, :TEMPLATE_STRING_IF_INVALID, ""), ""))))
+function render!(io::IO, n::VarNode, ctx::Context)
+    inv = STRING_IF_INVALID[]
+    if !isempty(inv) && n.fe.base isa Variable && resolve_var(n.fe.base, ctx) === UNDEF
+        return write(io, replace(inv, "%s" => join(n.fe.base.parts, ".")))     # filters aren't applied, as in Django
+    end
+    write_value(io, eval_fe(n.fe, ctx), ctx.autoescape)
+end
 function render_nodes(io::IO, nodes::Vector{Node}, ctx::Context)
     for n in nodes
         render!(io, n, ctx)
@@ -484,16 +493,40 @@ const TEMPLATE_LOCK = ReentrantLock()
 "Where templates are looked up: TEMPLATE_DIRS, each installed app's `templates/` (APP_DIRS), Juango's own."
 template_dirs() = vcat(String[abspath(d) for d in settings.TEMPLATE_DIRS], app_dirs("templates"), [BUILTIN_TEMPLATE_DIR])
 
-function find_template(name::AbstractString)
-    tried = String[]
-    for d in template_dirs()
+function find_template(name::AbstractString, dirs = template_dirs(), tried = String[]; throw_missing = true)
+    for d in dirs
         p = normpath(joinpath(d, name))
         startswith(p, normpath(d)) || continue
         isfile(p) && return p
         push!(tried, p)
     end
-    throw(TemplateDoesNotExist(String(name), tried))
+    throw_missing ? throw(TemplateDoesNotExist(String(name), tried)) : nothing
 end
+
+# --- template engines ------------------------------------------------------------------------------
+#
+# TEMPLATES lists the engines templates are looked up in, in order; each gets a chance to find a
+# template by name. The default is Juango's own language with TEMPLATE_DIRS:
+#
+#     configure!(TEMPLATES = [Juango.JuangoTemplates(), Juango.MustacheTemplates(dirs = ["mustache"])])
+#
+# An engine is any value with a method `Juango.engine_template(engine, name, tried) -> template or
+# nothing`; its templates need `render(t, context; request)` and a `name`.
+
+"""
+    JuangoTemplates(; dirs = nothing, app_dirs = true)
+
+Juango's template language (Django's): templates from `dirs` (default `TEMPLATE_DIRS`), each
+installed app's `templates/` and Juango's own.
+"""
+Base.@kwdef struct JuangoTemplates
+    dirs::Union{Nothing,Vector{String}} = nothing
+    app_dirs::Bool = true
+end
+engine_dirs(e) = vcat(String[abspath(d) for d in something(e.dirs, settings.TEMPLATE_DIRS)], e.app_dirs ? app_dirs("templates") : String[])
+template_engines() = (t = get(settings, :TEMPLATES, nothing); t === nothing ? Any[JuangoTemplates()] : collect(Any, t))
+"Whether templates are read again when their files change: TEMPLATE_CACHE_CHECK_MTIME, or by default only with DEBUG."
+check_template_mtime() = something(get(settings, :TEMPLATE_CACHE_CHECK_MTIME, nothing), settings.DEBUG)
 
 """
     get_template(name) -> Template
@@ -504,24 +537,81 @@ Templates are cached and reloaded automatically when the file changes. With
 isn't checked again.
 """
 const TEMPLATE_BY_NAME = Dict{String,Any}()
-clear_template_cache!() = lock(() -> (empty!(TEMPLATE_CACHE); empty!(TEMPLATE_BY_NAME); nothing), TEMPLATE_LOCK)
+clear_template_cache!() = lock(() -> (empty!(TEMPLATE_CACHE); empty!(TEMPLATE_BY_NAME); empty!(MUSTACHE_CACHE); nothing), TEMPLATE_LOCK)
 push!(SETTINGS_CHANGED_HOOKS, clear_template_cache!)
 function get_template(name::AbstractString)
     occursin('#', name) && return partial_template(name)         # "page.html#partial"
-    if !settings.TEMPLATE_CACHE_CHECK_MTIME
-        t = lock(() -> get(TEMPLATE_BY_NAME, name, nothing), TEMPLATE_LOCK)
+    tried = String[]
+    for e in template_engines()
+        t = engine_template(e, name, tried)
         t === nothing || return t
     end
-    p = find_template(name)
+    throw(TemplateDoesNotExist(String(name), tried))
+end
+function engine_template(e::JuangoTemplates, name::AbstractString, tried)
+    key = string(objectid(e.dirs), ":", name)
+    if !check_template_mtime()
+        t = lock(() -> get(TEMPLATE_BY_NAME, key, nothing), TEMPLATE_LOCK)
+        t === nothing || return t
+    end
+    p = find_template(name, vcat(engine_dirs(e), [BUILTIN_TEMPLATE_DIR]), tried; throw_missing = false)
+    p === nothing && return nothing
     mt = mtime(p)
     lock(TEMPLATE_LOCK) do
         c = get(TEMPLATE_CACHE, p, nothing)
         c !== nothing && c[1] == mt && return c[2]
         t = Template(read(p, String); name = String(name), origin = p)
         TEMPLATE_CACHE[p] = (mt, t)
-        TEMPLATE_BY_NAME[String(name)] = t
+        TEMPLATE_BY_NAME[key] = t
         t
     end
+end
+
+"""
+    MustacheTemplates(; dirs = String[], app_dirs = true, extension = ".mustache")
+
+Mustache templates (`{{name}}`, `{{#items}}...{{/items}}`) through Mustache.jl, for names ending
+in `extension`. Load the package (`using Mustache`) to enable it; context processors apply as for
+Juango templates, and `{{ }}` escapes HTML (`{{{ }}}` doesn't).
+"""
+Base.@kwdef struct MustacheTemplates
+    dirs::Vector{String} = String[]
+    app_dirs::Bool = true
+    extension::String = ".mustache"
+end
+"A parsed Mustache template."
+struct MustacheTemplate
+    name::String
+    origin::String
+    compiled::Any
+end
+const MUSTACHE_CACHE = Dict{String,Tuple{Float64,MustacheTemplate}}()
+"Parse Mustache source (defined by the Mustache extension)."
+mustache_compile(src) = throw(ArgumentError("MustacheTemplates needs Mustache.jl: add `using Mustache` to your project"))
+"Render parsed Mustache with a context (defined by the Mustache extension)."
+function mustache_render end
+function engine_template(e::MustacheTemplates, name::AbstractString, tried)
+    endswith(name, e.extension) || return nothing
+    p = find_template(name, engine_dirs(e), tried; throw_missing = false)
+    p === nothing && return nothing
+    mt = mtime(p)
+    lock(TEMPLATE_LOCK) do
+        c = get(MUSTACHE_CACHE, p, nothing)
+        c !== nothing && (c[1] == mt || !check_template_mtime()) && return c[2]
+        t = MustacheTemplate(String(name), p, mustache_compile(read(p, String)))
+        MUSTACHE_CACHE[p] = (mt, t)
+        t
+    end
+end
+function render(t::MustacheTemplate, context = Dict{String,Any}(); request = nothing, autoescape = true)
+    ctx = Dict{String,Any}()
+    if request !== nothing
+        for cp in settings.CONTEXT_PROCESSORS
+            merge!(ctx, to_context_dict(cp(request)))
+        end
+    end
+    merge!(ctx, to_context_dict(context))
+    mustache_render(t.compiled, Dict{String,Any}(k => (v isa SafeString ? v.s : v) for (k, v) in ctx))
 end
 
 "First template in `names` that exists."

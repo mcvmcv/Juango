@@ -214,3 +214,52 @@ end
     @test tr("{{ d.items.0.value }} {{ v.1 }} {{ v.9 }}", Dict("d" => Dict("k" => "val"), "v" => [10, 20])) == "val 20 "
     @test Juango.header_eq("Content-Type", "content-type") && !Juango.header_eq("a[", "a{") && !Juango.header_eq("ab", "abc")
 end
+
+import Mustache      # loads the Mustache extension (Juango.MustacheTemplates)
+
+@testset "string_if_invalid, format_html, template engines" begin
+    tr(s, ctx = Dict{String,Any}()) = render(Template(s), ctx)
+    configure!(TEMPLATE_STRING_IF_INVALID = "INVALID(%s)")
+    try
+        @test tr("{{ missing.var }} {{ known }} {{ nope|upper }}", Dict("known" => "ok")) == "INVALID(missing.var) ok INVALID(nope)"
+        @test tr("{% if missing %}yes{% else %}no{% endif %}") == "no"          # only output is affected
+    finally
+        configure!(TEMPLATE_STRING_IF_INVALID = "")
+    end
+    @test tr("[{{ missing }}]") == "[]"
+
+    @test format_html("<a href=\"{}\">{}</a>", "/x?a=1&b=2", "<b>") == SafeString("<a href=\"/x?a=1&amp;b=2\">&lt;b&gt;</a>")
+    @test format_html("{1}-{0} {name}", "a", mark_safe("<i>b</i>"); name = "<n>").s == "<i>b</i>-a &lt;n&gt;"
+    @test format_html_join(", ", "<li>{}: {}</li>", [("a", 1), ("<b>", 2)]).s == "<li>a: 1</li>, <li>&lt;b&gt;: 2</li>"
+    @test tr("{{ x }}", Dict("x" => format_html("<b>{}</b>", "&"))) == "<b>&amp;</b>"
+
+    # a second engine: Mustache templates next to Juango's
+    mdir = mktempdir()
+    write(joinpath(mdir, "hello.mustache"), "Hi {{name}}! {{#items}}[{{.}}]{{/items}}")
+    configure!(TEMPLATES = Any[Juango.JuangoTemplates(), Juango.MustacheTemplates(dirs = [mdir])])
+    try
+        @test render_to_string("hello.mustache", Dict("name" => "<Ann>", "items" => ["a", "b"])) == "Hi &lt;Ann&gt;! [a][b]"
+        r = render(get(RequestFactory(), "/"), "hello.mustache", Dict("name" => "Bo", "items" => String[]))
+        @test text(r) == "Hi Bo! " && r.templates == ["hello.mustache"]
+        @test occursin("Hello", render_to_string("child.html", Dict("name" => "World")))     # Juango's engine still answers
+        err = try get_template("nothing.mustache"); nothing catch e; e end
+        @test err isa Juango.TemplateDoesNotExist && any(p -> startswith(p, mdir), err.tried)
+    finally
+        configure!(TEMPLATES = nothing)
+    end
+
+    # templates are cached; read again on change only with TEMPLATE_CACHE_CHECK_MTIME (default: with DEBUG)
+    tdir = mktempdir()
+    write(joinpath(tdir, "cached.html"), "one")
+    old_debug = settings.DEBUG
+    configure!(TEMPLATE_DIRS = vcat([tdir], settings.TEMPLATE_DIRS), TEMPLATE_CACHE_CHECK_MTIME = nothing, DEBUG = false)
+    try
+        @test render_to_string("cached.html") == "one"
+        sleep(1.1); write(joinpath(tdir, "cached.html"), "two")
+        @test render_to_string("cached.html") == "one"                          # production: read once
+        configure!(DEBUG = true)
+        @test render_to_string("cached.html") == "two"                          # development: reloaded
+    finally
+        configure!(TEMPLATE_DIRS = filter(!=(tdir), settings.TEMPLATE_DIRS), TEMPLATE_CACHE_CHECK_MTIME = true, DEBUG = old_debug)
+    end
+end

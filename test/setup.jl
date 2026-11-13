@@ -402,7 +402,7 @@ const urlpatterns = [
     path("files/<path:rest>", (req; rest) -> HttpResponse(rest); name = "files"),
 ]
 
-configure!(DATABASE = TEST_DATABASE, ROOT_URLCONF = urlpatterns, TEMPLATE_DIRS = [TPL],
+configure!(DATABASE = TEST_DATABASE, ROOT_URLCONF = urlpatterns, TEMPLATE_DIRS = [TPL], TEMPLATE_CACHE_CHECK_MTIME = true,
            PASSWORD_ITERATIONS = 1000, DEBUG = true)
 migrate(verbose = false)
 

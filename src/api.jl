@@ -27,7 +27,7 @@ export EventStreamResponse, sse_event, websocket, ws_send, ws_receive, ws_close,
 # urls
 export path, re_path, include_urls, reverse_url, resolve
 # templates
-export Template, render_to_string, get_template, mark_safe, SafeString, escape_html, tattr,
+export Template, render_to_string, get_template, mark_safe, SafeString, escape_html, format_html, format_html_join, tattr,
        register_filter!, register_tag!, TagLibrary, simple_tag!, inclusion_tag!, tag!, TemplateSyntaxError
 # models and fields
 export Model, @model, @abstract_model, Field, CharField, TextField, EmailField, SlugField, URLField,
@@ -109,7 +109,7 @@ export runserver, execute_from_command_line
 public header, text, render_response!, process_template_response, temporary_file_path, TemporaryUploadedFile,
        MemoryFileUploadHandler, TemporaryFileUploadHandler, upload_file, sse_comment, WebSocketView, is_streaming, build_absolute_uri, handle_request
 # templates
-public render_form, TemplateFormRenderer
+public render_form, TemplateFormRenderer, JuangoTemplates, MustacheTemplates, engine_template
 # models, files, querysets
 public uuid4, FieldFile, FileSystemStorage, InMemoryStorage, storages, default_storage, save_file, delete_file, image_size,
        register_lookup, register_transform, deferred_fields, PoolTimeout, pool_status,

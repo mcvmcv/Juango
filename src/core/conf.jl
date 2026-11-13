@@ -44,7 +44,9 @@ function default_settings()
         :PASSWORD_MIN_LENGTH => 8,
         :CACHES => Dict("default" => Dict(:backend => :locmem)),
         :CACHE_MIDDLEWARE_SECONDS => 600,
-        :TEMPLATE_CACHE_CHECK_MTIME => true,
+        :TEMPLATE_CACHE_CHECK_MTIME => nothing,        # read templates again when they change (nothing: only with DEBUG)
+        :TEMPLATES => nothing,                         # template engines (nothing: Juango's, with TEMPLATE_DIRS)
+        :TEMPLATE_STRING_IF_INVALID => "",             # what unknown variables render as ("%s" is the name)
         :SITE_ID => 1,
         :SESSION_ENGINE => :db,
         :SESSION_FILE_PATH => nothing,
