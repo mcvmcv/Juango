@@ -154,7 +154,7 @@ macro choices(name, block)
                        (rhs, titlecase(replace(lowercase(string(m)), "_" => " ")))
         push!(items, :($(GlobalRef(@__MODULE__, :Choice))($(QuoteNode(m)), $(esc(value)), $(esc(label)))))
     end
-    :(const $(esc(name)) = $(GlobalRef(@__MODULE__, :ChoiceSet))($(QuoteNode(name)), Choice[$(items...)]))
+    :(Base.@__doc__ const $(esc(name)) = $(GlobalRef(@__MODULE__, :ChoiceSet))($(QuoteNode(name)), Choice[$(items...)]))
 end
 
 "The enumeration `@choices` defines: members by name, plus `choices`, `values`, `labels`, `members`, `label(v)`."

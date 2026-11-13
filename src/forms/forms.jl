@@ -136,7 +136,7 @@ macro form(name, body)
     end
     F = GlobalRef(@__MODULE__, :Form)
     quote
-        function $(esc(name))(data = nothing; initial = Dict{Symbol,Any}(), prefix = "", clean = nothing, files = nothing, media = nothing)
+        Base.@__doc__ function $(esc(name))(data = nothing; initial = Dict{Symbol,Any}(), prefix = "", clean = nothing, files = nothing, media = nothing)
             $F(Pair{Symbol,Any}[$(pairs_...)]; data = data, initial = initial, prefix = prefix,
                clean = clean, name = $(string(name)), files = files, media = media)
         end

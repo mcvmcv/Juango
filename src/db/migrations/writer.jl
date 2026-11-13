@@ -139,6 +139,25 @@ function write_file(app, number, name, m::Migration; dry_run = false, log = prin
 end
 relpath_or_abs(p) = (r = relpath(p); startswith(r, "..") ? p : r)
 
+"Apps whose last `makemigrations` left out foreign keys to tables of apps without migrations yet."
+const DEFERRED_APPS = Ref(Set{String}())
+
+"""
+    makemigrations_apps(apps; kw...) -> paths
+
+`makemigrations` for several apps: in dependency order, then once more for apps that had to
+leave out foreign keys to another of the apps (a cycle), now that those apps have migrations.
+"""
+function makemigrations_apps(apps; dry_run = false, check = false, kw...)
+    DEFERRED_APPS[] = Set{String}()
+    order = app_order(apps)
+    paths = reduce(vcat, [makemigrations(; app = a, dry_run = dry_run, check = check, kw...) for a in order]; init = String[])
+    again = [a for a in order if a in DEFERRED_APPS[]]
+    (dry_run || check || isempty(again)) && return paths
+    DEFERRED_APPS[] = Set{String}()
+    vcat(paths, reduce(vcat, [makemigrations(; app = a, kw...) for a in again]; init = String[]))
+end
+
 """
     makemigrations(; app="project", name=nothing, empty=false, merge=false, dry_run=false,
                    check=false, questioner=ask, verbose=true) -> Vector{String}
@@ -162,7 +181,13 @@ function makemigrations(; app = "project", name = nothing, empty = false, merge 
         return [write_file(app, next_number(g, app), nm, m; dry_run = dry_run || check, log = log)]
     end
     check_conflicts(g)
-    ops = empty ? Operation[] : detect_changes(g, app; questioner = questioner)
+    deferred = Tuple{String,String,String,String}[]
+    ops = empty ? Operation[] : detect_changes(g, app; questioner = questioner, deferred = deferred)
+    for (t, c, r, other) in deferred
+        log("  Note: the foreign key $t.$c -> $r is left out until app '$other' has a migration creating $r; " *
+            "makemigrations adds it then, in a migration that depends on '$other'.")
+    end
+    DEFERRED_APPS[] = isempty(deferred) ? DEFERRED_APPS[] : push!(DEFERRED_APPS[], app)
     if isempty(ops) && !empty
         log("No changes detected" * (app == "project" ? "" : " in app '$app'"))
         return String[]

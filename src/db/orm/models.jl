@@ -83,7 +83,7 @@ macro abstract_model(expr)
     M = GlobalRef(@__MODULE__, :Model)
     sup = super === nothing ? M : esc(super)
     quote
-        abstract type $(esc(name)) <: $sup end
+        Base.@__doc__ abstract type $(esc(name)) <: $sup end      # (a docstring before @abstract_model documents the type)
         $(GlobalRef(@__MODULE__, :ABSTRACT_MODELS))[$(esc(name))] = (Pair{Symbol,Any}[$(fieldpairs...)], $metaexpr)
         $(esc(name))
     end
@@ -358,7 +358,7 @@ macro model(expr)
                      Expr(:block, :(_data::Dict{Symbol,Any}), :(_cache::Dict{Symbol,Any})))
     metaexpr = super === nothing ? metaexpr : :(merge((_parent = $(esc(super)),), $metaexpr))
     quote
-        $(esc(structdef))
+        Base.@__doc__ $(esc(structdef))                          # (a docstring before @model documents the struct)
         $(esc(name))(; kwargs...) = $(GlobalRef(@__MODULE__, :construct))($(esc(name)); kwargs...)
         $(GlobalRef(@__MODULE__, :register_model!))($(esc(name)), Pair{Symbol,Any}[$(fieldpairs...)], $metaexpr)
         $(esc(name))

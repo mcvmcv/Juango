@@ -1567,3 +1567,39 @@ end
     @test get_next_by(b1, :day).id == b2.id
     @test_throws ArgumentError get_next_by(b1, :title)
 end
+
+@testset "docstrings on @model, @abstract_model, @form and @choices (#107)" begin
+    m = Module(:DocModels)
+    Core.eval(m, :(using Juango))
+    Base.include_string(m, """
+        "A documented base."
+        @abstract_model struct DocBase
+            note = CharField(max_length = 10, blank = true)
+        end
+        "An organisation that sends us samples."
+        @model struct DocClient <: DocBase
+            name = CharField(max_length = 100)
+            Meta(managed = false, table = "doc_client")
+        end
+        "A form with a docstring."
+        @form DocForm begin
+            name = CharField(max_length = 10)
+        end
+        "Colours."
+        @choices DocColour begin
+            RED = "r"
+        end
+        """)
+    try
+        T = getfield(m, :DocClient)
+        docof(s) = (d = get(Base.Docs.meta(m), Base.Docs.Binding(m, s), nothing); d === nothing ? "" :
+                    join([join(string.(x.text)) for x in values(d.docs)]))
+        @test startswith(Juango.docstring(T), "An organisation that sends us samples.")     # the admin docs' reader
+        @test startswith(docof(:DocBase), "A documented base.")
+        @test startswith(docof(:DocForm), "A form with a docstring.")
+        @test startswith(docof(:DocColour), "Colours.")
+        @test T(name = "x").name == "x" && Juango.modelmeta(T).table == "doc_client"
+    finally
+        foreach(Juango.unregister_model!, filter(T -> parentmodule(T) === m, Juango.all_models()))
+    end
+end

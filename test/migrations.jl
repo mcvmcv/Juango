@@ -1107,6 +1107,7 @@ end
         end
         g = Juango.Migrations.build_graph(["auth", "contenttypes"])
         @test haskey(Juango.Migrations.replay(g, keys(g.nodes)), "auth_user")      # still in the migration state
+        @test isempty(Juango.Migrations.detect_changes(g, "auth"; questioner = _ -> false))   # no spurious changes (#110)
     finally
         configure!(AUTH_USER_MODEL = User)
     end
@@ -1156,5 +1157,51 @@ end
     finally
         disconnect!(pre_migrate; dispatch_uid = :test_pre)
         disconnect!(post_migrate; dispatch_uid = :test_post, sender = "auth")
+    end
+end
+
+@testset "migrations: foreign keys between apps that point at each other (#108)" begin
+    da, db = mktempdir(), mktempdir()
+    configure!(MIGRATION_MODULES = Dict("migcyca" => da, "migcycb" => db))
+    quiet(f) = redirect_stdout(f, devnull)
+    try
+        @eval @model struct CyPart
+            name = CharField(max_length = 20)
+            machine = ForeignKey(:CyMachine, on_delete = :CASCADE, null = true)
+            Meta(table = "cy_part", app_label = "migcyca")
+        end
+        @eval @model struct CyMachine
+            name = CharField(max_length = 20)
+            default_part = ForeignKey(CyPart, on_delete = :PROTECT, null = true)
+            Meta(table = "cy_machine", app_label = "migcycb")
+        end
+        @test sort(Juango.Migrations.app_order(["migcycb", "migcyca"])) == ["migcyca", "migcycb"]   # a cycle: either order
+        paths = quiet(() -> Juango.Migrations.makemigrations_apps(["migcyca", "migcycb"]; questioner = _ -> false))
+        @test length(paths) == 3
+        f1, f2, f3 = read.(paths, String)
+        # whichever app goes first creates its table without the foreign key to the other's
+        first_part = occursin("CreateModel(\"cy_part\"", f1)
+        (x, xt, xfk, y, yt) = first_part ? ("migcyca", "cy_part", "machine_id", "migcycb", "cy_machine") :
+                                           ("migcycb", "cy_machine", "default_part_id", "migcyca", "cy_part")
+        @test occursin("CreateModel(\"$xt\"", f1) && !occursin("references = \"$yt\"", f1) && !occursin(y, f1)
+        @test occursin("CreateModel(\"$yt\"", f2) && occursin("references = \"$xt\"", f2) && occursin("(\"$x\", \"0001", f2)
+        @test occursin("AlterField(\"$xt\", Column(\"$xfk\"", f3) && occursin("references = \"$yt\"", f3) &&
+              occursin("(\"$y\", \"0001", f3) && dirname(paths[3]) == dirname(paths[1])
+        @test isempty(quiet(() -> Juango.Migrations.makemigrations_apps(["migcyca", "migcycb"]; questioner = _ -> false)))
+        quiet(() -> migrate())                                                  # PostgreSQL and MySQL create the constraints
+        p = create(CyPart; name = "gear")
+        m = create(CyMachine; name = "lathe", default_part = p)
+        p.machine = m; save!(p)
+        @test get(CyPart; id = p.id).machine.name == "lathe"
+        # a cross-app foreign key to an app that already has migrations isn't deferred
+        @test Juango.Migrations.app_order(["migcyca"]) == ["migcyca"]
+        update!(objects(CyPart); machine = nothing); delete!(objects(CyMachine)); delete!(objects(CyPart))
+        quiet(() -> migrate(app = "migcyca", target = "0001"))
+        quiet(() -> migrate(app = "migcycb", target = "zero"))
+        quiet(() -> migrate(app = "migcyca", target = "zero"))
+        @test !Juango.table_exists(Juango.backend(), "cy_part") && !Juango.table_exists(Juango.backend(), "cy_machine")
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app in ("migcyca", "migcycb"), Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
     end
 end

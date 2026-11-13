@@ -14,12 +14,27 @@ Operations that take `app`'s tables from the state its migrations describe to th
 its models describe. `questioner(question) -> Bool` decides whether a removed plus an
 added table or column is really a rename.
 """
-function detect_changes(g::Graph, app; questioner = ask)
+function detect_changes(g::Graph, app; questioner = ask, deferred = nothing)
     from = replay(g, keys(g.nodes))
     to = models_state()
-    old = Dict(k => v for (k, v) in from if v.app == app)
-    new = Dict(k => v for (k, v) in to if v.app == app)
+    # a swapped-out User and its join tables are in neither state's comparison (as in Django)
+    sw = swapped_tables()
+    old = Dict(k => v for (k, v) in from if v.app == app && !(k in sw))
+    new = Dict(k => v for (k, v) in to if v.app == app && !(k in sw))
     ops = Operation[]
+    # A foreign key to another app's table that no migration creates yet is left out (the column
+    # is created without its constraint) and added by a later migration that depends on that
+    # app's, as Django does: otherwise two apps that point at each other can't be migrated.
+    # `deferred` collects them, as (table, column, referenced table).
+    function defer_missing(table, c::Column)
+        (c.references === nothing || c.references == "__user_model__") && return c
+        r = Juango.ref_table(c.references)
+        t = get(to, r, nothing)
+        (t === nothing || t.app == app || haskey(from, r)) && return c
+        deferred === nothing || push!(deferred, (table, c.name, r, t.app))
+        Column(c.name, c.kind, c.null, c.default, c.unique, c.index, c.max_length, nothing, c.of, c.generated,
+               c.comment, c.max_digits, c.decimal_places)
+    end
 
     # renamed tables: same columns, different name
     removed = sort(setdiff(collect(keys(old)), keys(new)))
@@ -39,11 +54,11 @@ function detect_changes(g::Graph, app; questioner = ask)
             end
         end
     end
-    old = Dict(k => v for (k, v) in work if v.app == app)
+    old = Dict(k => v for (k, v) in work if v.app == app && !(k in sw))
 
     # new tables, created so that referenced tables come first
     for t in creation_order(Table[new[t] for t in added])
-        push!(ops, CreateModel(t.name; model = t.model, columns = t.columns, unique_together = t.unique_together,
+        push!(ops, CreateModel(t.name; model = t.model, columns = Column[defer_missing(t.name, c) for c in t.columns], unique_together = t.unique_together,
                                parent = t.parent, pk = t.pk, indexes = t.indexes, constraints = t.constraints,
                                pk_columns = t.pk_columns, comment = t.comment))
     end
@@ -74,10 +89,12 @@ function detect_changes(g::Graph, app; questioner = ask)
             end
         end
         for c in fresh
-            push!(ops, AddField(name, ncols[c]))
+            push!(ops, AddField(name, defer_missing(name, ncols[c])))
         end
         for c in n.columns
-            haskey(ocols, c.name) && ocols[c.name] != c && push!(ops, AlterField(name, c))
+            haskey(ocols, c.name) || continue
+            c2 = defer_missing(name, c)
+            ocols[c.name] != c2 && push!(ops, AlterField(name, c2))
         end
         # unique sets after renames; changed before columns are removed
         renamed = Dict(op.old => op.new for op in ops if op isa RenameField && op.table == name)
@@ -130,5 +147,38 @@ function creation_order(tables::Vector{Table})
     for t in sort(tables; by = t -> t.name)
         visit(t, String[])
     end
+    out
+end
+
+"""
+    app_order(apps) -> Vector
+
+`apps` ordered so that an app comes after the apps whose new tables its new tables point at
+(apps that point at each other stay in the given order; their foreign keys are deferred).
+"""
+function app_order(apps)
+    g = build_graph(unique(vcat(migrated_apps(), collect(apps))))
+    from = replay(g, keys(g.nodes))
+    to = models_state()
+    needs = Dict(a => Set{String}() for a in apps)
+    for (name, t) in to
+        (haskey(from, name) || !haskey(needs, t.app)) && continue
+        for c in t.columns
+            (c.references === nothing || c.references == "__user_model__") && continue
+            u = get(to, Juango.ref_table(c.references), nothing)
+            (u === nothing || u.app == t.app || haskey(from, u.name) || !haskey(needs, u.app)) && continue
+            push!(needs[t.app], u.app)
+        end
+    end
+    out = String[]
+    visiting = Set{String}()
+    visit(a) = begin
+        (a in out || a in visiting) && return           # done, or a cycle: leave it to deferral
+        push!(visiting, a)
+        foreach(visit, sort(collect(needs[a])))
+        delete!(visiting, a)
+        a in out || push!(out, a)
+    end
+    foreach(visit, apps)
     out
 end

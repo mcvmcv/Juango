@@ -242,14 +242,10 @@ function cmd_makemigrations(args)
     pos, flags = parse_flags(args)
     apps = !isempty(pos) ? pos : haskey(flags, "app") ? [flags["app"]] :
            unique(vcat(["project"], [a.label for a in installed_apps() if a.path !== nothing]))
-    rest = String[x for x in args if !(x in pos)]
-    length(apps) > 1 && return reduce(vcat, [cmd_makemigrations(vcat(rest, ["--app", a])) for a in apps])
-    flags["app"] = only(apps)
     q = haskey(flags, "noinput") || haskey(flags, "no-input") ? (_ -> false) : Migrations.ask
-    paths = makemigrations(; app = get(flags, "app", "project"), name = get(flags, "name", nothing),
-                           empty = haskey(flags, "empty"), merge = haskey(flags, "merge"),
-                           dry_run = haskey(flags, "dry-run"), check = haskey(flags, "check"), update = haskey(flags, "update"),
-                           questioner = q)
+    kw = (name = get(flags, "name", nothing), empty = haskey(flags, "empty"), merge = haskey(flags, "merge"),
+          dry_run = haskey(flags, "dry-run"), check = haskey(flags, "check"), update = haskey(flags, "update"), questioner = q)
+    paths = length(apps) > 1 ? Migrations.makemigrations_apps(apps; kw...) : makemigrations(; app = only(apps), kw...)
     haskey(flags, "check") && !isempty(paths) && exit(1)
     paths
 end
