@@ -8,6 +8,7 @@ const MONTH_ABBR_AP = ["Jan.", "Feb.", "March", "April", "May", "June", "July", 
 
 todatetime(x::DateTime) = x
 todatetime(x::Date) = DateTime(x)
+todatetime(x::Dates.Time) = DateTime(Date(1900, 1, 1), x)      # the `time` filter on a TimeField
 function todatetime(x)
     x === nothing && return nothing
     s = str(x)

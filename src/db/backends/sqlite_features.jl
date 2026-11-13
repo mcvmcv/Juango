@@ -1,5 +1,10 @@
 # --- JSON, arrays, ranges, full-text on SQLite (stored as JSON text) ---------------------------------
 
+# durations are microseconds; datetimes are text in the format Juango writes (2026-01-02T03:04:05.000)
+temporal_value_sql(::SQLiteBackend, kind, sql) = sql
+datetime_add_sql(::SQLiteBackend, op, a, d) = "strftime('%Y-%m-%dT%H:%M:%f', julianday($a) $op ($d) / 86400000000.0)"
+datetime_diff_sql(::SQLiteBackend, ka, a, kb, b) = "CAST(ROUND((julianday($a) - julianday($b)) * 86400000000.0) AS INTEGER)"
+
 sqlite_json_path(keys) = "\$" * join([all(isdigit, k) ? "[$k]" : "." * "\"" * replace(k, "\"" => "\\\"") * "\"" for k in keys])
 
 encode_array(::SQLiteBackend, v) = JSON.json(json_scalar_tree(collect(v)))

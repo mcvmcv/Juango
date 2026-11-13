@@ -230,6 +230,14 @@ end
     Meta(permissions = [("publish_memo", "Can publish memos")])
 end
 
+@model struct Shift
+    name = CharField(max_length = 20)
+    starts = TimeField()
+    stamp = TimeField(auto_now = true)
+    opened = DateTimeField(null = true, blank = true)
+    length = DurationField(null = true, blank = true)
+end
+
 @model struct Ledger
     label = CharField(max_length = 20)
     amount = DecimalField(max_digits = 8, decimal_places = 2)

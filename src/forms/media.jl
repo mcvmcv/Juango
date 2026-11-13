@@ -98,7 +98,6 @@ function MultiValueField(fields::AbstractVector; compress, decompress, widget = 
     f
 end
 
-parse_time(s) = (t = tryparse(Dates.Time, s, dateformat"HH:MM:SS"); t === nothing ? tryparse(Dates.Time, s, dateformat"HH:MM") : t)
 
 "A date and a time input making one `DateTime` (aware in the current time zone with `USE_TZ`)."
 SplitDateTimeField(; kw...) = MultiValueField([DateField(), Field(:char; max_length = 8, widget = Widget(:time))];

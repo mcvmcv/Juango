@@ -149,6 +149,13 @@ end
 BooleanField(; default = false, kw...) = Field(:bool; default = default, blank = true, kw...)
 DateTimeField(; kw...) = Field(:datetime; kw...)
 DateField(; kw...) = Field(:date; kw...)
+"A time of day (`Dates.Time`); `auto_now`/`auto_now_add` use the current time in the current time zone."
+TimeField(; kw...) = Field(:time; kw...)
+"""
+A length of time: a fixed `Period` (`Hour(2)`) or `CompoundPeriod` (`Day(1) + Hour(2)`), read back
+as a canonical `CompoundPeriod`. INTERVAL on PostgreSQL, a count of microseconds elsewhere.
+"""
+DurationField(; kw...) = Field(:duration; kw...)
 """
     ForeignKey(Model; on_delete=:CASCADE, related_name=nothing, kw...)
 

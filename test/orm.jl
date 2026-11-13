@@ -1274,3 +1274,50 @@ end
     @test t("{% load humanize l10n %}{{ x|intcomma }} {{ x|localize }}", Dict("x" => dec"1234567.10")) == "1,234,567.10 1234567.10"
     @test with_language(() -> Juango.number_format(dec"1234.565"; decimals = 2), "de") == "1234,57"
 end
+
+@testset "TimeField and DurationField" begin
+    @test Juango.parse_time("9:05") == Dates.Time(9, 5) && Juango.parse_time("12:30:05.25") == Dates.Time(12, 30, 5, 250)
+    @test Juango.parse_time("24:00") === nothing && Juango.time_string(Dates.Time(1, 2, 3, 4, 5)) == "01:02:03.004005"
+    @test Juango.duration_string(Day(1) + Hour(2) + Minute(3)) == "1 day, 2:03:00" && Juango.duration_string(Second(-90)) == "-0:01:30"
+    @test Juango.duration_string(Day(2) + Millisecond(5); serial = true) == "2 00:00:00.005000"
+    @test Juango.parse_duration_us("1 day, 2:03:04") == Juango.parse_duration_us("1 02:03:04") == Juango.duration_us(Day(1) + Hour(2) + Minute(3) + Second(4))
+    @test Juango.parse_duration_us("90") == 90_000_000 && Juango.parse_duration_us("P1DT2H0.5S") == 93_600_500_000 &&
+          Juango.parse_duration_us("P-1DT2H") == -79_200_000_000
+    @test Juango.to_duration(Hour(26)) == Day(1) + Hour(2)
+    @test_throws ArgumentError Juango.duration_us(Month(1))
+
+    s = create(Shift; name = "early", starts = Dates.Time(6, 30), length = Hour(8) + Minute(30),
+               opened = DateTime(2026, 3, 1, 6, 30))
+    create(Shift; name = "late", starts = Dates.Time(14, 0, 0, 500), length = Minute(45), opened = DateTime(2026, 3, 1, 23, 50))
+    create(Shift; name = "none", starts = Dates.Time(0))
+    refresh!(s)
+    @test s.starts == Dates.Time(6, 30) && s.starts isa Dates.Time && s.stamp isa Dates.Time
+    @test s.length == Hour(8) + Minute(30) && s.length isa Dates.CompoundPeriod
+    @test get(Shift; name = "late").starts == Dates.Time(14, 0, 0, 500)
+    @test [x.name for x in filter(Shift; starts__gt = Dates.Time(6)) |> order_by("starts")] == ["early", "late"]
+    @test [x.name for x in filter(Shift; length__lt = Hour(1))] == ["late"] && get(Shift; length = Minute(510)).name == "early"
+    @test aggregate(filter(Shift; length__isnull = false); total = Sum(:length))[:total] == Hour(9) + Minute(15)
+
+    # arithmetic: datetime + duration, datetime - datetime
+    ends = Dict(r[:name] => r[:ends] for r in values(annotate(filter(Shift; length__isnull = false); ends = F(:opened) + F(:length)), :name))
+    @test ends["early"] == DateTime(2026, 3, 1, 15, 0) && ends["late"] == DateTime(2026, 3, 2, 0, 35)
+    @test [x.name for x in filter(Shift; opened__lt = F(:opened) + Value(Hour(1)), length__isnull = false) |> order_by("name")] == ["early", "late"]
+    @test count(filter(Shift; opened__gt = Value(DateTime(2026, 3, 2)) - F(:length))) == 1
+    took = only(values(annotate(filter(Shift; name = "early"); took = Value(DateTime(2026, 3, 1, 8, 0)) - F(:opened)), :name))[:took]
+    @test took == Hour(1) + Minute(30)
+    update!(filter(Shift; name = "late"); length = F(:length) + Value(Minute(15)))
+    @test get(Shift; name = "late").length == Hour(1)
+
+    # forms, fixtures, display
+    f = ModelForm(Shift; fields = [:name, :starts, :length], data = Dict("name" => "x", "starts" => "07:15", "length" => "1 day, 1:00:00"))
+    @test is_valid(f) && cleaned_data(f)[:starts] == Dates.Time(7, 15) && cleaned_data(f)[:length] == Day(1) + Hour(1)
+    bad = ModelForm(Shift; fields = [:name, :starts, :length], data = Dict("name" => "x", "starts" => "25:00", "length" => "soon"))
+    @test !is_valid(bad) && bad.errors[:starts] == ["Enter a valid time."] && bad.errors[:length] == ["Enter a valid duration."]
+    @test occursin("type=\"time\"", Juango.widget_html(ModelForm(Shift; fields = [:starts])[:starts]))
+    @test occursin("value=\"8:30:00\"", Juango.widget_html(ModelForm(Shift; instance = s, fields = [:length])[:length]))
+    js = Juango.serialize(:json, filter(Shift; name = "early"))
+    @test occursin("\"starts\":\"06:30:00\"", js) && occursin("\"length\":\"08:30:00\"", js)
+    back = only(Juango.deserialize(:json, js)).object
+    @test back.starts == Dates.Time(6, 30) && back.length == Hour(8) + Minute(30)
+    @test render(Template("{{ s.starts }} {{ s.starts|time:\"H:i\" }} {{ s.length }}"), Dict("s" => s)) == "06:30:00 06:30 8:30:00"
+end

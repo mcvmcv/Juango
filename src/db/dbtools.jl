@@ -126,6 +126,7 @@ function field_for(col)
     m = match(r"^(?:character varying|varchar|nvarchar|char|character)\s*(?:\((\d+)\))?", t)
     m !== nothing && return "CharField(max_length = $(something(col.max_length, m[1] === nothing ? nothing : parse(Int, m[1]), 255)))", ""
     occursin(r"^tinyint\(1\)|^bool", t) && return "BooleanField()", ""
+    t == "interval" && return "DurationField()", ""               # before "int"
     occursin(r"int|serial", t) && return "IntegerField()", ""
     occursin(r"^(text|clob|longtext|mediumtext|tinytext|citext)", t) && return "TextField()", ""
     if occursin(r"^(numeric|decimal)", t)
@@ -137,6 +138,7 @@ function field_for(col)
     occursin(r"real|double|float|numeric|decimal", t) && return "FloatField()", ""
     occursin(r"^timestamp|^datetime", t) && return "DateTimeField()", ""
     t == "date" && return "DateField()", ""
+    occursin(r"^time(\(\d\))?( without time zone)?$", t) && return "TimeField()", ""
     occursin(r"^json", t) && return "JSONField()", ""
     t == "uuid" && return "UUIDField()", ""
     "TextField()", "  # TODO: check the type (was $(t))"

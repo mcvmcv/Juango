@@ -545,3 +545,11 @@ msgid "Ensure that there are no more than %(max)s digit before the decimal point
 msgid_plural "Ensure that there are no more than %(max)s digits before the decimal point."
 msgstr[0] "Bitte geben Sie nicht mehr als %(max)s Ziffer vor dem Komma ein."
 msgstr[1] "Bitte geben Sie nicht mehr als %(max)s Ziffern vor dem Komma ein."
+
+#: forms/forms.jl
+msgid "Enter a valid time."
+msgstr "Bitte eine gültige Uhrzeit eingeben."
+
+#: forms/forms.jl
+msgid "Enter a valid duration."
+msgstr "Bitte eine gültige Zeitspanne eingeben."

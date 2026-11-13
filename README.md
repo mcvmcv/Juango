@@ -199,6 +199,26 @@ round(dec"2.675"; digits = 2)                            # dec"2.68" (half to ev
 - **Databases.** Postgres uses `NUMERIC(p, s)` and MySQL/MariaDB `DECIMAL(p, s)`, both exact. SQLite has no exact decimal type. Its `NUMERIC` column stores values as doubles (about 15 significant digits), which is enough for amounts of money. `Sum`, `Min`, `Max` and arithmetic on decimal fields return Decimals. Other computed numbers (`Avg` of an integer field, for example) are `Float64` as before.
 - **Output.** Fixtures store decimals as strings (`"4.95"`), as Django does. Templates print them exactly, including `floatformat`, `localize` and `intcomma`. `JsonResponse` writes them as JSON numbers.
 
+#### Times of day and durations
+
+```julia
+@model struct Shift
+    starts = TimeField()                       # Dates.Time; auto_now / auto_now_add work too
+    length = DurationField()                   # Hour(8) + Minute(30), read back as a CompoundPeriod
+    opened = DateTimeField()
+end
+
+filter(Shift; starts__gte = Dates.Time(9), length__lt = Hour(1))
+annotate(Shift; ends = F(:opened) + F(:length))                   # a datetime
+filter(Shift; opened__gt = Value(now()) - F(:length))              # datetimes minus durations
+annotate(Shift; took = F(:closed) - F(:opened))                    # datetime - datetime: a duration
+aggregate(objects(Shift); total = Sum(:length))
+```
+
+- **Durations** are fixed `Period`s or `CompoundPeriod`s, and come back as a canonical `CompoundPeriod` (`Day(1) + Hour(2)`). Months and years have no fixed length, so a duration can't hold them, as Python's `timedelta` can't.
+- **Storage.** Postgres stores `TIME` and `INTERVAL` and does the arithmetic natively. MySQL/MariaDB use `TIME(6)`, SQLite stores times as text, and both store durations as a number of microseconds. `datetime ± duration` and `datetime - datetime` get the right SQL on each database.
+- **Text forms.** Templates and forms show durations as Django does (`1 day, 2:03:00`), and form inputs accept that, `1 02:03:00`, a number of seconds, or ISO 8601 (`P1DT2H`). Fixtures write times as `06:30:00` and durations as `1 02:03:00`.
+
 #### Many-to-many
 
 ```julia

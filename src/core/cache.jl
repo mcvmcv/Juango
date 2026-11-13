@@ -144,7 +144,7 @@ raw_clear(::DummyCache) = nothing
 #     nothing, Bool, Int64, Float64, String          as JSON
 #     Vector, Dict, Tuple, NamedTuple, Pair, Set      recursively (element types kept when simple)
 #     Symbol, Char, other integer and float types, BigInt, Rational, NaN/Inf
-#     Date, DateTime, Time, ZonedDateTime, UUID, Decimal, SafeString, Vector{UInt8}
+#     Date, DateTime, Time, ZonedDateTime, periods, UUID, Decimal, SafeString, Vector{UInt8}
 #     model instances (their field values, as the database stores them) and HttpResponse
 #
 # Anything else is an error when it's stored. `:serializer => :serialization` in a cache's
@@ -164,6 +164,9 @@ const JT = "__jt"      # the tag key; a plain Dict that has this key is stored a
 const CACHE_ELTYPES = Dict{String,Type}(string(T) => T for T in
     (Any, Int64, Float64, String, Bool, Symbol, Date, DateTime, Dates.Time, UUID, Nothing))
 cache_eltype(T) = haskey(CACHE_ELTYPES, string(T)) && CACHE_ELTYPES[string(T)] === T ? string(T) : "Any"
+
+const CACHE_PERIODS = Dict{String,Type}(string(nameof(T)) => T for T in (Dates.Year, Dates.Quarter, Dates.Month, Dates.Week, Dates.Day,
+    Dates.Hour, Dates.Minute, Dates.Second, Dates.Millisecond, Dates.Microsecond, Dates.Nanosecond))
 
 const CACHE_INT_TYPES = Dict{String,Type}(string(T) => T for T in
     (Int8, Int16, Int32, Int128, UInt8, UInt16, UInt32, UInt64, UInt128))
@@ -191,6 +194,8 @@ cache_encode(v::TimeZones.ZonedDateTime) =
     Dict{String,Any}(JT => "zdt", "v" => string(DateTime(TimeZones.astimezone(v, CACHE_UTC))), "tz" => string(TimeZones.timezone(v)))
 cache_encode(v::UUID) = tagged("uuid", string(v))
 cache_encode(v::Decimal) = tagged("decimal", string(v))
+cache_encode(v::Dates.Period) = Dict{String,Any}(JT => "period", "t" => string(nameof(typeof(v))), "v" => Dates.value(v))
+cache_encode(v::Dates.CompoundPeriod) = tagged("periods", Any[cache_encode(p) for p in v.periods])
 cache_encode(v::SafeString) = tagged("safe", v.s)
 cache_encode(v::Vector{UInt8}) = tagged("bytes", base64encode(v))
 function cache_encode(v::AbstractVector)
@@ -252,6 +257,8 @@ function cache_decode(d::AbstractDict)
     tag == "zdt" && return TimeZones.astimezone(TimeZones.ZonedDateTime(DateTime(v), CACHE_UTC), TimeZones.TimeZone(d["tz"]))
     tag == "uuid" && return UUID(v)
     tag == "decimal" && return parse(Decimal, v)
+    tag == "period" && return CACHE_PERIODS[d["t"]](d["v"])
+    tag == "periods" && return Dates.CompoundPeriod(Dates.Period[cache_decode(p) for p in v])
     tag == "safe" && return SafeString(v)
     tag == "bytes" && return base64decode(v)
     tag == "vec" && return typed_vector(d["t"], Any[cache_decode(x) for x in v])

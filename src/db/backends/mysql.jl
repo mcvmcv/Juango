@@ -60,9 +60,13 @@ function column_type(::MySQLBackend, kind::Symbol, max_length)
     kind === :uuid && return "CHAR(36)"
     kind === :citext && return "VARCHAR($(something(max_length, 255)))"
     kind === :decimal && return "DECIMAL(65, 30)"
+    kind === :time && return "TIME(6)"
+    kind === :duration && return "BIGINT"
     max_length === nothing ? "LONGTEXT" : "VARCHAR($max_length)"
 end
 array_column_type(::MySQLBackend, of, max_length) = "JSON"
+encode_duration(::MySQLBackend, us::Integer) = us
+duration_param_sql(::MySQLBackend) = "?"
 decimal_column_type(::MySQLBackend, max_digits, decimal_places) = "DECIMAL($max_digits, $decimal_places)"
 autoincrement_pk(b::MySQLBackend) = quote_name(b, "id") * " BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY"
 "Type names CAST accepts."

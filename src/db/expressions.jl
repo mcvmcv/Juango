@@ -242,6 +242,7 @@ value_sql(b, v::Bool) = (sql_literal(b, adapt_param(b, v)), Any[])
 value_sql(b, v::Integer) = (string(v), Any[])
 value_sql(b, v::AbstractFloat) = (isfinite(v) ? repr(Float64(v)) : throw(ArgumentError("non-finite value $v")), Any[])
 value_sql(b, ::Nothing) = ("NULL", Any[])
+value_sql(b, v::Duration) = (duration_param_sql(b), Any[v])
 value_sql(b, v) = ("?", Any[v])
 
 compile_expr(c::SQLCompiler, e::Value) = value_sql(backend(), e.value)
@@ -265,8 +266,70 @@ end
 function compile_expr(c::SQLCompiler, e::CombinedExpression)
     a, pa = compile_expr(c, e.lhs)
     b, pb = compile_expr(c, e.rhs)
+    if e.op in ("+", "-")
+        bk = backend()
+        ka, kb = temporal_kind(c, e.lhs), temporal_kind(c, e.rhs)
+        e.lhs isa Value && ka in (:datetime, :date) && (a = temporal_value_sql(bk, ka, a))
+        e.rhs isa Value && kb in (:datetime, :date) && (b = temporal_value_sql(bk, kb, b))
+        sql = temporal_sql(bk, e.op, ka, a, kb, b)
+        sql === nothing || return sql, vcat(pa, pb)
+    end
     "($a $(e.op) $b)", vcat(pa, pb)
 end
+
+# --- dates, times and durations in expressions ----------------------------------------------------------
+#
+#     annotate(Event; ends = F(:start) + F(:length))            # a datetime
+#     filter(Event; finish__gt = F(:start) + Value(Hour(2)))
+#     annotate(Event; took = F(:finish) - F(:start))            # a duration
+#
+# PostgreSQL does this natively (timestamps and intervals); MySQL and SQLite store durations as
+# microseconds, so they get their own SQL.
+
+"`:datetime`, `:date`, `:time` or `:duration` when an expression has that type, else nothing."
+temporal_kind(c::SQLCompiler, e) = nothing
+function temporal_kind(c::SQLCompiler, e::F)
+    if !occursin("__", e.name) && haskey(c.annotations, Symbol(e.name))
+        a = c.annotations[Symbol(e.name)]
+        return is_filtered_relation(a) ? nothing : temporal_kind(c, a)
+    end
+    f = try
+        last(resolve_path(c, c.base, c.T, e.name))
+    catch
+        nothing
+    end
+    f isa Field && f.kind in (:datetime, :date, :time, :duration) ? f.kind : nothing
+end
+temporal_kind(c::SQLCompiler, e::Value) = e.value isa Union{DateTime,TimeZones.ZonedDateTime} ? :datetime :
+    e.value isa Date ? :date : e.value isa Dates.Time ? :time : e.value isa Duration ? :duration : nothing
+function temporal_kind(c::SQLCompiler, e::Aggregate)
+    e.arg === nothing && return nothing
+    k = temporal_kind(c, e.arg)
+    k === :duration && e.func in ("SUM", "AVG", "MIN", "MAX") ? k : k !== nothing && e.func in ("MIN", "MAX") ? k : nothing
+end
+function temporal_kind(c::SQLCompiler, e::CombinedExpression)
+    ka, kb = temporal_kind(c, e.lhs), temporal_kind(c, e.rhs)
+    dt(k) = k in (:datetime, :date)
+    e.op in ("+", "-") && dt(ka) && kb === :duration && return :datetime
+    e.op == "+" && ka === :duration && dt(kb) && return :datetime
+    e.op == "-" && dt(ka) && dt(kb) && return :duration
+    ka === :duration && (kb === :duration || (kb === nothing && e.op in ("*", "/"))) && return :duration
+    kb === :duration && ka === nothing && e.op == "*" && return :duration
+    nothing
+end
+
+"SQL for `a op b` when it adds a duration to a datetime or subtracts datetimes, else nothing."
+function temporal_sql(b::DatabaseBackend, op, ka, a, kb, bsql)
+    dt(k) = k in (:datetime, :date)
+    dt(ka) && kb === :duration && return datetime_add_sql(b, op, a, bsql)
+    op == "+" && ka === :duration && dt(kb) && return datetime_add_sql(b, "+", bsql, a)
+    op == "-" && dt(ka) && dt(kb) && return datetime_diff_sql(b, ka, a, kb, bsql)
+    nothing
+end
+"A datetime or date parameter in date arithmetic, cast so PostgreSQL knows its type."
+temporal_value_sql(b::DatabaseBackend, kind, sql) = "CAST($sql AS $(cast_type(b, kind)))"
+datetime_add_sql(::DatabaseBackend, op, a, d) = "($a $op $d)"
+datetime_diff_sql(::DatabaseBackend, ka, a, kb, b) = ka === :date && kb === :date ? "(($a - $b) * INTERVAL '1 day')" : "($a - $b)"
 
 function compile_expr(c::SQLCompiler, e::Func)
     b = backend()
@@ -419,6 +482,8 @@ The positional form (`:count`, `:sum`, `:avg`, `:min`, `:max`) returns a single 
 """
 aggregate(qs::QuerySet; kw...) = in_db(() -> aggregate_here(qs; kw...), qs)
 
+const DATETIME_RESULT = Field(:datetime)       # converts computed datetimes like a DateTimeField's values
+
 "The DecimalField an expression's values come from (`F(:price)`, `Sum(:price)`, `F(:price) * 2`), else nothing."
 decimal_source(@nospecialize(T), e) = nothing
 function decimal_source(@nospecialize(T), e::F)
@@ -439,6 +504,11 @@ numbers as Float64.
 """
 function expr_value(@nospecialize(T), e, v)
     v === nothing && return nothing
+    if e isa Union{CombinedExpression,Aggregate}
+        k = try temporal_kind(SQLCompiler(T), e) catch; nothing end
+        k === :duration && return to_duration(v)
+        k === :datetime && e isa CombinedExpression && return from_db(DATETIME_RESULT, v)
+    end
     f = decimal_source(T, e)
     if f !== nothing
         # SQLite computes with doubles: keep the 15 digits they hold, not the binary noise

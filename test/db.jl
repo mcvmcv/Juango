@@ -255,6 +255,9 @@ end
     @test occursin("rating = FloatField(null = true, blank = true)", code)
     @test_throws ArgumentError inspectdb(["no_such_table"])
     @test occursin("amount = DecimalField(max_digits = 8, decimal_places = 2)", inspectdb(["ledger"]))
+    shift = inspectdb(["shift"])
+    (IS_POSTGRES || IS_MYSQL) && @test occursin("starts = TimeField()", shift)
+    IS_POSTGRES && @test occursin("length = DurationField(null = true, blank = true)", shift)
     @test "topic" in Juango.introspect_tables() && !("juango_migrations" in Juango.introspect_tables())
     # the generated models work against the existing tables
     m = Module(:Inspected)

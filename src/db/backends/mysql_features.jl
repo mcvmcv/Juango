@@ -1,5 +1,10 @@
 # --- JSON, arrays, ranges and full-text on MySQL/MariaDB (JSON columns) --------------------------------
 
+# durations are microseconds
+temporal_value_sql(::MySQLBackend, kind, sql) = sql
+datetime_add_sql(::MySQLBackend, op, a, d) = (op == "+" ? "DATE_ADD" : "DATE_SUB") * "($a, INTERVAL ($d) MICROSECOND)"
+datetime_diff_sql(::MySQLBackend, ka, a, kb, b) = "TIMESTAMPDIFF(MICROSECOND, $b, $a)"
+
 encode_array(::MySQLBackend, v) = JSON.json(json_scalar_tree(collect(v)))
 encode_range(::MySQLBackend, r::ValueRange) =
     JSON.json(Dict("lower" => json_scalar(r.lower), "upper" => json_scalar(r.upper), "bounds" => r.bounds))

@@ -186,6 +186,12 @@ function to_julia(fld::Field, raw)
     elseif k === :date
         v = tryparse(Date, s, dateformat"yyyy-mm-dd")
         return v, v === nothing ? gettext("Enter a valid date.") : nothing
+    elseif k === :time
+        v = parse_time(s)
+        return v, v === nothing ? gettext("Enter a valid time.") : nothing
+    elseif k === :duration
+        us = try parse_duration_us(s) catch; nothing end
+        return us === nothing ? (nothing, gettext("Enter a valid duration.")) : (duration_from_us(us), nothing)
     elseif k === :json || k === :hstore
         v = try
             plainjson(JSON.parse(s))
@@ -450,7 +456,7 @@ errors_html(errs) = isempty(errs) ? "" :
 
 input_type(fld::Field) = widget_kind(fld.widget) === :password ? "password" : widget_kind(fld.widget) === :hidden ? "hidden" :
     fld.kind === :email ? "email" : fld.kind === :url ? "url" : fld.kind in (:int, :float, :decimal) ? "number" :
-    fld.kind === :datetime ? "datetime-local" : fld.kind === :date ? "date" : "text"
+    fld.kind === :datetime ? "datetime-local" : fld.kind === :date ? "date" : fld.kind === :time ? "time" : "text"
 
 function widget_html(bf::BoundField)
     f, fld = bf.form, bf.field
@@ -513,6 +519,7 @@ function widget_html(bf::BoundField)
     t = input_type(fld)
     extra = fld.max_length !== nothing && t in ("text", "email", "url", "password") ? " maxlength=\"$(fld.max_length)\"" : ""
     t == "number" && fld.kind === :float && (extra *= " step=\"any\"")
+    t == "time" && (extra *= " step=\"1\"")                  # seconds too
     t == "number" && fld.kind === :decimal && (extra *= " step=\"" * decimal_step(fld.decimal_places) * "\"")
     v = (t == "password" || val === nothing) ? "" : " value=\"" * escape_html(display_string(val)) * "\""
     "<input type=\"$t\"$attrs$extra$v>"

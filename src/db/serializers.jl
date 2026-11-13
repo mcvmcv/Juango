@@ -29,6 +29,8 @@ function serial_value(f::Field, v)
     v isa TimeZones.ZonedDateTime && return string(TimeZones.astimezone(v, UTC_TZ))
     v isa Date && return string(v)
     v isa UUID && return string(v)
+    v isa Dates.Time && return time_string(v)
+    v isa Duration && return duration_string(v; serial = true)   # Django's "1 02:00:00"
     v isa Decimal && return string(v)                  # as Django: "19.90", exactly
     v isa FieldFile && return v.name
     f.kind === :geometry && return ewkt(v)

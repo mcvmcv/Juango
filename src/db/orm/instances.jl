@@ -38,7 +38,7 @@ function save_here!(obj::T) where {T<:Model}
     for f in all_fields(T)
         a = attname(f)
         if f.auto_now || (f.auto_now_add && (data[:id] === nothing || get(data, a, missing) === nothing))
-            data[a] = f.kind === :date ? Date(ts isa TimeZones.ZonedDateTime ? make_naive(ts) : ts) : ts
+            data[a] = auto_now_value(f, ts)
         end
     end
     created = data[:id] === nothing
@@ -160,6 +160,13 @@ end
 const EMAIL_RE = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 const SLUG_RE = r"^[-a-zA-Z0-9_]+$"
 const URL_RE = r"^https?://[^\s/$.?#].[^\s]*$"i
+
+"The value an `auto_now` field gets: the timestamp, or its date or time in the current time zone."
+function auto_now_value(f::Field, ts)
+    f.kind in (:date, :time) || return ts
+    local_ = ts isa TimeZones.ZonedDateTime ? make_naive(ts) : ts
+    f.kind === :date ? Date(local_) : Dates.Time(local_)
+end
 
 "The `step` of a number input for a decimal with `places` digits after the point (\"0.01\")."
 decimal_step(places) = places === nothing ? "any" : places == 0 ? "1" : "0." * "0"^(places - 1) * "1"

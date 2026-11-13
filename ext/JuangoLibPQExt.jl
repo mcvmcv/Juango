@@ -9,6 +9,7 @@ function Juango.pg_connect(url::String)
     # Silence NOTICEs such as "relation already exists, skipping" from CREATE ... IF NOT EXISTS.
     LibPQ.execute(conn, "SET client_min_messages TO warning")
     LibPQ.execute(conn, "SET TIME ZONE 'UTC'")          # naive timestamps are sent and read as UTC
+    LibPQ.execute(conn, "SET intervalstyle = 'iso_8601'")   # intervals read back as P1DT2H (DurationField)
     conn
 end
 
@@ -32,7 +33,8 @@ function parse_numeric(s::AbstractString)
     occursin(r"^-?\d+$", s) ? something(tryparse(Int, s), parse(BigInt, s)) : parse(Juango.Decimal, s)
 end
 const TYPE_MAP = Dict{Symbol,Type}(:numeric => String, :jsonb => String, :json => String, :uuid => String,
-                                   :int8range => String, :daterange => String, :tsrange => String)
+                                   :int8range => String, :daterange => String, :tsrange => String,
+                                   :interval => String, :time => String)
 
 # Row count for INSERT/UPDATE/DELETE; 0 for commands without one (BEGIN, CREATE, SET...).
 affected_rows(res) = try

@@ -63,12 +63,15 @@ adapt_param(::SQLiteBackend, x::DateTime) = Dates.format(x, "yyyy-mm-ddTHH:MM:SS
 adapt_param(::SQLiteBackend, x::Date) = string(x)
 
 function column_type(::SQLiteBackend, kind::Symbol, max_length)
-    kind in (:int, :bool, :fk) && return "INTEGER"
+    kind in (:int, :bool, :fk, :duration) && return "INTEGER"
     kind === :float && return "REAL"
     kind === :citext && return "TEXT COLLATE NOCASE"
     kind === :decimal && return "DECIMAL"      # NUMERIC affinity: compares as numbers
     "TEXT"
 end
+
+encode_duration(::SQLiteBackend, us::Integer) = us
+duration_param_sql(::SQLiteBackend) = "?"
 
 autoincrement_pk(b::SQLiteBackend) = quote_name(b, "id") * " INTEGER PRIMARY KEY AUTOINCREMENT"
 

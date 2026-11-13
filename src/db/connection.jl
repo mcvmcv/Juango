@@ -105,6 +105,12 @@ adapt_param(::DatabaseBackend, x::Symbol) = string(x)
 adapt_param(::DatabaseBackend, x::AbstractString) = String(x)
 adapt_param(::DatabaseBackend, x::UUID) = string(x)
 adapt_param(::DatabaseBackend, x::Decimal) = string(x)
+adapt_param(::DatabaseBackend, x::Dates.Time) = time_string(x)
+adapt_param(b::DatabaseBackend, x::Duration) = encode_duration(b, duration_us(x))
+"A duration as a parameter: an interval literal (PostgreSQL), else microseconds."
+encode_duration(::DatabaseBackend, us::Integer) = "$us microseconds"
+"SQL for a duration parameter, cast so the database knows its type."
+duration_param_sql(::DatabaseBackend) = "CAST(? AS INTERVAL)"
 adapt_param(::DatabaseBackend, x) = x
 
 "Column type for an ORM field kind (`:int`, `:bool`, `:fk`, `:float`, `:datetime`, `:date`, `:char`, `:text`, ...)."
@@ -122,6 +128,8 @@ function column_type(::DatabaseBackend, kind::Symbol, max_length)
     kind === :daterange && return "DATERANGE"
     kind === :datetimerange && return "TSRANGE"
     kind === :decimal && return "NUMERIC"
+    kind === :time && return "TIME"
+    kind === :duration && return "INTERVAL"
     max_length === nothing ? "TEXT" : "VARCHAR($max_length)"
 end
 "Column type of a decimal (NUMERIC(p, s) by default)."

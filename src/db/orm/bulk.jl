@@ -13,7 +13,7 @@ function prepare_for_insert!(objs, T)
         for f in all_fields(T)
             a = attname(f)
             if f.auto_now || (f.auto_now_add && get(data, a, nothing) === nothing)
-                data[a] = f.kind === :date ? Date(ts isa TimeZones.ZonedDateTime ? make_naive(ts) : ts) : ts
+                data[a] = auto_now_value(f, ts)
             end
         end
         data[:id] === nothing && pk_kind(T) === :uuid && (data[:id] = uuid4())
