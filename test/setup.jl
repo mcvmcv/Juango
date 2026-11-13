@@ -402,7 +402,7 @@ const urlpatterns = [
     path("files/<path:rest>", (req; rest) -> HttpResponse(rest); name = "files"),
 ]
 
-configure!(DATABASE = TEST_DATABASE, ROOT_URLCONF = urlpatterns, TEMPLATE_DIRS = [TPL], TEMPLATE_CACHE_CHECK_MTIME = true,
+configure!(DATABASE = TEST_DATABASE, ROOT_URLCONF = urlpatterns, TEMPLATE_DIRS = [TPL], TEMPLATE_CACHE_CHECK_MTIME = true, TEMPLATE_COMPILE = true,
            PASSWORD_ITERATIONS = 1000, DEBUG = true)
 migrate(verbose = false)
 
@@ -410,7 +410,17 @@ Admin.register!(Author; list_display = [:name, :email], search_fields = [:name])
 Admin.register!(Article; list_display = [:title, :author, :status, :published, "Len" => a -> length(a.body)],
                 search_fields = [:title, :body], list_filter = [:published, :status, :author])
 
-tr(src, ctx = Dict()) = render(Template(src), ctx)
+# Templates are compiled throughout the suite (as in production); `tr` renders interpreted too
+# and checks both give the same output.
+function tr(src, ctx = Dict())
+    t = Template(src)
+    out = render(t, ctx)
+    old = Juango.COMPILE_TEMPLATES[]          # not configure!: that would reset caches between the renders
+    Juango.COMPILE_TEMPLATES[] = false
+    interp = try render(t, ctx) finally Juango.COMPILE_TEMPLATES[] = old end
+    out == interp || occursin("lorem", src) || error("compiled and interpreted renders differ for $(repr(src)):\n  compiled:    $(repr(out))\n  interpreted: $(repr(interp))")
+    out
+end
 
 # ---------------------------------------------------------------------------------------------
 

@@ -106,8 +106,10 @@ function eval_cond(c::CondOp, ctx)
     op === :not && return !truthy(eval_cond(c.args[1], ctx))
     op === :and && return truthy(eval_cond(c.args[1], ctx)) && truthy(eval_cond(c.args[2], ctx))
     op === :or && return truthy(eval_cond(c.args[1], ctx)) || truthy(eval_cond(c.args[2], ctx))
-    a = eval_cond(c.args[1], ctx)
-    b = eval_cond(c.args[2], ctx)
+    compare(op, eval_cond(c.args[1], ctx), eval_cond(c.args[2], ctx))
+end
+"A comparison in `{% if %}`: `==`, `!=`, `in`, `not in`, `is`, `is not`, `<`, `>`, `<=`, `>=`."
+function compare(op::Symbol, a, b)
     op === :(==) && return value_eq(a, b)
     op === :(!=) && return !value_eq(a, b)
     op === :in && return value_in(a, b)
@@ -158,6 +160,27 @@ function render!(io::IO, n::IfNode, ctx::Context)
             return
         end
     end
+end
+
+# Compiled conditions: `and`/`or`/`not` become Julia's, values and comparisons are inlined.
+gen_cond(c::CondValue) = (v = gensym("c"); :(let $v = $(gen_fe(c.fe)); $v === $(GlobalRef(_M, :UNDEF)) ? nothing : $v end))
+function gen_cond(c::CondOp)
+    t(x) = :($(GlobalRef(_M, :truthy))($(gen_cond(x))))
+    c.op === :not && return :(!$(t(c.args[1])))
+    c.op === :and && return :($(t(c.args[1])) && $(t(c.args[2])))
+    c.op === :or && return :($(t(c.args[1])) || $(t(c.args[2])))
+    :($(GlobalRef(_M, :compare))($(QuoteNode(c.op)), $(gen_cond(c.args[1])), $(gen_cond(c.args[2]))))
+end
+
+function gen_node(n::IfNode)                     # compiled: if / elseif / else
+    ex = nothing
+    for (cond, nodes) in Iterators.reverse(n.branches)
+        body = gen_nodes(nodes)
+        ex = cond === nothing ? body :
+             Expr(:if, :($(GlobalRef(_M, :truthy))($(gen_cond(cond)))),
+                  body, (ex === nothing ? () : (ex,))...)
+    end
+    something(ex, :nothing)
 end
 
 # --- for ------------------------------------------------------------------------------
@@ -215,7 +238,13 @@ function tattr(l::ForLoop, ::Val{S}) where {S}
 end
 Base.getindex(l::ForLoop, k::AbstractString) = getfield(l, Symbol(k))     # forloop["counter"], as with the old Dict
 
-function render!(io::IO, n::ForNode, ctx::Context)
+render!(io::IO, n::ForNode, ctx::Context) =
+    run_for(io, n, ctx, (io, ctx) -> render_nodes(io, n.body, ctx), (io, ctx) -> render_nodes(io, n.empty, ctx))
+gen_node(n::ForNode) =                             # compiled: the body and empty part as closures
+    :($(GlobalRef(@__MODULE__, :run_for))(io, $(QuoteNode(n)), ctx,
+        (io, ctx) -> ($(gen_nodes(n.body)); nothing), (io, ctx) -> ($(gen_nodes(n.empty)); nothing)))
+"A `{% for %}` loop with its body and `{% empty %}` part given as functions `(io, ctx) -> nothing` (compiled or not)."
+function run_for(io::IO, n::ForNode, ctx::Context, body, empty)
     raw = eval_fe(n.iterable, ctx)
     items = if raw isa AbstractDict
         length(n.loopvars) == 1 ? collect(keys(raw)) : collect(pairs(raw))
@@ -224,7 +253,7 @@ function render!(io::IO, n::ForNode, ctx::Context)
     end
     n.reversed && (items = Base.reverse(items))
     if isempty(items)
-        render_nodes(io, n.empty, ctx)
+        empty(io, ctx)
         return
     end
     parent = lookup(ctx, "forloop")
@@ -243,7 +272,7 @@ function render!(io::IO, n::ForNode, ctx::Context)
                     ctx[v] = j <= length(vals) ? vals[j] : nothing
                 end
             end
-            render_nodes(io, n.body, ctx)
+            body(io, ctx)
         end
     end
 end
@@ -303,13 +332,13 @@ function render_block(io::IO, n::BlockNode, ctx::Context)
     with_scope(ctx) do
         if bc === nothing
             ctx["block"] = BlockRef(n, ctx)
-            render_nodes(io, n.nodes, ctx)
+            run_nodes(io, n.nodes, ctx)
         else
             b = pop_block!(bc, n.name)
             b === nothing && (b = n)
             ctx["block"] = BlockRef(b, ctx)
             try
-                render_nodes(io, b.nodes, ctx)
+                run_nodes(io, b.nodes, ctx)
             finally
                 push_block!(bc, n.name, b)
             end
@@ -335,7 +364,7 @@ function render!(io::IO, n::ExtendsNode, ctx::Context)
     if !any(x -> x isa ExtendsNode, parent.nodes)
         add_blocks!(bc, Dict(b.name => b for b in nodes_of_type(BlockNode, parent.nodes)))
     end
-    render_nodes(io, parent.nodes, ctx)
+    run_nodes(io, parent.nodes, ctx)
 end
 
 # --- include --------------------------------------------------------------------------
@@ -379,7 +408,7 @@ function render!(io::IO, n::IncludeNode, ctx::Context)
     ctx.render_ctx = Dict{Symbol,Any}()
     n.only && (ctx.stack = [Dict{String,Any}()])
     try
-        with_scope(() -> render_nodes(io, t.nodes, ctx), ctx, values)
+        with_scope(() -> run_nodes(io, t.nodes, ctx), ctx, values)
     finally
         ctx.stack, ctx.render_ctx = saved_stack, saved_rc
     end

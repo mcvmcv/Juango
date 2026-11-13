@@ -1355,7 +1355,7 @@ const home = cache_page(home_view; timeout = 60)   # whole GET responses, keyed 
 
   `:serializer => :serialization` in a cache's settings uses Julia's `Serialization` instead, which stores any value. Like Django's pickle, it lets anyone who can write to the cache store (the Redis server, the cache table) make the reader construct arbitrary objects, which can lead to running code. It also can't be read by another Julia version. An entry that can't be read counts as a miss and is deleted.
 - **Page caching.** `cache_page` and the per-site `CacheMiddleware` (`CACHE_MIDDLEWARE_SECONDS`) skip responses that set cookies or vary on `Cookie`, so per-user pages aren't shared.
-- **Templates.** Templates are read once and cached when `DEBUG` is off. With `DEBUG` on, they're read again when their files change, as Django's cached loader does. `TEMPLATE_CACHE_CHECK_MTIME = true` or `false` overrides that.
+- **Templates.** Templates are read once and cached when `DEBUG` is off. With `DEBUG` on, they're read again when their files change, as Django's cached loader does. `TEMPLATE_CACHE_CHECK_MTIME = true` or `false` overrides that. With `DEBUG` off, each template is also compiled into a Julia function the first time it's rendered: text, `{% if %}`, `{% for %}` and `{{ variables|filters }}` become plain Julia code, which renders about twice as fast as interpreting the parsed nodes. Other tags (custom ones included) are called as they are. `TEMPLATE_COMPILE = true` or `false` overrides the default.
 - **Sessions.** `SESSION_ENGINE = :cache` keeps sessions in the cache only, and `:cached_db` puts the cache in front of the database. The default is `:db`.
 
 ### Background tasks

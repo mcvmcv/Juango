@@ -378,7 +378,7 @@ function render!(io::IO, n::InclusionTagNode, ctx::Context)
     sub = Context(d; request = ctx.request)
     sub.autoescape = ctx.autoescape
     haskey(d, "csrf_token") || (tok = lookup(ctx, "csrf_token"); tok === UNDEF || (sub["csrf_token"] = tok))
-    render_nodes(io, t.nodes, sub)
+    run_nodes(io, t.nodes, sub)
 end
 
 """

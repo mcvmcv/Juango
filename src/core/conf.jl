@@ -45,6 +45,7 @@ function default_settings()
         :CACHES => Dict("default" => Dict(:backend => :locmem)),
         :CACHE_MIDDLEWARE_SECONDS => 600,
         :TEMPLATE_CACHE_CHECK_MTIME => nothing,        # read templates again when they change (nothing: only with DEBUG)
+        :TEMPLATE_COMPILE => nothing,                  # compile templates into Julia functions (nothing: when DEBUG is off)
         :TEMPLATES => nothing,                         # template engines (nothing: Juango's, with TEMPLATE_DIRS)
         :TEMPLATE_STRING_IF_INVALID => "",             # what unknown variables render as ("%s" is the name)
         :SITE_ID => 1,
@@ -105,15 +106,15 @@ function default_settings()
         :PASSWORD_ITERATIONS => 260_000,
         :SQL_DEBUG => false,
         :MIGRATIONS_DIR => "migrations",
-        :DEFAULT_AUTO_FIELD => :BigAutoField,
-        :REMOTE_USER_HEADER => "Remote-User",
+        :DEFAULT_AUTO_FIELD => :BigAutoField,               # the automatic primary key: AutoField, BigAutoField or SmallAutoField
+        :REMOTE_USER_HEADER => "Remote-User",             # RemoteUserMiddleware's header (set only by your proxy)
         :SILENCED_SYSTEM_CHECKS => String[],           # check ids to leave out ("security.W004", ...)
         :ATOMIC_REQUESTS => false,                     # true (the default database) or database aliases: each view in a transaction
         :HANDLER400 => nothing, :HANDLER403 => nothing, :HANDLER404 => nothing, :HANDLER500 => nothing,   # custom error views
         :FILE_UPLOAD_MAX_MEMORY_SIZE => 2_621_440,     # bigger uploads go to temporary files
         :FILE_UPLOAD_TEMP_DIR => nothing,              # nothing: the system's temporary directory
         :FILE_UPLOAD_PERMISSIONS => 0o644,             # mode of uploaded files saved by FileSystemStorage (nothing: leave it)
-        :FILE_UPLOAD_DIRECTORY_PERMISSIONS => nothing, # mode of directories it creates          # RemoteUserMiddleware's header (set only by your proxy)          # the automatic primary key: AutoField, BigAutoField or SmallAutoField
+        :FILE_UPLOAD_DIRECTORY_PERMISSIONS => nothing, # mode of directories it creates
         :MIGRATION_MODULES => Dict{String,String}(),
         :SITE_NAME => "Juango",
     )

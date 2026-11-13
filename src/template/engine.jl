@@ -481,7 +481,102 @@ function render(t::Template, context = Dict{String,Any}(); request = nothing, au
         end
     end
     ctx = Context([base, to_context_dict(context)], autoescape, Dict{Symbol,Any}(), request)
-    render_nodes(t.nodes, ctx)
+    io = IOBuffer()
+    run_nodes(io, t.nodes, ctx)
+    String(take!(io))
+end
+
+# --- compiled templates --------------------------------------------------------------------------------
+#
+# With TEMPLATE_COMPILE (default: when DEBUG is off), each list of nodes a template renders (its
+# body, its blocks, an included or parent template) becomes a Julia function the first time it's
+# rendered: text is written directly, `{% if %}` and `{% for %}` become Julia branches and loops,
+# and every other node is a call to its `render!` method on a constant node, so nothing is
+# dispatched at run time. Nodes without a generator (custom tags included) keep their own
+# `render!`, so behaviour and error messages (template name and line) are the same as when
+# interpreting.
+
+"Where compiled templates' functions live."
+module CompiledTemplates end
+
+# Compiled functions by node list identity (objectid => (weak ref to the list, function)): the
+# weak ref lets a template made from a string at run time be collected, and tells a reused
+# objectid from the list it was compiled for. Entries for collected lists are swept now and then.
+const COMPILED_NODES = Dict{UInt,Tuple{WeakRef,Any}}()
+const COMPILED_LOCK = ReentrantLock()
+const COMPILED_SWEEP = Ref(1024)
+"Whether templates are compiled: TEMPLATE_COMPILE, or by default when DEBUG is off (kept for speed)."
+const COMPILE_TEMPLATES = Ref(false)
+push!(SETTINGS_CHANGED_HOOKS, () -> (COMPILE_TEMPLATES[] = something(get(settings, :TEMPLATE_COMPILE, nothing), !settings.DEBUG)))
+compile_templates() = COMPILE_TEMPLATES[]
+
+"Render a list of nodes: through its compiled function when templates are compiled."
+function run_nodes(io::IO, nodes::Vector{Node}, ctx::Context)
+    compile_templates() || return render_nodes(io, nodes, ctx)
+    Base.invokelatest(compiled_function(nodes), io, ctx)
+    nothing
+end
+
+"The compiled function `(io, ctx) -> nothing` for a node list, compiling it the first time."
+function compiled_function(nodes::Vector{Node})
+    id = objectid(nodes)
+    lock(COMPILED_LOCK) do
+        e = get(COMPILED_NODES, id, nothing)
+        e !== nothing && e[1].value === nodes && return e[2]
+        if length(COMPILED_NODES) >= COMPILED_SWEEP[]
+            filter!(kv -> kv[2][1].value !== nothing, COMPILED_NODES)
+            COMPILED_SWEEP[] = max(1024, 2 * length(COMPILED_NODES))
+        end
+        f = Core.eval(CompiledTemplates, :((io::IO, ctx) -> ($(gen_nodes(nodes)); nothing)))
+        COMPILED_NODES[id] = (WeakRef(nodes), f)
+        f
+    end
+end
+
+"The Julia code that renders `nodes` (with `io` and `ctx` in scope)."
+gen_nodes(nodes) = Expr(:block, Any[gen_node(n) for n in nodes]...)
+gen_node(n::TextNode) = :($(GlobalRef(Base, :write))(io, $(n.s)))
+gen_node(n::Node) = :($(GlobalRef(@__MODULE__, :render!))(io, $(QuoteNode(n)), ctx))   # a constant node: static dispatch
+
+# `{{ var|filter:arg }}`: the variable's parts and the filter functions are constants, so the
+# lookups and filter calls aren't looped over or dispatched through `Function` fields.
+const _M = @__MODULE__
+gen_var(l::Literal) = QuoteNode(l.value)
+function gen_var(v::Variable)
+    ex = :($(GlobalRef(_M, :lookup))(ctx, $(v.parts[1])))
+    length(v.parts) == 1 && return ex
+    val = gensym("v")
+    body = Any[:($val = $ex)]
+    for i in 2:length(v.parts)
+        push!(body, :($val === $(GlobalRef(_M, :UNDEF)) || ($val = $(GlobalRef(_M, :getattr))($val, $(v.parts[i]), $(QuoteNode(v.syms[i])), $(v.vals[i]), $(v.idx[i])))))
+    end
+    push!(body, val)
+    Expr(:let, Expr(:block), Expr(:block, body...))
+end
+function gen_fe(fe::FilterExpr)
+    val = gensym("val")
+    body = Any[:($val = $(gen_var(fe.base))), :($val === $(GlobalRef(_M, :UNDEF)) && ($val = nothing))]
+    for (f, arg) in fe.filters
+        a = gensym("arg")
+        push!(body, arg === nothing ? :($a = nothing) :
+                    :($a = $(gen_var(arg)); $a === $(GlobalRef(_M, :UNDEF)) && ($a = nothing)))
+        call = f.needs_autoescape ? :($(f.fn)($val, $a, ctx.autoescape)) : :($(f.fn)($val, $a))
+        if f.is_safe
+            push!(body, :($val = $(GlobalRef(_M, :keep_safe))($val isa $(GlobalRef(_M, :SafeString)), $call)))
+        else
+            push!(body, :($val = $call))
+        end
+    end
+    push!(body, val)
+    Expr(:let, Expr(:block), Expr(:block, body...))
+end
+keep_safe(was_safe::Bool, v) = was_safe && v isa AbstractString ? SafeString(v) : v
+gen_node(n::VarNode) = quote
+    if isempty($(GlobalRef(_M, :STRING_IF_INVALID))[])
+        $(GlobalRef(_M, :write_value))(io, $(gen_fe(n.fe)), ctx.autoescape)
+    else
+        $(GlobalRef(_M, :render!))(io, $(QuoteNode(n)), ctx)
+    end
 end
 
 # --- loaders --------------------------------------------------------------------------

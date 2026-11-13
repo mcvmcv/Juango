@@ -75,6 +75,7 @@ function precompile_workload()
         lock(() -> empty!(CT_CACHE), CT_LOCK)
         lock(() -> empty!(CACHE_INSTANCES), CACHE_INSTANCES_LOCK)
         lock(() -> empty!(REVERSE_CACHE), REVERSE_LOCK)
+        lock(() -> empty!(COMPILED_NODES), COMPILED_LOCK)  # compiled templates (the generators stay precompiled)
         rm(tdir; recursive = true, force = true)
     end
     nothing
