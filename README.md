@@ -91,6 +91,8 @@ count(ann.posts)                 # reverse relation
 filter(Post; author__name="Ann", title__icontains="hel") |> order_by("-created")
 filter(Post, Q(status="p") | Q(published=true))
 filter(Post, Q(container__isnull=true) ⊻ Q(material__isnull=true))   # xor: an odd number true (also in CheckConstraints)
+order_by(Post, Desc(:published_at; nulls_last = true), "title")   # expressions too; NULLs placed alike on every database
+values_list(Event, :data__run; flat = true)                        # a key inside a JSON field (also values, order_by)
 exclude(Post; status="d")[1:10]  # slicing → LIMIT/OFFSET
 get(Post; slug="hello")          # throws DoesNotExist / MultipleObjectsReturned
 update!(filter(Post; author=ann); published=true)

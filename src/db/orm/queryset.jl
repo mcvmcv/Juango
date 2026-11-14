@@ -7,7 +7,7 @@ Iterate it, `collect` it, index it (`qs[1]`, `qs[1:10]`), or call `count`,
 """
 struct QuerySet{T<:Model}
     where::Vector{Q}                    # one entry per filter()/exclude() call
-    order::Vector{String}
+    order::Vector{Any}                  # "field" / "-field" strings and OrderBy terms (Asc, Desc)
     limit::Union{Nothing,Int}
     offset::Int
     isnone::Bool
@@ -116,9 +116,14 @@ Base.@nospecializeinfer function select_related(@nospecialize(qs::QuerySet), pat
         M = T
         for s in segs
             f = findfield(modelmeta(M), s)
-            (f !== nothing && f.kind === :fk && f.name === s) ||
-                throw(LookupError("select_related: '$s' is not a foreign key of $M (use prefetch_related for reverse relations)"))
-            M = related_model(f)
+            if f !== nothing && f.kind === :fk && f.name === s
+                M = related_model(f)
+                continue
+            end
+            r = reverse_one_to_one(M, s)          # the other side of a OneToOneField: at most one row
+            r === nothing && throw(LookupError("select_related: '$s' is not a foreign key or reverse one-to-one of $M " *
+                                               "(use prefetch_related for other reverse relations)"))
+            M = r[2]
         end
         segs in rel || push!(rel, segs)
     end
@@ -184,17 +189,22 @@ Base.@nospecializeinfer exclude(@nospecialize(T::Type{<:Model}), qargs::Q...; kw
 
 Order the results. Prefix with `-` for descending, `\"?\"` for random order.
 """
-Base.@nospecializeinfer order_by(@nospecialize(qs::QuerySet), fields...) = chain(qs; order = String[string(f) for f in fields])
+Base.@nospecializeinfer order_by(@nospecialize(qs::QuerySet), fields...) = chain(qs; order = Any[order_item(f) for f in fields])
 Base.@nospecializeinfer order_by(@nospecialize(T::Type{<:Model}), fields...) = order_by(objects(T), fields...)
 order_by(fields::Union{AbstractString,Symbol}...) = qs -> order_by(qs, fields...)
 
 "ORDER BY clause plus extra SELECT columns (needed with DISTINCT when ordering by joined columns)."
-function order_clause(c::SQLCompiler, order::Vector{String})
+function order_clause(c::SQLCompiler, order::Vector)
     T = c.T
     isempty(order) && (order = modelmeta(T).ordering)
-    isempty(order) && return "", String[]
-    parts, extra = String[], String[]
+    isempty(order) && return "", String[], Any[]
+    parts, extra, ps = String[], String[], Any[]
     for o in order
+        if o isa OrderBy                          # an expression (Asc, Desc), with joins as needed
+            sql, ops = compile_order_item(c, o)
+            push!(parts, sql); append!(ps, ops)
+            continue
+        end
         o == "?" && (push!(parts, random_function(backend())); continue)
         desc = startswith(o, "-")
         if haskey(c.annotations, Symbol(lstrip(o, '-'))) && !is_filtered_relation(c.annotations[Symbol(lstrip(o, '-'))])
@@ -209,6 +219,10 @@ function order_clause(c::SQLCompiler, order::Vector{String})
                 continue
             end
             f = findfield(modelmeta(M), Symbol(s))
+            if f !== nothing && f.kind === :json         # order_by("data__run"): a key inside a JSON field
+                push!(parts, json_order_sql(backend(), qcol(field_alias!(c, alias, M, f), column(f)), String.(segs[i+1:end]), desc))
+                @goto next_order
+            end
             (f !== nothing && f.kind === :fk) || throw(LookupError("cannot order $T by '$o': '$s' is not a foreign key of $M"))
             alias = field_alias!(c, alias, M, f)
             alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, "id", column(f); left = true)
@@ -233,8 +247,9 @@ function order_clause(c::SQLCompiler, order::Vector{String})
             push!(extra, "$col AS $(qname("__order$(length(extra) + 1)"))")
         end
         push!(parts, col * (desc ? " DESC" : " ASC"))
+        @label next_order
     end
-    " ORDER BY " * join(parts, ", "), extra
+    " ORDER BY " * join(parts, ", "), extra, ps
 end
 
 Base.@nospecializeinfer function where_clause(c::SQLCompiler, @nospecialize(qs::QuerySet))
@@ -257,11 +272,20 @@ function related_columns!(c::SQLCompiler, paths)
     cols = String[]
     for path in sort(paths; by = length)
         alias, M = c.base, c.T
+        left = false
         for (i, s) in enumerate(path)
             f = findfield(modelmeta(M), s)
-            alias = field_alias!(c, alias, M, f)
-            alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, "id", column(f); left = f.null)
-            M = related_model(f)
+            if f === nothing                      # reverse one-to-one: LEFT JOIN other.fk = this.id
+                _, R, rf = reverse_one_to_one(M, s)
+                left = true
+                alias = join!(c, alias, (alias, s, :rev), modelmeta(R).table, column(rf), "id"; left = true)
+                M = R
+            else
+                left = left || f.null
+                alias = field_alias!(c, alias, M, f)
+                alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, "id", column(f); left = left)
+                M = related_model(f)
+            end
             sub = path[1:i]
             any(x -> x[1] == sub, out) && continue
             push!(out, (sub, M, alias))
@@ -272,7 +296,7 @@ function related_columns!(c::SQLCompiler, paths)
             # a model that extends another table: join its parents for the inherited fields
             palias, A = alias, concrete_model(M)
             while (P = table_parent(A)) !== nothing
-                palias = join!(c, palias, (palias, :__parent), modelmeta(P).table, "id", "id"; left = f.null)
+                palias = join!(c, palias, (palias, :__parent), modelmeta(P).table, "id", "id"; left = left)
                 for g in modelmeta(P).fields
                     push!(cols, "$(qcol(palias, column(g))) AS $(qname(alias * "__" * column(g)))")
                 end
@@ -381,7 +405,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     if grouped && columns !== nothing && !idonly && qs.values_fields === nothing
         group = [pk_select(c.base, T)]
     end
-    o, extra = ordered ? order_clause(c, qs.order) : ("", String[])
+    o, extra, ops_order = ordered ? order_clause(c, qs.order) : ("", String[], Any[])
     (columns === nothing && !idonly && !grouped) && append!(sel, extra)
     distinct = (c.distinct || qs.distinct_fields !== nothing) && !grouped
     dkw = distinct ? "DISTINCT " : ""
@@ -409,12 +433,12 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         outer_sel = idonly ? pk_select(c.base, T) : columns !== nothing ? columns : "*"
         sql = "SELECT $outer_sel FROM ($inner) AS $(qname(c.base)) WHERE " * join(oparts, " AND ") *
               o * limit_offset_sql(backend(), qs.limit, qs.offset)
-        return sql, vcat(inner_ps, c.join_params, wps, hps, ops), c, related
+        return sql, vcat(inner_ps, c.join_params, wps, hps, ops, ops_order), c, related
     end
     if qs.for_update !== nothing && columns === nothing && !idonly && qs.values_fields === nothing
         sql *= for_update_sql(backend(), qs.for_update, c, related)
     end
-    sql, vcat(sel_ps, c.join_params, wps, hps), c, related
+    sql, vcat(sel_ps, c.join_params, wps, hps, ops_order), c, related
 end
 
 "The `FOR UPDATE ...` clause of `select_for_update` (nothing on SQLite, which locks the whole database)."
@@ -457,6 +481,7 @@ Base.@nospecializeinfer function build_combined(@nospecialize(qs::QuerySet); col
     order = String[]
     if ordered
         for o in qs.order
+            o isa OrderBy && throw(ArgumentError("order_by expressions aren't supported on union/intersection/difference; order by field names"))
             name = lstrip(o, '-')
             f = name in ("id", "pk") ? nothing : findfield(modelmeta(T), Symbol(name))
             col = f === nothing || qs.values_fields !== nothing ? (name == "pk" ? "id" : name) : column(f)
@@ -532,11 +557,17 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
                 parent = obj
                 for s in path[1:end-1]
                     parent = get((getfield(parent, :_cache)::Dict{Symbol,Any}), s, nothing)
+                    parent isa PrefetchedList && (parent = isempty(parent.items) ? nothing : parent.items[1])
                     parent === nothing && break
                 end
                 parent === nothing && continue
                 r = from_prefixed_row(M, row, alias * "__")
-                r === nothing || ((getfield(parent, :_cache)::Dict{Symbol,Any})[path[end]] = r)
+                if findfield(modelmeta(typeof(parent)), path[end]) === nothing
+                    # a reverse one-to-one: remember that there's no row too, so the accessor doesn't query
+                    (getfield(parent, :_cache)::Dict{Symbol,Any})[path[end]] = PrefetchedList(r === nothing ? Any[] : Any[r])
+                else
+                    r === nothing || ((getfield(parent, :_cache)::Dict{Symbol,Any})[path[end]] = r)
+                end
             end
         end
     end
@@ -685,7 +716,7 @@ end
 "Last object, or `nothing`."
 Base.@nospecializeinfer function Base.last(@nospecialize(qs::QuerySet))
     assert_unsliced(qs, "take last of")
-    flipped = [startswith(o, "-") ? o[2:end] : "-" * o for o in default_order(qs)]
+    flipped = Any[reverse_order(o) for o in default_order(qs)]
     first(chain(qs; order = flipped))
 end
 Base.@nospecializeinfer Base.first(@nospecialize(T::Type{<:Model})) = first(objects(T))
@@ -755,7 +786,7 @@ The object with the largest (smallest) value of the fields, which default to the
 """
 Base.@nospecializeinfer function latest(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
     T = model_of(qs)
-    order = [startswith(o, "-") ? o[2:end] : "-" * o for o in latest_order(qs, fields, "latest")]
+    order = Any[reverse_order(o) for o in latest_order(qs, fields, "latest")]
     o = first(chain(qs; order = order))
     o === nothing && throw(DoesNotExist(T, "latest"))
     o
@@ -883,4 +914,12 @@ function explain_here(qs::QuerySet)
         end
     end
     join(lines, "\n")
+end
+
+"The reverse side of a OneToOneField pointing at `T` named `name`: `(name, model, field)`, or nothing."
+Base.@nospecializeinfer function reverse_one_to_one(@nospecialize(T::Type), name)
+    for (rn, M, rf) in reverse_relations(T)
+        rf.one_to_one && string(rn) == string(name) && return (rn, M, rf)
+    end
+    nothing
 end

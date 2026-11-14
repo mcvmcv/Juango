@@ -56,7 +56,7 @@ export F, Value, Count, Sum, Avg, Min, Max, Lower, Upper, Length, Coalesce, Conc
        Extract, ExtractYear, ExtractQuarter, ExtractMonth, ExtractWeek, ExtractWeekDay, ExtractIsoWeekDay,
        ExtractIsoYear, ExtractDay, ExtractHour, ExtractMinute, ExtractSecond, Trunc, TruncYear,
        TruncQuarter, TruncMonth, TruncWeek, TruncDay, TruncDate, TruncTime, TruncHour, TruncMinute,
-       TruncSecond, When, Case, OuterRef, Subquery, Exists, Window,
+       TruncSecond, When, Case, OuterRef, Subquery, Exists, Window, Asc, Desc,
        RowNumber, Rank, DenseRank, Lag, Lead
 # migrations
 export migrate, makemigrations

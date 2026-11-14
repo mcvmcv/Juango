@@ -315,8 +315,8 @@ Base.@nospecializeinfer function getattr_other(@nospecialize(obj), part::Abstrac
     end
     r = tattr(obj, val)
     r === NOTFOUND || return r
-    if idx > 0 && (obj isa AbstractVector || obj isa Tuple)
-        return checkbounds(Bool, obj, idx) ? obj[idx] : UNDEF
+    if idx > 0 && (obj isa AbstractVector || obj isa Tuple || obj isa NamedTuple)   # {{ pair.0 }}
+        return 1 <= idx <= length(obj) ? obj[idx] : UNDEF
     end
     if obj isa AbstractDict
         part == "items" && return collect(pairs(obj))

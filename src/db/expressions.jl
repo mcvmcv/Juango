@@ -91,11 +91,11 @@ struct Aggregate <: Expression
     distinct::Bool
     filter::Union{Nothing,Q}
     default::Any                    # COALESCE(aggregate, default) when there are no rows
-    ordering::Vector{String}        # ORDER BY inside the aggregate (StringAgg, ArrayAgg): "name", "-created"
+    ordering::Vector{Any}           # ORDER BY inside the aggregate (StringAgg, ArrayAgg): "name", "-created", Desc(...)
     delimiter::Union{Nothing,String}   # StringAgg
 end
 Aggregate(func, arg, distinct, filter; default = nothing, ordering = String[], delimiter = nothing) =
-    Aggregate(func, arg, distinct, filter, default, ordering isa AbstractString ? [String(ordering)] : String[string(o) for o in ordering], delimiter)
+    Aggregate(func, arg, distinct, filter, default, ordering isa Union{AbstractString,Symbol,OrderBy,Expression} ? Any[order_item(ordering)] : Any[order_item(o) for o in ordering], delimiter)
 """
     Count(field=nothing; distinct=false, filter=nothing)
 
@@ -194,10 +194,53 @@ Lead(x, offset::Integer = 1) = WindowFunc("LEAD", Any[ref(x), Value(offset)])
 struct Window <: Expression
     expr::Expression
     partition_by::Vector{Any}
-    order_by::Vector{String}
+    order_by::Vector{Any}            # "field" / "-field" strings and OrderBy terms
 end
 Window(expr; partition_by = [], order_by = []) =
-    Window(expr, Any[ref(p) for p in partition_by], String[string(o) for o in order_by])
+    Window(expr, Any[ref(p) for p in partition_by], Any[order_item(o) for o in order_by])
+
+"""
+    Asc(expr; nulls_first = false, nulls_last = false)
+    Desc(expr; nulls_first = false, nulls_last = false)
+
+An ordering term, for `order_by`, `Window(order_by = ...)`, `Meta(ordering = ...)` and aggregates'
+`ordering`: any expression (a field name is an `F`), ascending or descending, with NULLs placed first
+or last (otherwise each database's default: last for ascending on PostgreSQL, first on SQLite and
+MySQL).
+
+    order_by(qs, Asc(Coalesce(:started, :planned); nulls_last = true), "id")
+    order_by(qs, Desc(:upper_bound; nulls_last = true))
+"""
+struct OrderBy
+    expr::Any                         # an Expression
+    descending::Bool
+    nulls_first::Union{Nothing,Bool}  # nothing: the database's default
+end
+function order_nulls(nulls_first::Bool, nulls_last::Bool)
+    nulls_first && nulls_last && throw(ArgumentError("nulls_first and nulls_last can't both be true"))
+    nulls_first ? true : nulls_last ? false : nothing
+end
+Asc(x; nulls_first::Bool = false, nulls_last::Bool = false) = OrderBy(ref(x), false, order_nulls(nulls_first, nulls_last))
+Desc(x; nulls_first::Bool = false, nulls_last::Bool = false) = OrderBy(ref(x), true, order_nulls(nulls_first, nulls_last))
+"An `order_by` argument as stored: strings stay strings (\"-name\"), expressions become `Asc(expr)`."
+order_item(o::OrderBy) = o
+order_item(o::Expression) = OrderBy(o, false, nothing)
+order_item(o) = string(o)
+"The term for the opposite direction (`last`, `latest`): NULL placement flips too, as in Django."
+reverse_order(o::OrderBy) = OrderBy(o.expr, !o.descending, o.nulls_first === nothing ? nothing : !o.nulls_first)
+reverse_order(o::AbstractString) = startswith(o, "-") ? o[2:end] : "-" * o
+
+"SQL for an ordering term, with its parameters."
+function compile_order_item(c::SQLCompiler, o)
+    ob = o isa OrderBy ? o : OrderBy(F(lstrip(string(o), '-')), startswith(string(o), "-"), nothing)
+    sql, ps = compile_expr(c, ob.expr)
+    order_term_sql(backend(), sql, ps, ob.descending, ob.nulls_first)
+end
+order_term_sql(::DatabaseBackend, sql, ps, desc, nf) =
+    sql * (desc ? " DESC" : " ASC") * (nf === nothing ? "" : nf ? " NULLS FIRST" : " NULLS LAST"), ps
+# MySQL/MariaDB have no NULLS FIRST/LAST: order by whether it's NULL first, as Django does
+order_term_sql(::MySQLBackend, sql, ps, desc, nf) = nf === nothing ? (sql * (desc ? " DESC" : " ASC"), ps) :
+    ("($sql) IS NULL " * (nf ? "DESC" : "ASC") * ", " * sql * (desc ? " DESC" : " ASC"), vcat(ps, ps))
 
 # --- analysis -------------------------------------------------------------------------------
 
@@ -233,6 +276,8 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
         f = findfield(modelmeta(T), Symbol(s))
         if f !== nothing
             alias = field_alias!(c, alias, T, f)
+            # data__run__0: a key path inside a JSON field (values, values_list, order_by, F)
+            f.kind === :json && !last_ && return json_path_sql(backend(), qcol(alias, column(f)), segs[i+1:end]), f
             if last_ || f.kind !== :fk
                 last_ || throw(LookupError("'$s' is not a relation in '$path'"))
                 return qcol(alias, column(f)), f
@@ -404,8 +449,8 @@ function compile_expr(c::SQLCompiler, e::Aggregate)
     end
     order = String[]
     for o in e.ordering
-        osql, ops = compile_expr(c, F(lstrip(o, '-')))
-        push!(order, osql * (startswith(o, "-") ? " DESC" : " ASC"))
+        osql, ops = compile_order_item(c, o)
+        push!(order, osql)
         append!(ps, ops)
     end
     sql = aggregate_sql(backend(), e.func, (e.distinct ? "DISTINCT " : "") * arg, order, e)
@@ -486,8 +531,8 @@ function compile_expr(c::SQLCompiler, e::Window)
     if !isempty(e.order_by)
         os = String[]
         for o in e.order_by
-            col, ops = compile_expr(c, F(lstrip(o, '-')))
-            push!(os, col * (startswith(o, "-") ? " DESC" : " ASC"))
+            col, ops = compile_order_item(c, o)
+            push!(os, col)
             append!(ps, ops)
         end
         push!(over, "ORDER BY " * join(os, ", "))

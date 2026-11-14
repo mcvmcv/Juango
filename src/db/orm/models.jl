@@ -5,7 +5,7 @@ mutable struct ModelMeta
     name::String
     table::String
     fields::Vector{Field}
-    ordering::Vector{String}
+    ordering::Vector{Any}            # strings ("-created") and OrderBy terms
     verbose_name::AbstractString
     verbose_name_plural::AbstractString
     app::String
@@ -218,7 +218,7 @@ Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields:
     name = string(get(meta, :name, nameof(T)))
     vname = get(meta, :verbose_name, lowercase(replace(name, r"(?<=[a-z])(?=[A-Z])" => " ")))
     m = ModelMeta(T, name, string(get(meta, :table, lowercase(name))), fs,
-                  String[string(o) for o in get(meta, :ordering, String[])],
+                  Any[order_item(o) for o in get(meta, :ordering, String[])],
                   vname isa AbstractString ? vname : string(vname),
                   (vp = get(meta, :verbose_name_plural, nothing); vp === nothing ? string(vname) * "s" : vp isa AbstractString ? vp : string(vp)),
                   string(get(meta, :app_label, default_app_label(T))), m2m,

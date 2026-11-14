@@ -488,7 +488,7 @@ function clean_file_field(f::Form, fld::Field)
     elseif v === nothing
         fld.blank || push!(errs, gettext("This field is required."))
     elseif up !== nothing
-        isempty(up.data) && push!(errs, gettext("The submitted file is empty."))
+        up.size == 0 && push!(errs, gettext("The submitted file is empty."))      # (not read: it may be on disk)
         fld.max_length !== nothing && length(up.name) > fld.max_length &&
             push!(errs, interpolate(gettext("Ensure this filename has at most %(max)d characters (it has %(len)d)."), Dict("max" => fld.max_length, "len" => length(up.name))))
         fld.kind === :image && image_size(up.data) === nothing &&

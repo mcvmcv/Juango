@@ -1788,3 +1788,54 @@ end
         end
     end
 end
+
+@testset "Asc/Desc with NULL placement, expressions in order_by (#111); reverse one-to-one select_related (#115); JSON key paths (#116)" begin
+    au = create(Author; name = "Ord Author")
+    a1 = create(Article; title = "ord-a", author = au, rating = 3.0, views = 1)
+    a2 = create(Article; title = "ord-b", author = au, rating = nothing, views = 5)
+    a3 = create(Article; title = "ord-c", author = au, rating = 1.0, views = 5)
+    qs = filter(Article; title__startswith = "ord-")
+    titles(q) = [x.title for x in q]
+    # NULLs placed the same way on every database
+    @test titles(order_by(qs, Asc(:rating; nulls_last = true))) == ["ord-c", "ord-a", "ord-b"]
+    @test titles(order_by(qs, Asc(:rating; nulls_first = true))) == ["ord-b", "ord-c", "ord-a"]
+    @test titles(order_by(qs, Desc(:rating; nulls_last = true))) == ["ord-a", "ord-c", "ord-b"]
+    @test titles(order_by(qs, Desc(:rating; nulls_first = true))) == ["ord-b", "ord-a", "ord-c"]
+    @test_throws ArgumentError Asc(:rating; nulls_first = true, nulls_last = true)
+    # any expression, mixed with field names
+    @test titles(order_by(qs, Asc(Coalesce(:rating, Value(2.0))), "title")) == ["ord-c", "ord-b", "ord-a"]
+    @test titles(order_by(qs, Desc(:views), Asc(:title))) == ["ord-b", "ord-c", "ord-a"]
+    @test titles(order_by(qs, F(:views) * Value(-1), "title")) == ["ord-b", "ord-c", "ord-a"]   # a plain expression: ascending
+    @test titles(order_by(qs, "author__name", Desc(:title))) == ["ord-c", "ord-b", "ord-a"]
+    # last() and latest() flip the direction and the NULL placement
+    @test last(order_by(qs, Asc(:rating; nulls_last = true))).title == "ord-b"
+    @test first(order_by(qs, Asc(:rating; nulls_last = true))).title == "ord-c"
+    # in Window and aggregate ordering
+    w = annotate(qs; r = Window(RowNumber(); order_by = [Desc(:rating; nulls_last = true)]))
+    @test Dict(x.title => x.r for x in w) == Dict("ord-a" => 1, "ord-c" => 2, "ord-b" => 3)
+    @test aggregate(qs; s = StringAgg(:title, ","; ordering = Desc(:title)))[:s] == "ord-c,ord-b,ord-a"
+
+    # #115: select_related through a reverse one-to-one, present and missing, and onward
+    au2 = create(Author; name = "No Profile")
+    create(Profile; user = au, bio = "hello")
+    rows = collect(order_by(select_related(filter(Author; name__in = ["Ord Author", "No Profile"]), :profile), "name"))
+    _, n = count_queries() do
+        rows[2].profile.bio == "hello" && rows[1].profile === nothing
+    end
+    @test n == 0 && rows[2].profile.bio == "hello" && rows[1].profile === nothing
+    @test_throws Juango.LookupError select_related(objects(Author), :article_set)
+    p = only(collect(select_related(filter(Profile; user = au), :user__profile)))
+    bio, n2 = count_queries(() -> p.user.profile.bio)
+    @test bio == "hello" && n2 == 0
+
+    # #116: JSON key paths in values, values_list and order_by
+    g1 = create(Gadget; nick = "g1", data = Dict("run" => 2, "meta" => Dict("by" => "ann"), "list" => [10, 20]))
+    g2 = create(Gadget; nick = "g2", data = Dict("run" => 10, "meta" => Dict("by" => "bob"), "list" => [30]))
+    gq = filter(Gadget; id__in = [g1.id, g2.id])
+    @test values_list(order_by(gq, "id"), :data__run; flat = true) == [2, 10]
+    @test values_list(order_by(gq, "id"), :data__meta__by; flat = true) == ["ann", "bob"]
+    @test values_list(order_by(gq, "id"), :data__list__0; flat = true) == [10, 30]
+    @test [d[:data__meta] for d in values(order_by(gq, "id"), :data__meta)] == [Dict("by" => "ann"), Dict("by" => "bob")]
+    @test [g.id for g in order_by(gq, "-data__run")] == [g2.id, g1.id]          # numbers sort as numbers
+    @test [g.id for g in order_by(gq, "data__meta__by")] == [g1.id, g2.id]
+end

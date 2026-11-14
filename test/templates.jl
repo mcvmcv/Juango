@@ -289,3 +289,9 @@ end
     end
     @test Juango.COMPILE_TEMPLATES[] === :eager                 # the test setup's
 end
+
+@testset "numeric lookups on tuples (#127)" begin
+    @test tr("{{ pair.0 }}|{{ pair.1 }}|{{ pair.5 }}|{% for x in pair.1 %}{{ x }}{% endfor %}", Dict("pair" => ([1], [2, 3]))) == "[1]|[2, 3]||23"
+    @test tr("{{ nt.0 }}-{{ nt.b }}", Dict("nt" => (a = "x", b = "y"))) == "x-y"
+    @test tr("{{ xs.2 }}", Dict("xs" => [1, 2])) == ""
+end
