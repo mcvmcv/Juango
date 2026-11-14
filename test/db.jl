@@ -297,3 +297,28 @@ end
     @test n > 5 && count(objects(Topic)) == 0 && count(objects(Author)) == 0 && count(objects(ContentType)) > 0
     @test create(Topic; name = "after flush").id >= 1
 end
+
+@testset "a throwaway test database (#113)" begin
+    tds = Juango.test_database_setting
+    @test tds("db.sqlite3") == ":memory:" && tds(":memory:") == ":memory:" && tds("sqlite:///x.db") == ":memory:"
+    @test tds("postgresql://u:p@h:5432/lab") == "postgresql://u:p@h:5432/test_lab"
+    @test tds("postgresql:///lab?host=/run/pg") == "postgresql:///test_lab?host=/run/pg"
+    @test tds("mysql://u@h/lab") == "mysql://u@h/test_lab" && tds("postgresql://h") == "postgresql://h/test_juango"
+    @test Juango.admin_database_setting("postgresql://u@h:1/test_lab?sslmode=disable") == "postgresql://u@h:1/postgres?sslmode=disable"
+    @test Juango.admin_database_setting("mysql://u@h/test_lab") == "mysql://u@h/"
+    if IS_POSTGRES || IS_MYSQL
+        # a whole cycle: create and migrate test_<name>, then drop it; the suite's own database is untouched
+        before = settings.DATABASE
+        n = count(objects(Author))
+        db = redirect_stdout(() -> setup_test_database(), devnull)
+        try
+            @test settings.DATABASE == tds(before) && count(objects(Author)) == 0     # an empty, migrated database
+            create(Author; name = "only in the test database")
+        finally
+            redirect_stdout(() -> teardown_test_database(db), devnull)
+        end
+        @test settings.DATABASE == before && count(objects(Author)) == n
+        b = Juango.backend_from_setting(tds(before))
+        @test_throws Exception Juango.close_connection(b, Juango.open_connection(b))           # dropped
+    end
+end

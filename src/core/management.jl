@@ -275,7 +275,7 @@ end
 
 # test [file ...]: run the project's tests (test/runtests.jl, or tests/test_*.jl)
 function cmd_test(args)
-    pos, _ = parse_flags(args)
+    pos, flags = parse_flags(args)
     files = if !isempty(pos)
         pos
     elseif isfile(joinpath("test", "runtests.jl"))
@@ -284,9 +284,15 @@ function cmd_test(args)
         sort([joinpath("tests", f) for f in (isdir("tests") ? readdir("tests") : String[]) if startswith(f, "test") && endswith(f, ".jl")])
     end
     isempty(files) && return println("No tests found (test/runtests.jl or tests/test_*.jl).")
-    for f in files
-        println("Running ", f)
-        Base.include(Main, abspath(f))
+    # a throwaway database, migrated, so the tests never touch the development one (--keepdb reuses it)
+    db = setup_test_database(; keepdb = haskey(flags, "keepdb"), verbose = true)
+    try
+        for f in files
+            println("Running ", f)
+            Base.include(Main, abspath(f))
+        end
+    finally
+        teardown_test_database(db; verbose = true)
     end
 end
 
@@ -355,7 +361,7 @@ for (n, h, f) in (
     ("flush", "Delete all data from the database: flush [--noinput]", cmd_flush),
     ("dbshell", "Open the database's command-line client", _ -> run(dbshell_cmd())),
     ("inspectdb", "Write models for existing tables: inspectdb [table ...]", args -> print(inspectdb(isempty(first(parse_flags(args))) ? nothing : first(parse_flags(args))))),
-    ("test", "Run the project's tests: test [file ...]", cmd_test),
+    ("test", "Run the project's tests against a throwaway test database: test [--keepdb] [file ...]", cmd_test),
     ("dumpdata", "Write the database's objects as a fixture: dumpdata [app[.Model] ...] [--format json|jsonl|yaml|xml] [--indent N] [--output FILE]", cmd_dumpdata),
     ("loaddata", "Load fixtures: loaddata <name or file> ...", cmd_loaddata),
     ("squashmigrations", "Combine migrations into one: squashmigrations <app> [start] <stop> [--name NAME]", cmd_squashmigrations),

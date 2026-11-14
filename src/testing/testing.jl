@@ -282,3 +282,115 @@ function assert_form_error(form::Form, field, errors)
     got == want || fail("$(field === nothing ? "form-wide" : "field '$field'") errors were $(repr(got)), expected $(repr(want))")
     true
 end
+
+# --- a throwaway test database ---------------------------------------------------------------------
+#
+#     manage.jl test [--keepdb] [file ...]       # does this around the run
+#
+#     # or, in test/runtests.jl run with `julia` / `Pkg.test()`:
+#     db = Juango.Testing.setup_test_database()
+#     try ... include("test_models.jl") ... finally Juango.Testing.teardown_test_database(db) end
+#
+# The tests then never touch the development database: SQLite runs in memory, and PostgreSQL and
+# MySQL get a `test_<name>` database on the same server, migrated, and dropped afterwards.
+
+"""
+    test_database_setting(setting) -> String
+
+The test database for a database setting (`TEST_DATABASE` overrides it for the default database):
+`":memory:"` for SQLite, and `test_<name>` on the same server for a PostgreSQL or MySQL URL.
+"""
+function test_database_setting(s)
+    s isa AbstractString || throw(ImproperlyConfigured("set TEST_DATABASE: can't derive a test database from a $(typeof(s))"))
+    m = match(r"^([A-Za-z][A-Za-z0-9+.-]*://[^/?]*)(?:/([^?]*))?(\?.*)?$", s)
+    (m === nothing || lowercase(split(s, "://")[1]) == "sqlite") && return ":memory:"
+    name = something(m[2], "")
+    test = isempty(name) ? "test_juango" : startswith(name, "test_") ? name : "test_" * name
+    m[1] * "/" * test * something(m[3], "")
+end
+
+"The server-level connection for creating and dropping a test database: the same URL with an admin database."
+function admin_database_setting(url::AbstractString)
+    m = match(r"^([A-Za-z][A-Za-z0-9+.-]*)(://[^/?]*)(?:/[^?]*)?(\?.*)?$", url)
+    scheme = lowercase(m[1])
+    m[1] * m[2] * (startswith(scheme, "postgres") ? "/postgres" : "/") * something(m[3], "")
+end
+test_database_name(url::AbstractString) = (m = match(r"://[^/?]*/([^?]*)", url); m === nothing ? "" : String(m[1]))
+
+function admin_sql(admin::AbstractString, sqls)
+    b = backend_from_setting(admin)
+    conn = open_connection(b)
+    try
+        foreach(sql -> driver_rowcount(b, conn, sql, Any[]), sqls)
+    finally
+        close_connection(b, conn)
+    end
+end
+
+struct TestDatabases
+    saved::Dict{Symbol,Any}           # the settings to put back
+    created::Vector{String}           # server databases to drop
+    keepdb::Bool
+end
+
+"""
+    setup_test_database(; keepdb = false, verbose = false) -> handle
+
+Point the database settings at throwaway test databases (`TEST_DATABASE`, or derived: SQLite in
+memory, `test_<name>` on the same PostgreSQL/MySQL server), create them, and migrate them. With
+`keepdb = true` an existing test database is reused (only new migrations run) and kept afterwards.
+Undo with `teardown_test_database(handle)`.
+"""
+function setup_test_database(; keepdb::Bool = false, verbose::Bool = false)
+    saved = Dict{Symbol,Any}(:DATABASE => settings.DATABASE, :DATABASES => get(settings, :DATABASES, nothing))
+    default = something(get(settings, :TEST_DATABASE, nothing), test_database_setting(settings.DATABASE))
+    others = get(settings, :DATABASES, nothing)
+    tests = others === nothing ? nothing :
+            Dict{String,Any}(string(k) => (string(k) == "default" ? default : test_database_setting(v)) for (k, v) in pairs(others))
+    if tests === nothing && default == settings.DATABASE      # already a throwaway database (":memory:")
+        migrate(verbose = verbose)
+        return TestDatabases(saved, String[], true)
+    end
+    created = String[]
+    for url in unique(vcat([default], tests === nothing ? String[] : collect(values(tests))))
+        url isa AbstractString && occursin("://", url) && !startswith(lowercase(url), "sqlite") || continue
+        name = test_database_name(url)
+        b = backend_from_setting(url)
+        q = quote_name(b, name)
+        exists = try
+            close_connection(b, open_connection(b)); true
+        catch
+            false
+        end
+        if exists && keepdb
+            verbose && println("Using existing test database $name")
+        else
+            verbose && println("Creating test database $name")
+            admin_sql(admin_database_setting(url),
+                      [b isa PostgresBackend ? "DROP DATABASE IF EXISTS $q WITH (FORCE)" : "DROP DATABASE IF EXISTS $q",
+                       b isa MySQLBackend ? "CREATE DATABASE $q CHARACTER SET utf8mb4" : "CREATE DATABASE $q"])
+        end
+        push!(created, url)
+    end
+    close_connection!()
+    tests === nothing ? configure!(DATABASE = default) : configure!(DATABASE = default, DATABASES = tests)
+    migrate(verbose = verbose)
+    TestDatabases(saved, created, keepdb)
+end
+
+"Drop the test databases (unless `keepdb`) and put the database settings back."
+function teardown_test_database(t::TestDatabases; verbose::Bool = false)
+    t.saved[:DATABASE] == settings.DATABASE && isempty(t.created) && return nothing    # nothing was swapped
+    close_connection!()
+    s = t.saved
+    s[:DATABASES] === nothing ? (delete!(SETTINGS, :DATABASES); configure!(DATABASE = s[:DATABASE])) :
+        configure!(DATABASE = s[:DATABASE], DATABASES = s[:DATABASES])
+    t.keepdb && return nothing
+    for url in t.created
+        b = backend_from_setting(url)
+        q = quote_name(b, test_database_name(url))
+        verbose && println("Destroying test database $(test_database_name(url))")
+        admin_sql(admin_database_setting(url), [b isa PostgresBackend ? "DROP DATABASE IF EXISTS $q WITH (FORCE)" : "DROP DATABASE IF EXISTS $q"])
+    end
+    nothing
+end

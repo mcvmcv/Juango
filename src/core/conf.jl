@@ -51,6 +51,7 @@ function default_settings()
         :TEMPLATE_CACHE_CHECK_MTIME => nothing,        # read templates again when they change (nothing: only with DEBUG)
         :HTMX_OOB_MESSAGES => true,                    # after htmx requests, send queued messages as an out-of-band swap
         :ACCESS_LOG => true,                           # runserver prints a line to stderr for each request
+        :TEST_DATABASE => nothing,                     # the test runner's database (nothing: SQLite in memory, or test_<name> on the same server)
         :TEMPLATE_COMPILE => nothing,                  # compile templates into Julia functions, in the background (nothing: when DEBUG is off; :eager: on first render)
         :TEMPLATES => nothing,                         # template engines (nothing: Juango's, with TEMPLATE_DIRS)
         :TEMPLATE_STRING_IF_INVALID => "",             # what unknown variables render as ("%s" is the name)

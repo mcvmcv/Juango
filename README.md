@@ -794,7 +794,7 @@ using Juango
 configure!(DATABASE = "postgresql://user:pass@localhost:5432/mydb")
 ```
 
-The URL can be anything libpq accepts, including `"host=/var/run/postgresql dbname=mydb"`, and the usual `PG*` environment variables and `~/.pgpass` apply. Juango doesn't use LibPQ.jl: its dependencies invalidated thousands of compiled methods when they loaded, which made a PostgreSQL project start several times more slowly than an SQLite one. Errors other than constraint violations raise `DatabaseError(msg, sqlstate)`.
+The URL is passed to libpq, so its query parameters work (`postgresql:///mydb?host=/var/run/postgresql` for a Unix socket), and the usual `PG*` environment variables and `~/.pgpass` apply. Juango doesn't use LibPQ.jl: its dependencies invalidated thousands of compiled methods when they loaded, which made a PostgreSQL project start several times more slowly than an SQLite one. Errors other than constraint violations raise `DatabaseError(msg, sqlstate)`.
 
 The database must already exist (`createdb mydb`). `migrate()` creates the tables. Postgres uses native types: `BOOLEAN`, `TIMESTAMP`, `DATE`, `DOUBLE PRECISION`, `BIGINT` identity primary keys, and `VARCHAR(n)` for `CharField(max_length=n)`. Foreign keys become real constraints (`DEFERRABLE INITIALLY DEFERRED`). Deletes still cascade through the ORM according to `on_delete`, so `:DO_NOTHING` raises `IntegrityError` while referencing rows still exist. Case-insensitive lookups use `ILIKE`.
 
@@ -1669,6 +1669,19 @@ r = post(c, "/posts/new/", Dict("title" => "X", ...); follow=true)
 ```
 
 The client keeps cookies, skips CSRF unless you pass `Client(enforce_csrf=true)`, and never opens a socket.
+
+**A throwaway test database.** `julia --project manage.jl test [--keepdb] [file ...]` runs the tests against a database of their own, so they never touch the development one: SQLite in memory, or `test_<name>` on the same PostgreSQL or MySQL server (created, migrated, and dropped afterwards; `--keepdb` reuses it). `TEST_DATABASE` names another. A suite run with `julia test/runtests.jl` or `Pkg.test()` does the same with:
+
+```julia
+db = Juango.Testing.setup_test_database()          # (keepdb = true to reuse it)
+try
+    include("test_models.jl")
+finally
+    Juango.Testing.teardown_test_database(db)
+end
+```
+
+For data that a group of tests shares and none may keep (Django's `setUpTestData`), create it inside an outer `rollback_after` and give each test its own inner `rollback_after`: they nest as savepoints.
 
 For browser automation or any real HTTP client, `with_live_server` runs the app on a free port for the block (Django's `LiveServerTestCase`). It serves static files even with `DEBUG` off, and allows its host for the block. The server answers in other tasks, so on Postgres and MySQL it only sees committed data: create test data outside `rollback_after`.
 

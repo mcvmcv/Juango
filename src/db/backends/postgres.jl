@@ -6,7 +6,7 @@
     PostgresBackend(url)
 
 PostgreSQL, through libpq. Selected by `settings.DATABASE = \"postgresql://user:pass@host:5432/dbname\"`
-(or `postgres://`, or a libpq `"host=... dbname=..."` string).
+(or `postgres://`; libpq query parameters such as `?host=/var/run/postgresql` work).
 """
 struct PostgresBackend <: DatabaseBackend
     url::String
