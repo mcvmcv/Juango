@@ -1771,6 +1771,15 @@ Juango's own checks use Django's ids where Django has the same check (`security.
 
 ## Deployment
 
+**Precompiling Juango.** After installing or updating Juango, Julia precompiles it once: about 2.5 minutes on a 4-core desktop. Most of that runs a workload of requests, queries, templates, forms and admin pages, so the code they need is compiled ahead of time and a fresh process (a server, a test run, `manage.jl migrate`) doesn't compile it again; without the workload, precompiling takes about 30 s but each new process spends over a minute compiling on its first requests. Two settings help:
+- `JULIA_IMAGE_THREADS` (in your shell's environment) sets how many threads write the compiled package. Julia uses half the cores by default; all of them cut the time from about 148 s to 118 s on a 4-core machine: `export JULIA_IMAGE_THREADS=$(nproc)`.
+- To precompile without the workload (quicker updates, slower first requests; worth it only if you update Juango far more often than you start processes), add to the project's `LocalPreferences.toml`:
+
+  ```toml
+  [Juango]
+  precompile_workload = false
+  ```
+
 **Starting fast.** A freshly started Julia compiles code the first time it runs it, so a new server answers its first requests slowly; the example blog takes about 12 seconds from `runserver` to its first page on a laptop. `manage.jl build` makes a system image of the project's packages (with PackageCompiler.jl, which it installs into a shared `@juango-build` environment the first time) while running a workload taken from the project. The workload requests every URL without parameters through the test client, against an in-memory copy of the schema, and parses every template:
 
 ```sh
