@@ -224,7 +224,7 @@ Base.@nospecializeinfer function combine(op, @nospecialize(qs::QuerySet), others
     vf = first(parts).values_fields
     all(p -> p.values_fields == vf, parts) || throw(ArgumentError("$op: the querysets must select the same fields"))
     QuerySet{T}(Q[], String[], nothing, 0, false, Vector{Symbol}[], copy(qs.prefetch), nothing, nothing,
-                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all), qs.db)
+                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all), qs.db, Dict{Symbol,Int}())
 end
 
 """

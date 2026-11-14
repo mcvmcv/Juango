@@ -1839,3 +1839,28 @@ end
     @test [g.id for g in order_by(gq, "-data__run")] == [g2.id, g1.id]          # numbers sort as numbers
     @test [g.id for g in order_by(gq, "data__meta__by")] == [g1.id, g2.id]
 end
+
+@testset "annotate after filter on the same multi-valued relation reuses its join (#132)" begin
+    au = create(Author; name = "Join Author")
+    for (t, p) in (("j1", true), ("j2", true), ("j3", false))
+        create(Article; title = t, author = au, published = p)
+    end
+    # filter, then annotate: counts the filtered rows (Django's rule)
+    a = only(collect(annotate(filter(Author; name = "Join Author", articles__published = true); n = Count(:articles))))
+    @test a.n == 2
+    @test only(collect(annotate(filter(Author; name = "Join Author", article__published = true); n = Count(:article)))).n == 2
+    # with a further filter on the same relation in a later call, the annotation keeps the earlier join
+    @test only(collect(annotate(filter(Author; name = "Join Author", articles__title__startswith = "j"); n = Count(:articles)))).n == 3
+    # annotate, then filter: separate joins, so the count covers all of them (distinct, as Django's docs advise)
+    b = only(collect(filter(annotate(filter(Author; name = "Join Author"); n = Count(:articles; distinct = true)); articles__published = true)))
+    @test b.n == 3
+    # an aggregate's own filter= condition still works next to it
+    c = only(collect(annotate(filter(Author; name = "Join Author", articles__published = true);
+                              n = Count(:articles), m = Count(:articles; filter = Q(articles__title = "j1")))))
+    @test c.n == 2 && c.m == 1
+    # many-to-many
+    t1 = create(Topic; name = "jt"); e1 = create(Essay; title = "keep"); e2 = create(Essay; title = "keep"); e3 = create(Essay; title = "drop")
+    for e in (e1, e2, e3); add!(e.topics, t1); end
+    @test only(collect(annotate(filter(Topic; name = "jt", essays__title = "keep"); n = Count(:essays)))).n == 2
+    @test only(collect(annotate(filter(Topic; name = "jt"); n = Count(:essays)))).n == 3
+end

@@ -27,17 +27,32 @@ mutable struct SQLCompiler
     outer::Union{Nothing,SQLCompiler}   # the enclosing query, for OuterRef
     uses_window::Bool           # set when a condition refers to a window annotation (-> wrapping query)
     join_params::Vector{Any}    # parameters in JOIN ... ON clauses (FilteredRelation conditions)
+    reuse_upto::Int             # compiling an annotation made after this many filter() calls (0: none)
 end
 Base.@nospecializeinfer function SQLCompiler(@nospecialize(T::Type); outer = nothing)
     table = modelmeta(T).table
     counter = outer === nothing ? Ref(0) : outer.counter
     c = SQLCompiler(T, table, table, String[], Dict{Any,String}(), Set{String}(), counter, false, 0,
-                    Dict{Symbol,Any}(), false, outer, false, Any[])
+                    Dict{Symbol,Any}(), false, outer, false, Any[], 0)
     outer === nothing || (c.base = new_alias!(c))   # subqueries alias their table: no clash with the outer one
     c
 end
 
 new_alias!(c::SQLCompiler) = (c.counter[] += 1; "j$(c.counter[])")
+
+"""
+The join key for a multi-valued relation `rn` from `alias`: each filter() call has its own joins
+(scope = its index); expressions (annotations, aggregate conditions) use their own, except that an
+annotation made after filter() calls reuses the latest of their joins of the same relation.
+"""
+function scope_key(c::SQLCompiler, alias, rn)
+    c.scope === :expr || return (alias, rn, c.scope)
+    for k in c.reuse_upto:-1:1
+        key = (alias, rn, k)
+        haskey(c.aliases, key) && return key
+    end
+    (alias, rn, :expr)
+end
 qcol(alias, col) = qname(alias) * "." * qname(col)
 
 "Join `table` (as a new alias) to `parent` on child.`childcol` = parent.`parentcol`; reuse an existing join for `key`."
@@ -228,7 +243,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             return compile_fobj_lookup(c, alias, g, related_model(g), rest, lookup, value, negated, false, (alias, g.name))
         end
         if f === nothing && (r = find_reverse_fobj(T, fname)) !== nothing
-            return compile_fobj_lookup(c, alias, r[3], r[2], rest, lookup, value, negated, true, (alias, r[1], c.scope))
+            return compile_fobj_lookup(c, alias, r[3], r[2], rest, lookup, value, negated, true, scope_key(c, alias, r[1]))
         end
         if f === nothing && (g = find_generic(generic_relations(T), fname)) !== nothing
             # post.comments (GenericRelation): join on object id AND content type
@@ -249,7 +264,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                 sql, ps = compile_lookup(c, a, M, subkey, value, negated)
                 return ("EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(cond(a)) AND $sql)", ps)
             end
-            a = join!(c, alias, (alias, g.name, c.scope), modelmeta(M).table, fkcol, "id"; left = true,
+            a = join!(c, alias, scope_key(c, alias, g.name), modelmeta(M).table, fkcol, "id"; left = true,
                       extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
             c.distinct = true
             return compile_lookup(c, a, M, subkey, value, negated)
@@ -276,7 +291,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                 sql, ps = compile_lookup(c, a, M, subkey, value, negated)
                 return ("EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(qcol(a, column(rf))) = $(qcol(alias, "id")) AND $sql)", ps)
             end
-            a = join!(c, alias, (alias, rn, c.scope), modelmeta(M).table, column(rf), "id"; left = true)
+            a = join!(c, alias, scope_key(c, alias, rn), modelmeta(M).table, column(rf), "id"; left = true)
             c.distinct = true
             return compile_lookup(c, a, M, subkey, value, negated)
         end

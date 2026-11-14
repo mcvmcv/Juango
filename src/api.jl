@@ -21,7 +21,7 @@ export settings, configure!
 # requests and responses
 export Request, HttpResponse, JsonResponse, HttpResponseRedirect, HttpResponsePermanentRedirect,
        HttpResponseNotFound, HttpResponseForbidden, HttpResponseBadRequest, HttpResponseNotAllowed,
-       StreamingHttpResponse, FileResponse, TemplateResponse, Http404, PermissionDenied, BadRequest, QueryDict, getlist,
+       StreamingHttpResponse, FileResponse, content_disposition, TemplateResponse, Http404, PermissionDenied, BadRequest, QueryDict, getlist,
        set_cookie!, delete_cookie!, getheader, setheader!, json_body
 export EventStreamResponse, sse_event, websocket, ws_send, ws_receive, ws_close, ws_isopen
 # urls

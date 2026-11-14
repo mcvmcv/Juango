@@ -23,10 +23,11 @@ struct QuerySet{T<:Model}
     for_update::Any                                # select_for_update options (a NamedTuple) or nothing
     combinator::Any                                # (op, querysets, all) for union/intersection/difference, or nothing
     db::Union{Nothing,String}                      # using_db(qs, alias): the database to query
+    annotated_after::Dict{Symbol,Int}              # annotation => filter() calls before it (it reuses their joins)
 end
 QuerySet{T}(where, order, limit, offset, isnone) where {T} =
     QuerySet{T}(where, order, limit, offset, isnone, Vector{Symbol}[], Prefetch[], nothing, nothing,
-                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing)
+                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing, Dict{Symbol,Int}())
 
 """
     using_db(qs, "replica")
@@ -370,18 +371,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         push!(group, pk_select(c.base, T))
         append!(group, [qcol(a, "id") for (_, _, a) in related])
     end
-    pre_ann = copy(sel)            # the select list without annotations (for a wrapping query)
-    ann_sel, ann_ps = String[], Any[]
-    for (k, v) in qs.annotations
-        is_filtered_relation(v) && continue
-        sql, p = compile_expr(c, v)
-        push!(ann_sel, "$sql AS $(qname(string(k)))")
-        append!(ann_ps, p)
-    end
-    if columns === nothing && !idonly
-        append!(sel, ann_sel)
-        append!(sel_ps, ann_ps)
-    end
+    # (WHERE is compiled before the annotations, which may reuse its joins)
     # WHERE, HAVING for conditions on aggregate annotations, or an outer WHERE for window ones
     wparts, wps, hparts, hps, oparts, ops = String[], Any[], String[], Any[], String[], Any[]
     if qs.isnone
@@ -401,6 +391,22 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
             end
         end
         c.scope = 0
+    end
+    pre_ann = copy(sel)            # the select list without annotations (for a wrapping query)
+    ann_sel, ann_ps = String[], Any[]
+    for (k, v) in qs.annotations
+        is_filtered_relation(v) && continue
+        # an annotation made after filter() calls reuses their joins of the same relations (as in
+        # Django), so Count(:book) after filter(book__shelf = 1) counts the books on that shelf
+        c.reuse_upto = get(qs.annotated_after, k, 0)
+        sql, p = compile_expr(c, v)
+        c.reuse_upto = 0
+        push!(ann_sel, "$sql AS $(qname(string(k)))")
+        append!(ann_ps, p)
+    end
+    if columns === nothing && !idonly
+        append!(sel, ann_sel)
+        append!(sel_ps, ann_ps)
     end
     if grouped && columns !== nothing && !idonly && qs.values_fields === nothing
         group = [pk_select(c.base, T)]

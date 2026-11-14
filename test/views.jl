@@ -386,7 +386,7 @@ end
         @test sse_event("a\nb"; retry = 3000) == "retry: 3000\ndata: a\ndata: b\n\n"
         r = get(c, "/file/")
         @test text(r) == read(fpath, String) && getheader(r, "Content-Length") == string(filesize(fpath))
-        @test getheader(r, "Content-Type") == "application/octet-stream"
+        @test getheader(r, "Content-Type") == "text/csv; charset=utf-8"
         @test getheader(r, "Content-Disposition") == "attachment; filename*=UTF-8''report%20%C3%BC.csv"
         @test Juango.content_disposition("a\"b.txt") == "inline; filename=\"a\\\"b.txt\""
         @test get(c, "/missing/").status == 404
@@ -1676,4 +1676,21 @@ end
     @test get_page(p, "2").number == 2 && get_page(p, "99").number == 3 && get_page(p, "x").number == 1
     @test get_page(p, 0).number == 1 && get_page(p, "last").number == 3 && get_page(Paginator(Int[], 10), 5).number == 1
     @test_throws Juango.Http404 page(p, 99)
+end
+
+@testset "FileResponse from a stored file or an IO; content_disposition (#133)" begin
+    body(r) = String(copy(Juango.consume_stream!(r).body))
+    ms = Juango.InMemoryStorage()
+    name = Juango.save_file(ms, "reports/r.csv", Vector{UInt8}(codeunits("a,b\n1,2\n")))
+    r = FileResponse(Juango.FieldFile(name, ms); as_attachment = true, filename = "report.csv")
+    @test getheader(r, "Content-Disposition") == "attachment; filename=\"report.csv\"" && getheader(r, "Content-Length") == "8"
+    @test startswith(getheader(r, "Content-Type"), "text/csv") && body(r) == "a,b\n1,2\n"
+    @test_throws Juango.Http404 FileResponse(Juango.FieldFile("missing.txt", ms))
+    dir = mktempdir(); write(joinpath(dir, "d.txt"), "on disk")
+    fs = FileSystemStorage(location = dir)
+    r2 = FileResponse(Juango.FieldFile("d.txt", fs))
+    @test body(r2) == "on disk" && getheader(r2, "Content-Disposition") == "inline; filename=\"d.txt\""
+    io = IOBuffer("streamed"); r3 = FileResponse(io; filename = "s.bin", as_attachment = true)
+    @test body(r3) == "streamed" && getheader(r3, "Content-Length") == "8" && !isopen(io)
+    @test content_disposition("Résumé.pdf"; attachment = true) == "attachment; filename*=UTF-8''R%C3%A9sum%C3%A9.pdf"
 end

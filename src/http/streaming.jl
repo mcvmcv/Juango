@@ -115,6 +115,51 @@ function FileResponse(path::AbstractString; as_attachment::Bool = false, filenam
     r
 end
 
+"""
+    FileResponse(f::FieldFile; as_attachment=false, filename=basename(f.name), content_type=<from the name>)
+    FileResponse(io::IO; filename="", as_attachment=false, content_type=<from the filename>, size=nothing)
+
+A stored file (from any storage: one on disk is streamed from disk, others are read through the
+storage), or any IO, streamed to the client. The IO is closed afterwards; Content-Length is set
+when the size is known (an `IOBuffer`, or `size`).
+
+    download(req; id) = FileResponse(get(Report; id).file; as_attachment = true, filename = "report.xlsx")
+"""
+function FileResponse(f::FieldFile; as_attachment::Bool = false, filename = basename(f.name), content_type = nothing,
+                      status::Integer = 200, headers = Pair{String,String}[])
+    isempty(f) && throw(Http404("No file"))
+    ct = something(content_type, get(MIME_TYPES, lowercase(splitext(string(filename))[2]), "application/octet-stream"))
+    p = try path(f.storage, f.name) catch; nothing end
+    p !== nothing && isfile(p) &&
+        return FileResponse(p; as_attachment = as_attachment, filename = filename, content_type = ct, status = status, headers = headers)
+    exists(f.storage, f.name) || throw(Http404("File '$(basename(f.name))' not found"))
+    FileResponse(IOBuffer(read(f)); as_attachment = as_attachment, filename = filename, content_type = ct, status = status, headers = headers)
+end
+function FileResponse(io::IO; filename = "", as_attachment::Bool = false, content_type = nothing, size = nothing,
+                      status::Integer = 200, headers = Pair{String,String}[])
+    ct = something(content_type, get(MIME_TYPES, lowercase(splitext(string(filename))[2]), "application/octet-stream"))
+    n = something(size, io isa IOBuffer ? bytesavailable(io) : nothing, Some(nothing))
+    writer = function (out)
+        try
+            while !eof(io)
+                write(out, read(io, 65536))
+            end
+        finally
+            close(io)
+        end
+    end
+    r = StreamingHttpResponse(writer; status = status, content_type = ct, headers = headers)
+    n === nothing || setheader!(r, "Content-Length", string(n))
+    setheader!(r, "Content-Disposition", content_disposition(filename; attachment = as_attachment))
+    r
+end
+
+"""
+    content_disposition(filename; attachment = false) -> String
+
+The value of a Content-Disposition header (`attachment; filename="report.xlsx"`, with RFC 6266
+encoding for names that aren't plain ASCII): `resp["Content-Disposition"] = content_disposition(name; attachment = true)`.
+"""
 function content_disposition(filename; attachment = false)
     kind = attachment ? "attachment" : "inline"
     name = string(filename)

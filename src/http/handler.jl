@@ -9,6 +9,12 @@ const MIME_TYPES = Dict(
     ".woff" => "font/woff", ".woff2" => "font/woff2", ".ttf" => "font/ttf",
     ".txt" => "text/plain; charset=utf-8", ".pdf" => "application/pdf", ".map" => "application/json",
     ".wasm" => "application/wasm", ".xml" => "application/xml",
+    # common downloads
+    ".csv" => "text/csv; charset=utf-8", ".tsv" => "text/tab-separated-values; charset=utf-8",
+    ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xls" => "application/vnd.ms-excel",
+    ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".ods" => "application/vnd.oasis.opendocument.spreadsheet", ".zip" => "application/zip", ".gz" => "application/gzip",
+    ".mp4" => "video/mp4", ".mp3" => "audio/mpeg", ".avif" => "image/avif",
 )
 
 "Serve a file from STATIC_DIRS or an app's `static/` (used by `runserver` when `DEBUG`)."

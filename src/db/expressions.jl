@@ -296,7 +296,7 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
             M = related_model(g)
             ctf, fkf = g.through
             ctcol, ctid = column(getfield_meta(M, ctf)), get_for_model(T).id::Integer
-            alias = join!(c, alias, (alias, g.name, :expr), modelmeta(M).table, column(getfield_meta(M, fkf)), "id";
+            alias = join!(c, alias, expr_key(c, alias, g.name), modelmeta(M).table, column(getfield_meta(M, fkf)), "id";
                           left = true, extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
             T = M
             last_ && return qcol(alias, "id"), nothing
@@ -305,7 +305,7 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
         rel = find_reverse(T, s)
         rel === nothing && throw(lookup_error(T, s))
         rn, M, rf = rel
-        alias = join!(c, alias, (alias, rn, :expr), modelmeta(M).table, column(rf), "id"; left = true)
+        alias = join!(c, alias, expr_key(c, alias, rn), modelmeta(M).table, column(rf), "id"; left = true)
         T = M
         last_ && return qcol(alias, "id"), nothing
     end
@@ -427,6 +427,17 @@ function compile_expr(c::SQLCompiler, e::Func)
     sql = function_sql(b, n, sqls, e)                 # functions.jl: Greatest, Replace, Round, Sqrt, ...
     sql === nothing || return sql, ps
     throw(ArgumentError("unknown function $n"))
+end
+
+"The join key of a multi-valued relation in an expression (see `scope_key`)."
+function expr_key(c::SQLCompiler, alias, rn)
+    old = c.scope
+    c.scope = :expr
+    try
+        scope_key(c, alias, rn)
+    finally
+        c.scope = old
+    end
 end
 
 "Compile a condition inside an expression; relations reuse the expression's joins."
@@ -559,7 +570,11 @@ Base.@nospecializeinfer function annotate(@nospecialize(qs::QuerySet); kw...)
             throw(ArgumentError("annotation '$k' conflicts with a field of $T"))
         push!(anns, k => ref(v))
     end
-    chain(qs; annotations = anns)
+    after = copy(qs.annotated_after)
+    for (k, _) in kw
+        after[k] = length(qs.where)
+    end
+    chain(qs; annotations = anns, annotated_after = after)
 end
 Base.@nospecializeinfer annotate(@nospecialize(T::Type{<:Model}); kw...) = annotate(objects(T); kw...)
 annotate(; kw...) = qs -> annotate(qs; kw...)
