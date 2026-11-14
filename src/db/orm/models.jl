@@ -284,6 +284,25 @@ function through_model(f::Field)
     error("ManyToManyField $(f.name): through model '$t' is not a registered model")
 end
 
+"""
+    through(Model, :field) -> join model
+
+The model behind a many-to-many field (Django's `Post.tags.through`): its join table's model, or the
+`through` model you gave. It's an ordinary model, so `objects`, `filter`, `bulk_create` and
+`values_list` work on it, and it's the sender of `m2m_changed`:
+
+    connect!(m2m_changed, tags_changed; sender = through(Post, :tags))
+    bulk_create([through(Post, :tags)(post_id = p.id, tag_id = t.id) for (p, t) in links])
+
+An automatic join model's two foreign keys are named after the models in lowercase (`post`/`tag`),
+or `from_post`/`to_post` for a relation from a model to itself.
+"""
+Base.@nospecializeinfer function through(@nospecialize(T::Type{<:Model}), name)
+    i = findfirst(f -> f.name === Symbol(name), modelmeta(T).m2m)
+    i === nothing && throw(ArgumentError("$(nameof(T)) has no many-to-many field '$name'"))
+    through_model(modelmeta(T).m2m[i])
+end
+
 "The two foreign keys of a many-to-many's intermediate model: (to the owner, to the target)."
 function through_fks(f::Field)
     Th, owner, target = through_model(f), f.model, related_model(f)

@@ -114,13 +114,14 @@ let F = register_filter!
     F("striptags", (v, _) -> replace(str(v), r"<[^>]*>" => ""))
     F("truncatechars", (v, a) -> (s = str(v); n = tonum(a); length(s) <= n ? s : first(s, max(n - 1, 0)) * "…"); is_safe = true)
     F("truncatewords", (v, a) -> (w = split(str(v)); n = tonum(a); length(w) <= n ? join(w, " ") : join(w[1:n], " ") * " …"); is_safe = true)
-    F("join", (v, a, ae) -> SafeString(join([ae ? conditional_escape(x) : str(x) for x in to_iterable(v)],
+    F("join", (v, a, ae) -> v === nothing ? "" : SafeString(join([ae ? conditional_escape(x) : str(x) for x in to_iterable(v)],
                                             ae ? conditional_escape(something(a, "")) : str(a)));
       needs_autoescape = true)
-    F("first", (v, _) -> (it = to_iterable(v); isempty(it) ? nothing : first(it)))
-    F("last", (v, _) -> (it = to_iterable(v); isempty(it) ? nothing : last(it)))
-    F("random", (v, _) -> (it = to_iterable(v); isempty(it) ? nothing : rand(it)))
+    F("first", (v, _) -> v === nothing ? "" : (it = to_iterable(v); isempty(it) ? nothing : first(it)))
+    F("last", (v, _) -> v === nothing ? "" : (it = to_iterable(v); isempty(it) ? nothing : last(it)))
+    F("random", (v, _) -> v === nothing ? "" : (it = to_iterable(v); isempty(it) ? nothing : rand(it)))
     F("slice", (v, a) -> begin
+        v === nothing && return ""                  # a missing value: nothing to slice (Django gives "")
         it = v isa AbstractString || v isa SafeString ? str(v) : to_iterable(v)
         m = match(r"^(-?\d*):(-?\d*)$", str(a))
         m === nothing && return it

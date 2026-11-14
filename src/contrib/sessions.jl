@@ -59,6 +59,9 @@ end
 
 Base.getindex(s::Session, k::AbstractString) = s.data[k]
 Base.get(s::Session, k::AbstractString, default) = get(s.data, k, default)
+Base.get(f::Base.Callable, s::Session, k::AbstractString) = haskey(s, k) ? s.data[k] : f()
+Base.get!(s::Session, k::AbstractString, default) = haskey(s, k) ? s.data[k] : (s[k] = default; default)
+Base.get!(f::Base.Callable, s::Session, k::AbstractString) = haskey(s, k) ? s.data[k] : (v = f(); s[k] = v; v)
 Base.haskey(s::Session, k::AbstractString) = haskey(s.data, k)
 Base.setindex!(s::Session, v, k::AbstractString) = (s.data[k] = v; s.modified = true; s)
 Base.delete!(s::Session, k::AbstractString) = (haskey(s.data, k) && (delete!(s.data, k); s.modified = true); s)

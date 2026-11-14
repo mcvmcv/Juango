@@ -18,8 +18,12 @@ function render(req::Request, template, context = Dict{String,Any}(); status = 2
     end
     t = template isa Template ? template : select_template(template)
     ctx = to_context_dict(context)
-    resp = HttpResponse(render(t, ctx; request = req); status = status, content_type = content_type)
-    resp.context = ctx
+    # for the test client, response.context is what the template saw: the context processors' values, then the view's
+    # (other engines' templates may not take processor_values)
+    seen = get(req.meta, :test_client, false) && t isa Union{Template,MustacheTemplate} ? Dict{String,Any}() : nothing
+    html = seen === nothing ? render(t, ctx; request = req) : render(t, ctx; request = req, processor_values = seen)
+    resp = HttpResponse(html; status = status, content_type = content_type)
+    resp.context = seen === nothing ? ctx : merge(seen, ctx)
     push!(resp.templates, t.name)
     resp
 end

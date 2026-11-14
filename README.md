@@ -352,7 +352,7 @@ filter(Post; tags__name="julia")                  # lookups in both directions
 prefetch_related(objects(Post), :tags)            # 2 extra queries for any number of posts
 ```
 
-- **Join table.** Juango creates a join table (`post_tags`, unique per pair) that migrations manage like any other table. Deleting either side removes its links.
+- **Join table.** Juango creates a join table (`post_tags`, unique per pair) that migrations manage like any other table. Deleting either side removes its links. `through(Post, :tags)` is its model (Django's `Post.tags.through`), with foreign keys `post` and `tag` (`from_post`/`to_post` for a relation to the same model): query it, `bulk_create` links, or connect `m2m_changed` with it as the sender.
 - **Custom intermediate model.** Use `through=:Membership` for one with extra fields, and fill those fields with `add!(club.members, ann; through_defaults=Dict(:role => "chair"))`.
 - **Self-referential relations.** `friends = ManyToManyField(:self)` is symmetrical: adding Bob to Ann's friends adds Ann to Bob's, and removing works both ways. Use `symmetrical = false` for one-way relations such as "follows".
 - **Forms and admin.** `ModelForm` renders a multiple select and `save!(form)` saves the relation. After `save!(form; commit=false)`, call `save_m2m!(form)` once the object is saved. The admin does this for you.
@@ -1420,7 +1420,7 @@ send(order_placed, Order; order = o)                             # send_robust c
 - **Built-in signals:**
   - `pre_save` and `post_save` (`instance`, `created`)
   - `pre_delete` and `post_delete` (`instance`, also sent for cascaded deletes)
-  - `m2m_changed` (`action`, `instance`, `model`, `pk_set`, `reverse`; the sender is the join model)
+  - `m2m_changed` (`action`, `instance`, `model`, `pk_set`, `reverse`; the sender is the join model, `through(Post, :tags)`)
   - `request_started` and `request_finished`
   - `user_logged_in`, `user_logged_out` and `user_login_failed` (without the password)
   - `pre_migrate` and `post_migrate`, once per app around `migrate` (the sender is the app label; `app_label`, `database`, `plan`, and `apps` for historical models). Juango's content types, permissions and default site are created by `post_migrate` receivers for "contenttypes", "auth" and "sites", which run before other apps'.

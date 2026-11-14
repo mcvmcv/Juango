@@ -46,7 +46,7 @@ export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_lis
        none, in_bulk, dates, datetimes, raw, explain, iterator, select_for_update, intersection,
        difference, create, get_or_create, update_or_create, update!, save!, refresh!, full_clean,
        clean_fields, validate_unique, validate_constraints, get_next_by, get_previous_by, bulk_create,
-       bulk_update, add!, remove!, set!, clear!, atomic, on_commit, using_db,
+       bulk_update, add!, remove!, set!, clear!, through, atomic, on_commit, using_db,
        DoesNotExist, MultipleObjectsReturned, ProtectedError, RestrictedError, SET, IntegrityError, DatabaseError, ValidationError, TransactionManagementError
 export run_async, sync_to_async, aget, acreate, acount, aexists, afirst, alast, acollect, aget_or_create,
        aupdate_or_create, abulk_create, abulk_update, aaggregate, ain_bulk, aupdate!, adelete!, asave!,
@@ -61,7 +61,7 @@ export F, Value, Count, Sum, Avg, Min, Max, Lower, Upper, Length, Coalesce, Conc
 # migrations
 export migrate, makemigrations
 # forms
-export Form, @form, ModelForm, is_valid, add_error!, as_p, cleaned_data, save_m2m!, has_changed,
+export Form, @form, ModelForm, is_valid, add_widget_attrs!, add_error!, as_p, cleaned_data, save_m2m!, has_changed,
        changed_fields, FormSet, formset_factory, modelformset_factory, inlineformset_factory,
        Widget, MultiWidget, MultiValueField, SplitDateTimeField, Media, ModelChoiceField,
        ModelMultipleChoiceField, TypedChoiceField, TypedMultipleChoiceField, MultipleChoiceField, RegexField,
@@ -74,7 +74,7 @@ export render, redirect, get_object_or_404, get_list_or_404, TemplateView, Redir
        LoginRequiredMixin, PermissionRequiredMixin, UserPassesTestMixin
 # auth and messages
 export User, AbstractUser, AnonymousUser, USER_MODEL, get_user_model, authenticate, login!, logout!,
-       create_user, create_superuser, set_password!, check_password, make_password, is_authenticated, login_required,
+       create_user, create_superuser, get_username, get_full_name, get_short_name, set_password!, check_password, make_password, is_authenticated, login_required,
        staff_member_required, Permission, Group, has_perm, has_perms, permission_required, ModelBackend,
        validate_password, update_session_auth_hash!, UserCreationForm, UserChangeForm, login_not_required,
        LoginRequiredMiddleware, RemoteUserMiddleware, PersistentRemoteUserMiddleware, RemoteUserBackend,
@@ -90,7 +90,7 @@ export Signal, connect!, disconnect!, receiver, send, pre_save, post_save, pre_d
 # translations and time zones
 export gettext, ngettext, pgettext, npgettext, gettext_lazy, ngettext_lazy, pgettext_lazy, @t_str,
        interpolate, get_language, activate!, deactivate!, with_language, LocaleMiddleware, i18n_patterns,
-       i18n_urls, timezone_now, make_aware, make_naive, localtime, with_timezone, activate_timezone!,
+       i18n_urls, timezone_now, make_aware, make_naive, localtime, localdate, with_timezone, activate_timezone!,
        deactivate_timezone!, get_current_timezone, TimezoneMiddleware
 # caching, HTTP caching and security headers
 export cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, get_or_set, cache_get_many,

@@ -109,6 +109,8 @@ display_string(::Nothing) = ""
 display_string(x::AbstractString) = String(x)
 display_string(x::SafeString) = x.s
 display_string(x::DateTime) = Dates.format(x, "yyyy-mm-dd HH:MM:SS")
+# a list shows as Django shows one (['a', 'b']), not as Julia's Any["a", "b"]
+display_string(v::AbstractVector) = "[" * join((x isa AbstractString ? "'" * x * "'" : display_string(x) for x in v), ", ") * "]"
 display_string(x) = string(x)
 
 const ALNUM = collect("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")

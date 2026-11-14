@@ -500,13 +500,14 @@ end
 
 Render a template. If `request` is given, context processors run as well.
 """
-function render(t::Template, context = Dict{String,Any}(); request = nothing, autoescape = true)
+function render(t::Template, context = Dict{String,Any}(); request = nothing, autoescape = true, processor_values = nothing)
     base = Dict{String,Any}()
     if request !== nothing
         for cp in settings.CONTEXT_PROCESSORS
             merge!(base, to_context_dict(cp(request)))
         end
     end
+    processor_values === nothing || merge!(processor_values, base)     # (the test client's response.context)
     ctx = Context([base, to_context_dict(context)], autoescape, Dict{Symbol,Any}(), request)
     io = IOBuffer()
     run_nodes(io, t.nodes, ctx)
@@ -793,13 +794,14 @@ function engine_template(e::MustacheTemplates, name::AbstractString, tried)
         t
     end
 end
-function render(t::MustacheTemplate, context = Dict{String,Any}(); request = nothing, autoescape = true)
+function render(t::MustacheTemplate, context = Dict{String,Any}(); request = nothing, autoescape = true, processor_values = nothing)
     ctx = Dict{String,Any}()
     if request !== nothing
         for cp in settings.CONTEXT_PROCESSORS
             merge!(ctx, to_context_dict(cp(request)))
         end
     end
+    processor_values === nothing || merge!(processor_values, ctx)
     merge!(ctx, to_context_dict(context))
     mustache_render(t.compiled, Dict{String,Any}(k => (v isa SafeString ? v.s : v) for (k, v) in ctx))
 end

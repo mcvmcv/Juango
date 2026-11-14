@@ -50,6 +50,17 @@ make_naive(z::TimeZones.ZonedDateTime, tz = get_current_timezone()) = DateTime(T
 "An aware datetime in the current (or given) time zone."
 localtime(z::TimeZones.ZonedDateTime, tz = get_current_timezone()) = TimeZones.astimezone(z, tz)
 localtime(x, tz = nothing) = x
+"`localtime()`: now, in the current time zone (aware with USE_TZ, naive local time otherwise)."
+localtime() = localtime(timezone_now())
+"""
+    localdate(x = timezone_now(), tz = get_current_timezone()) -> Date
+
+Today (or `x`'s day) in the current time zone: the user's date, not UTC's. A lab numbering plates by
+year shouldn't still be on last year's numbers on New Year's morning in UTC+13.
+"""
+localdate(x::TimeZones.ZonedDateTime = timezone_now(), tz = get_current_timezone()) = Date(TimeZones.astimezone(x, tz))
+localdate(x::DateTime, tz = nothing) = Date(x)
+localdate(x::Date, tz = nothing) = x
 is_aware(x) = x isa TimeZones.ZonedDateTime
 
 # --- the ORM: store UTC, return aware values ---------------------------------------------------------------------

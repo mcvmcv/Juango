@@ -1403,3 +1403,79 @@ end
     @test !any(in(["juango.W101", "juango.W102", "juango.W103", "juango.W104", "security.W003"]), [m.id for m in Juango.deploy_checks()])
     rm(parent; recursive = true)
 end
+
+@testset "from porting a Django app: auth names, sessions, dates, filters, forms, test context, through" begin
+    # #119: create_user's password keyword; get_username / get_full_name / get_short_name
+    u = create_user("kwpass"; password = "Kw-pass-123", first_name = "Kay", last_name = "Doe")
+    @test check_password(u, "Kw-pass-123")
+    @test_throws ArgumentError create_user("twice", "a-Pass-123"; password = "b-Pass-123")
+    s = create_superuser("kwsuper"; password = "Kw-pass-456")
+    @test s.is_superuser && check_password(s, "Kw-pass-456")
+    @test get_username(u) == "kwpass" && get_full_name(u) == "Kay Doe" && get_short_name(u) == "Kay"
+    @test tr("{{ u.get_username }}|{{ u.get_full_name }}|{{ u.get_short_name }}|{{ a.get_username }}|{{ a.is_anonymous }}",
+             Dict("u" => u, "a" => Juango.AnonymousUser())) == "kwpass|Kay Doe|Kay||true"
+
+    # #120: list filters on a missing value; lists print as Django prints them
+    @test tr("[{{ missing|slice:\":2\" }}][{{ missing|slice:\":2\"|upper }}][{{ missing|first }}][{{ missing|join:\", \" }}]", Dict()) == "[][][][]"
+    @test tr("{{ xs }}", Dict("xs" => Any["a", 1])) == "[&#x27;a&#x27;, 1]" && tr("{{ xs }}", Dict("xs" => Any[])) == "[]"
+
+    # #118: get(f, session, k), get!(session, k, v), get!(f, session, k)
+    sess = Juango.Session()
+    @test get(() -> 0, sess, "n") == 0 && !sess.modified
+    @test get!(sess, "cart", Any[]) == Any[] && sess.modified && haskey(sess, "cart")
+    push!(get!(() -> Any[], sess, "seen"), 7)
+    @test sess["seen"] == [7] && get!(() -> error("not called"), sess, "seen") == [7]
+
+    # #114: localdate() and localtime()
+    @test localdate() isa Date && localtime() isa Union{DateTime,Juango.TimeZones.ZonedDateTime}
+    override_settings(USE_TZ = true, TIME_ZONE = "Pacific/Auckland") do
+        z = Juango.TimeZones.ZonedDateTime(2025, 12, 31, 12, Juango.TimeZones.tz"UTC")     # already 1 January there
+        @test localdate(z) == Date(2026, 1, 1) && localdate() isa Date
+        @test Juango.TimeZones.timezone(localtime()) == Juango.TimeZones.TimeZone("Pacific/Auckland")
+    end
+
+    # #121: the test client's response.context has the context processors' values too
+    r = get(Client(), "/")
+    @test r.context["name"] == "World" && haskey(r.context, "user") && haskey(r.context, "csrf_token")
+
+    # #123: TypedChoiceField's empty_value
+    f = Form([:source => TypedChoiceField(["a" => "A", "" => "None"]; blank = true)]; data = QueryDict("source="))
+    @test is_valid(f) && f.cleaned_data[:source] == ""
+    f = Form([:n => TypedChoiceField(["1" => "One"]; coerce = x -> parse(Int, x), blank = true, empty_value = nothing)]; data = QueryDict("n="))
+    @test is_valid(f) && f.cleaned_data[:n] === nothing
+    f = Form([:n => TypedChoiceField(["1" => "One"]; coerce = x -> parse(Int, x))]; data = QueryDict("n=1"))
+    @test is_valid(f) && f.cleaned_data[:n] == 1
+
+    # #122: BoundField attributes, radio/checkbox lists, iterating the options, add_widget_attrs!
+    F = Form([:days => MultipleChoiceField(["mon" => "Monday", "tue" => "Tuesday"]; widget = Widget(:checkboxes)),
+              :size => CharField(max_length = 1, choices = ["s" => "Small", "l" => "Large"], widget = :radio),
+              :colour => CharField(max_length = 1, choices = ["r" => "Red", "g" => "Green"]),
+              :agree => BooleanField(), :note => TextField(blank = true), :name => CharField(max_length = 10)];
+             data = QueryDict("p-days=tue&p-size=l&p-name=x"), prefix = "p")
+    @test [bf.widget_type for bf in F] == ["checkboxselectmultiple", "radioselect", "select", "checkbox", "textarea", "text"]
+    @test F[:days].auto_id == "id_p-days" && F[:days].html_name == "p-days" && F[:days].use_fieldset && !F[:name].use_fieldset
+    @test F[:name].data == "x" && F[:name].initial === nothing
+    opts = collect(F[:days])
+    @test length(opts) == 2 && opts[2].choice_label == "Tuesday" && opts[2].id_for_label == "id_p-days_1" && opts[2].selected
+    @test opts[2].tag.s == "<input type=\"checkbox\" name=\"p-days\" value=\"tue\" id=\"id_p-days_1\" checked>"
+    html = tr("{% for c in f.size %}[{{ c.tag }}|{{ c.choice_label }}]{% endfor %}", Dict("f" => F))
+    @test occursin("type=\"radio\" name=\"p-size\" value=\"l\" id=\"id_p-size_1\" required checked", html) && occursin("|Small]", html)
+    @test occursin("<div id=\"id_p-size\"><div><label for=\"id_p-size_0\"><input type=\"radio\"", tr("{{ f.size }}", Dict("f" => F)))
+    @test occursin("<option value=\"g\">Green</option>", tr("{% for c in f.colour %}{{ c.tag }}{% endfor %}", Dict("f" => F)))
+    add_widget_attrs!(F) do bf
+        bf.widget_type == "checkbox" ? Dict("class" => "form-check-input") :
+        bf.widget_type == "select" ? Dict("class" => "form-select") : Dict("class" => "form-control")
+    end
+    @test occursin("class=\"form-check-input\"", tr("{{ f.agree }}", Dict("f" => F))) &&
+          occursin("class=\"form-select\"", tr("{{ f.colour }}", Dict("f" => F)))
+    add_widget_attrs!(bf -> Dict("class" => "big"), F)
+    @test occursin("class=\"form-control big\"", tr("{{ f.name }}", Dict("f" => F)))
+
+    # #117: through(Model, :field)
+    Th = through(Essay, :topics)
+    @test Th === Juango.through_model(only(filter(f -> f.name === :topics, Juango.modelmeta(Essay).m2m)))
+    e = create(Essay; title = "through"); t1 = create(Topic; name = "th1"); t2 = create(Topic; name = "th2")
+    bulk_create([Th(essay = e, topic = t1), Th(essay = e, topic = t2)])
+    @test count(e.topics) == 2 && count(filter(Th; essay = e)) == 2
+    @test_throws ArgumentError through(Essay, :nope)
+end

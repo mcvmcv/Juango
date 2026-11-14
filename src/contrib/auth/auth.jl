@@ -80,7 +80,17 @@ username_field(::Type) = :username
 Base.show(io::IO, u::AbstractUser) = print(io, getproperty(u, username_field(typeof(u))))
 tattr(::AbstractUser, ::Val{:is_authenticated}) = true
 tattr(::AbstractUser, ::Val{:is_anonymous}) = false
-tattr(u::AbstractUser, ::Val{:full_name}) = strip(u.first_name * " " * u.last_name)
+tattr(u::AbstractUser, ::Val{:full_name}) = get_full_name(u)
+tattr(u::AbstractUser, ::Val{:get_full_name}) = get_full_name(u)
+tattr(u::AbstractUser, ::Val{:get_short_name}) = get_short_name(u)
+tattr(u::AbstractUser, ::Val{:get_username}) = get_username(u)
+
+"The value of the user's `username_field` (Django's `get_username()`); `\"\"` for an anonymous user."
+get_username(u) = string(getproperty(u, username_field(typeof(u))))
+"First and last name, with a space between (Django's `get_full_name()`)."
+get_full_name(u) = String(strip(string(getproperty(u, :first_name), " ", getproperty(u, :last_name))))
+"The first name (Django's `get_short_name()`)."
+get_short_name(u) = string(getproperty(u, :first_name))
 
 "The user of a request that is not logged in."
 Base.@kwdef struct AnonymousUser
@@ -94,6 +104,12 @@ Base.@kwdef struct AnonymousUser
     is_active::Bool = false
 end
 Base.show(io::IO, ::AnonymousUser) = print(io, "AnonymousUser")
+get_username(::AnonymousUser) = ""
+get_full_name(::AnonymousUser) = ""
+get_short_name(::AnonymousUser) = ""
+tattr(u::AnonymousUser, ::Val{:get_username}) = ""
+tattr(u::AnonymousUser, ::Val{:get_full_name}) = ""
+tattr(u::AnonymousUser, ::Val{:get_short_name}) = ""
 
 is_authenticated(u) = u isa AbstractUser
 is_authenticated(req::Request) = req.user isa AbstractUser
@@ -117,6 +133,11 @@ has_usable_password(u::AbstractUser) = !startswith(u.password, "!") && identify_
 
 "Create and save a regular user of the `AUTH_USER_MODEL` (`username` fills its `username_field`)."
 function create_user(username::AbstractString, password = nothing; kw...)
+    if haskey(kw, :password)          # create_user(name; password = "..."), as Django code calls it
+        password === nothing || throw(ArgumentError("create_user: the password is given twice"))
+        password = kw[:password]
+        kw = Dict{Symbol,Any}(k => v for (k, v) in kw if k !== :password)
+    end
     T = get_user_model()
     uf = username_field(T)
     u = T(; uf => username, (uf === :username ? () : (:username => username,))..., kw...)

@@ -247,6 +247,7 @@ function to_julia(fld::Field, raw)
         return (raw !== nothing && lowercase(string(raw)) in ("on", "true", "1", "yes")), nothing
     end
     s = raw === nothing ? "" : (widget_kind(fld.widget) === :password ? string(raw) : strip(string(raw)))
+    k === :typedchoice && isempty(s) && return fld.related.empty_value, nothing     # not coerced, as in Django
     isempty(s) && return ((k in STRING_KINDS || k === :filepath) && !fld.null ? "" : nothing), nothing
     if k in STRING_KINDS
         return String(s), nothing
@@ -607,6 +608,7 @@ input_type(fld::Field) = widget_kind(fld.widget) === :password ? "password" : wi
 function widget_html(bf::BoundField)
     f, fld = bf.form, bf.field
     fld.kind === :multi && return multi_widget_html(bf)
+    widget_kind(fld.widget) in (:radio, :checkboxes) && return choice_list_html(bf)
     name, id = escape_html(html_name(f, fld)), escape_html(html_id(f, fld))
     val = display_value(bf)
     req = !fld.blank && fld.kind !== :bool ? " required" : ""
@@ -694,6 +696,160 @@ function widget_html(bf::BoundField)
     "<input type=\"$t\"$attrs$extra$v>"
 end
 
+# --- widget types, choice options and their subwidgets ---------------------------------------------
+
+"""
+    widget_type(field) -> String
+
+Django's name for the widget a field renders with (`BoundField.widget_type`): "text", "email",
+"number", "date", "datetime", "time", "password", "hidden", "textarea", "checkbox", "select",
+"selectmultiple", "radioselect", "checkboxselectmultiple", "clearablefile", "multi" ...
+"""
+function widget_type(fld::Field)
+    wk = widget_kind(fld.widget)
+    wk === :multi && return "multi"
+    wk === :radio && return "radioselect"
+    wk === :checkboxes && return "checkboxselectmultiple"
+    wk === :autocomplete && return "autocompleteselect"
+    wk === :raw_id && return "foreignkeyrawid"
+    wk in (:hidden, :password, :textarea) && return string(wk)
+    k = fld.kind
+    k === :bool && return "checkbox"
+    k in FILE_KINDS && return "clearablefile"
+    k in (:m2m, :modelmultichoice, :multichoice) && return "selectmultiple"
+    (k in (:fk, :modelchoice, :filepath) || fld.choices !== nothing) && return "select"
+    k === :geometry && return "geometry"
+    k in (:text, :json, :hstore) && return "textarea"
+    t = input_type(fld)
+    t == "datetime-local" ? "datetime" : t
+end
+
+is_multiple_choice(fld::Field) = fld.kind in (:m2m, :modelmultichoice, :multichoice)
+
+"`(value, label)` pairs of a choice field's options (groups flattened)."
+function choice_options(fld::Field)
+    k = fld.kind
+    k === :multichoice && return Pair{String,String}[string(c.first) => string(c.second) for c in field_choices(fld)]
+    if k in (:modelchoice, :modelmultichoice)
+        sp = fld.related
+        return Pair{String,String}[string(choice_key(sp, o)) => instance_label(sp, o) for o in choice_queryset(sp)]
+    end
+    (k === :m2m || k === :fk) && return Pair{String,String}[string(o.id) => string(o) for o in objects(related_model(fld))]
+    k === :filepath && return Pair{String,String}[string(c.first) => string(c.second) for c in filepath_choices(fld)]
+    fld.choices === nothing && return Pair{String,String}[]
+    Pair{String,String}[string(c.first) => string(c.second) for (_, opts) in choice_groups(fld) for c in opts]
+end
+
+"The values of a field that are currently chosen, as strings."
+function chosen_values(bf::BoundField)
+    val = display_value(bf)
+    vals = val isa AbstractVector ? val : val === nothing ? Any[] : Any[val]
+    Set{String}(string(x isa Model ? x.id : x) for x in vals)
+end
+
+"""
+One option of a choice field, for laying the options out by hand (Django's `BoundWidget`):
+
+    {% for choice in form.days %}{{ choice.tag }}<label for="{{ choice.id_for_label }}">{{ choice.choice_label }}</label>{% endfor %}
+
+`{{ choice }}` is the input inside its label.
+"""
+struct BoundWidget
+    bf::BoundField
+    index::Int                 # 0-based, as in the ids
+    value::String
+    label::String
+    selected::Bool
+end
+
+"The options of a choice field as `BoundWidget`s (with an empty first option for a blank single choice)."
+function subwidgets(bf::BoundField)
+    fld = bf.field
+    opts = choice_options(fld)
+    if !is_multiple_choice(fld) && fld.blank && fld.kind !== :bool && !any(o -> isempty(o.first), opts)
+        el = fld.kind === :modelchoice ? something(fld.related.empty_label, "---------") : "---------"
+        opts = vcat(Pair{String,String}["" => el], opts)
+    end
+    chosen = chosen_values(bf)
+    BoundWidget[BoundWidget(bf, i - 1, v, l, v in chosen) for (i, (v, l)) in enumerate(opts)]
+end
+Base.iterate(bf::BoundField, st = (subwidgets(bf), 1)) = st[2] > length(st[1]) ? nothing : (st[1][st[2]], (st[1], st[2] + 1))
+Base.IteratorSize(::Type{BoundField}) = Base.SizeUnknown()
+Base.eltype(::Type{BoundField}) = BoundWidget
+
+subwidget_id(w::BoundWidget) = html_id(w.bf.form, w.bf.field) * "_" * string(w.index)
+function subwidget_tag(w::BoundWidget)
+    fld = w.bf.field
+    wt = widget_type(fld)
+    if wt in ("select", "selectmultiple")
+        return "<option value=\"" * escape_html(w.value) * "\"" * (w.selected ? " selected" : "") * ">" * escape_html(w.label) * "</option>"
+    end
+    t = (wt == "radioselect" || !is_multiple_choice(fld)) ? "radio" : "checkbox"
+    req = t == "radio" && !fld.blank ? " required" : ""
+    "<input type=\"$t\" name=\"" * escape_html(html_name(w.bf.form, fld)) * "\" value=\"" * escape_html(w.value) *
+        "\" id=\"" * escape_html(subwidget_id(w)) * "\"" * req * widget_attrs(fld.widget) * (w.selected ? " checked" : "") * ">"
+end
+subwidget_html(w::BoundWidget) = "<label for=\"" * escape_html(subwidget_id(w)) * "\">" * subwidget_tag(w) * " " * escape_html(w.label) * "</label>"
+function tattr(w::BoundWidget, ::Val{S}) where {S}
+    S === :tag && return SafeString(subwidget_tag(w))
+    S === :id_for_label && return subwidget_id(w)
+    S === :choice_label && return w.label
+    S === :data && return Dict{String,Any}("name" => html_name(w.bf.form, w.bf.field), "value" => w.value, "label" => w.label,
+                                           "selected" => w.selected, "index" => string(w.index), "attrs" => Dict("id" => subwidget_id(w)))
+    NOTFOUND
+end
+__html__(w::BoundWidget) = subwidget_html(w)
+# In Julia too: bf.widget_type, bf.label, choice.tag ... (the template attributes)
+function Base.getproperty(bf::BoundField, s::Symbol)
+    (s === :form || s === :field) && return getfield(bf, s)
+    r = tattr(bf, Val(s))
+    r === NOTFOUND && throw(ArgumentError("BoundField has no attribute '$s'"))
+    r
+end
+function Base.getproperty(w::BoundWidget, s::Symbol)
+    s in (:bf, :index, :value, :label, :selected) && return getfield(w, s)
+    r = tattr(w, Val(s))
+    r === NOTFOUND && throw(ArgumentError("BoundWidget has no attribute '$s'"))
+    r
+end
+Base.show(io::IO, w::BoundWidget) = print(io, subwidget_html(w))
+
+"A radio or checkbox list (`widget = :radio` or `:checkboxes`), laid out as Django's: a div per option."
+function choice_list_html(bf::BoundField)
+    io = IOBuffer()
+    print(io, "<div id=\"", escape_html(html_id(bf.form, bf.field)), "\">")
+    for w in subwidgets(bf)
+        print(io, "<div>", subwidget_html(w), "</div>")
+    end
+    print(io, "</div>")
+    String(take!(io))
+end
+
+"""
+    add_widget_attrs!(form) do bf
+        bf.widget_type == "checkbox" ? Dict("class" => "form-check-input") :
+        bf.widget_type in ("select", "selectmultiple") ? Dict("class" => "form-select") : Dict("class" => "form-control")
+    end
+
+Add HTML attributes to each field's widget, chosen by looking at the bound field (its
+`widget_type`, name, errors ...): the way to give every field of a form Bootstrap's classes.
+`class` is appended to any class the widget already has; other attributes replace. Returns the form.
+"""
+function add_widget_attrs!(f, form::Form)
+    for fld in form.fields
+        extra = f(BoundField(form, fld))
+        (extra === nothing || isempty(extra) || widget_kind(fld.widget) === :multi) && continue
+        base = fld.widget isa Widget ? fld.widget : Widget(widget_kind(fld.widget))
+        attrs = copy(base.attrs)
+        for (k, v) in extra
+            k, v = string(k), string(v)
+            attrs[k] = k == "class" && haskey(attrs, k) ? attrs[k] * " " * v : v
+        end
+        fld.widget = Widget(base.kind; attrs = attrs, media = base.media)
+    end
+    form
+end
+
 label_tag(bf::BoundField) = "<label for=\"" * escape_html(html_id(bf.form, bf.field)) * "\">" *
                             escape_html(label(bf.field)) * ":</label>"
 
@@ -763,5 +919,12 @@ function tattr(bf::BoundField, ::Val{S}) where {S}
     S === :as_field_group && return as_field_group(bf)
     S === :is_hidden && return widget_kind(bf.field.widget) === :hidden
     S === :field && return bf.field
+    S === :widget_type && return widget_type(bf.field)
+    S === :auto_id && return html_id(bf.form, bf.field)
+    S === :html_name && return html_name(bf.form, bf.field)
+    S === :initial && return initial_for(bf.form, bf.field)
+    S === :data && return bf.form.data === nothing ? nothing : raw_value(bf.form, bf.field)
+    S === :use_fieldset && return widget_type(bf.field) in ("radioselect", "checkboxselectmultiple", "multi")
+    S === :subwidgets && return subwidgets(bf)
     NOTFOUND
 end
