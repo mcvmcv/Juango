@@ -670,14 +670,17 @@ Base.@nospecializeinfer function run_on(@nospecialize(f), b, conn, sql, @nospeci
     settings.SQL_DEBUG && @info "SQL" sql params
     ps = Any[adapt_param(b, p) for p in params]
     logged = log_enabled("juango.db.backends", 10)
-    t0 = logged ? time() : 0.0
+    rec = current_debug_record()
+    t0 = logged || rec !== nothing ? time() : 0.0
     try
         r = f(b, conn, rewrite_placeholders(b, sql), ps)
         logged && log!("juango.db.backends", :debug, "($(round((time() - t0) * 1000; digits = 3)) ms) $sql; args=$(repr(params))";
                        sql = sql, params = params, duration = time() - t0, alias = current_alias())
+        rec === nothing || record_query!(rec, sql, params, time() - t0, nothing)
         r
     catch e
         e2 = translate_error(b, e)
+        rec === nothing || record_query!(rec, sql, params, time() - t0, sprint(showerror, e2))
         e2 === e ? rethrow() : throw(e2)
     end
 end

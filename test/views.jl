@@ -1815,3 +1815,62 @@ end
     Juango.live_release_uploads!(s4, used)
     @test isempty(s4.uploads) && !isfile(path)
 end
+
+@testset "debug toolbar" begin
+    old_mw, old_urls = settings.MIDDLEWARE, settings.ROOT_URLCONF
+    a1 = create(Author; name = "DT Ann", email = "dtann@x"); a2 = create(Author; name = "DT Bob", email = "dtbob@x")
+    create(Article; title = "dt one", author = a1); create(Article; title = "dt two", author = a2)
+    write(joinpath(TPL, "dt_page.html"), "<html><body>{% for a in arts %}{{ a.author.name }};{% endfor %}{% include \"dt_part.html\" with n=3 %}</body></html>")
+    write(joinpath(TPL, "dt_part.html"), "[{{ n }}]")
+    function dt_page(req)
+        arts = collect(order_by(filter(Article; title__startswith = "dt "), "title"))    # 1 query, then one per author: an N+1
+        render(req, "dt_page.html", Dict("arts" => arts, "label" => "<x>", "qs" => filter(Article; id = 0)))
+    end
+    dt_json(req) = JsonResponse(Dict("n" => count(filter(Author; name__startswith = "DT"))))
+    try
+        configure!(MIDDLEWARE = vcat(Any[DebugToolbarMiddleware], old_mw), INTERNAL_IPS = ["127.0.0.1"],
+                   ROOT_URLCONF = vcat(old_urls, [path("dt/", dt_page; name = "dt-page"), path("dt.json", dt_json)]))
+        c = Client()
+        r = get(c, "/dt/")
+        body = text(r)
+        @test r.status == 200 && occursin("DT Ann;DT Bob;[3]", body)
+        @test occursin("<div id=\"jdt\"", body) && endswith(body, "</body></html>")
+        @test occursin("3 queries", body)                          # the articles, then each author
+        @test occursin("2 similar queries", body)                  # the N+1 is flagged
+        @test occursin("dt_page.html", body) && occursin("dt_part.html", body) && occursin("include", body)
+        @test occursin("&lt;QuerySet{Article}&gt;", body)          # a queryset in the context is described, not run
+        @test occursin("&quot;&lt;x&gt;&quot;", body)              # context values are escaped
+        @test occursin("from dt_page", body)                       # where each query came from: the view,
+        @test occursin("in template <code>dt_page.html</code>", body)   # and for the N+1, the template that ran it
+        @test !occursin("SessionMiddleware", body)                 # but not the request plumbing
+        @test occursin("dt-page", body)                            # URL name
+        link = getheader(r, "X-Juango-Debug")
+        @test link !== nothing && startswith(link, "/__debug__/")
+
+        r2 = get(c, "/dt.json")                                    # not HTML: left alone, but recorded
+        @test !occursin("jdt", text(r2)) && text(r2) == "{\"n\":2}"
+        hist = text(get(c, "/__debug__/"))
+        @test occursin("/dt.json", hist) && occursin("/dt/", hist)
+        page = get(c, getheader(r2, "X-Juango-Debug"))
+        @test page.status == 200 && occursin("SQL (1)", text(page)) && occursin("Juango debug", text(page))
+        @test get(c, "/__debug__/nope/").status == 404
+
+        # duplicated queries
+        configure!(ROOT_URLCONF = vcat(old_urls, [path("dup/", req -> (get(Author; id = a1.id); get(Author; id = a1.id); HttpResponse("<body>ok</body>")))]))
+        @test occursin("duplicated ×2", text(get(c, "/dup/")))
+
+        # not an internal address, or DEBUG off: nothing recorded or shown
+        configure!(INTERNAL_IPS = String[])
+        r3 = get(c, "/dt/")
+        @test !occursin("jdt", text(r3)) && getheader(r3, "X-Juango-Debug") === nothing
+        @test get(c, "/__debug__/").status == 404
+        configure!(DEBUG_TOOLBAR_SHOW = req -> true, DEBUG_TOOLBAR_STACKTRACES = false, DEBUG_TOOLBAR_HISTORY = 1)
+        @test occursin("jdt", text(get(c, "/dt/")))
+        @test length(Juango.DEBUG_HISTORY) == 1
+        @test Juango.current_debug_record() === nothing           # nothing left recording on this task
+    finally
+        configure!(MIDDLEWARE = old_mw, ROOT_URLCONF = old_urls, INTERNAL_IPS = String[], DEBUG_TOOLBAR_SHOW = nothing,
+                   DEBUG_TOOLBAR_STACKTRACES = true, DEBUG_TOOLBAR_HISTORY = 25)
+        rm(joinpath(TPL, "dt_page.html"); force = true); rm(joinpath(TPL, "dt_part.html"); force = true)
+    end
+end

@@ -120,6 +120,11 @@ function default_settings()
         :CSRF_TRUSTED_ORIGINS => String[],
         :PASSWORD_ITERATIONS => 260_000,
         :SQL_DEBUG => false,
+        :INTERNAL_IPS => String[],                     # addresses shown the debug toolbar (when DEBUG)
+        :DEBUG_TOOLBAR_SHOW => nothing,                # nothing: DEBUG and an INTERNAL_IPS client; or a function req -> Bool
+        :DEBUG_TOOLBAR_PREFIX => "/__debug__/",        # the history of recorded requests
+        :DEBUG_TOOLBAR_HISTORY => 25,                  # how many recorded requests to keep
+        :DEBUG_TOOLBAR_STACKTRACES => true,            # where each query came from (costs a backtrace per query)
         :MIGRATIONS_DIR => "migrations",
         :DEFAULT_AUTO_FIELD => :BigAutoField,               # the automatic primary key: AutoField, BigAutoField or SmallAutoField
         :REMOTE_USER_HEADER => "Remote-User",             # RemoteUserMiddleware's header (set only by your proxy)

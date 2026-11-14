@@ -219,3 +219,39 @@ Base.@nospecializeinfer function any_vector(@nospecialize(v::AbstractVector))
     end
     out
 end
+
+# --- debug toolbar recording (contrib/debugtoolbar.jl) ------------------------------------------
+#
+# Defined here because the query runner and the template engine, which are loaded before the
+# toolbar, record into it.
+
+"One SQL statement the debug toolbar recorded."
+struct DebugQuery
+    sql::String
+    params::Vector{Any}
+    seconds::Float64
+    alias::String
+    backtrace::Vector{Union{Ptr{Nothing},Base.InterpreterIP}}
+    error::Union{Nothing,String}
+    templates_started::Int                   # how many templates had started rendering when it ran
+end
+
+"One template the debug toolbar recorded: its name, how it was rendered and its context (already made safe to show)."
+struct DebugTemplate
+    name::String
+    how::String                              # "render", "include" or "extends"
+    context::Vector{Pair{String,String}}
+end
+
+"What the debug toolbar records while a request runs (on the request's task and the tasks it spawns)."
+mutable struct DebugRecord
+    const queries::Vector{DebugQuery}
+    const templates::Vector{DebugTemplate}
+    const lock::ReentrantLock
+    const stacktraces::Bool
+    info::Dict{Symbol,Any}                   # request, response and timing, filled in when the request is done
+end
+DebugRecord(stacktraces::Bool) = DebugRecord(DebugQuery[], DebugTemplate[], ReentrantLock(), stacktraces, Dict{Symbol,Any}())
+
+"The current task's debug toolbar record, or `nothing` when nothing is recording."
+current_debug_record() = get(task_local_storage(), :juango_debug, nothing)::Union{Nothing,DebugRecord}

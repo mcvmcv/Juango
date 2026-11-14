@@ -509,6 +509,8 @@ function render(t::Template, context = Dict{String,Any}(); request = nothing, au
     end
     processor_values === nothing || merge!(processor_values, base)     # (the test client's response.context)
     ctx = Context([base, to_context_dict(context)], autoescape, Dict{Symbol,Any}(), request)
+    rec = current_debug_record()
+    rec === nothing || record_template!(rec, t.name, "render", ctx.stack)
     io = IOBuffer()
     run_nodes(io, t.nodes, ctx)
     String(take!(io))
@@ -803,6 +805,8 @@ function render(t::MustacheTemplate, context = Dict{String,Any}(); request = not
     end
     processor_values === nothing || merge!(processor_values, ctx)
     merge!(ctx, to_context_dict(context))
+    rec = current_debug_record()
+    rec === nothing || record_template!(rec, t.name, "render", [ctx])
     mustache_render(t.compiled, Dict{String,Any}(k => (v isa SafeString ? v.s : v) for (k, v) in ctx))
 end
 

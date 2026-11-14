@@ -919,6 +919,38 @@ end
 - **From model fields:** `FilterSet(Post; fields = [:status, :author], data = req.GET)`, or with lookups, `fields = Dict(:views => ["gte", "lte"])` (named `views__gte` ...).
 - **Results:** `fs.qs` is the filtered queryset, to chain, paginate or count; `fs.form` is the bound form. An empty value leaves its filter out, and so does an invalid one, whose field shows the error, so a stale or mistyped URL still lists results. A date range on a datetime field includes the whole of the last day.
 
+### Debug toolbar
+
+`DebugToolbarMiddleware` shows each page's SQL, templates and timings in a panel in the
+corner of the page, like django-debug-toolbar. It's for finding N+1 queries in development:
+queries that differ only in their parameters are grouped as "similar", repeated ones are
+marked as duplicates, and each query says where it came from (your function and line, and
+the template it ran in).
+
+```julia
+configure!(DEBUG = true, INTERNAL_IPS = ["127.0.0.1", "::1"],
+           MIDDLEWARE = [DebugToolbarMiddleware, Juango.default_settings()[:MIDDLEWARE]...])
+```
+
+Put it first, so the queries of the other middleware (sessions, authentication) count too, but
+after `GZipMiddleware` and `ContentSecurityPolicyMiddleware` if you use them. Only clients in
+`INTERNAL_IPS` see it, and only while `DEBUG` is on. `DEBUG_TOOLBAR_SHOW = req -> ...` decides
+for itself instead.
+
+- **Panels:** timing (total, SQL, GC and allocation), SQL (statements with parameters,
+  duration, database alias and stack), templates (each render, include and extends, with
+  the context), request (view, URL name, GET/POST, cookie names, session, headers) and
+  response headers.
+- **Lazy values stay lazy:** querysets, the lazy user and the other context processors'
+  values are shown by type, so the panel never runs a query of its own.
+- **Responses without `</body>`:** htmx partials, JSON and other non-HTML responses are
+  recorded but left unchanged. Their `X-Juango-Debug` header links to the request's page
+  under `/__debug__/` (`DEBUG_TOOLBAR_PREFIX`), which also lists the last 25 requests
+  (`DEBUG_TOOLBAR_HISTORY`).
+- **Cost:** a backtrace per query; `DEBUG_TOOLBAR_STACKTRACES = false` turns it off.
+- **Development only:** it keeps recent requests, with their parameters and session values,
+  in memory. Leave it out of production settings.
+
 ### Streaming, server-sent events and WebSockets
 
 A streaming response sends its body while it is produced, so it never has to sit in memory whole.
