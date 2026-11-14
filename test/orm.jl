@@ -1210,86 +1210,92 @@ Juango.get_by_natural_key(::Type{Topic}, name) = get(Topic; name = name)
 end
 
 @testset "aware datetimes round-trip through the serializers (#141)" begin
-    P = Juango.parse_aware_datetime
-    utc(y, mo, d, h, mi, s = 0, ms = 0) = Juango.TimeZones.ZonedDateTime(DateTime(y, mo, d, h, mi, s, ms), Juango.UTC_TZ)
-    @test P("2026-11-14T18:21:17.605Z") == utc(2026, 11, 14, 18, 21, 17, 605)
-    @test P("2026-11-14T18:21:17.605+00:00") == utc(2026, 11, 14, 18, 21, 17, 605)
-    @test P("2026-11-15 07:21:17.605123+13:00") == utc(2026, 11, 14, 18, 21, 17, 605)     # microseconds dropped
-    @test P("2026-11-14T13:21-0500") == utc(2026, 11, 14, 18, 21) && P("2026-11-14T20:21:00+02") == utc(2026, 11, 14, 18, 21)
-    @test P("2026-11-14T18:21:17") === nothing && P("2026-11-14") === nothing && P("nonsense") === nothing && P(42) === nothing
-    override_settings(USE_TZ = true, TIME_ZONE = "Pacific/Auckland") do
-        au = create(Author; name = "TZ141", email = "tz141@x")
-        a = create(Article; title = "tz141", author = au)
-        s = serialize(:json, [a])
-        stamp = JSON.parse(s)[1]["fields"]["created"]
-        @test endswith(stamp, "Z") && length(stamp) == 24                      # as Django: 2026-11-14T18:21:17.605Z
-        d = only(deserialize(:json, s)).object
-        @test d.created isa Juango.TimeZones.ZonedDateTime
-        @test d.created == a.created
-        # an ISO string with an offset assigned to the field is stored as that instant
-        a.created = "2026-01-02T03:04:05+13:00"
-        save!(a; update_fields = [:created])
-        @test refresh!(a).created == utc(2026, 1, 1, 14, 4, 5)
+    rollback_after() do      # (leaves no rows for later testsets)
+        P = Juango.parse_aware_datetime
+        utc(y, mo, d, h, mi, s = 0, ms = 0) = Juango.TimeZones.ZonedDateTime(DateTime(y, mo, d, h, mi, s, ms), Juango.UTC_TZ)
+        @test P("2026-11-14T18:21:17.605Z") == utc(2026, 11, 14, 18, 21, 17, 605)
+        @test P("2026-11-14T18:21:17.605+00:00") == utc(2026, 11, 14, 18, 21, 17, 605)
+        @test P("2026-11-15 07:21:17.605123+13:00") == utc(2026, 11, 14, 18, 21, 17, 605)     # microseconds dropped
+        @test P("2026-11-14T13:21-0500") == utc(2026, 11, 14, 18, 21) && P("2026-11-14T20:21:00+02") == utc(2026, 11, 14, 18, 21)
+        @test P("2026-11-14T18:21:17") === nothing && P("2026-11-14") === nothing && P("nonsense") === nothing && P(42) === nothing
+        override_settings(USE_TZ = true, TIME_ZONE = "Pacific/Auckland") do
+            au = create(Author; name = "TZ141", email = "tz141@x")
+            a = create(Article; title = "tz141", author = au)
+            s = serialize(:json, [a])
+            stamp = JSON.parse(s)[1]["fields"]["created"]
+            @test endswith(stamp, "Z") && length(stamp) == 24                      # as Django: 2026-11-14T18:21:17.605Z
+            d = only(deserialize(:json, s)).object
+            @test d.created isa Juango.TimeZones.ZonedDateTime
+            @test d.created == a.created
+            # an ISO string with an offset assigned to the field is stored as that instant
+            a.created = "2026-01-02T03:04:05+13:00"
+            save!(a; update_fields = [:created])
+            @test refresh!(a).created == utc(2026, 1, 1, 14, 4, 5)
+        end
     end
 end
 
 @testset "model introspection API (#139)" begin
-    fs = concrete_fields(Article)
-    @test [f.name for f in fs] == [:title, :slug, :body, :status, :views, :rating, :published, :author, :created, :updated]
-    au = only(filter(f -> f.name === :author, fs))
-    @test attname(au) === :author_id && column(au) == "author_id" && is_relation(au) && related_model(au) === Author
-    @test !is_relation(fs[1]) && attname(fs[1]) === :title && !is_primary_key(Article, fs[1])
-    @test [f.name for f in many_to_many(Essay)] == [:topics] && related_model(only(many_to_many(Essay))) === Topic
-    @test isempty(many_to_many(Article)) && through(Essay, :topics) isa Type
+    rollback_after() do      # (leaves no rows for later testsets)
+        fs = concrete_fields(Article)
+        @test [f.name for f in fs] == [:title, :slug, :body, :status, :views, :rating, :published, :author, :created, :updated]
+        au = only(filter(f -> f.name === :author, fs))
+        @test attname(au) === :author_id && column(au) == "author_id" && is_relation(au) && related_model(au) === Author
+        @test !is_relation(fs[1]) && attname(fs[1]) === :title && !is_primary_key(Article, fs[1])
+        @test [f.name for f in many_to_many(Essay)] == [:topics] && related_model(only(many_to_many(Essay))) === Topic
+        @test isempty(many_to_many(Article)) && through(Essay, :topics) isa Type
 
-    a1 = create(Author; name = "Intro139", email = "i139@x")
-    art = create(Article; title = "intro139", author = a1, rating = 1.5)
-    led = create(Ledger; label = "intro139", amount = Juango.Decimal("19.90"))
-    # snapshot every column as JSON, change the row, put it back: what an undo recorder does
-    for obj in (art, led)
-        T = typeof(obj)
-        snap = Dict(string(attname(f)) => value_to_json(f, value_from_object(f, obj)) for f in concrete_fields(T) if f.generated === nothing)
-        stored = JSON.parse(JSON.json(snap))
-        for f in concrete_fields(T)
-            v = value_from_object(f, obj)
-            @test isequal(value_from_json(f, stored[string(attname(f))]), v)
+        a1 = create(Author; name = "Intro139", email = "i139@x")
+        art = create(Article; title = "intro139", author = a1, rating = 1.5)
+        led = create(Ledger; label = "intro139", amount = Juango.Decimal("19.90"))
+        # snapshot every column as JSON, change the row, put it back: what an undo recorder does
+        for obj in (art, led)
+            T = typeof(obj)
+            snap = Dict(string(attname(f)) => value_to_json(f, value_from_object(f, obj)) for f in concrete_fields(T) if f.generated === nothing)
+            stored = JSON.parse(JSON.json(snap))
+            for f in concrete_fields(T)
+                v = value_from_object(f, obj)
+                @test isequal(value_from_json(f, stored[string(attname(f))]), v)
+            end
         end
+        @test value_from_object(au, art) == a1.id                       # the id, not the Author
+        @test value_to_json(only(filter(f -> f.name === :amount, concrete_fields(Ledger))), led.amount) == "19.90"
+        ts = only(filter(f -> f.name === :created, concrete_fields(Article)))
+        @test value_from_json(ts, "2026-11-14T18:21:17.605Z") isa Union{DateTime,Juango.TimeZones.ZonedDateTime}
+        vals = Dict(attname(f) => value_from_json(f, value_to_json(f, value_from_object(f, art))) for f in concrete_fields(Article)
+                    if f.name in (:title, :rating))
+        update!(filter(Article; id = art.id); title = "changed", rating = 9.0)
+        update!(filter(Article; id = art.id); vals...)
+        @test (a = get(Article; id = art.id); a.title == "intro139" && a.rating == 1.5)
     end
-    @test value_from_object(au, art) == a1.id                       # the id, not the Author
-    @test value_to_json(only(filter(f -> f.name === :amount, concrete_fields(Ledger))), led.amount) == "19.90"
-    ts = only(filter(f -> f.name === :created, concrete_fields(Article)))
-    @test value_from_json(ts, "2026-11-14T18:21:17.605Z") isa Union{DateTime,Juango.TimeZones.ZonedDateTime}
-    vals = Dict(attname(f) => value_from_json(f, value_to_json(f, value_from_object(f, art))) for f in concrete_fields(Article)
-                if f.name in (:title, :rating))
-    update!(filter(Article; id = art.id); title = "changed", rating = 9.0)
-    update!(filter(Article; id = art.id); vals...)
-    @test (a = get(Article; id = art.id); a.title == "intro139" && a.rating == 1.5)
 end
 
 @testset "grouped values() drop Meta.ordering; order_by() clears it (#153)" begin
-    au = create(Author; name = "G153", email = "g153@x")
-    for (t, st) in (("g153 a", "p"), ("g153 b", "p"), ("g153 c", "d"))
-        create(Article; title = t, author = au, status = st)
+    rollback_after() do      # (leaves no rows for later testsets)
+        au = create(Author; name = "G153", email = "g153@x")
+        for (t, st) in (("g153 a", "p"), ("g153 b", "p"), ("g153 c", "d"))
+            create(Article; title = t, author = au, status = st)
+        end
+        base = filter(Article; title__startswith = "g153")               # Article has Meta(ordering = ["-id"])
+        grouped = annotate(values(base, :status); n = Count(:id))
+        sql = first(Juango.select_sql(grouped))
+        @test !occursin("ORDER BY", sql)                                 # PostgreSQL refused the GROUP BY with it
+        @test Dict(r[:status] => r[:n] for r in grouped) == Dict("p" => 2, "d" => 1)
+        @test [r[:status] for r in order_by(grouped, "-n")] == ["p", "d"]     # an explicit order_by is kept
+        @test occursin("ORDER BY", first(Juango.select_sql(values(base, :status))))   # not grouped: Meta.ordering applies
+        # any aggregate annotate groups, so Meta.ordering is dropped there too (Django ≥ 3.1), but not an explicit order_by
+        per_obj = annotate(base; n = Count(:id))
+        @test !occursin("ORDER BY", first(Juango.select_sql(per_obj))) && length(collect(per_obj)) == 3
+        @test [a.title for a in order_by(per_obj, "-title")] == ["g153 c", "g153 b", "g153 a"]
+        @test occursin("ORDER BY", first(Juango.select_sql(annotate(base; up = Upper(:title)))))   # not an aggregate: kept
+        # order_by() with no fields clears the ordering, Meta.ordering included, as in Django
+        @test !occursin("ORDER BY", first(Juango.select_sql(order_by(base))))
+        @test occursin("ORDER BY", first(Juango.select_sql(order_by(order_by(base), "title"))))
+        ids = sort([a.id for a in base])
+        @test first(order_by(base)).id == ids[1] && last(order_by(base)).id == ids[end]    # first/last: by id
+        @test first(base).id == ids[end]                                 # (Meta.ordering = ["-id"] otherwise)
+        @test length(collect(Juango.iterator(order_by(base); chunk_size = 2))) == 3
     end
-    base = filter(Article; title__startswith = "g153")               # Article has Meta(ordering = ["-id"])
-    grouped = annotate(values(base, :status); n = Count(:id))
-    sql = first(Juango.select_sql(grouped))
-    @test !occursin("ORDER BY", sql)                                 # PostgreSQL refused the GROUP BY with it
-    @test Dict(r[:status] => r[:n] for r in grouped) == Dict("p" => 2, "d" => 1)
-    @test [r[:status] for r in order_by(grouped, "-n")] == ["p", "d"]     # an explicit order_by is kept
-    @test occursin("ORDER BY", first(Juango.select_sql(values(base, :status))))   # not grouped: Meta.ordering applies
-    # any aggregate annotate groups, so Meta.ordering is dropped there too (Django ≥ 3.1), but not an explicit order_by
-    per_obj = annotate(base; n = Count(:id))
-    @test !occursin("ORDER BY", first(Juango.select_sql(per_obj))) && length(collect(per_obj)) == 3
-    @test [a.title for a in order_by(per_obj, "-title")] == ["g153 c", "g153 b", "g153 a"]
-    @test occursin("ORDER BY", first(Juango.select_sql(annotate(base; up = Upper(:title)))))   # not an aggregate: kept
-    # order_by() with no fields clears the ordering, Meta.ordering included, as in Django
-    @test !occursin("ORDER BY", first(Juango.select_sql(order_by(base))))
-    @test occursin("ORDER BY", first(Juango.select_sql(order_by(order_by(base), "title"))))
-    ids = sort([a.id for a in base])
-    @test first(order_by(base)).id == ids[1] && last(order_by(base)).id == ids[end]    # first/last: by id
-    @test first(base).id == ids[end]                                 # (Meta.ordering = ["-id"] otherwise)
-    @test length(collect(Juango.iterator(order_by(base); chunk_size = 2))) == 3
 end
 
 @testset "DecimalField" begin
