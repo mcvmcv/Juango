@@ -1877,3 +1877,23 @@ end
     @test aggregate(filter(Author; name__startswith = "Agg Join"); n = Count(:articles))[:n] == 4
     @test aggregate(qs[1:1]; n = Count(:articles))[:n] == 3       # a sliced queryset: over the objects (as before)
 end
+
+@testset "no implicit DISTINCT for reverse one-to-one or values(); values reuse filter joins (#138)" begin
+    a1 = create(Author; name = "dq same"); a2 = create(Author; name = "dq same2")
+    create(Profile; user = a1, bio = "red"); create(Profile; user = a2, bio = "red")
+    qs = filter(Author; name__startswith = "dq same", profile__bio = "red")
+    sql = Juango.select_sql(qs)[1]
+    @test !occursin("DISTINCT", sql)                                            # one-to-one: no duplicates possible
+    # values_list ordered by a column it doesn't select: PostgreSQL refused this under DISTINCT
+    @test values_list(order_by(qs, "-id"), :name; flat = true) == ["dq same2", "dq same"]
+    # a value read through the filtered relation uses the filter's join
+    vsql = Juango.select_sql(values(qs, :profile__bio))[1]
+    @test count("JOIN", vsql) == 1
+    @test values_list(qs, :profile__bio; flat = true) == ["red", "red"]
+    # equal rows from values() are all returned (no implicit DISTINCT), as in Django
+    au = create(Author; name = "dq multi")
+    for t in ("x", "y"); create(Article; title = "dq-$t", author = au, published = true); end
+    @test values_list(filter(Author; name = "dq multi", articles__published = true), :name; flat = true) == ["dq multi", "dq multi"]
+    # objects are still made distinct after a multi-valued join
+    @test length(collect(filter(Author; name = "dq multi", articles__published = true))) == 1
+end

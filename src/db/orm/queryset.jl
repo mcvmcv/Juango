@@ -326,6 +326,27 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         c.annotations[k] = v
     end
     grouped = any(p -> contains_aggregate(p.second), qs.annotations)
+    # WHERE is compiled first, so values() and annotations can reuse its joins (its SQL still goes after them)
+    # WHERE, HAVING for conditions on aggregate annotations, or an outer WHERE for window ones
+    wparts, wps, hparts, hps, oparts, ops = String[], Any[], String[], Any[], String[], Any[]
+    if qs.isnone
+        push!(wparts, sql_false(backend()))
+    else
+        for (i, q) in enumerate(qs.where)
+            c.scope = i
+            c.uses_aggregate = false
+            c.uses_window = false
+            sql, p = compile_q(c, c.base, T, q, false)
+            if c.uses_window
+                push!(oparts, sql); append!(ops, p)
+            elseif c.uses_aggregate
+                push!(hparts, sql); append!(hps, p)
+            else
+                push!(wparts, sql); append!(wps, p)
+            end
+        end
+        c.scope = 0
+    end
     # select list first: it may add joins, and its parameters come first in the SQL
     sel, sel_ps = String[], Any[]
     related = Tuple{Vector{Symbol},Any,String}[]
@@ -342,7 +363,9 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
                 is_filtered_relation(a) || contains_aggregate(a) || push!(group, qname(string(f)))
                 continue
             end
+            c.reuse_upto = length(qs.where)               # a value read through a filtered relation uses its join
             col, _ = resolve_path(c, c.base, T, f)
+            c.reuse_upto = 0
             push!(sel, "$col AS $(qname(f))")
             push!(group, col)
         end
@@ -371,27 +394,6 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         push!(group, pk_select(c.base, T))
         append!(group, [qcol(a, "id") for (_, _, a) in related])
     end
-    # (WHERE is compiled before the annotations, which may reuse its joins)
-    # WHERE, HAVING for conditions on aggregate annotations, or an outer WHERE for window ones
-    wparts, wps, hparts, hps, oparts, ops = String[], Any[], String[], Any[], String[], Any[]
-    if qs.isnone
-        push!(wparts, sql_false(backend()))
-    else
-        for (i, q) in enumerate(qs.where)
-            c.scope = i
-            c.uses_aggregate = false
-            c.uses_window = false
-            sql, p = compile_q(c, c.base, T, q, false)
-            if c.uses_window
-                push!(oparts, sql); append!(ops, p)
-            elseif c.uses_aggregate
-                push!(hparts, sql); append!(hps, p)
-            else
-                push!(wparts, sql); append!(wps, p)
-            end
-        end
-        c.scope = 0
-    end
     pre_ann = copy(sel)            # the select list without annotations (for a wrapping query)
     ann_sel, ann_ps = String[], Any[]
     for (k, v) in qs.annotations
@@ -413,7 +415,9 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     end
     o, extra, ops_order = ordered ? order_clause(c, qs.order) : ("", String[], Any[])
     (columns === nothing && !idonly && !grouped) && append!(sel, extra)
-    distinct = (c.distinct || qs.distinct_fields !== nothing) && !grouped
+    # objects are made distinct after a multi-valued join; values() rows aren't (as in Django, equal rows
+    # are all returned, and PostgreSQL would refuse ORDER BY on columns not selected)
+    distinct = ((c.distinct && qs.values_fields === nothing) || qs.distinct_fields !== nothing) && !grouped
     dkw = distinct ? "DISTINCT " : ""
     if distinct && qs.distinct_fields !== nothing && !isempty(qs.distinct_fields)
         backend() isa PostgresBackend ||

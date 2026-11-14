@@ -292,7 +292,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                 return ("EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(qcol(a, column(rf))) = $(qcol(alias, "id")) AND $sql)", ps)
             end
             a = join!(c, alias, scope_key(c, alias, rn), modelmeta(M).table, column(rf), "id"; left = true)
-            c.distinct = true
+            rf.one_to_one || (c.distinct = true)               # (a reverse one-to-one can't repeat rows)
             return compile_lookup(c, a, M, subkey, value, negated)
         end
         if !isempty(rest) && f.kind in (:json, :hstore, :array)
