@@ -2279,7 +2279,9 @@ const FINDER151_FILE = Ref("")
     end
     # commands: sqlflush, sqlsequencereset, migrate --plan; PostgreSQL index types
     sql = Juango.flush_sql()
-    @test !isempty(sql) && (IS_POSTGRES ? startswith(sql[1], "TRUNCATE") : any(s -> startswith(s, "DELETE FROM"), sql))
+    @test !isempty(sql) && (IS_POSTGRES ? startswith(sql[1], "TRUNCATE") :
+                            IS_MYSQL ? sql[1] == "SET FOREIGN_KEY_CHECKS = 0" && any(s -> startswith(s, "TRUNCATE TABLE"), sql) :
+                            any(s -> startswith(s, "DELETE FROM"), sql))
     seqs = Juango.sequence_reset_sql(["project"])
     @test IS_POSTGRES ? any(s -> occursin("setval", s) && occursin("\"article\"", s), seqs) : isempty(seqs)
     out = mktemp() do path, io                                       # (redirect_stdout needs a file, not an IOBuffer)
