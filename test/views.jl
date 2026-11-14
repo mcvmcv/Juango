@@ -1695,3 +1695,64 @@ end
     @test body(r3) == "streamed" && getheader(r3, "Content-Length") == "8" && !isopen(io)
     @test content_disposition("Résumé.pdf"; attachment = true) == "attachment; filename*=UTF-8''R%C3%A9sum%C3%A9.pdf"
 end
+
+@testset "FilterSet (#137)" begin
+    a1 = create(Author; name = "FS Ann", email = "ann@x"); a2 = create(Author; name = "FS Bob", email = "bob@x")
+    t0 = DateTime(2025, 3, 1, 12)
+    arts = [create(Article; title = "fs alpha", author = a1, status = "p", views = 5, published = true),
+            create(Article; title = "fs beta", author = a1, status = "d", views = 50, published = false, rating = 4.0),
+            create(Article; title = "fs gamma", author = a2, status = "p", views = 500, published = true)]
+    for (i, a) in enumerate(arts)                                      # created on 1, 2 and 3 March
+        update!(filter(Article; id = a.id); created = t0 + Day(i - 1))
+    end
+    base = filter(Article; title__startswith = "fs ")
+    PF(data; req = nothing) = FilterSet(Article, [
+            :title => CharFilter(lookup = "icontains"),
+            :status => ChoiceFilter(),
+            :author => ModelChoiceFilter(r -> filter(Author; name__startswith = "FS")),
+            :published => BooleanFilter(),
+            :views__gte => NumberFilter(field_name = :views, lookup = "gte"),
+            :created => DateFromToRangeFilter(),
+            :unrated => IsNullFilter(field_name = :rating),
+            :q => CharFilter(method = (qs, name, v) -> filter(qs, Q(title__icontains = v) | Q(author__name__icontains = v))),
+            :o => OrderingFilter([:views, :title, "author__name" => "author"]; field_labels = Dict("author" => "Writer")),
+        ]; data = data === nothing ? nothing : QueryDict(data), queryset = base, request = req)
+    titles(fs) = [a.title for a in order_by(fs.qs, "title")]
+    @test titles(PF(nothing)) == ["fs alpha", "fs beta", "fs gamma"] && !PF(nothing).is_bound
+    @test titles(PF("title=ALP")) == ["fs alpha"]
+    @test titles(PF("status=p")) == ["fs alpha", "fs gamma"]
+    @test titles(PF("author=$(a2.id)")) == ["fs gamma"]
+    @test titles(PF("published=false")) == ["fs beta"] && titles(PF("published=")) == ["fs alpha", "fs beta", "fs gamma"]
+    @test titles(PF("views__gte=50")) == ["fs beta", "fs gamma"]
+    @test titles(PF("created_after=2025-03-02")) == ["fs beta", "fs gamma"]
+    @test titles(PF("created_before=2025-03-02")) == ["fs alpha", "fs beta"]           # the whole last day
+    @test titles(PF("unrated=true")) == ["fs alpha", "fs gamma"]
+    @test titles(PF("q=bob")) == ["fs gamma"]
+    @test titles(PF("status=p&published=true&views__gte=100")) == ["fs gamma"]
+    # an invalid value leaves its filter out and shows the error; the others still apply
+    f = PF("views__gte=lots&status=p")
+    @test titles(f) == ["fs alpha", "fs gamma"] && haskey(f.form.errors, :views__gte)
+    @test titles(PF("status=nonsense")) == ["fs alpha", "fs beta", "fs gamma"]
+    @test titles(PF("author=999999")) == ["fs alpha", "fs beta", "fs gamma"]
+    # ordering, one or several fields, unknown ones ignored
+    @test [a.title for a in PF("o=-views").qs] == ["fs gamma", "fs beta", "fs alpha"]
+    @test [a.title for a in PF("o=author,-views").qs] == ["fs beta", "fs alpha", "fs gamma"] && isempty(PF("o=author,-views").form.errors)
+    @test length(collect(PF("o=password").qs)) == 3
+    # chainable, and with get_page
+    @test count(filter(PF("status=p").qs; views__lt = 100)) == 1
+    @test get_page(Paginator(PF("status=p").qs, 1), "9").number == 2
+    # the form renders field by field
+    html = tr("{{ f.form.status }}|{{ f.form.created_after }}|{{ f.form.o }}", Dict("f" => PF("status=p")))
+    @test occursin("<option value=\"p\" selected>", html) && occursin("name=\"created_after\"", html) && occursin(">Writer (descending)<", html)
+    # generated from model fields
+    g = FilterSet(Article; fields = Dict(:status => ["exact"], :views => ["gte", "lte"], :author => ["exact"], :title => ["icontains"]),
+                  data = QueryDict("views__gte=10&views__lte=100&title__icontains=fs"), queryset = base)
+    @test [a.title for a in g.qs] == ["fs beta"] && Set(first.(g.filters)) == Set([:status, :views__gte, :views__lte, :author, :title__icontains])
+    # many-to-many
+    tA = create(Topic; name = "fs-t1"); tB = create(Topic; name = "fs-t2")
+    e1 = create(Essay; title = "fs-e1"); e2 = create(Essay; title = "fs-e2")
+    add!(e1.topics, tA, tB); add!(e2.topics, tB)
+    m = FilterSet(Essay, [:topics => ModelMultipleChoiceFilter(filter(Topic; name__startswith = "fs-"))];
+                  data = QueryDict("topics=$(tA.id)&topics=$(tB.id)"), queryset = filter(Essay; title__startswith = "fs-"))
+    @test sort([e.title for e in m.qs]) == ["fs-e1", "fs-e2"]                                   # distinct: e1 once
+end

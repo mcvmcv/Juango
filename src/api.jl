@@ -84,6 +84,8 @@ export HtmxDetails, is_htmx, hx_redirect, hx_refresh, hx_location, hx_stop_polli
        hx_retarget, hx_reswap, hx_reselect, hx_trigger, form_status, HtmxMiddleware, HTMX_STOP_POLLING
 export LiveView, live, mount, handle_event, handle_info, live_context, live_redirect, subscribe, unsubscribe, publish,
        LiveForm, live_change!, live_submit!
+export FilterSet, Filter, CharFilter, NumberFilter, BooleanFilter, ChoiceFilter, MultipleChoiceFilter, ModelChoiceFilter,
+       ModelMultipleChoiceFilter, DateFilter, DateTimeFilter, DateFromToRangeFilter, NumberRangeFilter, IsNullFilter, OrderingFilter
 # signals
 export Signal, connect!, disconnect!, receiver, send, pre_save, post_save, pre_delete, post_delete,
        m2m_changed, request_started, request_finished, user_logged_in, user_logged_out,

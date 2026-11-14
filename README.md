@@ -889,6 +889,36 @@ path("archive/<int:year>/<int:month>/<int:day>/<slug:slug>/", A(DateDetailView))
 
 Future-dated objects are left out unless `allow_future = true`. An empty period is a 404 unless `allow_empty = true`. YearArchiveView lists its objects only with `make_object_list = true`. The default templates are `<model>_archive.html`, `_archive_year`, `_archive_month`, `_archive_day` and `_detail`. With USE_TZ, days are counted in the current time zone.
 
+### Filtering lists: FilterSet
+
+Filters for a list page from its GET parameters, in the manner of django-filter:
+
+```julia
+function posts(req)
+    fs = FilterSet(Post, [
+        :title   => CharFilter(lookup = "icontains"),
+        :status  => ChoiceFilter(),                                       # the model field's choices
+        :author  => ModelChoiceFilter(r -> filter(Author; team = r.user.team)),   # choices for this request
+        :tags    => ModelMultipleChoiceFilter(objects(Tag)),              # any of them (made distinct)
+        :created => DateFromToRangeFilter(),                              # ?created_after=...&created_before=...
+        :draft   => IsNullFilter(field_name = :published_at),
+        :q       => CharFilter(method = (qs, name, v) -> filter(qs, Q(title__icontains = v) | Q(body__icontains = v))),
+        :o       => OrderingFilter([:created, :title, "author__name" => "author"]),    # ?o=-created,title
+    ]; data = req.GET, request = req)
+    render(req, "posts.html", Dict("filter" => fs, "page_obj" => get_page(Paginator(fs.qs, 20), get(req.GET, "page", "1"))))
+end
+```
+
+```
+<form method="get">{{ filter.form.title.label_tag }} {{ filter.form.title }} {{ filter.form.title.errors }} ...</form>
+{% for post in page_obj %}...{% endfor %}
+<a href="{% querystring page=page_obj.next_page_number %}">next</a>      {# keeps the filters #}
+```
+
+- **Filters:** `CharFilter`, `NumberFilter`, `BooleanFilter` (yes/no/either), `ChoiceFilter`, `MultipleChoiceFilter`, `ModelChoiceFilter`, `ModelMultipleChoiceFilter`, `DateFilter`, `DateTimeFilter`, `DateFromToRangeFilter`, `NumberRangeFilter` (`_min`/`_max`), `IsNullFilter` and `OrderingFilter`. Each takes `field_name` (a path such as `"author__name"`; the filter's name by default), `lookup` (any lookup `filter` takes; `in` on a `CharFilter` splits commas), `exclude`, `distinct`, `label`, `method` and `form_field`.
+- **From model fields:** `FilterSet(Post; fields = [:status, :author], data = req.GET)`, or with lookups, `fields = Dict(:views => ["gte", "lte"])` (named `views__gte` ...).
+- **Results:** `fs.qs` is the filtered queryset, to chain, paginate or count; `fs.form` is the bound form. An empty value leaves its filter out, and so does an invalid one, whose field shows the error, so a stale or mistyped URL still lists results. A date range on a datetime field includes the whole of the last day.
+
 ### Streaming, server-sent events and WebSockets
 
 A streaming response sends its body while it is produced, so it never has to sit in memory whole.
