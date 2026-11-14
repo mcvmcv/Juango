@@ -1,20 +1,22 @@
 {% extends "admin/base.html" %}
 {% block breadcrumbs %}<div class="breadcrumbs">{% translate "Home" %}</div>{% endblock %}
 {% block content %}
-<h1 class="page">Site administration</h1>
-<div class="module">
-  <h2>{% translate "Models" %}</h2>
+<h1 class="page">{{ title }}</h1>
+{% for app in app_list %}
+<div class="module app-{{ app.app_label }}">
+  <h2><a href="{{ app.app_url }}">{{ app.name }}</a></h2>
   <table>
-    {% for m in model_list %}
+    {% for m in app.models %}
     <tr>
-      <th>{% if m.can_view %}<a href="{% url 'admin:changelist' model=m.slug %}">{{ m.verbose_name_plural|capfirst }}</a> <span class="muted">({{ m.count }})</span>{% else %}{{ m.verbose_name_plural|capfirst }}{% endif %}</th>
-      <td style="text-align:right">{% if m.can_add %}<a href="{% url 'admin:add' model=m.slug %}">+ {% translate "Add" %}</a>{% endif %} &nbsp; {% if m.can_view %}<a href="{% url 'admin:changelist' model=m.slug %}">{% if m.can_change %}{% translate "Change" %}{% else %}{% translate "View" %}{% endif %}</a>{% endif %}</td>
+      <th>{% if m.can_view %}<a href="{% url 'admin:changelist' app=m.app_label model=m.slug %}">{{ m.verbose_name_plural|capfirst }}</a> <span class="muted">({{ m.count }})</span>{% else %}{{ m.verbose_name_plural|capfirst }}{% endif %}</th>
+      <td style="text-align:right">{% if m.can_add %}<a href="{% url 'admin:add' app=m.app_label model=m.slug %}">+ {% translate "Add" %}</a>{% endif %} &nbsp; {% if m.can_view %}<a href="{% url 'admin:changelist' app=m.app_label model=m.slug %}">{% if m.can_change %}{% translate "Change" %}{% else %}{% translate "View" %}{% endif %}</a>{% endif %}</td>
     </tr>
-    {% empty %}
-    <tr><td>{% translate "You don’t have permission to view or edit anything." %}</td></tr>
     {% endfor %}
   </table>
 </div>
+{% empty %}
+<div class="module"><table><tr><td>{% translate "You don’t have permission to view or edit anything." %}</td></tr></table></div>
+{% endfor %}
 <div class="module">
   <h2>{% translate "Recent actions" %}</h2>
   <table>

@@ -634,8 +634,8 @@ end
         @test_throws TemplateSyntaxError Template("{% load flatpages %}{% get_flatpages %}")
 
         # edited in the admin
-        @test get(c, "/admin/flatpage/").status == 200
-        r = post(c, "/admin/flatpage/add/", Dict("url" => "/new/", "title" => "New", "content" => "Fresh", "template_name" => ""))
+        @test get(c, "/admin/flatpages/flatpage/").status == 200
+        r = post(c, "/admin/flatpages/flatpage/add/", Dict("url" => "/new/", "title" => "New", "content" => "Fresh", "template_name" => ""))
         @test r.status == 302 && occursin("Fresh", text(get(Client(), "/new/")))
     finally
         configure!(INSTALLED_APPS = old_apps, MIDDLEWARE = old_mw, ROOT_URLCONF = old_urls)
@@ -2352,6 +2352,11 @@ end
         x = T.export_response(mk(req("_export=xlsx")))
         @test getheader(x, "Content-Type") == Juango.MIME_TYPES[".xlsx"] && x.body[1:4] == UInt8[0x50, 0x4b, 0x03, 0x04]
         @test T.export_url(t, :csv) == "?_export=csv"
+        # CSV injection (#182): text that starts like a formula is shown, not run; numbers stay
+        @test Juango.csv_field("=HYPERLINK(\"x\")") == "\"'=HYPERLINK(\"\"x\"\")\""
+        @test Juango.csv_field("@SUM(A1)") == "'@SUM(A1)" && Juango.csv_field("+1") == "'+1" && Juango.csv_field(-5) == "-5"
+        @test Juango.csv_field("=1+1"; formulas = true) == "=1+1" && Juango.csv_field(nothing) == "" && Juango.csv_field("a,b") == "\"a,b\""
+        @test T.csv_string(["A"], [["-2 + 3"]]) == "A\n'-2 + 3\n" && T.csv_string(["A"], [["=x"]]; formulas = true) == "A\n=x\n"
     end
     # the XLSX writer itself
     b = Juango.xlsx_bytes([["Name", "Born", "Score", "Ok", "Note"], ["Ann <&>", Date(2000, 1, 2), 3.5, true, nothing]])

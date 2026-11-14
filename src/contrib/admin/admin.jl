@@ -100,6 +100,7 @@ mutable struct ModelAdmin
     get_readonly_fields::Any             # nothing, or (req, obj) -> names
     get_fields::Any                      # nothing, or (req, obj) -> names
     options::Dict{Symbol,Any}            # the hooks and options below (save_model, list_display_links, ...)
+    app::String                          # the model's app label: its URLs are <app>/<model>/
 end
 option(ma::ModelAdmin, k::Symbol, default = nothing) = get(ma.options, k, default)
 
@@ -260,13 +261,14 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    filter_horizontal = Symbol[], filter_vertical = Symbol[])
     modelmeta(T)  # validates T is a model
     slug = model_name(T)
+    key = admin_key(T)
     acts = AdminAction[to_action(a) for a in actions]
     delete_action && pushfirst!(acts, action(delete_selected; description = "Delete selected $(modelmeta(T).verbose_name_plural)",
                                              permission = :delete))
     for f in list_editable
         Symbol(f) in Symbol.(collect(list_display)) || throw(ArgumentError("list_editable field '$f' must also be in list_display"))
     end
-    site.registry[slug] = ModelAdmin(T, slug, collect(Any, list_display), Symbol.(search_fields),
+    site.registry[key] = ModelAdmin(T, slug, collect(Any, list_display), Symbol.(search_fields),
                                 Any[x isa Union{AbstractString,Symbol} ? Symbol(x) : x for x in list_filter],
                                 String.(string.(ordering)), fields === nothing ? nothing : Symbol.(fields),
                                 Symbol.(exclude), list_per_page, Symbol.(password_fields), queryset, acts,
@@ -295,22 +297,24 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                                                  :password_change_page => password_change_page,
                                                  :show_facets => Symbol(show_facets),
                                                  :filter_horizontal => Symbol.(collect(filter_horizontal)),
-                                                 :filter_vertical => Symbol.(collect(filter_vertical))))
-    filter!(!=(slug), site.order)
-    push!(site.order, slug)
+                                                 :filter_vertical => Symbol.(collect(filter_vertical))), modelmeta(T).app)
+    filter!(!=(key), site.order)
+    push!(site.order, key)
     T
 end
+"A model's key in an admin registry: `\"app_label.model_name\"` (Django's label_lower)."
+Base.@nospecializeinfer admin_key(@nospecialize(T::Type)) = modelmeta(T).app * "." * model_name(T)
 
 "Remove a model from the admin (`site` defaults to `Admin.site`)."
 Base.@nospecializeinfer function unregister!(@nospecialize(T::Type); site::AdminSite = Admin.site)
-    slug = model_name(T)
-    delete!(site.registry, slug)
-    filter!(!=(slug), site.order)
+    key = admin_key(T)
+    delete!(site.registry, key)
+    filter!(!=(key), site.order)
     nothing
 end
-is_registered(T::Type; site::AdminSite = Admin.site) = haskey(site.registry, model_name(T))
+is_registered(T::Type; site::AdminSite = Admin.site) = haskey(site.registry, admin_key(T))
 "The `ModelAdmin` of a model on the current site (for custom admin views)."
-model_admin(T::Type) = get_admin(model_name(T))
+model_admin(T::Type) = get_admin(modelmeta(T).app, model_name(T))
 
 function register_builtin!()
     register_user_model!()
@@ -333,7 +337,8 @@ function register_user_model!(T = Juango.get_user_model(); kw...)
               add_form = (data, files) -> Juango.UserCreationForm(data), kw...)
 end
 
-get_admin(slug) = (ma = get(current_site().registry, slug, nothing); ma === nothing ? throw(Http404("No admin for model '$slug'")) : ma)
+get_admin(app, model) = (ma = get(current_site().registry, string(app, ".", model), nothing);
+                         ma === nothing ? throw(Http404("No admin for model '$app.$model'")) : ma)
 
 # options that can depend on the request (Django's get_list_display & co.)
 list_display(ma::ModelAdmin, req) = ma.get_list_display === nothing ? ma.list_display : collect(Any, ma.get_list_display(req))
@@ -345,7 +350,9 @@ Base.@nospecializeinfer readonly_fields(ma::ModelAdmin, req, @nospecialize(obj))
 
 opts(ma::ModelAdmin) = (m = modelmeta(ma.model);
     Dict{String,Any}("slug" => ma.slug, "verbose_name" => m.verbose_name, "verbose_name_plural" => m.verbose_name_plural,
-                     "name" => m.name))
+                     "name" => m.name, "app_label" => ma.app, "app_name" => app_verbose_name(ma.app)))
+"An app's name as the admin shows it: its `App`'s verbose_name, else the label in title case."
+app_verbose_name(label) = (a = get(Juango.APP_DEFS, label, nothing); a === nothing ? titlecase(replace(label, '_' => ' ')) : a.verbose_name)
 
 # --- permissions: superusers may do everything; staff need the model's permissions ----------------
 
@@ -377,21 +384,38 @@ end
 
 admin_url_for(e::LogEntry) = (e.content_type === nothing || e.object_id === nothing || e.action_flag == DELETION) ? nothing :
     (T = Juango.model_class(e.content_type); T === nothing || !is_registered(T; site = current_site()) ? nothing :
-     reverse_url("admin:change"; model = model_name(T), id = e.object_id))
+     reverse_url("admin:change"; app = modelmeta(T).app, model = model_name(T), id = e.object_id))
 
-function index(req::Request)
+function index(req::Request; app = nothing)
     st = current_site()
-    ctx = base_context(req, something(st.index_title, gettext("Site administration")))
+    keys_ = [k for k in visible_models(req) if app === nothing || st.registry[k].app == app]
+    app === nothing || !isempty(keys_) || throw(Http404("No app '$app' in this admin"))
+    title = app === nothing ? something(st.index_title, gettext("Site administration")) :
+            replace(gettext("%(app)s administration"), "%(app)s" => app_verbose_name(app))
+    ctx = base_context(req, title)
     ctx["model_list"] = [merge(opts(st.registry[s]), Dict{String,Any}(
                              "count" => can_view(req, st.registry[s]) ? count(admin_queryset(st.registry[s], req)) : nothing,
                              "can_add" => can(req, st.registry[s], :add), "can_view" => can_view(req, st.registry[s]),
                              "can_change" => can(req, st.registry[s], :change)))
-                         for s in visible_models(req)]
-    recent = req.user isa AbstractUser ? collect(select_related(filter(LogEntry; user = req.user), :content_type)[1:10]) : LogEntry[]
-    ctx["recent_actions"] = [Dict{String,Any}("entry" => e, "url" => admin_url_for(e),
-                                              "type" => e.content_type === nothing ? "" : e.content_type.model) for e in recent]
-    render(req, "admin/index.html", ctx)
+                         for s in keys_]
+    # grouped by app, as Django's: apps by name, models in the order they were registered
+    labels = unique(m["app_label"] for m in ctx["model_list"])
+    ctx["app_list"] = sort([Dict{String,Any}("app_label" => l, "name" => app_verbose_name(l),
+                                             "app_url" => reverse_url("admin:app_list"; app = l),
+                                             "models" => [m for m in ctx["model_list"] if m["app_label"] == l]) for l in labels];
+                           by = a -> lowercase(a["name"]))
+    ctx["app_label"] = app
+    if app === nothing
+        recent = req.user isa AbstractUser ? collect(select_related(filter(LogEntry; user = req.user), :content_type)[1:10]) : LogEntry[]
+        ctx["recent_actions"] = [Dict{String,Any}("entry" => e, "url" => admin_url_for(e),
+                                                  "type" => e.content_type === nothing ? "" : e.content_type.model) for e in recent]
+    else
+        ctx["recent_actions"] = Dict{String,Any}[]
+    end
+    render(req, app === nothing ? "admin/index.html" : ["admin/$app/app_index.html", "admin/app_index.html"], ctx)
 end
+"An app's page in the admin (`/admin/<app_label>/`): its models."
+app_index(req::Request; app) = index(req; app = app)
 
 admin_login(req::Request) =
     LoginView(template = "admin/login.html", redirect_url = reverse_url("admin:index"), require_staff = true)(req)
@@ -630,9 +654,9 @@ Base.@nospecializeinfer function delete_selected(ma::ModelAdmin, req::Request, @
     nothing
 end
 
-csv_cell(v) = (s = v isa SafeString ? v.s : v === nothing ? "" : string(v);
-    s = replace(s, r"<[^>]*>" => "");
-    occursin(r"[\",\n]", s) ? "\"" * replace(s, "\"" => "\"\"") * "\"" : s)
+# (text that starts like a formula gets a leading ', so spreadsheets don't run it)
+csv_cell(v) = v isa Number ? Juango.csv_field(v) :
+    Juango.csv_field(replace(v isa SafeString ? v.s : v === nothing ? "" : string(v), r"<[^>]*>" => ""))
 
 """
     Admin.export_csv
@@ -674,8 +698,8 @@ end
 
 # --- change list -------------------------------------------------------------------------------------
 
-function changelist(req::Request; model)
-    ma = get_admin(model)
+function changelist(req::Request; app, model)
+    ma = get_admin(app, model)
     T = ma.model
     meta = modelmeta(T)
     require_perm(req, ma, :view, :change)
@@ -769,7 +793,7 @@ function changelist(req::Request; model)
         hidden = fs === nothing ? "" : Juango.widget_html(forms[k][:id])
         pk = Juango.pk_string(o)
         # a NamedTuple, not a Dict: the template reads row.id, row.cells ..., and this is per row
-        push!(rows, (id = pk, cells = cells, hidden = SafeString(hidden), url = reverse_url("admin:change"; model = ma.slug, id = pk) * back_q))
+        push!(rows, (id = pk, cells = cells, hidden = SafeString(hidden), url = reverse_url("admin:change"; app = ma.app, model = ma.slug, id = pk) * back_q))
     end
     sf = option(ma, :show_facets, :allow)
     facets_on = sf === :always || (sf === :allow && haskey(req.GET, "_facets"))
@@ -949,10 +973,10 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         verb = adding ? "added" : "changed"
         if haskey(req.POST, "_continue") || save_as_new || custom_add
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may edit it again below.")
-            return Juango.HttpResponseRedirect(reverse_url("admin:change"; model = ma.slug, id = Juango.pk_string(o)) * keep_filters(req))
+            return Juango.HttpResponseRedirect(reverse_url("admin:change"; app = ma.app, model = ma.slug, id = Juango.pk_string(o)) * keep_filters(req))
         elseif haskey(req.POST, "_addanother")
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may add another $(meta.verbose_name) below.")
-            return Juango.HttpResponseRedirect(reverse_url("admin:add"; model = ma.slug))
+            return Juango.HttpResponseRedirect(reverse_url("admin:add"; app = ma.app, model = ma.slug))
         end
         message!(req, :success, interpolate(adding ? gettext("The %(model)s “%(object)s” was added successfully.") :
                                                      gettext("The %(model)s “%(object)s” was changed successfully."),
@@ -978,22 +1002,22 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         "password_fields" => [Dict("name" => string(pf), "label" => uppercasefirst(string(pf))) for pf in pfs],
         "view_on_site" => adding ? nothing : get_absolute_url(obj), "save_on_top" => option(ma, :save_on_top, false),
         "password_change" => adding || !option(ma, :password_change_page, false) ? nothing :
-            Dict("summary" => Juango.password_summary(obj), "url" => reverse_url("admin:password_change"; model = ma.slug, id = Juango.pk_string(obj))),
-        "history_url" => adding ? nothing : reverse_url("admin:history"; model = ma.slug, id = Juango.pk_string(obj))))
+            Dict("summary" => Juango.password_summary(obj), "url" => reverse_url("admin:password_change"; app = ma.app, model = ma.slug, id = Juango.pk_string(obj))),
+        "history_url" => adding ? nothing : reverse_url("admin:history"; app = ma.app, model = ma.slug, id = Juango.pk_string(obj))))
     render(req, "admin/change_form.html", ctx)
 end
 
 "The change list to go back to: with the filters it had (`_changelist_filters`, preserve_filters)."
 function changelist_url(ma::ModelAdmin, req::Request)
     f = get(req.GET, "_changelist_filters", "")
-    reverse_url("admin:changelist"; model = ma.slug) * (option(ma, :preserve_filters, true) && !isempty(f) ? "?" * f : "")
+    reverse_url("admin:changelist"; app = ma.app, model = ma.slug) * (option(ma, :preserve_filters, true) && !isempty(f) ? "?" * f : "")
 end
 "`?_changelist_filters=...` to carry on to the next admin page."
 keep_filters(req::Request) = (f = get(req.GET, "_changelist_filters", ""); isempty(f) ? "" : "?_changelist_filters=" * Juango.urlquote(f))
 
 "The user admin's \"Change password\" page (`password_change_page = true`): `AdminPasswordChangeForm`."
-function password_change_view(req::Request; model, id)
-    ma = get_admin(model)
+function password_change_view(req::Request; app, model, id)
+    ma = get_admin(app, model)
     option(ma, :password_change_page, false) || throw(Http404("No password page for $(ma.slug)"))
     obj = admin_object(ma, req, id)
     require_perm(req, ma, :change; obj = obj)
@@ -1004,14 +1028,14 @@ function password_change_view(req::Request; model, id)
         log_action!(req.user, obj, CHANGE, "Changed password.")
         obj.id == req.user.id && Juango.update_session_auth_hash!(req, obj)       # changing your own: stay logged in
         message!(req, :success, gettext("Password changed successfully."))
-        return Juango.HttpResponseRedirect(reverse_url("admin:change"; model = ma.slug, id = Juango.pk_string(obj)))
+        return Juango.HttpResponseRedirect(reverse_url("admin:change"; app = ma.app, model = ma.slug, id = Juango.pk_string(obj)))
     end
     ctx = base_context(req, interpolate(gettext("Change password: %(username)s"), Dict("username" => string(obj))))
     merge!(ctx, Dict{String,Any}("opts" => opts(ma), "form" => form, "object" => obj))
     render(req, "admin/change_password.html", ctx)
 end
 
-add_view(req::Request; model) = change_form(req, get_admin(model), nothing)
+add_view(req::Request; app, model) = change_form(req, get_admin(app, model), nothing)
 "The object with this primary key (from the URL), or a 404."
 function admin_object(ma::ModelAdmin, req, id)
     pk = Juango.parse_pk(ma.model, id)
@@ -1019,10 +1043,10 @@ function admin_object(ma::ModelAdmin, req, id)
     Juango.get_object_or_404(admin_queryset(ma, req); pk = pk)
 end
 
-change_view(req::Request; model, id) = (ma = get_admin(model); change_form(req, ma, admin_object(ma, req, id)))
+change_view(req::Request; app, model, id) = (ma = get_admin(app, model); change_form(req, ma, admin_object(ma, req, id)))
 
-function delete_view(req::Request; model, id)
-    ma = get_admin(model)
+function delete_view(req::Request; app, model, id)
+    ma = get_admin(app, model)
     meta = modelmeta(ma.model)
     obj = admin_object(ma, req, id)
     require_perm(req, ma, :delete; obj = obj)
@@ -1042,7 +1066,7 @@ function delete_view(req::Request; model, id)
         catch e
             e isa Union{ProtectedError,RestrictedError} || rethrow()
             message!(req, :error, e.msg)
-            return Juango.HttpResponseRedirect(reverse_url("admin:change"; model = ma.slug, id = id))
+            return Juango.HttpResponseRedirect(reverse_url("admin:change"; app = ma.app, model = ma.slug, id = id))
         end
     end
     related = Any[]
@@ -1063,8 +1087,8 @@ function delete_view(req::Request; model, id)
 end
 
 "The change history of one object."
-function history_view(req::Request; model, id)
-    ma = get_admin(model)
+function history_view(req::Request; app, model, id)
+    ma = get_admin(app, model)
     obj = admin_object(ma, req, id)
     require_perm(req, ma, :view, :change; obj = obj)
     entries = collect(select_related(order_by(filter(LogEntry; content_type = get_for_model(ma.model), object_id = Juango.pk_string(obj)),
@@ -1075,8 +1099,8 @@ function history_view(req::Request; model, id)
 end
 
 "JSON search for autocomplete widgets: `?term=...` over the model's search_fields."
-function autocomplete_view(req::Request; model)
-    ma = get_admin(model)
+function autocomplete_view(req::Request; app, model)
+    ma = get_admin(app, model)
     require_perm(req, ma, :view, :change)
     sfields = search_fields(ma, req)
     isempty(sfields) && throw(Http404("$(ma.slug) has no search_fields for autocomplete"))
@@ -1118,20 +1142,33 @@ function urls(st::AdminSite = site)
     st === site && register_user_model!()
     s(v) = site_view(st, v)
     wrap(p) = Juango.wrap_view(p, s)
-    custom = Any[path(ma.slug * "/", include_urls([wrap(p) for p in ma.extra_urls])) for ma in values(st.registry) if !isempty(ma.extra_urls)]
+    custom = Any[path(ma.app * "/" * ma.slug * "/", include_urls([wrap(p) for p in ma.extra_urls])) for ma in values(st.registry) if !isempty(ma.extra_urls)]
+    # Django's names for each registered model: admin:<app>_<model>_changelist, _add, _change, _delete, _history
+    named = Any[]
+    for ma in values(st.registry)
+        a, m, base = ma.app, ma.slug, ma.app * "/" * ma.slug * "/"
+        n = a * "_" * m
+        append!(named, Any[
+            path(base, s((req; kw...) -> changelist(req; app = a, model = m)); name = n * "_changelist"),
+            path(base * "add/", s((req; kw...) -> add_view(req; app = a, model = m)); name = n * "_add"),
+            path(base * "<str:object_id>/change/", s((req; object_id) -> change_view(req; app = a, model = m, id = object_id)); name = n * "_change"),
+            path(base * "<str:object_id>/delete/", s((req; object_id) -> delete_view(req; app = a, model = m, id = object_id)); name = n * "_delete"),
+            path(base * "<str:object_id>/history/", s((req; object_id) -> history_view(req; app = a, model = m, id = object_id)); name = n * "_history")])
+    end
     include_urls(vcat(Any[
         path("", s(index); name = "index"),
         path("login/", site_view(st, admin_login; public = true); name = "login"),
         path("logout/", site_view(st, admin_logout; public = true); name = "logout")],
         Any[wrap(p) for p in st.extra_urls], custom, Any[
-        path("<slug:model>/", s(changelist); name = "changelist"),
-        path("<slug:model>/add/", s(add_view); name = "add"),
-        path("<slug:model>/autocomplete/", s(autocomplete_view); name = "autocomplete"),
-        path("<slug:model>/<str:id>/change/", s(change_view); name = "change"),
-        path("<slug:model>/<str:id>/delete/", s(delete_view); name = "delete"),
-        path("<slug:model>/<str:id>/history/", s(history_view); name = "history"),
-        path("<slug:model>/<str:id>/password/", s(password_change_view); name = "password_change"),
-    ]); namespace = st.name)
+        path("<slug:app>/", s(app_index); name = "app_list"),
+        path("<slug:app>/<slug:model>/", s(changelist); name = "changelist"),
+        path("<slug:app>/<slug:model>/add/", s(add_view); name = "add"),
+        path("<slug:app>/<slug:model>/autocomplete/", s(autocomplete_view); name = "autocomplete"),
+        path("<slug:app>/<slug:model>/<str:id>/change/", s(change_view); name = "change"),
+        path("<slug:app>/<slug:model>/<str:id>/delete/", s(delete_view); name = "delete"),
+        path("<slug:app>/<slug:model>/<str:id>/history/", s(history_view); name = "history"),
+        path("<slug:app>/<slug:model>/<str:id>/password/", s(password_change_view); name = "password_change"),
+    ], named); namespace = st.name)
 end
 
 end # module Admin

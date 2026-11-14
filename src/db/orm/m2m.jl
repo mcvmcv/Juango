@@ -95,7 +95,7 @@ function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}())
     o = m2m_owner(qs)
     want = unique(objid.(collect(objs)))
     atomic() do
-        have = values_list(filter(base_objects(o.through), Q(attname(o.mine) => o.id)), attname(o.other); flat = true)
+        have = collect(values_list(filter(base_objects(o.through), Q(attname(o.mine) => o.id)), attname(o.other); flat = true))
         gone = setdiff(have, want)
         isempty(gone) || remove!(qs, gone...)
         add!(qs, setdiff(want, have)...; through_defaults = through_defaults)
@@ -108,7 +108,7 @@ function prefetch_m2m!(objs::Vector, name, f::Field, forward::Bool, qs, to_attr)
     mine, other = forward ? (src, dst) : (dst, src)
     Other = related_model(other)
     ids = [o.id for o in objs]
-    pairs_ = values_list(filter(base_objects(through_model(f)), Q(Symbol(attname(mine), "__in") => ids)), attname(mine), attname(other))
+    pairs_ = collect(values_list(filter(base_objects(through_model(f)), Q(Symbol(attname(mine), "__in") => ids)), attname(mine), attname(other)))
     owners_of = Dict{Any,Vector{Any}}()
     for (mid, oid) in pairs_
         push!(get!(() -> Any[], owners_of, oid), mid)

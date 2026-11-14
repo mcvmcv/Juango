@@ -17,7 +17,7 @@
 # --- exported --------------------------------------------------------------------------------------
 
 # settings
-export settings, configure!
+export settings, configure!, declare_settings!
 # requests and responses
 export Request, HttpResponse, JsonResponse, HttpResponseRedirect, HttpResponsePermanentRedirect,
        HttpResponseNotFound, HttpResponseForbidden, HttpResponseBadRequest, HttpResponseNotAllowed,
@@ -116,7 +116,7 @@ export cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, ge
 # mail
 export send_mail, mail_admins, mail_managers, EmailMessage, EmailMultiAlternatives, send!, attach!, attach_file,
        send_mass_mail, get_connection, send_messages,
-       XlsxResponse, write_xlsx,
+       XlsxResponse, write_xlsx, csv_field,
        attach_alternative!
 # apps, contrib apps, tasks
 export App, get_model, concrete_fields, many_to_many, attname, column, is_relation, is_primary_key, related_model,

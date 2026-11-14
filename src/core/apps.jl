@@ -19,13 +19,15 @@
 
 """
     App(label; mod=nothing, path=nothing, verbose_name, ready=nothing, urls=nothing,
-        commands=Dict(), requires=String[], name=label)
+        commands=Dict(), requires=String[], name=label, settings=())
 
 An installable application. `path` is its directory (holding `templates/`, `static/`,
 `locale/`, `migrations/`); `mod` the module its models are defined in; `ready()` runs once,
 when the app is installed (connect signals there); `urls` are patterns for
 `include_urls(app)`; `commands` maps names to `(help, args -> ...)` for `manage.jl`;
-`requires` lists apps that must be installed too.
+`requires` lists apps that must be installed too; `settings` declares the app's own settings,
+as `name => default` pairs (a Dict) or bare names, so the settings check knows them and
+`settings.NAME` reads the default until the project sets it (see `declare_settings!`).
 """
 mutable struct App
     label::String
@@ -47,13 +49,15 @@ const APP_DEFS = Dict{String,App}()
 const MODULE_APPS = IdDict{Module,String}()
 
 function App(label::AbstractString; mod = nothing, path = nothing, verbose_name = nothing, ready = nothing, urls = nothing,
-             commands = Dict{String,Tuple{String,Function}}(), requires = String[], name = label, default_auto_field = nothing)
+             commands = Dict{String,Tuple{String,Function}}(), requires = String[], name = label, default_auto_field = nothing,
+             settings = ())
     occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", label) || throw(ImproperlyConfigured("app label '$label' must be a valid identifier"))
     cmds = Dict{String,Tuple{String,Function}}(string(k) => (string(v[1]), v[2]) for (k, v) in commands)
     a = App(String(label), String(name), something(verbose_name, titlecase(replace(String(label), "_" => " "))),
             mod, path === nothing ? nothing : abspath(string(path)), ready, urls, cmds, String[string(r) for r in requires], false,
             default_auto_field)
     APP_DEFS[a.label] = a
+    declare_settings!((s isa Pair ? s : Symbol(s) for s in (settings isa AbstractDict ? pairs(settings) : settings))...)
     mod === nothing || (MODULE_APPS[mod] = a.label)
     a
 end

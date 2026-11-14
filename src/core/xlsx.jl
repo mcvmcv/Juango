@@ -120,3 +120,23 @@ function XlsxResponse(rows; filename = "data.xlsx", kw...)
     setheader!(r, "Content-Disposition", content_disposition(string(filename); attachment = true))
     r
 end
+
+# --- CSV ------------------------------------------------------------------------------------------
+
+"""
+    csv_field(v; formulas = false) -> String
+
+`v` as one CSV field: `nothing` is empty, and a field holding a quote, comma, line break or
+edge space is quoted. Text starting with `=`, `+`, `-`, `@`, a tab or a carriage return gets a
+leading `'`, so a spreadsheet shows it rather than running it as a formula (CSV injection:
+a value like `=HYPERLINK(...)` would otherwise come back as a live link); numbers are written
+as they are. `formulas = true` leaves text alone.
+"""
+function csv_field(@nospecialize(v); formulas::Bool = false)
+    v === nothing && return ""
+    s = v isa SafeString ? v.s : string(v)
+    if !formulas && !(v isa Number) && !isempty(s) && first(s) in ('=', '+', '-', '@', '\t', '\r')
+        s = "'" * s
+    end
+    occursin(r"[\",\r\n]", s) || startswith(s, ' ') || endswith(s, ' ') ? "\"" * replace(s, "\"" => "\"\"") * "\"" : s
+end

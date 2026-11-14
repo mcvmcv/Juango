@@ -992,22 +992,22 @@ end
         try
             c = Client()
             force_login!(c, root_user())
-            r = get(c, "/admin/cpline/")
-            @test r.status == 200 && occursin("/admin/cpline/7,lime/change/", text(r))
-            r = get(c, "/admin/cpline/7,lime/change/")
+            r = get(c, "/admin/migcomp/cpline/")
+            @test r.status == 200 && occursin("/admin/migcomp/cpline/7,lime/change/", text(r))
+            r = get(c, "/admin/migcomp/cpline/7,lime/change/")
             @test r.status == 200 && !occursin("name=\"order\"", text(r)) && occursin("name=\"qty\"", text(r))
-            r = post(c, "/admin/cpline/7,lime/change/", Dict("qty" => "11"))
+            r = post(c, "/admin/migcomp/cpline/7,lime/change/", Dict("qty" => "11"))
             @test r.status == 302 && get(CpLine; pk = (7, "lime")).qty == 11
-            @test get(c, "/admin/cpline/7,nope/change/").status == 404 && get(c, "/admin/cpline/x/change/").status == 404
-            @test get(c, "/admin/cpline/7,lime/history/").status == 200
-            r = post(c, "/admin/cpline/add/", Dict("order" => "9", "product" => "a,b/c", "qty" => "2"))
+            @test get(c, "/admin/migcomp/cpline/7,nope/change/").status == 404 && get(c, "/admin/migcomp/cpline/x/change/").status == 404
+            @test get(c, "/admin/migcomp/cpline/7,lime/history/").status == 200
+            r = post(c, "/admin/migcomp/cpline/add/", Dict("order" => "9", "product" => "a,b/c", "qty" => "2"))
             @test r.status == 302 && exists(filter(CpLine; pk = (9, "a,b/c")))
             @test Juango.pk_string(get(CpLine; pk = (9, "a,b/c"))) == "9,a_2Cb_2Fc"
             @test Juango.parse_pk(CpLine, "9,a_2Cb_2Fc") == (9, "a,b/c")
-            @test get(c, "/admin/cpline/9,a_2Cb_2Fc/change/").status == 200
-            r = post(c, "/admin/cpline/", Dict("action" => "delete_selected", "_selected_action" => "9,a_2Cb_2Fc", "post" => "yes"))
+            @test get(c, "/admin/migcomp/cpline/9,a_2Cb_2Fc/change/").status == 200
+            r = post(c, "/admin/migcomp/cpline/", Dict("action" => "delete_selected", "_selected_action" => "9,a_2Cb_2Fc", "post" => "yes"))
             @test !exists(filter(CpLine; pk = (9, "a,b/c")))
-            r = post(c, "/admin/cpline/7,lime/delete/", Dict("post" => "yes"))
+            r = post(c, "/admin/migcomp/cpline/7,lime/delete/", Dict("post" => "yes"))
             @test r.status == 302 && !exists(filter(CpLine; pk = (7, "lime"))) && !exists(filter(CpShip; id = s2.id))
         finally
             Admin.unregister!(CpLine)

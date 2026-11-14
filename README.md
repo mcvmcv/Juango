@@ -383,8 +383,11 @@ annotate(objects(Author); n = Count(:posts)) |> filter(n__gt = 2) |> order_by("-
 annotate(objects(Author); published = Count(:posts; filter = Q(posts__published = true)))
 values(objects(Post), :status) |> annotate(n = Count())        # rows like Dict(:status => "p", :n => 12)
 aggregate(objects(Post); total = Sum(:views), avg = Avg(:views))   # Dict(:total => ..., :avg => ...)
-values_list(objects(Post), :title, :author__name)               # tuples; flat=true for one field
+values_list(objects(Post), :title, :author__name)               # tuples; flat=true for one field, named=true for NamedTuples
+filter(Plate; id__in = values_list(filter(Event; kind = "load"), :plate_id; flat = true))   # one query: a subquery
 ```
+
+`values` and `values_list` return lazy QuerySets, as in Django: they chain (`order_by`, `distinct`, slices, `count`, `exists`), `first` and `last` give `nothing` when there are no rows, and nothing runs until they're iterated, compared with a vector or `collect`ed. Collect one when you need a snapshot that later writes can't change.
 
 - **Aggregates:** `Count`, `Sum`, `Avg`, `Min`, `Max`, with `distinct=` and `filter=`.
 - **Functions:** `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Cast(x, :float)`, `Now()`, and `ExtractYear`/`ExtractMonth`/`ExtractDay`.
@@ -988,6 +991,8 @@ function article_list(req)
     render(req, "articles.html", Dict("table" => table))    # {% render_table table %}
 end
 ```
+
+CSV exports (here and the admin's `export_csv`) prefix text starting with `=`, `+`, `-` or `@` with `'`, so a value like `=HYPERLINK(...)` opens in a spreadsheet as text, not as a live formula (`export_response(t; csv_formulas = true)` turns that off; `csv_field(v)` does it for your own CSV).
 
 - **Sorting:** clicking a header sorts by it (`?sort=views`, again for `-views`), keeping the page's other parameters. Querysets sort in the database, other rows in Julia.
 - **Columns:** `columns = nothing` takes the model's fields. `exclude` and `sequence = [:title, :..., :edit]` change the set and order.
@@ -1795,7 +1800,9 @@ Admin.register!(Post; list_display=[:title, :author, :published, "Words" => p ->
                 search_fields=[:title, :body], list_filter=[:published, :author])
 ```
 
-The admin gives you login, a model index, change lists (search, filters, pagination), add/change forms with validation, and delete confirmation that shows cascade effects. Users and groups are registered automatically, with password hashing in the user form. More options:
+The admin gives you login, a model index, change lists (search, filters, pagination), add/change forms with validation, and delete confirmation that shows cascade effects. Users and groups are registered automatically, with password hashing in the user form.
+
+URLs are Django's: each model is under its app (`/admin/blog/post/`, `/admin/blog/post/3/change/`, `/admin/auth/user/`), so models with the same name in different apps don't collide. The index groups models by app, and `/admin/blog/` lists one app's. Pages reverse with Django's names, `{% url 'admin:blog_post_change' post.pk %}`, `admin:blog_post_changelist`, `_add`, `_delete`, `_history` and `admin:app_list` (`app = "blog"`), or with the generic `admin:changelist` / `admin:change` given `app`, `model` and `id`. More options:
 
 ```julia
 function publish(admin, req, qs)                    # an action: runs on the selected objects
@@ -1835,7 +1842,7 @@ Admin.register!(Person;
     get_list_display = req -> req.user.is_superuser ? [:name, :salary] : [:name],          # get_list_filter, get_search_fields,
     get_readonly_fields = (req, obj) -> obj === nothing ? [] : [:email],                   # get_ordering, get_fields too
     list_select_related = [:team], show_full_result_count = false,
-    urls = [path("<str:id>/promote/", promote; name = "person_promote")])                 # admin/person/3/promote/
+    urls = [path("<str:id>/promote/", promote; name = "person_promote")])                 # admin/hr/person/3/promote/
 ```
 
 - **Filters.** `:field => :empty` filters on empty values and `:fk => :related_only` lists only the related objects in use.
@@ -2080,6 +2087,25 @@ Set them with `configure!(...)` and read them with `settings.NAME`. Request limi
 A request over a limit gets 400 Bad Request; `nothing` turns a limit off. `runserver` drops clients that take more than `SERVER_READ_HEADER_TIMEOUT` seconds (10) to send their headers, and kept-alive connections idle for `SERVER_IDLE_TIMEOUT` seconds (120). `SERVER_READ_TIMEOUT` limits reading a whole request (off by default, so slow uploads, server-sent events and WebSockets work).
 
 `ALLOWED_HOSTS` is checked with `DEBUG` on too: the default allows only `localhost`, `127.0.0.1` and `[::1]`. An empty list in `DEBUG` allows any `*.localhost` name as well. This keeps other sites from reaching a development server through DNS rebinding. Add your machine's name or address to reach it from elsewhere. The main ones: `DEBUG`, `SECRET_KEY`, `DATABASE` (a SQLite path, `":memory:"`, a `scheme://` URL, or a backend instance), `INSTALLED_APPS`, `APP_DIRS`, `ROOT_URLCONF`, `TEMPLATE_DIRS`, `STATIC_URL`, `STATIC_DIRS`, `STATIC_ROOT`, `ALLOWED_HOSTS`, `MIDDLEWARE`, `CONTEXT_PROCESSORS`, `LOGIN_URL`, `LOGIN_REDIRECT_URL`, `APPEND_SLASH`, `SESSION_COOKIE_AGE`, `PASSWORD_ITERATIONS`, `SQL_DEBUG`. Any extra keyword becomes a custom setting.
+
+### Misspelled and mistyped settings
+
+Django ignores `DEBG = False` without a word. Juango knows every setting it reads, so:
+- **`configure!` warns** in DEBUG, once per name, when a name is a letter or two away from a known one: `Unknown setting ALLOWED_HOST: did you mean ALLOWED_HOSTS?`
+- **`manage.jl check`** (and `runserver` when it starts) reports every unknown setting as `settings.W001`, with the closest known name.
+- **The same check catches wrong types:**
+  - a true/false setting given anything else (`DEBUG = "false"` from an environment variable): `settings.E001`;
+  - a list setting given a string (`ALLOWED_HOSTS = "example.com"`, read as a list of characters): `settings.E002`;
+  - a number setting given a string: `settings.E003`;
+  - a `DATABASE` (or `DATABASES` entry) that isn't a path, a URL with a known scheme or a backend: `settings.E004`.
+
+Declare your own settings so they aren't reported, optionally with defaults that `settings.NAME` returns until a project sets them:
+
+```julia
+declare_settings!(:BLOG_PAGE_SIZE => 20, :BLOG_API_KEY)      # a library or project
+const BLOG = App("blog"; settings = Dict(:BLOG_PAGE_SIZE => 20))
+configure!(EXTRA_SETTINGS = [:MY_FLAG, "ACME_*"])           # or list them (* for a prefix)
+```
 
 
 ### Settings from the environment

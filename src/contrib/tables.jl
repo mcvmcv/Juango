@@ -19,7 +19,7 @@
 module Tables
 
 # (explicit imports: this file loads before Juango's export list)
-import ..Juango: render!, __html__, Node, Parser, Token, FilterExpr, Context, parse_filter_expr, split_contents,
+import ..Juango: csv_field, render!, __html__, Node, Parser, Token, FilterExpr, Context, parse_filter_expr, split_contents,
                  register_tag!, eval_fe, display_string, truthy, format_date, localtime, model_of, resolve_path,
                  SQLCompiler, modelmeta, label, Field, urlencode, MIME_TYPES, xlsx_bytes, Template, Model, QuerySet,
                  SafeString, HttpResponse, setheader!, content_disposition, get_template, render, objects, order_by,
@@ -388,15 +388,17 @@ end
 
 The whole table as a CSV or XLSX download when the request asks for it (`?_export=csv`, or
 `format`), else `nothing`: `r = export_response(table); r === nothing || return r` in a view.
+CSV text that starts like a formula (`=`, `+`, `-`, `@`) is prefixed with `'` so spreadsheets don't
+run it; `csv_formulas = true` turns that off.
 """
-function export_response(t::Table; format = nothing)
+function export_response(t::Table; format = nothing, csv_formulas::Bool = false)
     f = format === nothing ? (t.request === nothing ? nothing : get(t.request.GET, param(t, "_export"), nothing)) : string(format)
     (f === nothing || isempty(f)) && return nothing
     fmt = Symbol(lowercase(f))
     fmt in t.export_formats || return nothing
     header, rows = export_rows(t)
     if fmt === :csv
-        r = HttpResponse(csv_string(header, rows); content_type = "text/csv; charset=utf-8")
+        r = HttpResponse(csv_string(header, rows; formulas = csv_formulas); content_type = "text/csv; charset=utf-8")
         setheader!(r, "Content-Disposition", content_disposition(t.export_name * ".csv"; attachment = true))
         return r
     elseif fmt === :xlsx
@@ -409,11 +411,9 @@ end
 "A link that exports the table in `format`, keeping the page's parameters."
 export_url(t::Table, format) = query_url(t, param(t, "_export") => string(format))
 
-csv_cell(v) = v === nothing ? "" : (s = v isa Union{Dates.TimeType} ? string(v) : string(v);
-                                    occursin(r"[\",\r\n]", s) || startswith(s, ' ') ? "\"" * replace(s, "\"" => "\"\"") * "\"" : s)
-csv_string(header, rows) = sprint() do io
-    println(io, join(csv_cell.(header), ","))
-    foreach(r -> println(io, join(csv_cell.(r), ",")), rows)
+csv_string(header, rows; formulas::Bool = false) = sprint() do io
+    println(io, join([csv_field(v; formulas) for v in header], ","))
+    foreach(r -> println(io, join([csv_field(v; formulas) for v in r], ",")), rows)
 end
 
 end # module Tables

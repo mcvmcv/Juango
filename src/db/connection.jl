@@ -70,6 +70,17 @@ function backend_from_setting(s::AbstractString)
     f(String(s))
 end
 backend_from_setting(x) = throw(ImproperlyConfigured("settings.DATABASE must be a path, a URL or a DatabaseBackend, got $(typeof(x))"))
+# (for the settings check: what's wrong with a DATABASE value, without connecting)
+database_setting_issue(::DatabaseBackend) = nothing
+function database_setting_issue(s::AbstractString)
+    isempty(strip(s)) && return "empty; give a file path, a URL (postgresql://...) or a backend"
+    m = match(r"^([A-Za-z][A-Za-z0-9+.-]*)://", s)
+    m === nothing && return nothing
+    scheme = lowercase(m.captures[1])
+    haskey(BACKEND_SCHEMES, scheme) ? nothing : "no database backend for '$scheme://'. " *
+        get(PLANNED_BACKENDS, scheme, "Registered schemes: " * join(sort(collect(keys(BACKEND_SCHEMES))), ", "))
+end
+database_setting_issue(x) = "must be a path, a URL or a DatabaseBackend, not $(typeof(x))"
 
 # --- driver interface (every backend implements these) -----------------------------------
 

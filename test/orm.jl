@@ -249,11 +249,11 @@ end
     # --- the admin change list doesn't run a query per row ----------------------------------
     c = Client()
     force_login!(c, root_user())
-    n1 = nq(() -> get(c, "/admin/article/"))
+    n1 = nq(() -> get(c, "/admin/project/article/"))
     for i in 1:5
         create(Article; title = "rel-extra-$i", author = create(Author; name = "Rel Extra $i"))
     end
-    n2 = nq(() -> get(c, "/admin/article/"))
+    n2 = nq(() -> get(c, "/admin/project/article/"))
     @test n2 == n1
 end
 
@@ -373,9 +373,9 @@ end
     Admin.register!(Essay; list_display = [:title])
     c = Client()
     force_login!(c, root_user())
-    r = get(c, "/admin/essay/add/")
+    r = get(c, "/admin/project/essay/add/")
     @test r.status == 200 && occursin("name=\"topics\"", text(r)) && occursin("multiple", text(r))
-    r = post(c, "/admin/essay/add/", Dict("title" => "From admin", "topics" => [string(web.id)]))
+    r = post(c, "/admin/project/essay/add/", Dict("title" => "From admin", "topics" => [string(web.id)]))
     @test r.status == 302 && [t.name for t in get(Essay; title = "From admin").topics] == ["web"]
     Admin.unregister!(Essay)
 end
@@ -396,12 +396,12 @@ end
     c = Client()
     force_login!(c, root_user())
     Admin.register!(Essay; list_display = [:title])
-    @test !occursin("Hidden", text(get(c, "/admin/essay/")))
-    @test get(c, "/admin/essay/$(hidden.id)/change/").status == 404
+    @test !occursin("Hidden", text(get(c, "/admin/project/essay/")))
+    @test get(c, "/admin/project/essay/$(hidden.id)/change/").status == 404
     Admin.register!(Essay; list_display = [:title], queryset = req -> filter(base_objects(Essay); title__startswith = "H"))
-    r = get(c, "/admin/essay/")
+    r = get(c, "/admin/project/essay/")
     @test occursin("Hidden", text(r)) && !occursin("Databases", text(r))
-    @test get(c, "/admin/essay/$(hidden.id)/change/").status == 200
+    @test get(c, "/admin/project/essay/$(hidden.id)/change/").status == 200
     Admin.unregister!(Essay)
     delete!(filter(base_objects(Essay); title = "Hidden"))
     @test !exists(filter(base_objects(Essay); title = "Hidden"))
@@ -491,6 +491,27 @@ end
     @test values_list(order_by(exa, "title"), :title; flat = true) == ["ex-1", "ex-2", "ex-3"]
     @test values_list(order_by(exa, "title"), :title, :author__name)[3] == ("ex-3", "Ex B")
     @test values_list(order_by(annotate(exau; n = Count(:articles)), "name"), :n; flat = true) == [2, 1, 0]
+    # #160: values_list is a lazy QuerySet
+    vl = values_list(order_by(exa, "title"), :title; flat = true)
+    @test vl isa QuerySet && collect(vl) == ["ex-1", "ex-2", "ex-3"] && first(vl) == "ex-1" && last(vl) == "ex-3"
+    @test first(values_list(filter(exa; title = "nope"), :title; flat = true)) === nothing
+    @test last(values_list(filter(exa; title = "nope"), :title)) === nothing
+    @test count(vl) == 3 && exists(vl) && vl[2:3] == ["ex-2", "ex-3"] && vl[2] == "ex-2" && length(vl) == 3
+    @test values_list(order_by(exa, "-title"), :title; flat = true)[1:1] == ["ex-3"]
+    @test sort(values_list(exa, :title; flat = true); rev = true) == ["ex-3", "ex-2", "ex-1"]
+    @test Set(values_list(exa, :title; flat = true)) == Set(["ex-1", "ex-2", "ex-3"])
+    @test order_by(values_list(exa, :title, :author__name), "-title")[1] == ("ex-3", "Ex B")
+    nt = first(values_list(order_by(exa, "title"), :title, :views; named = true))
+    @test nt isa NamedTuple && nt.title == "ex-1" && keys(nt) == (:title, :views)
+    @test distinct(values_list(exa, :author__name; flat = true)) |> collect |> sort == ["Ex A", "Ex B"]
+    @test_throws ArgumentError values_list(exa, :title, :views; flat = true)
+    @test_throws ArgumentError values_list(exa, :title; flat = true, named = true)
+    # as a subquery: one query, not a fetch and a list of parameters
+    sub = values_list(filter(exa; title__in = ["ex-1", "ex-2"]), :author_id; flat = true)
+    nsub, nq = Juango.count_queries(() -> count(filter(exau; id__in = sub)))
+    @test nq == 1 && nsub == length(unique(collect(sub)))
+    @test values(values_list(order_by(exa, "title"), :title))[1] == Dict(:title => "ex-1")      # values() turns rows back into Dicts
+    @test JSON.parse(String(JsonResponse(values_list(order_by(exa, "title"), :title; flat = true)).body)) == ["ex-1", "ex-2", "ex-3"]
     @test first(values(exa, :id))[:id] isa Integer
 
     # --- aggregate() -----------------------------------------------------------------------------
@@ -782,9 +803,9 @@ end
     c = Client()
     force_login!(c, root_user())
     Admin.register!(Ticket)
-    @test get(c, "/admin/ticket/$(t.id)/change/").status == 200
-    @test get(c, "/admin/ticket/not-a-uuid/change/").status == 404
-    @test occursin("t1", text(get(c, "/admin/ticket/")))
+    @test get(c, "/admin/project/ticket/$(t.id)/change/").status == 200
+    @test get(c, "/admin/project/ticket/not-a-uuid/change/").status == 404
+    @test occursin("t1", text(get(c, "/admin/project/ticket/")))
     Admin.unregister!(Ticket)
     delete!(t)
     @test !exists(filter(Stub; id = st.id))

@@ -699,7 +699,7 @@ function widget_html(bf::BoundField)
         end
         # autocomplete: a select holding the current choice, filled by searching (admin JavaScript)
         opt = cur === nothing ? "" : "<option value=\"$(escape_html(string(cur.id)))\" selected>$(escape_html(string(cur)))</option>"
-        return "<select$attrs data-autocomplete=\"$(model_name(R))\"><option value=\"\">---------</option>$opt</select>"
+        return "<select$attrs data-autocomplete=\"$(modelmeta(R).app)/$(model_name(R))\"><option value=\"\">---------</option>$opt</select>"
     elseif fld.kind in FILE_KINDS
         cur = get(f.initial, fld.name, nothing)
         io = IOBuffer()

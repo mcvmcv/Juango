@@ -24,10 +24,11 @@ struct QuerySet{T<:Model}
     combinator::Any                                # (op, querysets, all) for union/intersection/difference, or nothing
     db::Union{Nothing,String}                      # using_db(qs, alias): the database to query
     annotated_after::Dict{Symbol,Int}              # annotation => filter() calls before it (it reuses their joins)
+    values_mode::Symbol                            # values() rows: :dict; values_list: :tuple, :named or :flat
 end
 QuerySet{T}(where, order, limit, offset, isnone) where {T} =
     QuerySet{T}(where, order, limit, offset, isnone, Vector{Symbol}[], Prefetch[], nothing, nothing,
-                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing, Dict{Symbol,Int}())
+                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing, Dict{Symbol,Int}(), :dict)
 
 """
     using_db(qs, "replica")
@@ -630,7 +631,16 @@ Base.@nospecializeinfer function fetch_values(@nospecialize(qs::QuerySet))
         end
         push!(out, d)
     end
-    out
+    shape_values(qs, out)
+end
+"values() rows as values_list gives them: tuples, named tuples or plain values."
+Base.@nospecializeinfer function shape_values(@nospecialize(qs::QuerySet), rows::Vector{Dict{Symbol,Any}})
+    m = qs.values_mode
+    m === :dict && return rows
+    ks = Symbol[Symbol(f) for f in qs.values_fields]
+    m === :flat && return Any[r[ks[1]] for r in rows]
+    m === :named && return [NamedTuple{Tuple(ks)}(Tuple(r[k] for k in ks)) for r in rows]
+    Tuple[Tuple(r[k] for k in ks) for r in rows]
 end
 
 Base.@nospecializeinfer function do_prefetch!(@nospecialize(objs::Vector), p::Prefetch)
@@ -686,7 +696,13 @@ Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), na
 end
 
 Base.@nospecializeinfer Base.collect(@nospecialize(qs::QuerySet)) = fetch(qs)
-Base.eltype(::Type{QuerySet{T}}) where {T} = T
+# a queryset equals a vector of the same rows (`values_list(qs, :id; flat = true) == [1, 2]`)
+Base.@nospecializeinfer Base.:(==)(@nospecialize(qs::QuerySet), v::AbstractVector) = fetch(qs) == v
+Base.@nospecializeinfer Base.:(==)(v::AbstractVector, @nospecialize(qs::QuerySet)) = v == fetch(qs)
+# values() and values_list querysets as JSON: their rows
+Base.@nospecializeinfer JsonResponse(@nospecialize(qs::QuerySet); kw...) = JsonResponse(fetch(qs); kw...)
+Base.@nospecializeinfer Base.sort(@nospecialize(qs::QuerySet); kw...) = sort(fetch(qs); kw...)
+Base.IteratorEltype(::Type{<:QuerySet}) = Base.EltypeUnknown()     # objects, or values()/values_list rows
 Base.IteratorSize(::Type{<:QuerySet}) = Base.SizeUnknown()
 Base.@nospecializeinfer function Base.iterate(@nospecialize(qs::QuerySet))
     v = fetch(qs)

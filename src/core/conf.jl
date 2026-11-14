@@ -6,6 +6,8 @@
 #     settings.DEBUG   # => false
 
 const SETTINGS = Dict{Symbol,Any}()
+struct NoSetting end
+const NO_SETTING = NoSetting()
 
 "Hooks run whenever settings change (used to invalidate caches)."
 const SETTINGS_CHANGED_HOOKS = Function[]
@@ -161,11 +163,136 @@ function reset_settings!()
     nothing
 end
 
+# --- known settings: misspelled and mistyped ones are reported -----------------------------------------
+
+"Settings Juango reads that have no default (it looks them up with `get(settings, ...)`)."
+const OPTIONAL_SETTINGS = Set([:AUTHENTICATION_BACKENDS, :AUTH_PASSWORD_VALIDATORS, :AUTH_USER_MODEL, :DATABASES,
+    :FILE_UPLOAD_HANDLERS, :FIXTURE_DIRS, :FORM_RENDERER, :LOGGING, :PASSWORD_HASHERS, :STATICFILES_FINDERS,
+    :STATICFILES_STORAGE, :STORAGES, :TASKS, :EXTRA_SETTINGS])
+"Settings declared by apps and libraries (`declare_settings!`, `App(...; settings = ...)`): name => default."
+const DECLARED_SETTINGS = Dict{Symbol,Any}()
+
+"""
+    declare_settings!(:BLOG_PAGE_SIZE => 20, :BLOG_FEED_TITLE => "Blog", :BLOG_API_KEY)
+
+Declare settings of your own, so the `settings.W001` check doesn't report them as unknown. A
+`name => default` pair also gives the setting a default, read by `settings.NAME` until
+`configure!` sets it; a bare name has none. Apps can declare theirs with `App(...; settings = ...)`;
+a project can instead list names in `configure!(EXTRA_SETTINGS = [:MY_SETTING, "MYPREFIX_*"])`.
+"""
+function declare_settings!(names...)
+    for x in names
+        x isa Pair ? (DECLARED_SETTINGS[Symbol(x.first)] = x.second) : (DECLARED_SETTINGS[Symbol(x)] = NO_SETTING)
+    end
+    nothing
+end
+
+"Whether `k` is a setting Juango, an app or the project knows (`EXTRA_SETTINGS` entries ending in * are prefixes)."
+function is_known_setting(k::Symbol, defaults = default_settings())
+    (haskey(defaults, k) || k in OPTIONAL_SETTINGS || haskey(DECLARED_SETTINGS, k)) && return true
+    s = string(k)
+    for e in get(SETTINGS, :EXTRA_SETTINGS, ())
+        e = string(e)
+        (endswith(e, '*') ? startswith(s, chop(e)) : s == e) && return true
+    end
+    false
+end
+
+"The Levenshtein distance between two strings."
+function edit_distance(a::AbstractString, b::AbstractString)
+    a, b = collect(a), collect(b)
+    prev = collect(0:length(b))
+    for i in 1:length(a)
+        cur = similar(prev); cur[1] = i
+        for j in 1:length(b)
+            cur[j+1] = min(prev[j+1] + 1, cur[j] + 1, prev[j] + (a[i] == b[j] ? 0 : 1))
+        end
+        prev = cur
+    end
+    prev[end]
+end
+
+"The known setting closest to `k` within `maxdist` edits (or a known name with `k`'s spelling in another case), or nothing."
+function closest_setting(k::Symbol; maxdist::Int = 2, defaults = default_settings())
+    s = uppercase(string(k))
+    best, bestd = nothing, maxdist + 1
+    for n in Iterators.flatten((keys(defaults), OPTIONAL_SETTINGS, keys(DECLARED_SETTINGS)))
+        n === k && continue
+        d = edit_distance(s, string(n))
+        d < bestd && ((best, bestd) = (n, d))
+    end
+    best
+end
+
+"Settings warned about already (once per name)."
+const WARNED_SETTINGS = Set{Symbol}()
+
+"""
+    settings_issues() -> Vector{Tuple{Symbol,String,String,Union{Nothing,String}}}
+
+The problems the `settings` system check reports: unknown names (`settings.W001`, with the closest
+known one), and values of the wrong type for DEBUG and the other true/false settings
+(`settings.E001`), list settings given a string (`settings.E002`), number settings given a string
+(`settings.E003`) and DATABASE / DATABASES (`settings.E004`), each as (level, message, id, hint).
+"""
+function settings_issues()
+    defaults = default_settings()
+    out = Tuple{Symbol,String,String,Union{Nothing,String}}[]
+    for (k, v) in SETTINGS
+        if !is_known_setting(k, defaults)
+            c = closest_setting(k; maxdist = 3, defaults = defaults)
+            push!(out, (:warning, "Unknown setting $k" * (c === nothing ? "." : ": did you mean $c?"), "settings.W001",
+                        c === nothing ? "If it's a setting of your own, declare it: declare_settings!(:$k) or EXTRA_SETTINGS = [:$k]." : nothing))
+            continue
+        end
+        haskey(defaults, k) || continue
+        d = defaults[k]
+        if d isa Bool && !(v isa Bool) && k !== :ACCESS_LOG
+            push!(out, (:error, "$k must be true or false, not $(repr(v)).", "settings.E001",
+                        v isa AbstractString ? "Read it with env(\"$k\", Bool), which understands \"true\", \"1\", \"off\", ..." : nothing))
+        elseif d isa AbstractVector && v isa AbstractString
+            push!(out, (:error, "$k must be a list, not the string $(repr(v)).", "settings.E002",
+                        "Write [$(repr(v))]; a string is read as a list of its characters."))
+        elseif d isa Integer && !(d isa Bool) && v isa AbstractString
+            push!(out, (:error, "$k must be a number, not the string $(repr(v)).", "settings.E003",
+                        "Read it with env(\"$k\", Int)."))
+        end
+    end
+    dbs = Any[("DATABASE", get(SETTINGS, :DATABASE, nothing))]
+    x = get(SETTINGS, :DATABASES, nothing)
+    x isa AbstractDict && append!(dbs, [("DATABASES[$(repr(a))]", u) for (a, u) in x])
+    x === nothing || x isa AbstractDict ||
+        push!(out, (:error, "DATABASES must be a Dict of alias => database, not $(typeof(x)).", "settings.E004", nothing))
+    for (name, u) in dbs
+        u === nothing && continue
+        msg = database_setting_issue(u)
+        msg === nothing || push!(out, (:error, "$name: $msg", "settings.E004", nothing))
+    end
+    out
+end
+# (database_setting_issue is in db/connection.jl)
+
+function warn_misspelled_settings(kwargs)
+    get(SETTINGS, :DEBUG, false) === true || return
+    defaults = nothing
+    for (k, _) in kwargs
+        k in WARNED_SETTINGS && continue
+        defaults === nothing && (defaults = default_settings())
+        is_known_setting(k, defaults) && continue
+        c = closest_setting(k; defaults = defaults)
+        c === nothing && continue
+        push!(WARNED_SETTINGS, k)
+        @warn "Unknown setting $k: did you mean $c? (declare_settings!(:$k) if it's yours)"
+    end
+end
+
 """
     configure!(; kwargs...)
 
-Update settings. Any keyword is accepted; unknown names become custom settings
-readable through `settings.NAME`.
+Update settings. Any keyword is accepted: names Juango doesn't know are custom settings,
+readable through `settings.NAME`. When DEBUG is on, a name a letter or two away from a known one
+(`DEBG`, `ALLOWED_HOST`) gets a warning, and `manage.jl check` reports every unknown name
+(`settings.W001`; declare your own with `declare_settings!` or `EXTRA_SETTINGS`).
 """
 configure!(; kwargs...) = apply_settings!(kwargs, true)
 
@@ -175,6 +302,7 @@ function apply_settings!(kwargs, enter::Bool)
     for (k, v) in kwargs
         SETTINGS[k] = v
     end
+    enter && warn_misspelled_settings(kwargs)
     foreach(h -> h(), SETTINGS_CHANGED_HOOKS)
     haskey(kwargs, :INSTALLED_APPS) && installed_apps()       # fail early, and run the apps' ready hooks
     if any_receivers(setting_changed)
@@ -193,10 +321,15 @@ function Base.getproperty(::SettingsProxy, k::Symbol)
     v = get(SETTINGS, k, NO_SETTING)
     v === NO_SETTING || return v
     isempty(SETTINGS) && (merge!(SETTINGS, default_settings()); return getproperty(settings, k))
+    d = get(DECLARED_SETTINGS, k, NO_SETTING)
+    d === NO_SETTING || return d
     throw(KeyError("setting $k is not defined"))
 end
-struct NoSetting end
-const NO_SETTING = NoSetting()
 Base.propertynames(::SettingsProxy) = Tuple(keys(SETTINGS))
-Base.get(::SettingsProxy, k::Symbol, default) = get(SETTINGS, k, default)
+function Base.get(::SettingsProxy, k::Symbol, default)
+    v = get(SETTINGS, k, NO_SETTING)
+    v === NO_SETTING || return v
+    d = get(DECLARED_SETTINGS, k, NO_SETTING)
+    d === NO_SETTING ? default : d
+end
 Base.show(io::IO, ::SettingsProxy) = print(io, "Juango.settings(", length(SETTINGS), " values)")

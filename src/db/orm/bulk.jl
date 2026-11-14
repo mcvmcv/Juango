@@ -180,7 +180,8 @@ function iterator(qs::QuerySet; chunk_size::Integer = 2000)
 end
 Base.@nospecializeinfer iterator(@nospecialize(T::Type{<:Model}); kw...) = iterator(objects(T); kw...)
 Base.IteratorSize(::Type{QuerySetIterator}) = Base.SizeUnknown()
-Base.eltype(it::QuerySetIterator) = it.qs.values_fields === nothing ? model_of(it.qs) : Dict{Symbol,Any}
+Base.eltype(it::QuerySetIterator) = it.qs.values_fields === nothing ? model_of(it.qs) :
+    it.qs.values_mode === :dict ? Dict{Symbol,Any} : Any
 function Base.iterate(it::QuerySetIterator, st = (Any[], 1, 0, false))
     buf, i, pos, done = st
     if i > length(buf)
@@ -223,8 +224,9 @@ Base.@nospecializeinfer function combine(op, @nospecialize(qs::QuerySet), others
     end
     vf = first(parts).values_fields
     all(p -> p.values_fields == vf, parts) || throw(ArgumentError("$op: the querysets must select the same fields"))
+    vm = first(parts).values_mode
     QuerySet{T}(Q[], String[], nothing, 0, false, Vector{Symbol}[], copy(qs.prefetch), nothing, nothing,
-                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all), qs.db, Dict{Symbol,Int}())
+                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all), qs.db, Dict{Symbol,Int}(), vm)
 end
 
 """
@@ -282,7 +284,7 @@ Base.@nospecializeinfer function update_here!(@nospecialize(qs::QuerySet); kw...
     mytable = modelmeta(T).table
     if any(k -> modelmeta(getfield_meta(T, k).model).table != mytable, keys(kw))
         # fields live in several tables (multi-table inheritance): one UPDATE per table, same ids
-        ids = values_list(qs, :id; flat = true)
+        ids = collect(values_list(qs, :id; flat = true))
         n = 0
         for M in vcat([concrete_model(T)], ancestors(T))
             mine = [k => v for (k, v) in kw if modelmeta(getfield_meta(T, k).model).table == modelmeta(M).table]
@@ -344,7 +346,7 @@ Base.@nospecializeinfer function deletion_closure!(seen::IdDict{Any,Set{Any}}, r
         deletion_closure!(seen, restricts, M, row_keys(filter(base_objects(M), Q(Symbol(ctf, :_id) => get_for_model(T).id), Q(Symbol(fkf, "__in") => v))))
     end
     for C in child_models(T)
-        deletion_closure!(seen, restricts, C, values_list(filter(base_objects(C); id__in = v), :id; flat = true))
+        deletion_closure!(seen, restricts, C, collect(values_list(filter(base_objects(C); id__in = v), :id; flat = true)))
     end
     for (_, M, f) in reverse_relations(T)
         rel = filter(base_objects(M), Q(Symbol(attname(f), "__in") => v))
@@ -392,7 +394,7 @@ Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector
         delete_ids!(M, row_keys(rel))
     end
     for C in child_models(T)        # rows of subclasses that extend these rows
-        delete_ids!(C, values_list(filter(base_objects(C); id__in = ids), :id; flat = true))
+        delete_ids!(C, collect(values_list(filter(base_objects(C); id__in = ids), :id; flat = true)))
     end
     for (_, M, f) in reverse_relations(T)
         rel = filter(base_objects(M), Q(Symbol(attname(f), "__in") => ids))
@@ -421,7 +423,7 @@ Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector
 end
 
 "The primary keys of a queryset's rows: ids, or tuples for a composite key."
-Base.@nospecializeinfer row_keys(@nospecialize(qs::QuerySet)) = is_composite(model_of(qs)) ? Any[o.pk for o in fetch(qs)] : values_list(qs, :id; flat = true)
+Base.@nospecializeinfer row_keys(@nospecialize(qs::QuerySet)) = is_composite(model_of(qs)) ? Any[o.pk for o in fetch(qs)] : collect(values_list(qs, :id; flat = true))
 
 "Delete rows of a model with a composite primary key (only ForeignObjects can refer to them; see `delete_fobj_refs!`)."
 Base.@nospecializeinfer function delete_composite!(@nospecialize(T::Type), keys::Vector)

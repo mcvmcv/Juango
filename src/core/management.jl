@@ -116,6 +116,9 @@ end
 register_check!(tags = [:templates]) do
     [CheckMessage(:error, "Template directory '$d' does not exist."; id = "templates.E001") for d in settings.TEMPLATE_DIRS if !isdir(d)]
 end
+register_check!(tags = [:settings]) do
+    [CheckMessage(l, m; id = id, hint = h) for (l, m, id, h) in settings_issues()]
+end
 register_check!(() -> [CheckMessage(:error, m; id = "apps.E001") for m in app_issues()]; tags = [:apps])
 register_check!(tags = [:models]) do
     msgs = CheckMessage[]

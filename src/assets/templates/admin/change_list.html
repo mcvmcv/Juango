@@ -1,9 +1,9 @@
 {% extends "admin/base.html" %}
-{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a> › {{ opts.verbose_name_plural|capfirst }}</div>{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a> › <a href="{% url 'admin:app_list' app=opts.app_label %}">{{ opts.app_name }}</a> › {{ opts.verbose_name_plural|capfirst }}</div>{% endblock %}
 {% block content %}
 <div class="toolbar" style="justify-content:space-between">
   <h1 class="page" style="margin:0">{{ title }}</h1>
-  {% if can_add %}<a class="button" href="{% url 'admin:add' model=opts.slug %}">Add {{ opts.verbose_name }} +</a>{% endif %}
+  {% if can_add %}<a class="button" href="{% url 'admin:add' app=opts.app_label model=opts.slug %}">Add {{ opts.verbose_name }} +</a>{% endif %}
 </div>
 <div class="layout">
   <div class="main">

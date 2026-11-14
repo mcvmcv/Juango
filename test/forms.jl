@@ -182,8 +182,8 @@ end
         c = Client()
         force_login!(c, root_user())
         Admin.register!(Attachment; list_display = [:title, :file])
-        @test occursin("enctype=\"multipart/form-data\"", text(get(c, "/admin/attachment/add/")))
-        r = post(c, "/admin/attachment/add/", Dict("title" => "from admin", "file" => UploadedFile("admin.txt", "via admin")))
+        @test occursin("enctype=\"multipart/form-data\"", text(get(c, "/admin/project/attachment/add/")))
+        r = post(c, "/admin/project/attachment/add/", Dict("title" => "from admin", "file" => UploadedFile("admin.txt", "via admin")))
         @test r.status == 302
         fa = get(Attachment; title = "from admin")
         @test String(read(fa.file)) == "via admin" && isfile(fa.file.path)

@@ -657,7 +657,7 @@ end
         force_login!(ac, root_user())
         r = get(ac, "/admin/")
         @test occursin("Website-Verwaltung", text(r)) && occursin("Neueste Aktionen", text(r)) && occursin("lang=\"de\"", text(r))
-        @test occursin("Sichern und weiter bearbeiten", text(get(ac, "/admin/author/add/")))
+        @test occursin("Sichern und weiter bearbeiten", text(get(ac, "/admin/project/author/add/")))
     finally
         configure!(ROOT_URLCONF = old_urls, MIDDLEWARE = old_mw)
     end
@@ -718,7 +718,7 @@ end
         c = Client()
         force_login!(c, root_user())
         @test get(c, "/admin/").status == 200 && root_user().date_joined isa TZ.ZonedDateTime
-        r = get(c, "/admin/article/$(a.id)/change/")
+        r = get(c, "/admin/project/article/$(a.id)/change/")
         @test r.status == 200 && occursin(r"NZ[SD]T", text(r))
 
         # TimezoneMiddleware activates the session's time zone
@@ -1225,4 +1225,50 @@ end
             v === nothing ? delete!(ENV, k) : (ENV[k] = v)
         end
     end
+end
+
+@testset "misspelled and mistyped settings (#163)" begin
+    @test Juango.edit_distance("DEBG", "DEBUG") == 1
+    @test Juango.edit_distance("", "abc") == 3 && Juango.edit_distance("kitten", "sitting") == 3
+    override_settings(DEBG = false, ALLOWED_HOST = ["x"], DEBUG = "false",
+                      ALLOWED_HOSTS = "example.com", SECURE_HSTS_SECONDS = "3600", MY_THING = 1) do
+        msgs = Juango.run_checks(tags = [:settings])
+        byid(id) = [m for m in msgs if m.id == id]
+        w = byid("settings.W001")
+        @test any(m -> m.msg == "Unknown setting DEBG: did you mean DEBUG?", w)
+        @test any(m -> m.msg == "Unknown setting ALLOWED_HOST: did you mean ALLOWED_HOSTS?", w)
+        @test any(m -> startswith(m.msg, "Unknown setting MY_THING.") && occursin("declare_settings!(:MY_THING)", m.hint), w)
+        @test any(m -> occursin("DEBUG must be true or false", m.msg), byid("settings.E001"))
+        @test any(m -> occursin("ALLOWED_HOSTS must be a list", m.msg), byid("settings.E002"))
+        @test any(m -> occursin("SECURE_HSTS_SECONDS must be a number", m.msg), byid("settings.E003"))
+        override_settings(EXTRA_SETTINGS = ["MY_*"]) do
+            @test !any(m -> occursin("MY_THING", m.msg), Juango.run_checks(tags = [:settings]))
+        end
+    end
+    override_settings(DATABASE = 42, DATABASES = Dict("other" => "nosuch://x")) do
+        e = [m.msg for m in Juango.run_checks(tags = [:settings]) if m.id == "settings.E004"]
+        @test any(occursin("DATABASE: must be a path"), e) && any(occursin("no database backend for 'nosuch://'"), e)
+    end
+    # declared settings: known, with defaults
+    @test_throws KeyError settings.ZZ_PAGE_SIZE
+    declare_settings!(:ZZ_PAGE_SIZE => 20, :ZZ_KEY)
+    @test settings.ZZ_PAGE_SIZE == 20 && get(settings, :ZZ_PAGE_SIZE, 0) == 20 && get(settings, :ZZ_KEY, 7) == 7
+    override_settings(ZZ_PAGE_SIZE = 5, ZZ_KEY = "k") do
+        @test settings.ZZ_PAGE_SIZE == 5
+        @test !any(m -> occursin("ZZ_", m.msg), Juango.run_checks(tags = [:settings]))
+    end
+    a = Juango.App("zzsettings"; settings = Dict(:ZZAPP_LIMIT => 3))
+    @test settings.ZZAPP_LIMIT == 3 && Juango.is_known_setting(:ZZAPP_LIMIT)
+    # configure! warns once, in DEBUG, only near a known name
+    empty!(Juango.WARNED_SETTINGS)
+    override_settings(DEBUG = true) do
+        @test_logs (:warn, r"Unknown setting SECRET_KY: did you mean SECRET_KEY\?") override_settings(() -> nothing; SECRET_KY = "x")
+        @test_logs override_settings(() -> nothing; SECRET_KY = "x")          # once
+        @test_logs override_settings(() -> nothing; TOTALLY_MINE = 1)          # not near anything
+    end
+    override_settings(DEBUG = false) do
+        @test_logs override_settings(() -> nothing; SECRT_KEY = "x")
+    end
+    delete!(Juango.DECLARED_SETTINGS, :ZZ_PAGE_SIZE); delete!(Juango.DECLARED_SETTINGS, :ZZ_KEY); delete!(Juango.DECLARED_SETTINGS, :ZZAPP_LIMIT)
+    delete!(Juango.APP_DEFS, "zzsettings")
 end

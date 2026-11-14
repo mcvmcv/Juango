@@ -647,22 +647,29 @@ The results as `Dict{Symbol,Any}` rows instead of objects. Fields may follow rel
 Base.@nospecializeinfer function Base.values(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
     T = model_of(qs)
     fs = isempty(fields) ? vcat(["id"], [column(f) for f in all_fields(T)]) : String[string(f) for f in fields]
-    chain(qs; values_fields = fs, group_by_object = any(p -> contains_aggregate(p.second), qs.annotations))
+    chain(qs; values_fields = fs, values_mode = :dict, group_by_object = any(p -> contains_aggregate(p.second), qs.annotations))
 end
 Base.@nospecializeinfer Base.values(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...) = values(objects(T), fields...)
 
 """
-    values_list(qs, fields...; flat=false) -> Vector
+    values_list(qs, fields...; flat = false, named = false) -> QuerySet
 
-Field values as tuples, or as plain values with `flat=true` (one field). Fields may follow
-relations and name annotations.
+The rows as tuples of field values, as named tuples with `named = true`, or as plain values
+with `flat = true` (one field). Fields may follow relations and name annotations.
+
+Like Django's, the result is a lazy QuerySet: nothing runs until it's iterated, collected or
+compared, so it chains (`order_by`, `distinct`, slicing, `count`, `exists`), `first` and `last`
+give `nothing` when there are no rows, and `filter(Plate; id__in = values_list(qs, :plate_id; flat = true))`
+is one query with a subquery. `collect` it for a `Vector`.
 """
-function values_list(qs::QuerySet, fields::Union{Symbol,AbstractString}...; flat = false)
+Base.@nospecializeinfer function values_list(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...; flat::Bool = false, named::Bool = false)
+    flat && named && throw(ArgumentError("values_list: pass flat or named, not both"))
     flat && length(fields) != 1 && throw(ArgumentError("flat=true requires exactly one field"))
-    rows = fetch(values(qs, fields...))
-    keys_ = [Symbol(f) for f in fields]
-    flat ? [r[keys_[1]] for r in rows] : [Tuple(r[k] for k in keys_) for r in rows]
+    T = model_of(qs)
+    fs = isempty(fields) ? vcat([:id], [Symbol(column(f)) for f in all_fields(T)]) : collect(Any, fields)
+    chain(values(qs, fs...); values_mode = flat ? :flat : named ? :named : :tuple)
 end
+Base.@nospecializeinfer values_list(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...; kw...) = values_list(objects(T), fields...; kw...)
 
 """
     aggregate(qs; name = Aggregate(...), ...) -> Dict{Symbol,Any}
