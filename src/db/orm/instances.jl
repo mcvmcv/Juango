@@ -21,9 +21,76 @@ Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, 
     alias = write_db(obj, db)
     with_db(alias) do
         check_relations_db(obj)
+        number_in_order!(obj)
         save_here!(obj, only)
         set_instance_db!(obj)
     end
+end
+
+# --- Meta(order_with_respect_to = :parent) ------------------------------------------------------------
+
+"The foreign key a model is ordered with respect to (`Meta(order_with_respect_to = ...)`), or nothing."
+Base.@nospecializeinfer function order_wrt_field(@nospecialize(T::Type))
+    k = get(modelmeta(concrete_model(T)).extra, :order_with_respect_to, nothing)
+    k === nothing ? nothing : getfield_meta(T, Symbol(k))
+end
+
+"A new object of an ordered model goes last among its parent's (its `_order` is how many there are)."
+Base.@nospecializeinfer function number_in_order!(@nospecialize(obj::Model))
+    T = typeof(obj)
+    f = order_wrt_field(T)
+    f === nothing && return
+    data = getfield(obj, :_data)::Dict{Symbol,Any}
+    data[:id] === nothing || return
+    pv = get(data, attname(f), nothing)
+    data[:_order] = pv === nothing ? 0 : count(filter(base_objects(T), Q(attname(f) => pv)))
+    nothing
+end
+
+"""
+    get_order(parent, Child) -> Vector of ids
+
+The ids of `parent`'s `Child` objects in their order (Django's `parent.get_child_order()`), for a
+model with `Meta(order_with_respect_to = :parent_field)`.
+"""
+Base.@nospecializeinfer function get_order(@nospecialize(parent::Model), @nospecialize(T::Type{<:Model}))
+    f = order_wrt_field(T)
+    f === nothing && throw(ArgumentError("$(nameof(T)) has no Meta(order_with_respect_to = ...)"))
+    collect(values_list(order_by(filter(base_objects(T), Q(attname(f) => parent.id)), "_order", "id"), :id; flat = true))
+end
+
+"""
+    set_order!(parent, Child, ids)
+
+Put `parent`'s `Child` objects in this order (Django's `parent.set_child_order(ids)`): `ids` must be
+all of them, each once.
+"""
+Base.@nospecializeinfer function set_order!(@nospecialize(parent::Model), @nospecialize(T::Type{<:Model}), ids)
+    f = order_wrt_field(T)
+    f === nothing && throw(ArgumentError("$(nameof(T)) has no Meta(order_with_respect_to = ...)"))
+    want = collect(ids)
+    have = get_order(parent, T)
+    (length(want) == length(have) && Set(string.(want)) == Set(string.(have))) ||
+        throw(ArgumentError("set_order!: give every one of the $(length(have)) $(nameof(T)) ids of this parent, once"))
+    atomic() do
+        for (i, id) in enumerate(want)
+            update!(filter(base_objects(T); id = id), _order = i - 1)
+        end
+    end
+    nothing
+end
+
+"The next object in its parent's order (`get_previous_in_order` the previous one), or nothing."
+Base.@nospecializeinfer get_next_in_order(@nospecialize(obj::Model)) = neighbour_in_order(obj, 1)
+Base.@nospecializeinfer get_previous_in_order(@nospecialize(obj::Model)) = neighbour_in_order(obj, -1)
+Base.@nospecializeinfer function neighbour_in_order(@nospecialize(obj::Model), step::Int)
+    T = typeof(obj)
+    f = order_wrt_field(T)
+    f === nothing && throw(ArgumentError("$(nameof(T)) has no Meta(order_with_respect_to = ...)"))
+    o = getproperty(obj, :_order)
+    sibs = filter(base_objects(T), Q(attname(f) => getproperty(obj, attname(f))))
+    step > 0 ? first(order_by(filter(sibs; _order__gt = o), "_order", "id")) :
+               first(order_by(filter(sibs; _order__lt = o), "-_order", "-id"))
 end
 
 "The attribute names (`author_id` for `author`) of the fields in `update_fields`, checked."

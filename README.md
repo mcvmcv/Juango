@@ -472,6 +472,8 @@ objects(Post) |> published |> order_by("-created")
 
 `CharField(db_collation = "C")` (or `TextField`) gives the column a collation, for a case- or accent-insensitive column, or byte order: `"C"` or an ICU collation such as `"und-x-icu"` on PostgreSQL, `"utf8mb4_bin"` on MySQL, `"NOCASE"` on SQLite. Changing it is a migration (`AlterField`).
 
+`Meta(order_with_respect_to = :question)` keeps each question's answers in an order of their own, as Django's: a hidden `_order` column (a migration adds it), new answers go last, `get_order(question, Answer)` gives their ids in order, `set_order!(question, Answer, ids)` reorders them, and `get_next_in_order(answer)` / `get_previous_in_order(answer)` step through them. It's the default ordering unless `Meta(ordering)` says otherwise.
+
 `Meta(default_related_name = "%(class)s_items")` names the reverse side of a model's relations that don't set `related_name` (and their query name), as Django's.
 
 #### Model inheritance

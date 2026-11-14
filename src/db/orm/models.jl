@@ -216,6 +216,17 @@ Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields:
         name in (:id, :pk) && error("$T: '$name' is reserved for the automatic primary key")
         push!(f.kind === :m2m ? m2m : f.kind === :gfk ? gfks : f.kind === :grel ? grels : f.kind === :fobj ? fobjs : fs, f)
     end
+    # Meta(order_with_respect_to = :fk): a hidden `_order` column numbering the objects of each parent (Django's)
+    owrt = get(meta, :order_with_respect_to, nothing)
+    if owrt !== nothing
+        k = findfirst(f -> f.name === Symbol(owrt) && f.kind === :fk, fs)
+        k === nothing && error("$T: order_with_respect_to = :$owrt must name one of its foreign keys")
+        of = Field(:int; default = 0, editable = false, blank = true)
+        of.name = :_order
+        of.model = T
+        push!(fs, of)
+        haskey(meta, :ordering) || (meta = merge(meta, (ordering = ["_order"],)))
+    end
     name = string(get(meta, :name, nameof(T)))
     vname = get(meta, :verbose_name, lowercase(replace(name, r"(?<=[a-z])(?=[A-Z])" => " ")))
     m = ModelMeta(T, name, string(get(meta, :table, lowercase(name))), fs,

@@ -120,6 +120,11 @@ Base.show(io::IO, t::Topic) = print(io, t.name)
     deleted = BooleanField(default = false)
 end
 Juango.default_queryset(::Type{Essay}) = filter(base_objects(Essay); deleted = false)
+@model struct Step146
+    essay = ForeignKey(Essay, on_delete = :CASCADE)
+    text = CharField(max_length = 20)
+    Meta(order_with_respect_to = :essay)
+end
 Juango.manager(::Type{Essay}, ::Val{:with_topics}) = filter(Essay; topics__isnull = false)
 untitled(qs::QuerySet{Essay}) = filter(qs; title = "")
 

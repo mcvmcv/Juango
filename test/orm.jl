@@ -1394,6 +1394,26 @@ end
     end
 end
 
+@testset "Meta(order_with_respect_to) (#146)" begin
+    rollback_after() do
+        e1 = create(Essay; title = "ow146 a"); e2 = create(Essay; title = "ow146 b")
+        s1 = create(Step146; essay = e1, text = "one"); s2 = create(Step146; essay = e1, text = "two")
+        s3 = create(Step146; essay = e1, text = "three"); t1 = create(Step146; essay = e2, text = "other")
+        @test (s1._order, s2._order, s3._order, t1._order) == (0, 1, 2, 0)             # numbered per parent
+        @test get_order(e1, Step146) == [s1.id, s2.id, s3.id]
+        @test [s.text for s in filter(Step146; essay = e1)] == ["one", "two", "three"]   # the default ordering
+        set_order!(e1, Step146, [s3.id, s1.id, s2.id])
+        @test get_order(e1, Step146) == [s3.id, s1.id, s2.id]
+        @test [s.text for s in filter(Step146; essay = e1)] == ["three", "one", "two"]
+        @test get_next_in_order(refresh!(s3)).id == s1.id && get_previous_in_order(refresh!(s3)) === nothing
+        @test get_previous_in_order(refresh!(s2)).id == s1.id && get_next_in_order(refresh!(s2)) === nothing
+        @test_throws ArgumentError set_order!(e1, Step146, [s1.id])
+        @test_throws ArgumentError get_order(e1, Topic)
+        @test !any(f -> f.name === :_order, ModelForm(Step146).fields)                   # not editable
+        @test any(f -> f.name === :_order, Juango.concrete_fields(Step146))
+    end
+end
+
 @testset "DecimalField" begin
     @test_throws ArgumentError DecimalField(max_digits = 3, decimal_places = 4)
     @test_throws UndefKeywordError DecimalField(max_digits = 3)
