@@ -241,7 +241,7 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
             T = related_model(f)
             continue
         end
-        mm = find_m2m(T, s)
+        mm = find_m2m_query(T, s)
         if mm !== nothing
             s1, s2 = m2m_path(mm[2], mm[3])
             return resolve_path(c, alias, T, join(vcat([string(s1), string(s2)], segs[i+1:end], last_ ? ["id"] : String[]), "__"))
@@ -577,6 +577,7 @@ numbers as Float64.
 """
 Base.@nospecializeinfer function expr_value(@nospecialize(T), e, v)
     v === nothing && return nothing
+    e isa Exists && return v isa Bool ? v : v != 0          # SQLite and MySQL give 0/1
     if e isa Aggregate
         e.func == "ARRAY_AGG" && return v isa AbstractString ? JSON.parse(v) : v
         e.func in ("BOOL_AND", "BOOL_OR") && return v isa Bool ? v : v != 0

@@ -83,7 +83,7 @@ Base.@nospecializeinfer function filtered_target(@nospecialize(T::Type), fr)
             throw(ArgumentError("FilteredRelation('$rel'): relations inherited from a parent model are not supported"))
         return related_model(f), "id", column(f), false
     end
-    find_m2m(T, rel) === nothing ||
+    find_m2m_query(T, rel) === nothing ||
         throw(ArgumentError("FilteredRelation('$rel'): many-to-many relations are not supported; filter the through model"))
     r = find_reverse(T, rel)
     r === nothing && throw(lookup_error(T, rel))
@@ -132,7 +132,8 @@ end
 
 Base.@nospecializeinfer function find_reverse(@nospecialize(T::Type), name)
     for (rn, M, rf) in reverse_relations(T)
-        (string(rn) == name || !startswith(string(rn), "+") && lowercase(modelmeta(M).name) == name) && return (rn, M, rf)
+        (string(rn) == name || !startswith(string(rn), "+") &&
+            string(something(rf.related_query_name, Symbol(lowercase(modelmeta(M).name)))) == name) && return (rn, M, rf)
     end
     nothing
 end
@@ -197,7 +198,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
         col = qcol(alias, "id")
     else
         f = findfield(meta, Symbol(fname))
-        if f === nothing && (mm = find_m2m(T, fname)) !== nothing
+        if f === nothing && (mm = find_m2m_query(T, fname)) !== nothing
             # tags__name on Post -> through the join model: +post_tags_src__tag__name
             step1, step2 = m2m_path(mm[2], mm[3])
             if isempty(rest) && lookup == "isnull"

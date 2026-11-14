@@ -253,7 +253,8 @@ mutable struct AutoThrough{N} <: Model
 end
 (::Type{AutoThrough{N}})(; kwargs...) where {N} = construct(AutoThrough{N}; kwargs...)
 
-target_name(f::Field, owner) = f.related === :self ? string(nameof(owner)) :
+# (a many-to-many to USER_MODEL names its join column `user_id`, whichever model AUTH_USER_MODEL names)
+target_name(f::Field, owner) = f.related === :self ? string(nameof(owner)) : f.related === :__user_model__ ? "User" :
                                f.related isa Type ? string(nameof(f.related)) : string(f.related)
 
 Base.@nospecializeinfer function make_through_model(@nospecialize(T::Type), m::ModelMeta, f::Field)
@@ -338,6 +339,20 @@ end
 Base.@nospecializeinfer function find_m2m(@nospecialize(T::Type), name)
     for r in m2m_relations(T)
         string(r[1]) == name && return r
+    end
+    nothing
+end
+"""
+A many-to-many relation of `T` by its name in lookups (`filter`, `Count`, `values` paths): the
+field's name, or for the reverse side its query name: `related_query_name`, else
+`related_name`, else the other model's name in lowercase (`filter(Lot; sample__name = "x")`).
+"""
+Base.@nospecializeinfer function find_m2m_query(@nospecialize(T::Type), name)
+    for r in m2m_relations(T)
+        f = r[2]
+        q = r[3] ? string(r[1]) :
+            string(something(f.related_query_name, f.related_name, Symbol(lowercase(modelmeta(f.model).name))))
+        (q == name || string(r[1]) == name) && return r
     end
     nothing
 end

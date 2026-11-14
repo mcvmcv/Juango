@@ -1720,3 +1720,71 @@ Juango.tattr!(b::EcBlock, ::Val{:well}, v) = (b.position = (findfirst(v[1], EC_R
         Juango.execute("DROP TABLE IF EXISTS " * Juango.quote_name(Juango.backend(), "ec_block"))
     end
 end
+
+@model struct EcLot
+    code = CharField(max_length = 20)
+    Meta(table = "ec_lot", app_label = "ectest2")
+end
+@model struct EcSample
+    name = CharField(max_length = 20)
+    lots = ManyToManyField(EcLot; blank = true)                                     # no related_name
+    tags = ManyToManyField(Tag; blank = true, related_name = :ec_samples, related_query_name = :ecs)
+    lot = ForeignKey(EcLot; null = true, on_delete = :SET_NULL, related_name = :main_samples, related_query_name = :mainsample)
+    Meta(table = "ec_sample", app_label = "ectest2")
+end
+@model struct EcProject
+    title = CharField(max_length = 20)
+    pinned_by = ManyToManyField(USER_MODEL; blank = true, related_name = :pinned_projects)
+    Meta(table = "ec_project", app_label = "ectest2")
+end
+
+@testset "reverse m2m query names, related_query_name, USER_MODEL m2m, Exists as Bool, get_or_set do (#124-#126)" begin
+    quiet(f) = redirect_stdout(f, devnull)
+    models = Juango.all_models()
+    ec = filter(T -> Juango.modelmeta(T).app == "ectest2", models)
+    quiet(() -> Juango.sync_models!(ec))
+    try
+        # #125: the join table's column is user_id, and the relation works both ways
+        Th = through(EcProject, :pinned_by)
+        @test Set(Juango.attname(f) for f in Juango.modelmeta(Th).fields) == Set([:ecproject_id, :user_id])
+        st = Juango.models_state(ec)
+        @test any(c -> c.name == "user_id" && c.references == "__user_model__", st["ec_project_pinned_by"].columns)
+        u = create_user("pinner", "pin-Pass-123")
+        p = create(EcProject; title = "p1")
+        add!(p.pinned_by, u)
+        @test count(p.pinned_by) == 1 && first(u.pinned_projects).title == "p1"
+        @test count(filter(EcProject; pinned_by = u)) == 1
+        remove!(p.pinned_by, u)
+        @test count(p.pinned_by) == 0
+
+        # #124: reverse lookups by the default query name, and related_query_name
+        l1 = create(EcLot; code = "L1"); l2 = create(EcLot; code = "L2")
+        s1 = create(EcSample; name = "x", lot = l1); s2 = create(EcSample; name = "y")
+        add!(s1.lots, l1, l2); add!(s2.lots, l1)
+        @test count(l1.ecsample_set) == 2                                      # the accessor
+        @test [l.code for l in order_by(filter(EcLot; ecsample__name = "y"), "code")] == ["L1"]
+        @test Dict(l.code => l.n for l in annotate(objects(EcLot); n = Count(:ecsample))) == Dict("L1" => 2, "L2" => 1)
+        t = create(Tag; label = "rq"); add!(s1.tags, t)
+        @test count(filter(Tag; ecs__name = "x")) == 1 && count(t.ec_samples) == 1
+        @test count(filter(EcLot; mainsample__name = "x")) == 1                 # FK related_query_name
+        # Exists annotations are Bool on every database
+        a = annotate(order_by(objects(EcLot), "code"); has_main = Exists(filter(EcSample; lot = OuterRef(:id))))
+        @test [x.has_main for x in a] == [true, false] && all(x -> x.has_main isa Bool, a)
+
+        # #126: get_or_set(f, key) for do-blocks
+        old_caches = settings.CACHES
+        configure!(CACHES = Dict("default" => Dict(:BACKEND => :locmem)))
+        n = Ref(0)
+        v1 = get_or_set("ec-key"; timeout = 60) do
+            n[] += 1; 41 + n[]
+        end
+        v2 = get_or_set(() -> (n[] += 1; 0), "ec-key")
+        @test v1 == 42 && v2 == 42 && n[] == 1 && get_or_set("ec-other", 5) == 5
+        configure!(CACHES = old_caches)
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app == "ectest2", Juango.all_models()))
+        for t in ("ec_sample_tags", "ec_sample_lots", "ec_project_pinned_by", "ec_sample", "ec_project", "ec_lot")
+            Juango.execute("DROP TABLE IF EXISTS " * Juango.quote_name(Juango.backend(), t))
+        end
+    end
+end

@@ -517,16 +517,23 @@ cache_has(key; version = nothing, cache_name = "default") = (c = cache(cache_nam
 "Empty the whole cache."
 cache_clear(; cache_name = "default") = raw_clear(cache(cache_name))
 
-"The cached value for `key`, computing and storing `f()` on a miss."
+"""
+    get_or_set(key, f_or_value; timeout, version, cache_name)
+    get_or_set(key; timeout, ...) do ... end
+
+The cached value for `key`, computing and storing `f()` (or storing the value) on a miss.
+"""
 function get_or_set(key, f; timeout = :default, version = nothing, cache_name = "default")
     c = cache(cache_name)
     k = make_key(c, key, version)
     found, v = raw_get(c, k)
     found && return v
-    v = f()
+    v = f isa Base.Callable ? f() : f
     timeout == 0 || raw_set(c, k, v, expiry(c, timeout))
     v
 end
+
+get_or_set(f::Base.Callable, key; kw...) = get_or_set(key, f; kw...)       # do-block form, like get!(f, d, k)
 
 "Several values at once: a `Dict` of the keys that are cached."
 cache_get_many(keys; version = nothing, cache_name = "default") =

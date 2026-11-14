@@ -352,6 +352,7 @@ filter(Post; tags__name="julia")                  # lookups in both directions
 prefetch_related(objects(Post), :tags)            # 2 extra queries for any number of posts
 ```
 
+- **Reverse names.** The reverse side is `tag.post_set` (or `related_name`) on an object, and `post` in lookups (`filter(Tag; post__title = "x")`, `Count(:post)`), or `related_query_name` when given; the same holds for foreign keys. A many-to-many to `USER_MODEL` names its join column `user_id`.
 - **Join table.** Juango creates a join table (`post_tags`, unique per pair) that migrations manage like any other table. Deleting either side removes its links. `through(Post, :tags)` is its model (Django's `Post.tags.through`), with foreign keys `post` and `tag` (`from_post`/`to_post` for a relation to the same model): query it, `bulk_create` links, or connect `m2m_changed` with it as the sender.
 - **Custom intermediate model.** Use `through=:Membership` for one with extra fields, and fill those fields with `add!(club.members, ann; through_defaults=Dict(:role => "chair"))`.
 - **Self-referential relations.** `friends = ManyToManyField(:self)` is symmetrical: adding Bob to Ann's friends adds Ann to Bob's, and removing works both ways. Use `symmetrical = false` for one-way relations such as "follows".
