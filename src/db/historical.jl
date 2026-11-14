@@ -76,7 +76,8 @@ end
 function historical_value(c::Column, v)
     v === nothing && return nothing
     c.kind === :bool && return v isa Bool ? v : v != 0
-    c.kind === :datetime && return v isa DateTime || v isa TimeZones.ZonedDateTime ? v : something(todatetime(v), v)
+    c.kind === :datetime && return v isa DateTime || v isa TimeZones.ZonedDateTime ? v :
+                                   (z = parse_aware_datetime(v); z === nothing ? something(todatetime(v), v) : datetime_from_db(z))
     c.kind === :date && return v isa Date ? v : Date(todatetime(v))
     (c.kind in INT_KINDS || (c.kind === :fk && c.of !== :uuid)) && return v isa Integer ? Int(v) : parse(Int, string(v))
     c.kind === :time && return to_time(v)

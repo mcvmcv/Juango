@@ -26,7 +26,8 @@ function serial_value(f::Field, v)
     v === nothing && return nothing
     v isa Model && return v.id
     v isa DateTime && return Dates.format(v, "yyyy-mm-ddTHH:MM:SS.sss")
-    v isa TimeZones.ZonedDateTime && return string(TimeZones.astimezone(v, UTC_TZ))
+    v isa TimeZones.ZonedDateTime &&                                  # as Django's JSON encoder: UTC, milliseconds, "Z"
+        return Dates.format(DateTime(TimeZones.astimezone(v, UTC_TZ)), "yyyy-mm-ddTHH:MM:SS.sss") * "Z"
     v isa Date && return string(v)
     v isa UUID && return string(v)
     v isa Dates.Time && return time_string(v)

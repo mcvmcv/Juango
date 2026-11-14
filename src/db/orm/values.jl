@@ -15,7 +15,8 @@ function from_db(f::Field, v)
                             v isa AbstractString ? Vector{UInt8}(codeunits(v)) : Vector{UInt8}(v)
     k === :duration && return to_duration(v)
     k === :decimal && return f.decimal_places === nothing ? to_decimal(v) : round(to_decimal(v); digits = f.decimal_places)
-    k === :datetime && return datetime_from_db(v isa DateTime || v isa TimeZones.ZonedDateTime ? v : something(todatetime(v), v))
+    k === :datetime && return datetime_from_db(v isa DateTime || v isa TimeZones.ZonedDateTime ? v :
+                                               something(parse_aware_datetime(v), todatetime(v), v))
     k === :date && return v isa Date ? v : Date(todatetime(v))
     v isa AbstractString ? String(v) : v
 end

@@ -69,8 +69,33 @@ is_aware(x) = x isa TimeZones.ZonedDateTime
 function to_utc_naive(v)
     v isa TimeZones.ZonedDateTime && return DateTime(TimeZones.astimezone(v, UTC_TZ))
     v isa DateTime && settings.USE_TZ && return DateTime(TimeZones.astimezone(make_aware(v), UTC_TZ))
+    v isa AbstractString && (z = parse_aware_datetime(v)) !== nothing && return DateTime(TimeZones.astimezone(z, UTC_TZ))
     v
 end
+"""
+    parse_aware_datetime(s) -> ZonedDateTime or nothing
+
+An ISO 8601 date-time with a UTC offset (`2026-11-14T18:21:17.605Z`, `...+13:00`, `+1300` or
+`+13`), as a UTC `ZonedDateTime`; `nothing` when `s` isn't one. A space may separate the date and
+the time, the seconds are optional, and digits beyond milliseconds are dropped.
+"""
+function parse_aware_datetime(s::AbstractString)
+    m = match(r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)(?:\.(\d+))?(Z|[+-]\d{2}(?::?\d{2})?)$"i, strip(s))
+    m === nothing && return nothing
+    t = m[2]
+    d = tryparse(DateTime, m[1] * "T" * t, ncodeunits(t) == 5 ? dateformat"yyyy-mm-ddTHH:MM" : dateformat"yyyy-mm-ddTHH:MM:SS")
+    d === nothing && return nothing
+    m[3] === nothing || (d += Millisecond(parse(Int, rpad(first(m[3], 3), 3, '0'))))
+    off = uppercase(m[4])
+    if off != "Z"
+        digits = replace(off[2:end], ":" => "")
+        mins = parse(Int, digits[1:2]) * 60 + (ncodeunits(digits) >= 4 ? parse(Int, digits[3:4]) : 0)
+        d -= Minute(off[1] == '-' ? -mins : mins)
+    end
+    TimeZones.ZonedDateTime(d, UTC_TZ)
+end
+parse_aware_datetime(_) = nothing
+
 "A datetime read from the database (USE_TZ: aware, in UTC)."
 function datetime_from_db(v)
     settings.USE_TZ || return v isa TimeZones.ZonedDateTime ? DateTime(TimeZones.astimezone(v, default_timezone())) : v

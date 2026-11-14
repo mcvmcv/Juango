@@ -1209,6 +1209,30 @@ Juango.get_by_natural_key(::Type{Topic}, name) = get(Topic; name = name)
     @test_throws Juango.YAMLError Juango.parse_yaml("a: &x 1\nb: *x")
 end
 
+@testset "aware datetimes round-trip through the serializers (#141)" begin
+    P = Juango.parse_aware_datetime
+    utc(y, mo, d, h, mi, s = 0, ms = 0) = Juango.TimeZones.ZonedDateTime(DateTime(y, mo, d, h, mi, s, ms), Juango.UTC_TZ)
+    @test P("2026-11-14T18:21:17.605Z") == utc(2026, 11, 14, 18, 21, 17, 605)
+    @test P("2026-11-14T18:21:17.605+00:00") == utc(2026, 11, 14, 18, 21, 17, 605)
+    @test P("2026-11-15 07:21:17.605123+13:00") == utc(2026, 11, 14, 18, 21, 17, 605)     # microseconds dropped
+    @test P("2026-11-14T13:21-0500") == utc(2026, 11, 14, 18, 21) && P("2026-11-14T20:21:00+02") == utc(2026, 11, 14, 18, 21)
+    @test P("2026-11-14T18:21:17") === nothing && P("2026-11-14") === nothing && P("nonsense") === nothing && P(42) === nothing
+    override_settings(USE_TZ = true, TIME_ZONE = "Pacific/Auckland") do
+        au = create(Author; name = "TZ141", email = "tz141@x")
+        a = create(Article; title = "tz141", author = au)
+        s = serialize(:json, [a])
+        stamp = JSON.parse(s)[1]["fields"]["created"]
+        @test endswith(stamp, "Z") && length(stamp) == 24                      # as Django: 2026-11-14T18:21:17.605Z
+        d = only(deserialize(:json, s)).object
+        @test d.created isa Juango.TimeZones.ZonedDateTime
+        @test d.created == a.created
+        # an ISO string with an offset assigned to the field is stored as that instant
+        a.created = "2026-01-02T03:04:05+13:00"
+        save!(a; update_fields = [:created])
+        @test refresh!(a).created == utc(2026, 1, 1, 14, 4, 5)
+    end
+end
+
 @testset "DecimalField" begin
     @test_throws ArgumentError DecimalField(max_digits = 3, decimal_places = 4)
     @test_throws UndefKeywordError DecimalField(max_digits = 3)
