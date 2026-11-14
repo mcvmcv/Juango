@@ -473,7 +473,6 @@ function compile_expr(c::SQLCompiler, e::Aggregate)
     sql, ps
 end
 
-sql_string_literal(s) = "'" * replace(s, "'" => "''") * "'"
 obsql(order) = isempty(order) ? "" : " ORDER BY " * join(order, ", ")
 "SQL for an aggregate (`arg` already has DISTINCT); PostgreSQL's spelling by default."
 function aggregate_sql(::DatabaseBackend, func, arg, order, e)

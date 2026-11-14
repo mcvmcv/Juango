@@ -192,7 +192,7 @@ end
 
 function like_literal(b, v, pre, post)
     s = replace(string(v), "\\" => "\\\\", "%" => "\\%", "_" => "\\_")
-    lit(b, pre * s * post) * " ESCAPE '\\'"
+    lit(b, pre * s * post) * " ESCAPE " * backslash_literal(b)
 end
 
 "A condition (over column names) as SQL with the values written in as literals."

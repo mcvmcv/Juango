@@ -19,7 +19,7 @@
 # and last differing character, against the last HTML the browser has); the browser patches its
 # copy and morphs it into the page.
 #
-# Settings: LIVE_MAX_STATE_BYTES (a view bigger than this is closed), LIVE_MAX_VIEWS_PER_SESSION,
+# Settings: LIVE_MAX_STATE_BYTES (a view bigger than this is closed), LIVE_MAX_VIEWS_PER_SESSION, LIVE_MAX_VIEWS,
 # LIVE_MAX_MESSAGE_BYTES, LIVE_MAX_UPLOAD_BYTES, and LIVE_PUBSUB = :postgres to deliver `publish`
 # to every process through PostgreSQL's LISTEN/NOTIFY. A view type can keep its state across a
 # reconnect (`Juango.live_snapshot(::Type{MyView}) = true`): the browser holds a signed copy.
@@ -288,18 +288,32 @@ end
 
 # --- limits ----------------------------------------------------------------------------------------
 
-const LIVE_OPEN = Dict{String,Int}()          # open live views per session (or client address)
+# Open live views per session, and in all. A visitor without a session counts only towards the total
+# (not per client address: behind a reverse proxy every visitor has the proxy's address).
+const LIVE_OPEN = Dict{String,Int}()
+const LIVE_OPEN_TOTAL = Ref(0)
 const LIVE_OPEN_LOCK = ReentrantLock()
-live_owner(req::Request) = (k = try req.session.key catch; nothing end; k === nothing ? "addr:" * string(get(req.meta, :remote_addr, "")) : "session:" * k)
-function live_claim!(owner::String)
+live_owner(req::Request) = (k = try req.session.key catch; nothing end; k === nothing ? nothing : "session:" * k)
+function live_claim!(owner::Union{Nothing,String})
     lock(LIVE_OPEN_LOCK) do
-        n = get(LIVE_OPEN, owner, 0)
-        n >= settings.LIVE_MAX_VIEWS_PER_SESSION && return false
-        LIVE_OPEN[owner] = n + 1
+        LIVE_OPEN_TOTAL[] >= settings.LIVE_MAX_VIEWS && return false
+        if owner !== nothing
+            n = get(LIVE_OPEN, owner, 0)
+            n >= settings.LIVE_MAX_VIEWS_PER_SESSION && return false
+            LIVE_OPEN[owner] = n + 1
+        end
+        LIVE_OPEN_TOTAL[] += 1
         true
     end
 end
-live_release!(owner::String) = lock(() -> (n = get(LIVE_OPEN, owner, 1) - 1; n <= 0 ? delete!(LIVE_OPEN, owner) : (LIVE_OPEN[owner] = n)), LIVE_OPEN_LOCK)
+function live_release!(owner::Union{Nothing,String})
+    lock(LIVE_OPEN_LOCK) do
+        LIVE_OPEN_TOTAL[] = max(0, LIVE_OPEN_TOTAL[] - 1)
+        owner === nothing && return
+        n = get(LIVE_OPEN, owner, 1) - 1
+        n <= 0 ? delete!(LIVE_OPEN, owner) : (LIVE_OPEN[owner] = n)
+    end
+end
 
 struct LiveTooLarge <: Exception
     what::String
@@ -318,12 +332,20 @@ LIVE_SNAPSHOT_MAX_AGE seconds are ignored.
 """
 live_snapshot(::Type) = false
 
+# Whose state it is: the user and the session (a new login, or another browser, mounts afresh).
+function live_snapshot_owner(req::Request)
+    u = try req.user catch; nothing end
+    uid = u isa AbstractUser ? string(u.id) : ""
+    k = try req.session.key catch; nothing end
+    uid * "|" * something(k, "")
+end
+
 function live_snapshot_token(s::LiveSession)
     V = typeof(s.view)
     live_snapshot(V) || return nothing
     try
         fields = Dict{String,Any}(string(f) => cache_encode(getfield(s.view, f)) for f in fieldnames(V))
-        signing_dumps(Dict("v" => string(nameof(V)), "p" => s.req.path, "f" => fields); salt = "juango.live")
+        signing_dumps(Dict("v" => string(nameof(V)), "p" => s.req.path, "o" => live_snapshot_owner(s.req), "f" => fields); salt = "juango.live")
     catch e
         @warn "live view $V: can't snapshot its state (keep live_snapshot for views whose fields the cache can store)" exception = e maxlog = 1
         nothing
@@ -338,7 +360,7 @@ function live_restore!(s::LiveSession, token)
         return false                                   # tampered with, or too old: mount afresh
     end
     V = typeof(s.view)
-    (get(d, "v", "") == string(nameof(V)) && get(d, "p", "") == s.req.path) || return false
+    (get(d, "v", "") == string(nameof(V)) && get(d, "p", "") == s.req.path && get(d, "o", nothing) == live_snapshot_owner(s.req)) || return false
     for (k, v) in get(d, "f", Dict())
         f = Symbol(k)
         f in fieldnames(V) || continue
@@ -357,6 +379,10 @@ end
 function live_upload_chunk!(s::LiveSession, m)
     ref = string(get(m, "ref", ""))
     isempty(ref) && return
+    # at most DATA_UPLOAD_MAX_NUMBER_FILES waiting for an event at once (each up to LIVE_MAX_UPLOAD_BYTES)
+    !haskey(s.uploads, ref) && something(settings.DATA_UPLOAD_MAX_NUMBER_FILES, typemax(Int)) <= length(s.uploads) &&
+        throw(LiveTooLarge("number of uploads"))
+    haskey(s.uploads, ref) && s.uploads[ref]["done"] && return            # finished: no more chunks
     u = get!(s.uploads, ref) do
         Dict{String,Any}("name" => basename(string(get(m, "name", "upload"))), "ctype" => string(get(m, "content_type", "application/octet-stream")),
                          "buf" => IOBuffer(), "path" => nothing, "size" => 0, "done" => false)
@@ -374,21 +400,44 @@ function live_upload_chunk!(s::LiveSession, m)
     nothing
 end
 
-"Event parameters with `{\"__upload__\": ref}` replaced by the uploaded files."
+"""
+Event parameters with `{\"__upload__\": ref}` (or a list of them) replaced by the uploaded files.
+Returns the refs used: they're released once the event has been handled (`live_release_uploads!`).
+"""
 function live_attach_uploads!(s::LiveSession, params::Dict{String,Any})
-    for (k, v) in collect(params)
-        if v isa AbstractDict && haskey(v, "__upload__")
-            u = get(s.uploads, string(v["__upload__"]), nothing)
-            (u === nothing || !u["done"]) && (delete!(params, k); continue)
-            params[k] = if u["path"] === nothing
-                UploadedFile(u["name"], take!(u["buf"]); content_type = u["ctype"])
-            else
-                close(u["buf"])
-                TemporaryUploadedFile(u["name"], u["path"]; content_type = u["ctype"])
-            end
+    used = String[]
+    function file_for(v)
+        v isa AbstractDict && haskey(v, "__upload__") || return v
+        ref = string(v["__upload__"])
+        u = get(s.uploads, ref, nothing)
+        (u === nothing || !u["done"] || ref in used) && return nothing
+        push!(used, ref)
+        if u["path"] === nothing
+            UploadedFile(u["name"], take!(u["buf"]); content_type = u["ctype"])
+        else
+            close(u["buf"])
+            TemporaryUploadedFile(u["name"], u["path"]; content_type = u["ctype"])
         end
     end
-    params
+    for (k, v) in collect(params)
+        if v isa AbstractVector && any(x -> x isa AbstractDict && haskey(x, "__upload__"), v)
+            fs = Any[f for f in (file_for(x) for x in v) if f !== nothing]
+            isempty(fs) ? delete!(params, k) : (params[k] = fs)
+        elseif v isa AbstractDict && haskey(v, "__upload__")
+            f = file_for(v)
+            f === nothing ? delete!(params, k) : (params[k] = f)
+        end
+    end
+    used
+end
+"Forget uploads an event has used, removing their temporary files (as a request's are removed at its end)."
+function live_release_uploads!(s::LiveSession, refs)
+    for ref in refs
+        u = pop!(s.uploads, ref, nothing)
+        (u === nothing || u["path"] === nothing) && continue
+        try close(u["buf"]) catch end
+        rm(u["path"]; force = true)
+    end
 end
 function live_cleanup_uploads!(s::LiveSession)
     for u in values(s.uploads)
@@ -452,8 +501,12 @@ function run_live(ws, req::Request, lr::LiveRoute, kwargs)
                 live_send_render!(ws, s, render_live(s), false)
                 continue
             end
-            m[1] === :event && live_attach_uploads!(s, m[3])
-            url = live_dispatch!(s, m)
+            used = m[1] === :event ? live_attach_uploads!(s, m[3]) : String[]
+            url = try
+                live_dispatch!(s, m)
+            finally
+                live_release_uploads!(s, used)
+            end
             if url !== nothing
                 ws_send(ws, Dict("type" => "redirect", "url" => url))
                 continue

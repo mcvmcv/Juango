@@ -1104,7 +1104,7 @@ urlpatterns = [live("chat/<str:room>/", Chat, "chat.html"; name = "chat")]
 - **Tests:** `lt = live_test(Chat, "chat.html"; params = Dict("room" => "a"), user = u)`. Then `live_event!(lt, "say", Dict("text" => "hi"))`, `live_info!(lt, msg)` and `live_flush!(lt)` (for published messages) each return the live part's HTML. `lt.view` is the view and `lt.redirect` the last redirect. Juango's own tests drive `live.js` in headless Chromium (`test/browser.jl`, with `JUANGO_BROWSER_TESTS=1`).
 - **Costs and limits:**
   - Each open page holds a task, a view and its request. Every change re-renders the live part on the server; only the changed span is sent.
-  - A view whose state grows past `LIVE_MAX_STATE_BYTES` (1 MB) is closed, a session (or client address) can have `LIVE_MAX_VIEWS_PER_SESSION` (20) open, and messages and uploads are capped by `LIVE_MAX_MESSAGE_BYTES` and `LIVE_MAX_UPLOAD_BYTES`.
+  - A view whose state grows past `LIVE_MAX_STATE_BYTES` (1 MB) is closed, a session can have `LIVE_MAX_VIEWS_PER_SESSION` (20) open and the process `LIVE_MAX_VIEWS` (10,000), and messages and uploads are capped by `LIVE_MAX_MESSAGE_BYTES` and `LIVE_MAX_UPLOAD_BYTES`.
   - With several server processes, a load balancer must keep each socket on one process (any process can mount a view: its state is rebuilt, or restored from the snapshot, on reconnect).
 
 ### Forms

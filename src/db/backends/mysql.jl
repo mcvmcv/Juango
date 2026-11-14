@@ -131,3 +131,7 @@ function supports_insert_returning(b::MySQLBackend)
         end
     end
 end
+
+# Literals need only their quotes doubled here too: every connection sets NO_BACKSLASH_ESCAPES (above),
+# so a backslash in a literal is an ordinary character and can't end it early. (Without that mode,
+# `x\'` would.) Keep it in SQL_MODE.

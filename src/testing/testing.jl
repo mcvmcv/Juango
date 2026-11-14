@@ -305,7 +305,7 @@ function test_database_setting(s)
     m = match(r"^([A-Za-z][A-Za-z0-9+.-]*://[^/?]*)(?:/([^?]*))?(\?.*)?$", s)
     (m === nothing || lowercase(split(s, "://")[1]) == "sqlite") && return ":memory:"
     name = something(m[2], "")
-    test = isempty(name) ? "test_juango" : startswith(name, "test_") ? name : "test_" * name
+    test = "test_" * (isempty(name) ? "juango" : name)       # always prefixed: never the database itself
     m[1] * "/" * test * something(m[3], "")
 end
 
@@ -347,9 +347,17 @@ function setup_test_database(; keepdb::Bool = false, verbose::Bool = false)
     others = get(settings, :DATABASES, nothing)
     tests = others === nothing ? nothing :
             Dict{String,Any}(string(k) => (string(k) == "default" ? default : test_database_setting(v)) for (k, v) in pairs(others))
-    if tests === nothing && default == settings.DATABASE      # already a throwaway database (":memory:")
+    if tests === nothing && default == ":memory:" && settings.DATABASE == ":memory:"     # already a throwaway database
         migrate(verbose = verbose)
         return TestDatabases(saved, String[], true)
+    end
+    # the test databases are dropped and created again: never one of the real ones
+    real = Set(string(v) for v in vcat([settings.DATABASE], others === nothing ? Any[] : collect(values(others))))
+    realnames = Set(test_database_name(u) for u in real if occursin("://", u))
+    for url in vcat([default], tests === nothing ? Any[] : collect(values(tests)))
+        url isa AbstractString && url != ":memory:" || continue
+        (url in real || (occursin("://", url) && test_database_name(url) in realnames)) &&
+            throw(ImproperlyConfigured("the test database $(repr(url)) is one of DATABASE/DATABASES; it would be dropped. Set TEST_DATABASE to another"))
     end
     created = String[]
     for url in unique(vcat([default], tests === nothing ? String[] : collect(values(tests))))

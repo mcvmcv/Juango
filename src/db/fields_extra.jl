@@ -293,7 +293,7 @@ A key path of a JSON column as SQL with the keys inlined (no parameters), for va
 and order_by(): the value as JSON text (decoded when read), or with `sortable` something that
 orders numbers as numbers.
 """
-json_path_sql(::DatabaseBackend, col, keys; sortable = false) = "($col #> " * sql_string_literal(pg_array_literal(keys)) * ")"
+json_path_sql(b::DatabaseBackend, col, keys; sortable = false) = "($col #> " * sql_string_literal(b, pg_array_literal(keys)) * ")"
 "An ORDER BY term for a JSON key path (numbers ordered as numbers)."
 json_order_sql(b::DatabaseBackend, col, keys, desc::Bool) = json_path_sql(b, col, keys; sortable = true) * (desc ? " DESC" : " ASC")
 

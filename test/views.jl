@@ -1580,11 +1580,11 @@ end
             end
             @test code isa H.WebSockets.WebSocketError && code.message.code == 4413
         end
-        override_settings(LIVE_MAX_VIEWS_PER_SESSION = 1) do
+        override_settings(LIVE_MAX_VIEWS = 1) do                                  # (no session here: only the total counts)
             code = H.WebSockets.open("ws://127.0.0.1:$port/keep/") do ws1
                 ws_send(ws1, Dict("type" => "join", "params" => Dict()))
                 recv(ws1)
-                H.WebSockets.open("ws://127.0.0.1:$port/keep/") do ws2                 # the same client address
+                H.WebSockets.open("ws://127.0.0.1:$port/keep/") do ws2
                     ws_send(ws2, Dict("type" => "join", "params" => Dict()))
                     try recv(ws2); nothing catch e; e end
                 end
@@ -1601,7 +1601,27 @@ end
             @test code isa H.WebSockets.WebSocketError && code.message.code == 4413
         end
         sleep(0.2)
-        @test isempty(Juango.LIVE_OPEN)                                           # released when the sockets closed
+        @test isempty(Juango.LIVE_OPEN) && Juango.LIVE_OPEN_TOTAL[] == 0           # released when the sockets closed
+        # per session; visitors without one (all behind a proxy share an address) only count in the total
+        override_settings(LIVE_MAX_VIEWS_PER_SESSION = 2) do
+            @test Juango.live_claim!("session:a") && Juango.live_claim!("session:a") && !Juango.live_claim!("session:a")
+            @test all(_ -> Juango.live_claim!(nothing), 1:5)
+            Juango.live_release!("session:a"); Juango.live_release!("session:a")
+            foreach(_ -> Juango.live_release!(nothing), 1:5)
+        end
+        @test isempty(Juango.LIVE_OPEN) && Juango.LIVE_OPEN_TOTAL[] == 0
+        # at most DATA_UPLOAD_MAX_NUMBER_FILES uploads waiting at once
+        override_settings(DATA_UPLOAD_MAX_NUMBER_FILES = 1) do
+            code = H.WebSockets.open("ws://127.0.0.1:$port/keep/") do ws
+                ws_send(ws, Dict("type" => "join", "params" => Dict()))
+                recv(ws)
+                for r in ("a", "b")
+                    ws_send(ws, Dict("type" => "upload", "ref" => r, "name" => "x", "chunk" => Juango.base64encode("x"), "last" => false))
+                end
+                try recv(ws); nothing catch e; e end
+            end
+            @test code isa H.WebSockets.WebSocketError && code.message.code == 4413
+        end
     finally
         close(server)
     end
@@ -1755,4 +1775,43 @@ end
     m = FilterSet(Essay, [:topics => ModelMultipleChoiceFilter(filter(Topic; name__startswith = "fs-"))];
                   data = QueryDict("topics=$(tA.id)&topics=$(tB.id)"), queryset = filter(Essay; title__startswith = "fs-"))
     @test sort([e.title for e in m.qs]) == ["fs-e1", "fs-e2"]                                   # distinct: e1 once
+end
+
+@testset "security fixes after the review of #101-#137" begin
+    # literals: quotes doubled (MySQL connections set NO_BACKSLASH_ESCAPES, so backslashes are plain there)
+    @test Juango.sql_string_literal(Juango.SQLiteBackend(":memory:"), "a'b\\c") == "'a''b\\c'"
+    # and on the database under test, hostile JSON keys are only ever keys
+    g = create(Gadget; nick = "sec", data = Dict("run" => 1))
+    for k in ("x' OR 1=1 -- ", "x\\' OR 1=1 -- ", "x\") OR 1=1 -- ", "a\\\\", "{a,b}")
+        @test values_list(filter(Gadget; id = g.id), Symbol("data__" * k); flat = true) == [nothing]
+        @test length(collect(order_by(filter(Gadget; id = g.id), "data__" * k))) == 1
+    end
+    # the test database is never the real one
+    @test Juango.test_database_setting("postgresql://h/test_lab") == "postgresql://h/test_test_lab"
+    if IS_POSTGRES || IS_MYSQL
+        override_settings(TEST_DATABASE = settings.DATABASE) do
+            @test_throws Juango.ImproperlyConfigured setup_test_database()
+        end
+    end
+    # snapshots belong to one user and session
+    req1 = Request("GET", "/keep/"); req2 = Request("GET", "/keep/")
+    req1.user = create_user("snap-a", "snap-Pass-1"); req2.user = create_user("snap-b", "snap-Pass-2")
+    s1 = Juango.LiveSession(LiveKeep(count = 5), req1, "live_keep.html")
+    tok = Juango.live_snapshot_token(s1)
+    s2 = Juango.LiveSession(LiveKeep(), req2, "live_keep.html")
+    @test !Juango.live_restore!(s2, tok) && s2.view.count == 0
+    s3 = Juango.LiveSession(LiveKeep(), req1, "live_keep.html")
+    @test Juango.live_restore!(s3, tok) && s3.view.count == 5
+    # uploads are released once their event has been handled
+    s4 = Juango.LiveSession(LiveKeep(), Request("GET", "/keep/"), "live_keep.html")
+    override_settings(FILE_UPLOAD_MAX_MEMORY_SIZE = 10) do
+        Juango.live_upload_chunk!(s4, Dict("ref" => "r", "name" => "big.txt", "chunk" => Juango.base64encode("y" ^ 50), "last" => true))
+    end
+    path = s4.uploads["r"]["path"]
+    @test isfile(path)
+    params = Dict{String,Any}("file" => Dict("__upload__" => "r"))
+    used = Juango.live_attach_uploads!(s4, params)
+    @test params["file"] isa UploadedFile && read(params["file"], String) == "y" ^ 50
+    Juango.live_release_uploads!(s4, used)
+    @test isempty(s4.uploads) && !isfile(path)
 end

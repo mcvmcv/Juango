@@ -28,7 +28,7 @@ encode_range(::MySQLBackend, r::ValueRange) =
     JSON.json(Dict("lower" => json_scalar(r.lower), "upper" => json_scalar(r.upper), "bounds" => r.bounds))
 
 mysql_jtext(col, path_ph = "?") = "JSON_UNQUOTE(JSON_EXTRACT($col, $path_ph))"
-json_path_sql(::MySQLBackend, col, keys; sortable = false) = "JSON_EXTRACT($col, " * sql_string_literal(sqlite_json_path(keys)) * ")"
+json_path_sql(b::MySQLBackend, col, keys; sortable = false) = "JSON_EXTRACT($col, " * sql_string_literal(b, sqlite_json_path(keys)) * ")"
 # MariaDB keeps JSON as text, so a plain JSON_EXTRACT sorts "10" before "2": by the number first, then the text
 function json_order_sql(b::MySQLBackend, col, keys, desc::Bool)
     x = "JSON_UNQUOTE(" * json_path_sql(b, col, keys) * ")"

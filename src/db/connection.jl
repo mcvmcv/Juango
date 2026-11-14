@@ -154,12 +154,22 @@ positive_check(::DatabaseBackend) = true
 positive_check_name(table, col) = first(string(table, "_", col, "_check"), 63)
 
 "SQL literal for a value that has already been through `adapt_param` (used in DEFAULT clauses)."
-function sql_literal(::DatabaseBackend, p)
+function sql_literal(b::DatabaseBackend, p)
     (p === missing || p === nothing) && return "NULL"
     p isa Bool && return p ? "TRUE" : "FALSE"
     p isa Number && return string(p)
-    "'" * replace(string(p), "'" => "''") * "'"
+    sql_string_literal(b, string(p))
 end
+
+"""
+A string as an SQL literal, quotes doubled. (MySQL/MariaDB would also treat a backslash as an escape
+character, but Juango's connections set NO_BACKSLASH_ESCAPES.) Prefer parameters: this is for SQL
+that can't take them (DDL, keys written into a query).
+"""
+sql_string_literal(::DatabaseBackend, s::AbstractString) = "'" * replace(s, "'" => "''") * "'"
+sql_string_literal(s::AbstractString) = sql_string_literal(backend(), s)
+"The literal for a backslash, as a LIKE pattern's ESCAPE character."
+backslash_literal(::DatabaseBackend) = "'\\'"
 
 "An INSERT statement; `cols` are already quoted. An empty `cols` inserts a row of defaults."
 function insert_sql(b::DatabaseBackend, table, cols::Vector{String})

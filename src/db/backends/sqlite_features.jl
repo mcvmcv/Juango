@@ -12,8 +12,8 @@ encode_array(::SQLiteBackend, v) = JSON.json(json_scalar_tree(collect(v)))
 encode_range(::SQLiteBackend, r::ValueRange) =
     JSON.json(Dict("lower" => json_scalar(r.lower), "upper" => json_scalar(r.upper), "bounds" => r.bounds))
 
-json_path_sql(::SQLiteBackend, col, keys; sortable = false) =
-    "($col " * (sortable ? "->>" : "->") * " " * sql_string_literal(sqlite_json_path(keys)) * ")"
+json_path_sql(b::SQLiteBackend, col, keys; sortable = false) =
+    "($col " * (sortable ? "->>" : "->") * " " * sql_string_literal(b, sqlite_json_path(keys)) * ")"
 json_key_sql(::SQLiteBackend, col, keys, numeric::Bool; boolean = false) = "json_extract($col, ?)", Any[sqlite_json_path(keys)]
 json_key_isnull_sql(::SQLiteBackend, col, keys) = "json_type($col, ?) IS NULL", Any[sqlite_json_path(keys)]
 json_exact_sql(::SQLiteBackend, col, v) = "json($col) = json(?)", Any[JSON.json(json_scalar_tree(v))]
