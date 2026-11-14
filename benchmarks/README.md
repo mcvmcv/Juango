@@ -39,7 +39,7 @@ Both apps run with `DEBUG` off, no access log, persistent database connections, 
 
 ## Results
 
-Measured on 2026-11-14 (`results/results.md`, written by `bench.py`):
+Measured on 2026-11-14 in the afternoon, after #101 and #102 (`results/results.md`, written by `bench.py`):
 
 Machine: Intel(R) Core(TM) i5-4440 CPU @ 3.10GHz, 4 cores, Linux 6.12.116+deb13-amd64. julia version 1.13.3; Python 3.13.5, Django 5.2.19.
 32 connections, 10 s per page after 3 s of warm-up; the load generator runs on the same machine (one core). Juango: `runserver` with --threads=4,1; Django: 4 gunicorn sync workers, or 4 uvicorn workers (ASGI).
@@ -48,36 +48,46 @@ Machine: Intel(R) Core(TM) i5-4440 CPU @ 3.10GHz, 4 cores, Linux 6.12.116+deb13-
 
 | Page | juango | gunicorn | uvicorn |
 |---|---:|---:|---:|
-| JSON response | 26,184 req/s<br>p50 0.8 / p99 3.8 ms | 6,893 req/s<br>p50 4.4 / p99 7.0 ms | 1,170 req/s<br>p50 25.4 / p99 46.7 ms |
-| template: 100-row loop, no database | 6,213 req/s<br>p50 4.4 / p99 15.4 ms | 671 req/s<br>p50 45.9 / p99 69.2 ms | 410 req/s<br>p50 82.6 / p99 139.6 ms |
-| list: join + pagination (20 of 1000) | 4,004 req/s<br>p50 6.9 / p99 26.0 ms | 1,157 req/s<br>p50 26.9 / p99 39.0 ms | 524 req/s<br>p50 70.2 / p99 114.8 ms |
-| form POST with CSRF | 18,712 req/s<br>p50 1.2 / p99 4.6 ms | 4,658 req/s<br>p50 6.6 / p99 10.4 ms | 1,014 req/s<br>p50 36.6 / p99 54.1 ms |
-| admin change list (logged in) | 834 req/s<br>p50 35.1 / p99 103.0 ms | 78 req/s<br>p50 408.5 / p99 467.0 ms | 60 req/s<br>p50 476.8 / p99 1083.7 ms |
-| start to first response | 7.2 s | 0.3 s | 0.5 s |
-| first request to each page | 1, 352, 3079, 2, 1505 ms | 1, 15, 49, 57, 57 ms | 3, 12, 13, 59, 72 ms |
-| peak memory | 842 MB | 165 MB | 300 MB |
+| JSON response | 18,884 req/s<br>p50 1.1 / p99 6.5 ms | 4,214 req/s<br>p50 7.2 / p99 14.2 ms | 839 req/s<br>p50 28.4 / p99 99.9 ms |
+| template: 100-row loop, no database | 4,146 req/s<br>p50 7.0 / p99 22.5 ms | 427 req/s<br>p50 74.0 / p99 111.3 ms | 191 req/s<br>p50 153.2 / p99 267.2 ms |
+| list: join + pagination (20 of 1000) | 3,187 req/s<br>p50 8.3 / p99 41.2 ms | 668 req/s<br>p50 45.8 / p99 82.4 ms | 400 req/s<br>p50 99.5 / p99 172.8 ms |
+| form POST with CSRF | 13,513 req/s<br>p50 1.6 / p99 9.0 ms | 2,815 req/s<br>p50 10.7 / p99 21.6 ms | 757 req/s<br>p50 40.6 / p99 87.6 ms |
+| admin change list (logged in) | 555 req/s<br>p50 47.8 / p99 196.6 ms | 48 req/s<br>p50 656.8 / p99 865.0 ms | 50 req/s<br>p50 348.1 / p99 2216.5 ms |
+| start to first response | 7.4 s | 0.5 s | 0.7 s |
+| first request to each page | 1, 73, 109, 5, 188 ms | 5, 15, 77, 64, 93 ms | 4, 22, 27, 53, 78 ms |
+| peak memory | 499 MB | 163 MB | 283 MB |
 
 ### PostgreSQL
 
 | Page | juango | gunicorn | uvicorn |
 |---|---:|---:|---:|
-| JSON response | 21,733 req/s<br>p50 0.9 / p99 5.5 ms | 6,866 req/s<br>p50 4.4 / p99 8.3 ms | 1,297 req/s<br>p50 28.2 / p99 42.2 ms |
-| template: 100-row loop, no database | 5,850 req/s<br>p50 4.3 / p99 17.4 ms | 696 req/s<br>p50 45.2 / p99 57.9 ms | 404 req/s<br>p50 81.7 / p99 154.2 ms |
-| list: join + pagination (20 of 1000) | 2,436 req/s<br>p50 7.5 / p99 88.9 ms | 879 req/s<br>p50 34.6 / p99 57.3 ms | 242 req/s<br>p50 152.6 / p99 266.1 ms |
-| form POST with CSRF | 16,393 req/s<br>p50 1.2 / p99 7.0 ms | 4,762 req/s<br>p50 6.4 / p99 11.9 ms | 1,148 req/s<br>p50 26.1 / p99 59.0 ms |
-| admin change list (logged in) | 576 req/s<br>p50 32.8 / p99 324.0 ms | 75 req/s<br>p50 426.2 / p99 473.0 ms | 39 req/s<br>p50 1136.9 / p99 1502.7 ms |
-| start to first response | 14.0 s | 0.4 s | 0.6 s |
-| first request to each page | 1, 368, 3352, 2, 2875 ms | 1, 13, 51, 60, 61 ms | 10, 14, 24, 66, 73 ms |
-| peak memory | 1,319 MB | 194 MB | 296 MB |
+| JSON response | 19,594 req/s<br>p50 1.0 / p99 6.8 ms | 5,113 req/s<br>p50 5.9 / p99 11.8 ms | 928 req/s<br>p50 22.8 / p99 102.3 ms |
+| template: 100-row loop, no database | 3,762 req/s<br>p50 7.5 / p99 29.6 ms | 503 req/s<br>p50 62.8 / p99 93.0 ms | 313 req/s<br>p50 144.0 / p99 234.8 ms |
+| list: join + pagination (20 of 1000) | 1,906 req/s<br>p50 9.3 / p99 130.4 ms | 620 req/s<br>p50 50.6 / p99 73.1 ms | 215 req/s<br>p50 147.9 / p99 262.0 ms |
+| form POST with CSRF | 13,340 req/s<br>p50 1.8 / p99 8.5 ms | 3,546 req/s<br>p50 8.6 / p99 16.3 ms | 821 req/s<br>p50 30.1 / p99 104.4 ms |
+| admin change list (logged in) | 177 req/s<br>p50 143.9 / p99 650.3 ms | 52 req/s<br>p50 606.6 / p99 694.9 ms | 41 req/s<br>p50 680.4 / p99 1669.2 ms |
+| start to first response | 7.4 s | 0.4 s | 0.6 s |
+| first request to each page | 1, 73, 105, 1, 198 ms | 5, 14, 61, 76, 83 ms | 3, 22, 21, 70, 79 ms |
+| peak memory | 630 MB | 184 MB | 291 MB |
 
 What it shows:
-- **Throughput:** Juango answers 3-4x as many requests as Django under gunicorn on the simple pages (JSON, form POST). It's about 9x on the template page, 2.8-3.5x on the paginated list and 7-10x on the admin change list. Latency follows the same pattern.
+- **Throughput:** Juango answers 4-5x as many requests as Django under gunicorn on the simple pages (JSON, form POST), about 8-10x on the template page, 3-5x on the paginated list and 3-12x on the admin change list. Latency follows the same pattern.
 - **Django under uvicorn is slower than under gunicorn here:** this app's views are synchronous, and Django's ASGI handler runs them one at a time per worker, in a single thread (`sync_to_async(thread_sensitive=True)`).
-- **Start-up and first requests are Juango's weak side:** 7 s from start to the first response (14 s with LibPQ, which invalidates part of the precompiled code), and up to 3 s for the first request to a page whose code wasn't precompiled. `manage.jl build` (a system image) is the remedy for deployments.
-- **Memory:** Juango uses 0.8-1.3 GB, against 165-300 MB for Django's four worker processes.
-- **Tail latency:** Juango's p99 on PostgreSQL is 5-10x its p50, probably garbage-collection pauses.
+- **Start-up and first requests:** 7.4 s from start to the first response on either database, and 70-200 ms for the first request to each page. Django takes 0.4-0.7 s and 15-90 ms. `manage.jl build` (a system image) is the remedy for the start-up time.
+- **Memory:** Juango's one process peaks at 0.5-0.65 GB, against 165-300 MB for Django's four worker processes. Most of it is code: bare Julia is 230 MB and loading Juango adds about 200 MB; the data live at a time is 20-60 MB.
+- **Tail latency:** Juango's p99 is 4-14x its p50 on the database pages, mostly garbage-collection pauses, which stop every thread (a collection every 70-150 ms under this load, each taking 5-10 ms when the machine is busy). Django's is about 1.5-2x.
+
+This run was on a busy machine (other work pushed the load average to 11 by the end), so absolute numbers are lower than on an idle one, for every server; the comparison between servers still holds. The earlier run (2026-11-14, idle machine, before #101 and #102) is in `results/results-95.md`: start-up was 7.2 s on SQLite and 14 s on PostgreSQL, first requests up to 3.4 s, and peak memory 0.84-1.32 GB.
 
 ### What this benchmark changed in Juango
+
+#101 and #102 (after the first run):
+- **First requests:** ORM, admin and form code compiled again for each project model on its first request (4.75 s for the list page). It's now compiled once in Juango's precompile workload, for every model.
+- **PostgreSQL start-up:** LibPQ.jl's dependencies invalidated about 4,000 of Juango's compiled methods when they loaded. Juango now talks to libpq directly (`src/db/backends/libpq.jl`).
+- **Templates compile in the background** and are interpreted until the compiled function is ready.
+- **Per query:** no global lock and no settings Dict built to find the database; the pool waits on a condition rather than polling.
+
+The first run:
 
 Profiling the slowest cases found:
 - **PostgreSQL queries took 2.4 ms each:** LibPQ's `async_execute` waits for every result through a FileWatching watcher, which adds about 2 ms of wake-up latency (and builds debug log messages on every loop). Juango now sends the query without blocking and waits with `poll(2)` for the first millisecond, then yields to other tasks. A query now takes about 0.1 ms. The PostgreSQL list page went from 337 to 2,436 req/s, and the admin from 92 to 576.

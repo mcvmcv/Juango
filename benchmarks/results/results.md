@@ -5,25 +5,25 @@ Machine: Intel(R) Core(TM) i5-4440 CPU @ 3.10GHz, 4 cores, Linux 6.12.116+deb13-
 
 | Page | juango | gunicorn | uvicorn |
 |---|---:|---:|---:|
-| JSON response | 26,184 req/s<br>p50 0.8 / p99 3.8 ms | 6,893 req/s<br>p50 4.4 / p99 7.0 ms | 1,170 req/s<br>p50 25.4 / p99 46.7 ms |
-| template: 100-row loop, no database | 6,213 req/s<br>p50 4.4 / p99 15.4 ms | 671 req/s<br>p50 45.9 / p99 69.2 ms | 410 req/s<br>p50 82.6 / p99 139.6 ms |
-| list: join + pagination (20 of 1000) | 4,004 req/s<br>p50 6.9 / p99 26.0 ms | 1,157 req/s<br>p50 26.9 / p99 39.0 ms | 524 req/s<br>p50 70.2 / p99 114.8 ms |
-| form POST with CSRF | 18,712 req/s<br>p50 1.2 / p99 4.6 ms | 4,658 req/s<br>p50 6.6 / p99 10.4 ms | 1,014 req/s<br>p50 36.6 / p99 54.1 ms |
-| admin change list (logged in) | 834 req/s<br>p50 35.1 / p99 103.0 ms | 78 req/s<br>p50 408.5 / p99 467.0 ms | 60 req/s<br>p50 476.8 / p99 1083.7 ms |
-| start to first response | 7.2 s | 0.3 s | 0.5 s |
-| first request to each page | 1, 352, 3079, 2, 1505 ms | 1, 15, 49, 57, 57 ms | 3, 12, 13, 59, 72 ms |
-| peak memory | 842 MB | 165 MB | 300 MB |
+| JSON response | 18,884 req/s<br>p50 1.1 / p99 6.5 ms | 4,214 req/s<br>p50 7.2 / p99 14.2 ms | 839 req/s<br>p50 28.4 / p99 99.9 ms |
+| template: 100-row loop, no database | 4,146 req/s<br>p50 7.0 / p99 22.5 ms | 427 req/s<br>p50 74.0 / p99 111.3 ms | 191 req/s<br>p50 153.2 / p99 267.2 ms |
+| list: join + pagination (20 of 1000) | 3,187 req/s<br>p50 8.3 / p99 41.2 ms | 668 req/s<br>p50 45.8 / p99 82.4 ms | 400 req/s<br>p50 99.5 / p99 172.8 ms |
+| form POST with CSRF | 13,513 req/s<br>p50 1.6 / p99 9.0 ms | 2,815 req/s<br>p50 10.7 / p99 21.6 ms | 757 req/s<br>p50 40.6 / p99 87.6 ms |
+| admin change list (logged in) | 555 req/s<br>p50 47.8 / p99 196.6 ms | 48 req/s<br>p50 656.8 / p99 865.0 ms | 50 req/s<br>p50 348.1 / p99 2216.5 ms |
+| start to first response | 7.4 s | 0.5 s | 0.7 s |
+| first request to each page | 1, 73, 109, 5, 188 ms | 5, 15, 77, 64, 93 ms | 4, 22, 27, 53, 78 ms |
+| peak memory | 499 MB | 163 MB | 283 MB |
 
 ### PostgreSQL
 
 | Page | juango | gunicorn | uvicorn |
 |---|---:|---:|---:|
-| JSON response | 21,733 req/s<br>p50 0.9 / p99 5.5 ms | 6,866 req/s<br>p50 4.4 / p99 8.3 ms | 1,297 req/s<br>p50 28.2 / p99 42.2 ms |
-| template: 100-row loop, no database | 5,850 req/s<br>p50 4.3 / p99 17.4 ms | 696 req/s<br>p50 45.2 / p99 57.9 ms | 404 req/s<br>p50 81.7 / p99 154.2 ms |
-| list: join + pagination (20 of 1000) | 2,436 req/s<br>p50 7.5 / p99 88.9 ms | 879 req/s<br>p50 34.6 / p99 57.3 ms | 242 req/s<br>p50 152.6 / p99 266.1 ms |
-| form POST with CSRF | 16,393 req/s<br>p50 1.2 / p99 7.0 ms | 4,762 req/s<br>p50 6.4 / p99 11.9 ms | 1,148 req/s<br>p50 26.1 / p99 59.0 ms |
-| admin change list (logged in) | 576 req/s<br>p50 32.8 / p99 324.0 ms | 75 req/s<br>p50 426.2 / p99 473.0 ms | 39 req/s<br>p50 1136.9 / p99 1502.7 ms |
-| start to first response | 14.0 s | 0.4 s | 0.6 s |
-| first request to each page | 1, 368, 3352, 2, 2875 ms | 1, 13, 51, 60, 61 ms | 10, 14, 24, 66, 73 ms |
-| peak memory | 1,319 MB | 194 MB | 296 MB |
+| JSON response | 19,594 req/s<br>p50 1.0 / p99 6.8 ms | 5,113 req/s<br>p50 5.9 / p99 11.8 ms | 928 req/s<br>p50 22.8 / p99 102.3 ms |
+| template: 100-row loop, no database | 3,762 req/s<br>p50 7.5 / p99 29.6 ms | 503 req/s<br>p50 62.8 / p99 93.0 ms | 313 req/s<br>p50 144.0 / p99 234.8 ms |
+| list: join + pagination (20 of 1000) | 1,906 req/s<br>p50 9.3 / p99 130.4 ms | 620 req/s<br>p50 50.6 / p99 73.1 ms | 215 req/s<br>p50 147.9 / p99 262.0 ms |
+| form POST with CSRF | 13,340 req/s<br>p50 1.8 / p99 8.5 ms | 3,546 req/s<br>p50 8.6 / p99 16.3 ms | 821 req/s<br>p50 30.1 / p99 104.4 ms |
+| admin change list (logged in) | 177 req/s<br>p50 143.9 / p99 650.3 ms | 52 req/s<br>p50 606.6 / p99 694.9 ms | 41 req/s<br>p50 680.4 / p99 1669.2 ms |
+| start to first response | 7.4 s | 0.4 s | 0.6 s |
+| first request to each page | 1, 73, 105, 1, 198 ms | 5, 14, 61, 76, 83 ms | 3, 22, 21, 70, 79 ms |
+| peak memory | 630 MB | 184 MB | 291 MB |
 

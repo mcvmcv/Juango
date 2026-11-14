@@ -1791,6 +1791,12 @@ Restart=always
 User=www-data
 ```
 
+**Threads, memory and garbage collection.** One Juango process serves the whole machine, unlike Django's worker processes:
+- **Threads:** `--threads=auto,1` (or `JULIA_NUM_THREADS=auto,1`): worker threads for the views, plus the interactive thread the server answers connections on. More threads than cores doesn't help.
+- **Memory:** a process starts at about 450 MB (bare Julia is 230 MB, and Juango's compiled code most of the rest), and under load the heap grows by a few hundred MB above the data actually live (20-60 MB for the benchmark app), because Julia collects lazily. The benchmark app peaked at 0.5-0.65 GB under 32 connections.
+- **`--heap-size-hint`** makes the collector work harder as the heap nears the hint. Only use it to keep a process inside a memory limit, and leave plenty of room: a hint close to what's live makes every collection a full one (in the benchmark, `--heap-size-hint=150M` cut throughput by three-quarters). 1-2 GB is a sensible ceiling for a typical app.
+- **Tail latency:** collections stop every thread for a few milliseconds, so a busy server's p99 is several times its median (see `benchmarks/README.md`). The fewer objects a view allocates (`values_list` instead of whole objects, `only`, paginating big lists), the fewer collections. `--gcthreads` didn't help in the benchmark.
+
 ```nginx
 location /static/ { alias /srv/blog/staticfiles/; }     # manage.jl collectstatic
 location /media/  { alias /srv/blog/media/; }
@@ -1814,7 +1820,7 @@ CMD ["julia", "--project", "-J", "build/juango.so", "manage.jl", "runserver", "0
 
 **Logging requests.** `runserver` prints a line to stderr for each request. `ACCESS_LOG = false` turns that off, for example behind a proxy that logs requests itself.
 
-**Performance.** `benchmarks/` has the same small app in Juango and Django, plus a script that measures both: throughput, latency, start-up time and memory. On a 4-core desktop, Juango served 3-10x as many requests per second as Django under gunicorn, depending on the page. Its start-up and first requests are much slower without a system image, and it uses several times the memory. See `benchmarks/README.md` for the numbers.
+**Performance.** `benchmarks/` has the same small app in Juango and Django, plus a script that measures both: throughput, latency, start-up time and memory. On a 4-core desktop, Juango served 3-12x as many requests per second as Django under gunicorn, depending on the page. It takes about 7 s to start without a system image (Django: under a second), its first request to each page takes 70-200 ms, and its one process uses 0.5-0.65 GB against 165-300 MB for Django's four workers. See `benchmarks/README.md` for the numbers.
 
 ## Settings
 
