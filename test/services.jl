@@ -1166,3 +1166,63 @@ end
     @test_throws ArgumentError Juango.build(; project_file = pf, output = out, workload = :everything, dry_run = true)
     @test "child.html" in Juango.template_names()
 end
+
+@testset "settings from the environment and .env files (django-environ)" begin
+    E = Juango.Environ
+    saved = Dict(k => get(ENV, k, nothing) for k in ("J_STR", "J_BOOL", "J_INT", "J_LIST", "J_DICT", "J_JSON", "J_QUOTED",
+                                                       "J_SINGLE", "J_EXPAND", "J_SET", "J_COMMENT", "DATABASE_URL", "CACHE_URL", "EMAIL_URL"))
+    try
+        foreach(k -> delete!(ENV, k), keys(saved))
+        ENV["J_SET"] = "from the environment"
+        f = tempname()
+        write(f, """
+        # a comment
+        J_STR=hello
+        export J_BOOL = yes
+        J_INT=42
+        J_LIST=a, b ,c
+        J_DICT=x=1,y=2
+        J_JSON={"a": [1, 2]}
+        J_QUOTED="two\\nlines and \\"quotes\\""
+        J_SINGLE='kept as \${J_STR}'
+        J_EXPAND=\${J_STR} world   # trailing comment
+        J_SET=from the file
+        """)
+        @test E.read_env(f) == 9 && E.read_env(tempname()) == 0                     # a missing file is fine
+        @test E.env("J_STR") == "hello" && E.env("J_BOOL", Bool) === true && E.env("J_INT", Int) == 42
+        @test E.env("J_LIST", Vector{String}) == ["a", "b", "c"] && E.env("J_DICT", Dict{String,Int}) == Dict("x" => 1, "y" => 2)
+        @test E.env("J_JSON", Any) == Dict("a" => [1, 2])
+        @test E.env("J_QUOTED") == "two\nlines and \"quotes\"" && E.env("J_SINGLE") == "kept as \${J_STR}"
+        @test E.env("J_EXPAND") == "hello world" && E.env("J_SET") == "from the environment"   # the environment wins
+        E.read_env(f; overwrite = true)
+        @test E.env("J_SET") == "from the file"
+        @test E.env("J_MISSING"; default = 3) == 3
+        @test_throws Juango.ImproperlyConfigured E.env("J_MISSING")
+        @test_throws Juango.ImproperlyConfigured E.env("J_STR", Int)
+        ENV["J_BOOL"] = "off"; @test E.env("J_BOOL", Bool) === false
+        bad = tempname(); write(bad, "NOT A LINE\n")
+        @test_throws Juango.ImproperlyConfigured E.read_env(bad)
+        # URLs
+        ENV["DATABASE_URL"] = "psql://u:p@db.example:5432/app"
+        @test E.env_db() == "postgresql://u:p@db.example:5432/app"
+        @test E.env_db("NOPE"; default = "sqlite://:memory:") == "sqlite:///:memory:"
+        @test Juango.backend_from_setting(E.env_db("NOPE"; default = "sqlite3:////tmp/x.db")) isa Juango.SQLiteBackend
+        ENV["CACHE_URL"] = "redis://cache:6379/1?timeout=60&key_prefix=app"
+        c = E.env_cache()
+        @test c[:backend] === :redis && c[:location] == "redis://cache:6379/1" && c[:timeout] == 60 && c[:key_prefix] == "app"
+        @test E.env_cache("NOPE"; default = "locmem://?max_entries=10") == Dict{Symbol,Any}(:backend => :locmem, :max_entries => 10)
+        @test E.env_cache("NOPE"; default = "file:///var/tmp/c")[:location] == "/var/tmp/c"
+        ENV["EMAIL_URL"] = "smtp+tls://me%40x.io:s%3Acret@mail.x.io"
+        m = E.env_email()
+        @test m.EMAIL_BACKEND === :smtp && m.EMAIL_HOST == "mail.x.io" && m.EMAIL_PORT == 587 && m.EMAIL_USE_TLS
+        @test m.EMAIL_HOST_USER == "me@x.io" && m.EMAIL_HOST_PASSWORD == "s:cret"
+        @test E.env_email("NOPE"; default = "consolemail://") == (EMAIL_BACKEND = :console,)
+        @test E.env_email("NOPE"; default = "filemail:///tmp/mails").EMAIL_FILE_PATH == "/tmp/mails"
+        @test E.env_email("NOPE"; default = "smtps://h").EMAIL_PORT == 465
+        @test_throws Juango.ImproperlyConfigured E.env_email("NOPE"; default = "pigeon://loft")
+    finally
+        for (k, v) in saved
+            v === nothing ? delete!(ENV, k) : (ENV[k] = v)
+        end
+    end
+end

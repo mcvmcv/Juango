@@ -495,6 +495,8 @@ end
     end
     @test isfile(joinpath(root, "manage.jl")) && isfile(joinpath(root, "templates", "home.html"))
     @test occursin("@eval using Revise", read(joinpath(root, "manage.jl"), String))                    # (#142)
+    st = read(joinpath(root, "settings.jl"), String)
+    @test occursin("using Juango.Environ", st) && occursin("env_db(", st) && occursin(".env", read(joinpath(root, ".gitignore"), String))
     @test occursin("Juango.project_include(joinpath(BASE_DIR, \"views.jl\"))", read(joinpath(root, "project.jl"), String))
 end
 

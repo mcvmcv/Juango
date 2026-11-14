@@ -168,6 +168,16 @@ public build, build_workload, project_include, on_reload!, CheckMessage, registe
 
 # --- Juango.Testing, Juango.GIS, Juango.Postgres ----------------------------------------------------
 
+"""
+`using Juango.Environ` for settings from the environment and .env files (django-environ):
+`read_env`, `env(name, T; default)`, `env_db`, `env_cache` and `env_email`. They're kept out of
+Juango's own exports because `env` is a short, common name.
+"""
+module Environ
+using ..Juango: env, read_env, env_db, env_cache, env_email
+export env, read_env, env_db, env_cache, env_email
+end
+
 module Testing
 using ..Juango: Client, RequestFactory, request, post, force_login!, text, outbox, rollback_after,
     capture_on_commit_callbacks, with_live_server, live_server_url, override_settings, assert_contains,

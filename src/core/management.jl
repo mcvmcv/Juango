@@ -555,13 +555,17 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
         Juango.on_reload!(() -> Base.include(@__MODULE__, joinpath(BASE_DIR, "settings.jl")))
         """,
         "settings.jl" => """
+        # Settings, with what changes between deployments read from the environment or a .env file
+        # (kept out of version control): DEBUG=false, SECRET_KEY=..., DATABASE_URL=postgresql://...
+        using Juango.Environ
+        read_env(joinpath(BASE_DIR, ".env"))
+
         configure!(
-            DEBUG = get(ENV, "JUANGO_DEBUG", "true") == "true",
-            SECRET_KEY = get(ENV, "JUANGO_SECRET_KEY", "$secret"),
-            ALLOWED_HOSTS = ["localhost", "127.0.0.1"],
-            # For PostgreSQL:
-            # DATABASE = "postgresql://user:password@localhost:5432/$name",
-            DATABASE = joinpath(BASE_DIR, "db.sqlite3"),
+            DEBUG = env("DEBUG", Bool; default = true),
+            SECRET_KEY = env("SECRET_KEY"; default = "$secret"),
+            ALLOWED_HOSTS = env("ALLOWED_HOSTS", Vector{String}; default = ["localhost", "127.0.0.1"]),
+            # DATABASE_URL=postgresql://user:password@localhost:5432/$name (or mysql://, sqlite:////path)
+            DATABASE = env_db(; default = "sqlite:///" * joinpath(BASE_DIR, "db.sqlite3")),
             # Your apps (`julia --project manage.jl startapp blog`) go here too, e.g. Blog.APP
             INSTALLED_APPS = ["juango.admin", "juango.auth", "juango.contenttypes", "juango.sessions", "juango.messages"],
             MIGRATIONS_DIR = joinpath(BASE_DIR, "migrations"),
@@ -634,7 +638,7 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
         .msg { padding: .5rem 1rem; background: #eef; border-radius: 4px; }
         .msg.success { background: #e6f6e6; } .msg.error { background: #fde8e8; }
         """,
-        ".gitignore" => "db.sqlite3*\nManifest.toml\n",
+        ".gitignore" => "db.sqlite3*\nManifest.toml\n.env\n",
     )
     for (rel, content) in files
         p = joinpath(root, rel)

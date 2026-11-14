@@ -2048,6 +2048,30 @@ A request over a limit gets 400 Bad Request; `nothing` turns a limit off. `runse
 
 `ALLOWED_HOSTS` is checked with `DEBUG` on too: the default allows only `localhost`, `127.0.0.1` and `[::1]`. An empty list in `DEBUG` allows any `*.localhost` name as well. This keeps other sites from reaching a development server through DNS rebinding. Add your machine's name or address to reach it from elsewhere. The main ones: `DEBUG`, `SECRET_KEY`, `DATABASE` (a SQLite path, `":memory:"`, a `scheme://` URL, or a backend instance), `INSTALLED_APPS`, `APP_DIRS`, `ROOT_URLCONF`, `TEMPLATE_DIRS`, `STATIC_URL`, `STATIC_DIRS`, `STATIC_ROOT`, `ALLOWED_HOSTS`, `MIDDLEWARE`, `CONTEXT_PROCESSORS`, `LOGIN_URL`, `LOGIN_REDIRECT_URL`, `APPEND_SLASH`, `SESSION_COOKIE_AGE`, `PASSWORD_ITERATIONS`, `SQL_DEBUG`. Any extra keyword becomes a custom setting.
 
+
+### Settings from the environment
+
+What changes between deployments (secrets, the database, `DEBUG`) can come from environment
+variables or a `.env` file kept out of version control, as with django-environ. The
+`settings.jl` that `startproject` writes does this:
+
+```julia
+using Juango.Environ
+read_env(joinpath(BASE_DIR, ".env"))                    # KEY=value lines; variables already set win
+
+configure!(
+    DEBUG = env("DEBUG", Bool; default = false),        # true/on/yes/1, false/off/no/0
+    SECRET_KEY = env("SECRET_KEY"),                      # no default: a clear error if it's missing
+    ALLOWED_HOSTS = env("ALLOWED_HOSTS", Vector{String}; default = ["localhost"]),   # "a.com,b.com"
+    DATABASE = env_db(; default = "sqlite:///db.sqlite3"),         # DATABASE_URL=postgresql://u:p@host/db
+    CACHES = Dict("default" => env_cache(; default = "locmem://")), # CACHE_URL=redis://host:6379/0?timeout=60
+    env_email(; default = "consolemail://")...,                    # EMAIL_URL=smtp+tls://user:pass@host
+)
+```
+
+- **`env(name, T; default)`** reads `String`, `Bool`, numbers, `Vector{T}` (comma-separated), `Dict{K,V}` (`k=v,k2=v2`) and `Any` (JSON).
+- **`.env` files** take comments, `export`, single quotes (taken as they are), double quotes (with escapes) and `${OTHER}` expansion.
+- **`env_db`** accepts django-environ's scheme names (`psql`, `pgsql`, `postgis`, `mysql2`, `sqlite3`).
 ## Differences from Django (current limitations)
 
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
