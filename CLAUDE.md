@@ -26,5 +26,7 @@ A Django-style web framework in Julia. Roadmap: GitHub issues on mcvmcv/Juango.
 - `JUANGO_TEST_DATABASE` picks the database: unset for in-memory SQLite, or a
   `postgresql://` / `mysql://` URL. A throwaway database is created on that server and
   dropped afterwards.
+- `JUANGO_BROWSER_TESTS=1` adds `test/browser.jl` (live.js in headless Chromium, driven by
+  `node --experimental-websocket test/browser/live.mjs`; Chromium takes a few hundred MB more).
 - Don't touch the system PostgreSQL or MariaDB services. Use throwaway servers on other ports.
 - Kill stray Julia processes by PID. `pkill -f <pattern>` also matches the shell running it.

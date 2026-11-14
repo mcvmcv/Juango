@@ -288,3 +288,61 @@ function parse_pg_number_array(s::AbstractString, elparse)
     isempty(inner) && return Any[]
     Any[x == "NULL" ? nothing : elparse(x) for x in split(inner, ',')]
 end
+
+# --- LISTEN / NOTIFY ------------------------------------------------------------------------------
+
+struct PGnotifyC
+    relname::Ptr{UInt8}
+    be_pid::Cint
+    extra::Ptr{UInt8}
+    next::Ptr{Cvoid}
+end
+
+"A connection listening on a channel; `close(l)` stops `pg_listen`."
+mutable struct PGListener
+    conn::Union{Nothing,PGConn}
+    watcher::Any
+    stopped::Bool
+end
+PGListener() = PGListener(nothing, nothing, false)
+
+"""
+    pg_listen(f, listener, url, channel)
+
+`LISTEN channel` on a connection of its own and call `f(payload)` for each notification, until
+`close(listener)` (or the connection fails, which throws).
+"""
+function pg_listen(f, l::PGListener, url::String, channel::String)
+    conn = l.conn = pg_connect(url)
+    try
+        pg_exec(conn, "LISTEN " * "\"" * replace(channel, "\"" => "\"\"") * "\"", Any[])
+        fd = ccall((:PQsocket, LIBPQ_HANDLE), Cint, (Ptr{Cvoid},), conn.ptr)
+        l.watcher = FileWatching.FDWatcher(RawFD(fd), true, false)
+        while !l.stopped
+            ccall((:PQconsumeInput, LIBPQ_HANDLE), Cint, (Ptr{Cvoid},), conn.ptr) == 1 || throw(connection_lost(conn))
+            while true
+                n = ccall((:PQnotifies, LIBPQ_HANDLE), Ptr{PGnotifyC}, (Ptr{Cvoid},), conn.ptr)
+                n == C_NULL && break
+                payload = unsafe_string(unsafe_load(n).extra)
+                ccall((:PQfreemem, LIBPQ_HANDLE), Cvoid, (Ptr{Cvoid},), n)
+                try
+                    f(payload)
+                catch e
+                    @error "LISTEN $channel: handling a notification failed" exception = (e, catch_backtrace())
+                end
+            end
+            l.stopped || wait(l.watcher)
+        end
+    catch e
+        l.stopped || rethrow()
+    finally
+        l.watcher === nothing || try close(l.watcher) catch end
+        pg_close(conn)
+    end
+    nothing
+end
+function Base.close(l::PGListener)
+    l.stopped = true
+    l.watcher === nothing || try close(l.watcher) catch end
+    nothing
+end

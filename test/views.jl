@@ -1479,3 +1479,161 @@ end
     @test count(e.topics) == 2 && count(filter(Th; essay = e)) == 2
     @test_throws ArgumentError through(Essay, :nope)
 end
+
+# --- live views, part 2 (#103) ------------------------------------------------------------------------
+
+Base.@kwdef mutable struct LiveKeep <: LiveView
+    count::Int = 0
+    note::String = ""
+    files::Vector{String} = String[]
+end
+Juango.live_snapshot(::Type{LiveKeep}) = true
+function Juango.handle_event(v::LiveKeep, name, params)
+    name == "inc" && (v.count += 1)
+    name == "note" && (v.note = string(params["text"]))
+    name == "grow" && (v.note = "x" ^ 5000)
+    name == "send" && (f = params["file"]; push!(v.files, "$(f.name):$(f.size):$(read(f, String)[1:3])"))
+    nothing
+end
+Base.@kwdef mutable struct LiveContact <: LiveView
+    form::LiveForm = LiveForm(d -> Form([:name => CharField(max_length = 5), :email => EmailField()]; data = d))
+    sent::Bool = false
+end
+function Juango.handle_event(v::LiveContact, name, params)
+    name == "validate" && live_change!(v.form, params)
+    name == "save" && (v.sent = live_submit!(v.form, params))
+    nothing
+end
+
+@testset "live views, part 2: patches, limits, snapshots, uploads, forms, pub-sub (#103)" begin
+    # patches are computed in UTF-16 code units, as the browser slices strings
+    apply(old, p) = (u = transcode(UInt16, old); transcode(String, vcat(u[1:p[1]], transcode(UInt16, p[3]), u[p[1]+p[2]+1:end])))
+    for (a, b) in [("<p>1</p>", "<p>12</p>"), ("héllo wörld", "héllo wörld!"), ("a😀b", "a😁b"), ("", "x"), ("same", "same"),
+                   ("<ul><li>1</li></ul>", "<ul><li>0</li><li>1</li></ul>")]
+        @test apply(a, Juango.live_patch(a, b)) == b
+    end
+    @test Juango.live_patch("<p>1</p>", "<p>2</p>") == (3, 1, "2")
+
+    write(joinpath(TPL, "live_keep.html"), "<html>{% liveview %}<p id=\"n\">{{ count }}</p><p>{{ note }}</p>{{ files|join:\",\" }}" *
+          "<div>" * "padding " ^ 40 * "</div>{% endliveview %}</html>")
+    write(joinpath(TPL, "live_contact.html"), "<html>{% liveview %}{{ form.form.as_p }}{% if sent %}SENT{% endif %}{% endliveview %}</html>")
+    old_urls = settings.ROOT_URLCONF
+    configure!(ROOT_URLCONF = [live("keep/", LiveKeep, "live_keep.html"), live("contact/", LiveContact, "live_contact.html")])
+    H = Juango.HTTP
+    port = let s = Juango.Sockets.listen(Juango.Sockets.localhost, 0)
+        p = Int(Juango.Sockets.getsockname(s)[2]); close(s); p
+    end
+    server = runserver("127.0.0.1", port; block = false, quiet = true)
+    recv(ws) = Juango.JSON.parse(ws_receive(ws))
+    try
+        # patches: a small change goes as a patch against the last HTML; a resync gets it all
+        out = H.WebSockets.open("ws://127.0.0.1:$port/keep/") do ws
+            ws_send(ws, Dict("type" => "join", "diff" => true, "params" => Dict()))
+            r1 = recv(ws)
+            ws_send(ws, Dict("type" => "event", "event" => "inc", "params" => Dict()))
+            r2 = recv(ws)
+            ws_send(ws, Dict("type" => "resync"))
+            r3 = recv(ws)
+            (r1, r2, r3)
+        end
+        r1, r2, r3 = out
+        @test r1["type"] == "render" && r1["seq"] == 1 && occursin("<p id=\"n\">0</p>", r1["html"])
+        @test r2["type"] == "patch" && r2["base"] == 1 && r2["seq"] == 2 && length(r2["ins"]) < 10
+        @test occursin("<p id=\"n\">1</p>", apply(r1["html"], (r2["start"], r2["del"], r2["ins"])))
+        @test r3["type"] == "render" && r3["html"] == apply(r1["html"], (r2["start"], r2["del"], r2["ins"]))
+        @test haskey(r2, "snap")                                                   # LiveKeep keeps snapshots
+
+        # a reconnect with the snapshot gets the state back; a tampered one is ignored
+        snap = r2["snap"]
+        back = H.WebSockets.open("ws://127.0.0.1:$port/keep/") do ws
+            ws_send(ws, Dict("type" => "join", "diff" => true, "params" => Dict(), "snap" => snap))
+            recv(ws)
+        end
+        @test occursin("<p id=\"n\">1</p>", back["html"])
+        bad = H.WebSockets.open("ws://127.0.0.1:$port/keep/") do ws
+            ws_send(ws, Dict("type" => "join", "params" => Dict(), "snap" => snap[1:end-2] * "xx"))
+            recv(ws)
+        end
+        @test occursin("<p id=\"n\">0</p>", bad["html"])
+
+        # uploads over the socket: chunks, then the event names the file
+        data = "abc" * "z" ^ 100
+        up = H.WebSockets.open("ws://127.0.0.1:$port/keep/") do ws
+            ws_send(ws, Dict("type" => "join", "params" => Dict()))
+            recv(ws)
+            ws_send(ws, Dict("type" => "upload", "ref" => "u1", "name" => "../x.csv", "content_type" => "text/csv",
+                             "chunk" => Juango.base64encode(data[1:50]), "last" => false))
+            ws_send(ws, Dict("type" => "upload", "ref" => "u1", "name" => "../x.csv", "chunk" => Juango.base64encode(data[51:end]), "last" => true))
+            ws_send(ws, Dict("type" => "event", "event" => "send", "params" => Dict("file" => Dict("__upload__" => "u1"))))
+            recv(ws)
+        end
+        @test occursin("x.csv:103:abc", up["html"])
+
+        # limits: the size of a view's state, and live views per session
+        override_settings(LIVE_MAX_STATE_BYTES = 2000) do
+            code = H.WebSockets.open("ws://127.0.0.1:$port/keep/") do ws
+                ws_send(ws, Dict("type" => "join", "params" => Dict()))
+                recv(ws)
+                ws_send(ws, Dict("type" => "event", "event" => "grow", "params" => Dict()))
+                try recv(ws); nothing catch e; e end
+            end
+            @test code isa H.WebSockets.WebSocketError && code.message.code == 4413
+        end
+        override_settings(LIVE_MAX_VIEWS_PER_SESSION = 1) do
+            code = H.WebSockets.open("ws://127.0.0.1:$port/keep/") do ws1
+                ws_send(ws1, Dict("type" => "join", "params" => Dict()))
+                recv(ws1)
+                H.WebSockets.open("ws://127.0.0.1:$port/keep/") do ws2                 # the same client address
+                    ws_send(ws2, Dict("type" => "join", "params" => Dict()))
+                    try recv(ws2); nothing catch e; e end
+                end
+            end
+            @test code isa H.WebSockets.WebSocketError && code.message.code == 4429
+        end
+        override_settings(LIVE_MAX_MESSAGE_BYTES = 100) do
+            code = H.WebSockets.open("ws://127.0.0.1:$port/keep/") do ws
+                ws_send(ws, Dict("type" => "join", "params" => Dict()))
+                recv(ws)
+                ws_send(ws, Dict("type" => "event", "event" => "note", "params" => Dict("text" => "y" ^ 200)))
+                try recv(ws); nothing catch e; e end
+            end
+            @test code isa H.WebSockets.WebSocketError && code.message.code == 4413
+        end
+        sleep(0.2)
+        @test isempty(Juango.LIVE_OPEN)                                           # released when the sockets closed
+    finally
+        close(server)
+    end
+
+    # LiveForm: errors only for the fields touched, all of them on submit
+    lt = live_test(LiveContact, "live_contact.html")
+    live_event!(lt, "validate", Dict("name" => "toolongname", "email" => "", "_target" => "name"))
+    @test occursin("at most 5 characters", lt.html) && !occursin("This field is required", lt.html)
+    live_event!(lt, "save", Dict("name" => "ann", "email" => ""))
+    @test occursin("This field is required", lt.html) && !occursin("SENT", lt.html)
+    live_event!(lt, "save", Dict("name" => "ann", "email" => "a@b.co"))
+    @test occursin("SENT", lt.html) && lt.view.form.form.cleaned_data[:name] == "ann"
+    close(lt)
+
+    # pub-sub across processes through PostgreSQL's LISTEN/NOTIFY
+    if IS_POSTGRES
+        write(joinpath(TPL, "live_counter.html"), "{% liveview %}<p>{{ count }}</p><ul>{% for m in log %}<li>{{ m }}</li>{% endfor %}</ul>{% endliveview %}")
+        override_settings(LIVE_PUBSUB = :postgres) do
+            lt = live_test(LiveCounter, "live_counter.html"; params = Dict("start" => "1", "room" => "pg"))
+            try
+                @test publish("room:pg", "via postgres") === nothing
+                t0 = time()
+                while !isready(getfield(lt, :session).inbox) && time() - t0 < 10
+                    sleep(0.05)
+                end
+                @test occursin("<li>via postgres</li>", live_flush!(lt))
+            finally
+                close(lt)
+            end
+        end
+        @test Juango.LIVE_LISTENER[] === nothing                                  # stopped with the setting
+        rm(joinpath(TPL, "live_counter.html"); force = true)
+    end
+    configure!(ROOT_URLCONF = old_urls)
+    rm(joinpath(TPL, "live_keep.html"); force = true); rm(joinpath(TPL, "live_contact.html"); force = true)
+end

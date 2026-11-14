@@ -82,7 +82,8 @@ export User, AbstractUser, AnonymousUser, USER_MODEL, get_user_model, authentica
 export message!, get_messages, url_has_allowed_host_and_scheme
 export HtmxDetails, is_htmx, hx_redirect, hx_refresh, hx_location, hx_stop_polling, hx_push_url, hx_replace_url,
        hx_retarget, hx_reswap, hx_reselect, hx_trigger, form_status, HtmxMiddleware, HTMX_STOP_POLLING
-export LiveView, live, mount, handle_event, handle_info, live_context, live_redirect, subscribe, unsubscribe, publish
+export LiveView, live, mount, handle_event, handle_info, live_context, live_redirect, subscribe, unsubscribe, publish,
+       LiveForm, live_change!, live_submit!
 # signals
 export Signal, connect!, disconnect!, receiver, send, pre_save, post_save, pre_delete, post_delete,
        m2m_changed, request_started, request_finished, user_logged_in, user_logged_out,
@@ -109,7 +110,7 @@ export runserver, execute_from_command_line
 # --- public, not exported ----------------------------------------------------------------------------
 
 # requests, responses and streaming
-public clean, header, text, render_response!, process_template_response, temporary_file_path, TemporaryUploadedFile,
+public clean, live_snapshot, header, text, render_response!, process_template_response, temporary_file_path, TemporaryUploadedFile,
        MemoryFileUploadHandler, TemporaryFileUploadHandler, upload_file, sse_comment, WebSocketView, is_streaming, build_absolute_uri, handle_request
 # templates
 public render_form, TemplateFormRenderer, JuangoTemplates, MustacheTemplates, engine_template

@@ -1032,8 +1032,9 @@ end
 Live views are server-rendered pages that stay connected, in the manner of Phoenix LiveView. The page is
 rendered as ordinary HTML, so it works without JavaScript and can be indexed. Then a small script
 (`juango/live.js`) opens a WebSocket to the same URL. The server keeps a view for the page in a
-task: each browser event updates its state, and the server renders the `{% liveview %}` part again,
-which the browser morphs into the page (with the vendored Idiomorph, so focus and typing survive).
+task: each browser event updates its state, and the server renders the `{% liveview %}` part again
+and sends what changed (a patch against the HTML the browser has, or the whole part when that's
+smaller), which the browser morphs into the page (with the vendored Idiomorph, so focus and typing survive).
 
 ```julia
 Base.@kwdef mutable struct Chat <: LiveView         # fields are the template's variables
@@ -1063,16 +1064,18 @@ urlpatterns = [live("chat/<str:room>/", Chat, "chat.html"; name = "chat")]
 
 - **Bindings:**
   - `j-click="name"` sends the element's `j-value-*` attributes as parameters.
-  - `j-submit="name"` on a form sends its fields.
+  - `j-submit="name"` on a form sends its fields. Its files are uploaded over the socket first, in chunks, and arrive as `UploadedFile`s (in memory, or temporary files past `FILE_UPLOAD_MAX_MEMORY_SIZE`).
   - `j-change="name"` fires on input in a field, or in any field of a form that has the attribute. It sends the form's fields and `_target`, debounced by `j-debounce` milliseconds (150 by default).
   - `j-keydown="name"` sends `key` and `value`; add `j-key="Enter"` to fire only for that key.
-- **Pub-sub:** `subscribe(topic)` in `mount` delivers `publish(topic, msg)` to `handle_info` while the page is open. It works within one process for now.
-- **Connections:** the WebSocket has the session and `req.user`, as usual, and the browser's `Origin` must be this site. Throwing `Http404` or `PermissionDenied` in `mount` refuses the socket. A dropped connection reconnects with backoff and mounts a fresh view (form fields keep what was typed). A failing handler closes the socket, so the page reconnects and remounts.
-- **Tests:** `lt = live_test(Chat, "chat.html"; params = Dict("room" => "a"), user = u)`. Then `live_event!(lt, "say", Dict("text" => "hi"))`, `live_info!(lt, msg)` and `live_flush!(lt)` (for published messages) each return the live part's HTML. `lt.view` is the view and `lt.redirect` the last redirect.
+- **Pub-sub:** `subscribe(topic)` in `mount` delivers `publish(topic, msg)` to `handle_info` while the page is open. Within one process by default; with `LIVE_PUBSUB = :postgres`, to every process using the same PostgreSQL database, through `LISTEN`/`NOTIFY` (sent when the current transaction commits). The message must then be something the cache's JSON serializer stores (it arrives decoded, with its types), at most about 7 KB.
+- **Forms:** `LiveForm(d -> ContactForm(d))` validates as the user types (`<form j-change="validate" j-submit="save">`, with `live_change!(v.form, params)` and `live_submit!(v.form, params)` in `handle_event`), showing errors only for the fields they've changed, and every field's once they submit. The template renders `form.form` as any form.
+- **Keeping state across a reconnect:** with `Juango.live_snapshot(::Type{Chat}) = true`, the browser holds a signed copy of the view's fields (refreshed with each render) and sends it back when it reconnects, so the view gets its state back instead of starting afresh. The fields must be values the cache's JSON serializer stores; snapshots expire after `LIVE_SNAPSHOT_MAX_AGE` seconds.
+- **Connections:** the WebSocket has the session and `req.user`, as usual, and the browser's `Origin` must be this site. Throwing `Http404` or `PermissionDenied` in `mount` refuses the socket. A dropped connection reconnects with backoff and mounts a fresh view (form fields keep what was typed), unless the view keeps snapshots. A failing handler closes the socket, so the page reconnects and remounts.
+- **Tests:** `lt = live_test(Chat, "chat.html"; params = Dict("room" => "a"), user = u)`. Then `live_event!(lt, "say", Dict("text" => "hi"))`, `live_info!(lt, msg)` and `live_flush!(lt)` (for published messages) each return the live part's HTML. `lt.view` is the view and `lt.redirect` the last redirect. Juango's own tests drive `live.js` in headless Chromium (`test/browser.jl`, with `JUANGO_BROWSER_TESTS=1`).
 - **Costs and limits:**
-  - Each open page holds a task, a view and its request.
-  - Every change re-renders and sends the whole live part. Sending only the changed parts is planned.
-  - With several server processes, pub-sub doesn't cross them yet, and a load balancer must keep each socket on one process (any process can mount a view, since state is rebuilt on reconnect).
+  - Each open page holds a task, a view and its request. Every change re-renders the live part on the server; only the changed span is sent.
+  - A view whose state grows past `LIVE_MAX_STATE_BYTES` (1 MB) is closed, a session (or client address) can have `LIVE_MAX_VIEWS_PER_SESSION` (20) open, and messages and uploads are capped by `LIVE_MAX_MESSAGE_BYTES` and `LIVE_MAX_UPLOAD_BYTES`.
+  - With several server processes, a load balancer must keep each socket on one process (any process can mount a view: its state is rebuilt, or restored from the snapshot, on reconnect).
 
 ### Forms
 

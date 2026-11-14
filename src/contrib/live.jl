@@ -15,8 +15,14 @@
 # The page is rendered as ordinary HTML (it works without JavaScript). Then live.js opens a
 # WebSocket to the same URL: the server mounts a fresh view, keeps it in a task for as long as the
 # page is open, and after every browser event (or message published to a topic it subscribed
-# to) renders the `{% liveview %}` part again and sends it; the browser morphs it into the page.
-# The whole part is sent each time; sending only the changed parts is for later.
+# to) renders the `{% liveview %}` part again and sends what changed (the span between the first
+# and last differing character, against the last HTML the browser has); the browser patches its
+# copy and morphs it into the page.
+#
+# Settings: LIVE_MAX_STATE_BYTES (a view bigger than this is closed), LIVE_MAX_VIEWS_PER_SESSION,
+# LIVE_MAX_MESSAGE_BYTES, LIVE_MAX_UPLOAD_BYTES, and LIVE_PUBSUB = :postgres to deliver `publish`
+# to every process through PostgreSQL's LISTEN/NOTIFY. A view type can keep its state across a
+# reconnect (`Juango.live_snapshot(::Type{MyView}) = true`): the browser holds a signed copy.
 
 """
     LiveView
@@ -70,8 +76,10 @@ mutable struct LiveSession
     inbox::Channel{Any}
     topics::Set{String}
     html::String
+    seq::Int                                  # renders sent; patches name the one they apply to
+    uploads::Dict{String,Any}                 # ref => (name, content_type, IOBuffer or (path, io), size)
 end
-LiveSession(view, req, template) = LiveSession(view, req, template, Channel{Any}(1024), Set{String}(), "")
+LiveSession(view, req, template) = LiveSession(view, req, template, Channel{Any}(1024), Set{String}(), "", 0, Dict{String,Any}())
 
 "The view's `{% liveview %}` part, rendered."
 function render_live(s::LiveSession)
@@ -115,6 +123,7 @@ function subscribe(topic::AbstractString)
     s === nothing && throw(ArgumentError("subscribe: call it from a live view's mount or handlers"))
     lock(() -> push!(get!(Set{Channel{Any}}, LIVE_TOPICS, String(topic)), s.inbox), LIVE_TOPICS_LOCK)
     push!(s.topics, String(topic))
+    ensure_live_listener()
     nothing
 end
 
@@ -136,12 +145,70 @@ function unsubscribe!(s::LiveSession, topic::String)
 end
 
 """
-    publish(topic, msg) -> number of views it was sent to
+    publish(topic, msg) -> number of views it was sent to (in this process)
 
 Send `msg` to the `handle_info` of every open live view subscribed to `topic`. A view whose
 queue is full (1024 unhandled messages) misses it.
+
+With `LIVE_PUBSUB = :postgres`, the message goes to the views of every process using the same
+PostgreSQL database, through `NOTIFY` (sent when the current transaction commits, if there is
+one). It must then be something the cache's JSON serializer stores (numbers, strings, dates,
+models, containers ...), at most about 7 KB as JSON, and `publish` returns `nothing`.
 """
 function publish(topic::AbstractString, msg)
+    settings.LIVE_PUBSUB === :postgres || return publish_local(topic, msg)
+    backend() isa PostgresBackend || throw(ImproperlyConfigured("LIVE_PUBSUB = :postgres needs a PostgreSQL DATABASE"))
+    payload = JSON.json(Dict("t" => String(topic), "m" => cache_encode(msg)))
+    ncodeunits(payload) < 7900 || throw(ArgumentError("publish: the message is too big for NOTIFY ($(ncodeunits(payload)) bytes as JSON)"))
+    execute("SELECT pg_notify(?, ?)", Any[LIVE_CHANNEL, payload])
+    nothing
+end
+
+const LIVE_CHANNEL = "juango_live"
+"The process's LISTEN task for LIVE_PUBSUB = :postgres: (listener, the database setting it listens on)."
+const LIVE_LISTENER = Ref{Any}(nothing)
+const LIVE_LISTENER_LOCK = ReentrantLock()
+
+"Start listening for other processes' `publish` (LIVE_PUBSUB = :postgres), once per process."
+function ensure_live_listener()
+    settings.LIVE_PUBSUB === :postgres || return
+    lock(LIVE_LISTENER_LOCK) do
+        url = db_state().setting
+        cur = LIVE_LISTENER[]
+        cur !== nothing && cur[2] == url && return
+        cur === nothing || close(cur[1])
+        url isa AbstractString || throw(ImproperlyConfigured("LIVE_PUBSUB = :postgres needs DATABASE to be a postgresql:// URL"))
+        l = PGListener()
+        LIVE_LISTENER[] = (l, url)
+        ready = Channel{Bool}(1)
+        errormonitor(Threads.@spawn begin
+            first_try = true
+            while !l.stopped
+                try
+                    pg_listen(l, url, LIVE_CHANNEL) do payload
+                        d = JSON.parse(payload)
+                        publish_local(string(d["t"]), cache_decode(d["m"]))
+                    end
+                catch e
+                    l.stopped || @error "live views: listening for NOTIFY failed; retrying" exception = e
+                end
+                first_try && (first_try = false; isready(ready) || put!(ready, false))
+                l.stopped || sleep(1)
+            end
+        end)
+        # wait until LISTEN is in place, so a publish right after subscribing isn't missed
+        t0 = time()
+        while (l.watcher === nothing && !l.stopped) && time() - t0 < 10 && !isready(ready)
+            sleep(0.01)
+        end
+    end
+    nothing
+end
+stop_live_listener() = lock(() -> (cur = LIVE_LISTENER[]; cur === nothing || close(cur[1]); LIVE_LISTENER[] = nothing), LIVE_LISTENER_LOCK)
+push!(SETTINGS_CHANGED_HOOKS, () -> (cur = LIVE_LISTENER[]; cur !== nothing && (settings.LIVE_PUBSUB !== :postgres ||
+                                     get(database_settings(), "default", nothing) != cur[2]) && stop_live_listener()))
+
+function publish_local(topic::AbstractString, msg)
     inboxes = lock(() -> collect(get(LIVE_TOPICS, String(topic), Set{Channel{Any}}())), LIVE_TOPICS_LOCK)
     n = 0
     for ch in inboxes
@@ -180,13 +247,170 @@ function (lr::LiveRoute)(req::Request; kwargs...)
     render(req, lr.template, live_context(v))
 end
 
+# --- patches -----------------------------------------------------------------------------------------
+
+"""
+The change from `old` to `new` as (start, deleted, inserted), in UTF-16 code units as JavaScript
+counts them: the span between the first and the last character that differ.
+"""
+function live_patch(old::String, new::String)
+    a, b = transcode(UInt16, old), transcode(UInt16, new)
+    n = min(length(a), length(b))
+    p = 0
+    while p < n && a[p+1] == b[p+1]
+        p += 1
+    end
+    p > 0 && 0xd800 <= a[p] <= 0xdbff && (p -= 1)             # don't split a surrogate pair
+    q = 0
+    while q < n - p && a[end-q] == b[end-q]
+        q += 1
+    end
+    q > 0 && 0xdc00 <= a[end-q+1] <= 0xdfff && (q -= 1)
+    (p, length(a) - p - q, transcode(String, b[p+1:end-q]))
+end
+
+"Send the view's HTML: a patch against what the browser has when that's smaller, else the whole part."
+function live_send_render!(ws, s::LiveSession, html::String, diff::Bool)
+    msg = Dict{String,Any}("seq" => s.seq + 1)
+    if diff && !isempty(s.html)
+        start, del, ins = live_patch(s.html, html)
+        if ncodeunits(ins) + 64 < ncodeunits(html)
+            merge!(msg, Dict("type" => "patch", "base" => s.seq, "start" => start, "del" => del, "ins" => ins))
+        end
+    end
+    haskey(msg, "type") || merge!(msg, Dict("type" => "render", "html" => html))
+    snap = live_snapshot_token(s)
+    snap === nothing || (msg["snap"] = snap)
+    s.seq += 1
+    s.html = html
+    ws_send(ws, msg)
+end
+
+# --- limits ----------------------------------------------------------------------------------------
+
+const LIVE_OPEN = Dict{String,Int}()          # open live views per session (or client address)
+const LIVE_OPEN_LOCK = ReentrantLock()
+live_owner(req::Request) = (k = try req.session.key catch; nothing end; k === nothing ? "addr:" * string(get(req.meta, :remote_addr, "")) : "session:" * k)
+function live_claim!(owner::String)
+    lock(LIVE_OPEN_LOCK) do
+        n = get(LIVE_OPEN, owner, 0)
+        n >= settings.LIVE_MAX_VIEWS_PER_SESSION && return false
+        LIVE_OPEN[owner] = n + 1
+        true
+    end
+end
+live_release!(owner::String) = lock(() -> (n = get(LIVE_OPEN, owner, 1) - 1; n <= 0 ? delete!(LIVE_OPEN, owner) : (LIVE_OPEN[owner] = n)), LIVE_OPEN_LOCK)
+
+struct LiveTooLarge <: Exception
+    what::String
+end
+
+# --- state across a reconnect ----------------------------------------------------------------------
+
+"""
+    Juango.live_snapshot(::Type{MyView}) = true
+
+Keep a view's state across a reconnect: after each render the browser gets a signed copy of its
+fields (they must be values the cache's JSON serializer stores: numbers, strings, dates, models,
+containers of them ...), and sends it back when it reconnects; the view is mounted (for its
+subscriptions) and then gets those fields back, instead of starting afresh. Snapshots older than
+LIVE_SNAPSHOT_MAX_AGE seconds are ignored.
+"""
+live_snapshot(::Type) = false
+
+function live_snapshot_token(s::LiveSession)
+    V = typeof(s.view)
+    live_snapshot(V) || return nothing
+    try
+        fields = Dict{String,Any}(string(f) => cache_encode(getfield(s.view, f)) for f in fieldnames(V))
+        signing_dumps(Dict("v" => string(nameof(V)), "p" => s.req.path, "f" => fields); salt = "juango.live")
+    catch e
+        @warn "live view $V: can't snapshot its state (keep live_snapshot for views whose fields the cache can store)" exception = e maxlog = 1
+        nothing
+    end
+end
+
+function live_restore!(s::LiveSession, token)
+    token isa AbstractString || return false
+    d = try
+        signing_loads(token; salt = "juango.live", max_age = settings.LIVE_SNAPSHOT_MAX_AGE)
+    catch
+        return false                                   # tampered with, or too old: mount afresh
+    end
+    V = typeof(s.view)
+    (get(d, "v", "") == string(nameof(V)) && get(d, "p", "") == s.req.path) || return false
+    for (k, v) in get(d, "f", Dict())
+        f = Symbol(k)
+        f in fieldnames(V) || continue
+        setfield!(s.view, f, convert(fieldtype(V, f), cache_decode(v)))
+    end
+    true
+end
+
+# --- uploads over the socket -------------------------------------------------------------------------
+#
+# live.js sends a form's files before its submit event, in chunks: {type: "upload", ref, name,
+# content_type, chunk (base64), last}. The event's parameters then name each file as
+# {"__upload__": ref}, which becomes an `UploadedFile` (in memory, or a temporary file past
+# FILE_UPLOAD_MAX_MEMORY_SIZE). LIVE_MAX_UPLOAD_BYTES limits each file.
+
+function live_upload_chunk!(s::LiveSession, m)
+    ref = string(get(m, "ref", ""))
+    isempty(ref) && return
+    u = get!(s.uploads, ref) do
+        Dict{String,Any}("name" => basename(string(get(m, "name", "upload"))), "ctype" => string(get(m, "content_type", "application/octet-stream")),
+                         "buf" => IOBuffer(), "path" => nothing, "size" => 0, "done" => false)
+    end
+    bytes = base64decode(string(get(m, "chunk", "")))
+    u["size"] += length(bytes)
+    u["size"] > settings.LIVE_MAX_UPLOAD_BYTES && throw(LiveTooLarge("upload $(u["name"])"))
+    if u["path"] === nothing && u["size"] > settings.FILE_UPLOAD_MAX_MEMORY_SIZE
+        path, io = mktemp(something(settings.FILE_UPLOAD_TEMP_DIR, tempdir()))
+        write(io, take!(u["buf"]))
+        u["path"], u["buf"] = path, io
+    end
+    write(u["buf"], bytes)
+    get(m, "last", false) === true && (u["done"] = true)
+    nothing
+end
+
+"Event parameters with `{\"__upload__\": ref}` replaced by the uploaded files."
+function live_attach_uploads!(s::LiveSession, params::Dict{String,Any})
+    for (k, v) in collect(params)
+        if v isa AbstractDict && haskey(v, "__upload__")
+            u = get(s.uploads, string(v["__upload__"]), nothing)
+            (u === nothing || !u["done"]) && (delete!(params, k); continue)
+            params[k] = if u["path"] === nothing
+                UploadedFile(u["name"], take!(u["buf"]); content_type = u["ctype"])
+            else
+                close(u["buf"])
+                TemporaryUploadedFile(u["name"], u["path"]; content_type = u["ctype"])
+            end
+        end
+    end
+    params
+end
+function live_cleanup_uploads!(s::LiveSession)
+    for u in values(s.uploads)
+        u["path"] === nothing && continue
+        try close(u["buf"]) catch end
+        rm(u["path"]; force = true)
+    end
+    empty!(s.uploads)
+end
+
 "The socket's side: mount, then handle events and messages until the page closes."
 function run_live(ws, req::Request, lr::LiveRoute, kwargs)
     s = nothing
     reader = nothing
+    owner = live_owner(req)
+    claimed = false
     try
         join = JSON.parse(String(ws_receive(ws)))
         get(join, "type", "") == "join" || return
+        claimed = live_claim!(owner)
+        claimed || return close(ws, HTTP.WebSockets.CloseFrameBody(4429, "too many live views"))
+        diff = get(join, "diff", false) === true
         s = LiveSession(lr.view(), req, lr.template)
         try
             with_live_session(() -> mount(s.view, req, live_params(req, kwargs, get(join, "params", nothing))), s)
@@ -194,15 +418,23 @@ function run_live(ws, req::Request, lr::LiveRoute, kwargs)
             e isa Union{Http404,PermissionDenied} || rethrow()
             return close(ws, HTTP.WebSockets.CloseFrameBody(4403, "refused"))
         end
-        s.html = render_live(s)
-        ws_send(ws, Dict("type" => "render", "html" => s.html))
+        live_snapshot(typeof(s.view)) && live_restore!(s, get(join, "snap", nothing))
+        live_send_render!(ws, s, render_live(s), diff)
         inbox = s.inbox
+        sess = s
         reader = @async begin
             try
                 for raw in ws
+                    sizeof(raw) > settings.LIVE_MAX_MESSAGE_BYTES && (put!(inbox, (:toolarge, "message")); break)
                     m = JSON.parse(raw isa AbstractString ? raw : String(raw))
-                    get(m, "type", "") == "event" &&
+                    t = get(m, "type", "")
+                    if t == "event"
                         put!(inbox, (:event, string(get(m, "event", "")), Dict{String,Any}(string(k) => v for (k, v) in get(m, "params", Dict()))))
+                    elseif t == "upload"
+                        put!(inbox, (:upload, m))
+                    elseif t == "resync"
+                        put!(inbox, (:resync,))
+                    end
                 end
             catch e
                 is_disconnect(e) || e isa InvalidStateException || @error "live view: reading the socket" exception = (e, catch_backtrace())
@@ -213,28 +445,107 @@ function run_live(ws, req::Request, lr::LiveRoute, kwargs)
         while true
             m = take!(inbox)
             m[1] === :closed && break
+            m[1] === :toolarge && throw(LiveTooLarge(m[2]))
+            m[1] === :upload && (live_upload_chunk!(s, m[2]); continue)
+            if m[1] === :resync                       # the browser lost track: send the whole part
+                s.html = ""
+                live_send_render!(ws, s, render_live(s), false)
+                continue
+            end
+            m[1] === :event && live_attach_uploads!(s, m[3])
             url = live_dispatch!(s, m)
             if url !== nothing
                 ws_send(ws, Dict("type" => "redirect", "url" => url))
                 continue
             end
+            Base.summarysize(s.view) > settings.LIVE_MAX_STATE_BYTES && throw(LiveTooLarge("state"))
             html = render_live(s)
-            if html != s.html
-                s.html = html
-                ws_send(ws, Dict("type" => "render", "html" => html))
-            end
+            html == s.html || live_send_render!(ws, s, html, diff)
         end
     catch e
-        # a failing handler closes the socket; the browser reconnects and mounts a fresh view
-        is_disconnect(e) || @error "live view $(lr.view) failed" exception = (e, catch_backtrace())
+        if e isa LiveTooLarge
+            @warn "live view $(lr.view): closed, $(e.what) too large (LIVE_MAX_STATE_BYTES, LIVE_MAX_MESSAGE_BYTES, LIVE_MAX_UPLOAD_BYTES)"
+            ws_isopen(ws) && try close(ws, HTTP.WebSockets.CloseFrameBody(4413, "too large")) catch end
+        else
+            # a failing handler closes the socket; the browser reconnects and mounts a fresh view
+            is_disconnect(e) || @error "live view $(lr.view) failed" exception = (e, catch_backtrace())
+        end
     finally
+        claimed && live_release!(owner)
         if s !== nothing
             foreach(t -> unsubscribe!(s, t), collect(s.topics))
             close(s.inbox)
+            live_cleanup_uploads!(s)
         end
         ws_isopen(ws) && try close(ws) catch end
     end
     nothing
+end
+
+# --- forms in live views -------------------------------------------------------------------------------
+
+"""
+    LiveForm(make)
+
+A form in a live view, validated as the user types: errors show only for fields they've changed
+(or all of them once they submit). `make(data)` (or `make(data, files)`) builds the form from
+the submitted values: `LiveForm(d -> ContactForm(d))`, or `LiveForm((d, files) -> ModelForm(Post; data = d, files = files))`.
+
+    Base.@kwdef mutable struct Contact <: LiveView
+        form::LiveForm = LiveForm(d -> ContactForm(d))
+    end
+    function Juango.handle_event(v::Contact, name, params)
+        name == "validate" && live_change!(v.form, params)                 # <form j-change="validate" j-submit="save">
+        name == "save" && live_submit!(v.form, params) && (save_message(v.form.form); return live_redirect("/thanks/"))
+    end
+
+The template renders `form.form` as any form (`{{ form.form }}`, or field by field). File inputs
+in a `j-submit` form are uploaded over the socket first and arrive as `UploadedFile`s.
+"""
+mutable struct LiveForm
+    make::Any
+    form::Any
+    touched::Set{String}          # html names of the fields the user has changed
+end
+LiveForm(make) = LiveForm(make, make(nothing), Set{String}())
+
+function live_form_data(params)
+    data = Dict{String,Vector{String}}()
+    files = Dict{String,Any}()
+    for (k, v) in params
+        k == "_target" && continue
+        if v isa UploadedFile
+            files[k] = v
+        elseif v isa AbstractVector
+            data[k] = String[string(x) for x in v]
+        else
+            data[k] = [v === nothing ? "" : string(v)]
+        end
+    end
+    QueryDict(data), files
+end
+function live_rebuild!(lf::LiveForm, params)
+    data, files = live_form_data(params)
+    lf.form = applicable(lf.make, data, files) ? lf.make(data, files) : lf.make(data)
+    is_valid(lf.form)
+end
+
+"`live_change!(lf, params)`: a field changed (`j-change` on the form): validate, showing errors for the fields touched so far."
+function live_change!(lf::LiveForm, params)
+    t = string(get(params, "_target", ""))
+    isempty(t) || push!(lf.touched, t)
+    live_rebuild!(lf, params)
+    f = lf.form
+    shown = Set(fld.name for fld in f.fields if html_name(f, fld) in lf.touched)
+    filter!(kv -> kv.first in shown, f.errors)
+    lf
+end
+
+"`live_submit!(lf, params) -> Bool`: the form was submitted: validate every field; true when it's valid."
+function live_submit!(lf::LiveForm, params)
+    ok = live_rebuild!(lf, params)
+    foreach(fld -> push!(lf.touched, html_name(lf.form, fld)), lf.form.fields)
+    ok
 end
 
 # --- {% liveview %} ----------------------------------------------------------------------------------

@@ -51,6 +51,12 @@ function default_settings()
         :TEMPLATE_CACHE_CHECK_MTIME => nothing,        # read templates again when they change (nothing: only with DEBUG)
         :HTMX_OOB_MESSAGES => true,                    # after htmx requests, send queued messages as an out-of-band swap
         :ACCESS_LOG => true,                           # runserver prints a line to stderr for each request
+        :LIVE_MAX_STATE_BYTES => 1_000_000,            # live views: a view's size (Base.summarysize) past which it's closed
+        :LIVE_MAX_VIEWS_PER_SESSION => 20,             # live views open at once per session (or client address)
+        :LIVE_MAX_MESSAGE_BYTES => 262_144,            # one message from the browser
+        :LIVE_MAX_UPLOAD_BYTES => 10_485_760,          # one file uploaded over a live view's socket
+        :LIVE_SNAPSHOT_MAX_AGE => 3600,                # seconds a reconnecting browser's state snapshot stays valid
+        :LIVE_PUBSUB => nothing,                       # nothing: publish in this process; :postgres: to every process, by LISTEN/NOTIFY
         :TEST_DATABASE => nothing,                     # the test runner's database (nothing: SQLite in memory, or test_<name> on the same server)
         :TEMPLATE_COMPILE => nothing,                  # compile templates into Julia functions, in the background (nothing: when DEBUG is off; :eager: on first render)
         :TEMPLATES => nothing,                         # template engines (nothing: Juango's, with TEMPLATE_DIRS)

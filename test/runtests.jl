@@ -7,6 +7,8 @@ using Test
 # Longest first, so the two job slots finish at about the same time.
 const GROUPS = [["orm", "db", "migrations"], ["views", "admin"], ["services"], ["templates", "forms"]]
 const JOBS = parse(Int, get(ENV, "JUANGO_TEST_JOBS", "2"))
+# browser tests of live.js (they need chromium and node): JUANGO_BROWSER_TESTS=1
+get(ENV, "JUANGO_BROWSER_TESTS", "") == "1" && push!(GROUPS[2], "browser")
 
 # Run each file of the group even when an earlier one fails; exit non-zero if any did.
 const RUNNER = """
