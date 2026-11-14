@@ -120,8 +120,7 @@ end
 "Messages sent with the `:locmem` backend (the test Client's)."
 const outbox = EmailMessage[]
 
-function email_backend()
-    b = settings.EMAIL_BACKEND
+function email_backend(b = settings.EMAIL_BACKEND)
     b isa Function && return b
     b === :smtp && return smtp_send
     b === :console && return msgs -> (foreach(m -> (println(message_string(m)); println("-"^79)), msgs); length(msgs))
@@ -143,9 +142,48 @@ function email_backend()
 end
 
 """
-    send!(msg; fail_silently=false) -> number of messages sent (0 or 1)
+    conn = get_connection(backend = settings.EMAIL_BACKEND; fail_silently = false)
+
+A mail connection, as Django's `get_connection`: a backend for some messages other than
+EMAIL_BACKEND (`get_connection(:console)`), or one to send many messages through
+(`send_messages(conn, msgs)`, or `send!(msg; connection = conn)`).
 """
-function send!(m::EmailMessage; fail_silently = false)
+struct MailConnection
+    backend::Any
+    fail_silently::Bool
+end
+get_connection(backend = nothing; fail_silently::Bool = false) =
+    MailConnection(email_backend(something(backend, settings.EMAIL_BACKEND)), fail_silently)
+
+"Send messages through a connection (one SMTP session for all of them); returns how many were sent."
+function send_messages(c::MailConnection, msgs)
+    msgs = [m for m in msgs if !isempty(recipients(m))]
+    isempty(msgs) && return 0
+    try
+        return c.backend(msgs)
+    catch e
+        c.fail_silently || rethrow()
+        @warn "Sending email failed" exception = e
+        return 0
+    end
+end
+
+"""
+    send_mass_mail(datatuple; fail_silently = false, connection = nothing) -> Int
+
+Send several messages, each `(subject, message, from_email, recipient_list)`, over one
+connection (Django's): unlike `send_mail` in a loop, SMTP logs in once.
+"""
+function send_mass_mail(datatuple; fail_silently::Bool = false, connection = nothing)
+    msgs = [EmailMessage(s, m; from_email = f, to = collect(String, r)) for (s, m, f, r) in datatuple]
+    send_messages(something(connection, get_connection(; fail_silently = fail_silently)), msgs)
+end
+
+"""
+    send!(msg; fail_silently=false, connection=nothing) -> number of messages sent (0 or 1)
+"""
+function send!(m::EmailMessage; fail_silently = false, connection = nothing)
+    connection === nothing || return send_messages(connection, [m])
     isempty(recipients(m)) && return 0
     try
         return email_backend()([m])

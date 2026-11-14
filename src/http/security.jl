@@ -57,7 +57,8 @@ function SecurityMiddleware(get_response)
                        (s.SECURE_HSTS_INCLUDE_SUBDOMAINS ? "; includeSubDomains" : "") * (s.SECURE_HSTS_PRELOAD ? "; preload" : ""))
         end
         s.SECURE_CONTENT_TYPE_NOSNIFF && !hasheader(resp, "X-Content-Type-Options") && setheader!(resp, "X-Content-Type-Options", "nosniff")
-        s.X_FRAME_OPTIONS === nothing || hasheader(resp, "X-Frame-Options") || setheader!(resp, "X-Frame-Options", string(s.X_FRAME_OPTIONS))
+        s.X_FRAME_OPTIONS === nothing || get(req.meta, :xframe_options_exempt, false) || hasheader(resp, "X-Frame-Options") ||
+            setheader!(resp, "X-Frame-Options", string(s.X_FRAME_OPTIONS))
         s.SECURE_REFERRER_POLICY === nothing || hasheader(resp, "Referrer-Policy") ||
             setheader!(resp, "Referrer-Policy", s.SECURE_REFERRER_POLICY isa AbstractString ? s.SECURE_REFERRER_POLICY : join(s.SECURE_REFERRER_POLICY, ","))
         s.SECURE_CROSS_ORIGIN_OPENER_POLICY === nothing || hasheader(resp, "Cross-Origin-Opener-Policy") ||

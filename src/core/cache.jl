@@ -638,10 +638,18 @@ function tag_cache(p::Parser, t::Token)
     nodes = first(parse_nodes(p, ["endcache"]))
     CacheNode(parse_filter_expr(bits[2]), strip(bits[3], ['"', '\'']), Any[parse_filter_expr(b) for b in bits[4:end]], nodes)
 end
+"""
+    make_template_fragment_key(name, vary_on = []) -> String
+
+The cache key of a `{% cache ... name vary_on... %}` fragment, to delete it when its data changes
+(Django's): `cache_delete(make_template_fragment_key("sidebar", [user.id]))`.
+"""
+make_template_fragment_key(name, vary_on = []) =
+    "template.cache:" * string(name) * ":" * bytes2hex(sha256(join([string(v) for v in vary_on], ":")))
+
 function render!(io::IO, n::CacheNode, ctx::Context)
     t = eval_fe(n.timeout, ctx)
-    vary = join([string(eval_fe(v, ctx)) for v in n.vary], ":")
-    k = "template.cache:" * n.name * ":" * bytes2hex(sha256(vary))
+    k = make_template_fragment_key(n.name, [eval_fe(v, ctx) for v in n.vary])
     hit = cache_get(k)
     hit === nothing || return write(io, hit)
     s = render_nodes(n.nodes, ctx)

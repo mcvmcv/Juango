@@ -71,7 +71,7 @@ Widget(kind = nothing; attrs = Dict{String,String}(), media = Media(), template_
 option_attrs_html(w, value, label) = w isa Widget && w.option_attrs !== nothing ?
     join([" $(escape_html(string(k)))=\"$(escape_html(string(v)))\"" for (k, v) in sort!(collect(w.option_attrs(value, label)); by = first)]) : ""
 widget_media(w::Widget) = w.media
-widget_kind(w) = w isa Widget ? w.kind : w isa MultiWidget ? :multi : w
+widget_kind(w) = w isa Widget ? w.kind : w isa MultiWidget ? :multi : w isa SelectDateWidget ? :selectdate : w
 widget_attrs(w) = w isa Widget ? join([" $(escape_html(k))=\"$(escape_html(v))\"" for (k, v) in sort!(collect(w.attrs))]) : ""
 
 "The media of a form: its own, then each field's widget's."
@@ -86,11 +86,31 @@ end
 
 # --- multi-value fields -----------------------------------------------------------------------------------
 
-"Renders a multi-value field's parts side by side (optionally with its own media)."
+"Renders a multi-value field's parts side by side (optionally with its own media); `hidden = true` as hidden inputs."
 struct MultiWidget
     media::Media
+    hidden::Bool
 end
-MultiWidget(; media = Media()) = MultiWidget(media)
+MultiWidget(; media = Media(), hidden::Bool = false) = MultiWidget(media, hidden)
+"`SplitDateTimeField(widget = SplitHiddenDateTimeWidget())`: its date and time as hidden inputs (Django's widget)."
+SplitHiddenDateTimeWidget(; media = Media()) = MultiWidget(media, true)
+
+"""
+    SelectDateWidget(; years = this year and the next 9, months = nothing, empty_label = "---")
+
+A `DateField`'s widget of three selects, day, month and year, as Django's (submitted as
+`name_day`, `name_month` and `name_year`). `months` replaces the month names (12 labels).
+"""
+struct SelectDateWidget
+    years::Vector{Int}
+    months::Union{Nothing,Vector{String}}
+    empty_label::String
+    attrs::Dict{String,String}
+end
+SelectDateWidget(; years = Dates.year(Dates.today()):Dates.year(Dates.today()) + 9, months = nothing, empty_label = "---",
+                 attrs = Dict{String,String}()) =
+    SelectDateWidget(collect(Int, years), months === nothing ? nothing : String.(collect(months)), string(empty_label),
+                     Dict{String,String}(string(k) => string(v) for (k, v) in attrs))
 widget_media(w::MultiWidget) = w.media
 
 struct MultiSpec
@@ -157,10 +177,10 @@ function multi_widget_html(bf::BoundField)
     parts = String[]
     for (i, sub) in enumerate(spec.fields)
         name = html_name(f, fld) * "_$(i - 1)"
-        t = widget_kind(sub.widget) === :time ? "time" : input_type(sub)
+        t = fld.widget isa MultiWidget && fld.widget.hidden ? "hidden" : widget_kind(sub.widget) === :time ? "time" : input_type(sub)
         v = vals === nothing || i > length(vals) || vals[i] === nothing ? "" :
             " value=\"" * escape_html(vals[i] isa Date ? string(vals[i]) : display_string(vals[i])) * "\""
-        req = fld.blank ? "" : " required"
+        req = fld.blank || !f.use_required_attribute ? "" : " required"
         push!(parts, "<input type=\"$t\" name=\"$(escape_html(name))\" id=\"$(escape_html(html_id(f, fld) * "_$(i - 1)"))\"$req$v$(widget_attrs(sub.widget))>")
     end
     join(parts, " ")

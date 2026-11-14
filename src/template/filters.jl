@@ -6,6 +6,22 @@ tonum(x) = (s = str(x); something(tryparse(Int, s), tryparse(Float64, s), 0))
 
 const MONTH_ABBR_AP = ["Jan.", "Feb.", "March", "April", "May", "June", "July", "Aug.", "Sept.", "Oct.", "Nov.", "Dec."]
 
+# A date's parts in templates, as Django's attribute lookup on Python's date and datetime:
+# {{ d.year }}, {% url 'day' d.year d.month d.day %}. weekday counts Monday as 0, isoweekday as 1.
+tattr(d::Union{Date,DateTime}, ::Val{:year}) = Dates.year(d)
+tattr(d::Union{Date,DateTime}, ::Val{:month}) = Dates.month(d)
+tattr(d::Union{Date,DateTime}, ::Val{:day}) = Dates.day(d)
+tattr(d::Union{Date,DateTime}, ::Val{:weekday}) = Dates.dayofweek(d) - 1
+tattr(d::Union{Date,DateTime}, ::Val{:isoweekday}) = Dates.dayofweek(d)
+tattr(d::DateTime, ::Val{:hour}) = Dates.hour(d)
+tattr(d::DateTime, ::Val{:minute}) = Dates.minute(d)
+tattr(d::DateTime, ::Val{:second}) = Dates.second(d)
+tattr(d::DateTime, ::Val{:microsecond}) = Dates.millisecond(d) * 1000
+tattr(d::DateTime, ::Val{:date}) = Date(d)
+tattr(t::Dates.Time, ::Val{:hour}) = Dates.hour(t)
+tattr(t::Dates.Time, ::Val{:minute}) = Dates.minute(t)
+tattr(t::Dates.Time, ::Val{:second}) = Dates.second(t)
+
 todatetime(x::DateTime) = x
 todatetime(x::Date) = DateTime(x)
 todatetime(x::Dates.Time) = DateTime(Date(1900, 1, 1), x)      # the `time` filter on a TimeField

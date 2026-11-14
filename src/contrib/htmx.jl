@@ -181,8 +181,7 @@ end
 function append_oob_messages!(req::Request, resp::HttpResponse)
     (200 <= resp.status < 300 && resp.status != 204 && !is_streaming(resp)) || return
     occursin("text/html", something(getheader(resp, "Content-Type"), "")) || return
-    s = req.session
-    (s isa Session && !isempty(get(s, "_messages", Any[]))) || return
+    has_messages(req) || return
     html = render(get_template("juango/htmx_messages.html"), Dict{String,Any}("messages" => get_messages(req)))
     append!(resp.body, codeunits(html))
     nothing

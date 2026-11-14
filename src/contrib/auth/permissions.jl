@@ -39,7 +39,8 @@ function update_permissions!()
         (T <: AutoThrough || !model_in_use(T)) && continue
         m = modelmeta(T)
         ct = get_for_model(T)
-        wanted = [(a * "_" * lowercase(m.name), "Can $a $(m.verbose_name)") for a in DEFAULT_PERMISSIONS]
+        actions = String.(collect(get(m.extra, :default_permissions, DEFAULT_PERMISSIONS)))    # Meta(default_permissions = (...))
+        wanted = [(a * "_" * lowercase(m.name), "Can $a $(m.verbose_name)") for a in actions]
         append!(wanted, [(string(c), string(n)) for (c, n) in get(m.extra, :permissions, [])])
         have = Set(values_list(filter(base_objects(Permission); content_type = ct), :codename; flat = true))
         for (code, name) in wanted
@@ -111,11 +112,11 @@ has_module_perms(::Union{AnonymousUser,Nothing}, app::AbstractString) = false
 Require all of `perms`. Anonymous users are sent to the login page; logged-in users
 without the permissions get 403 Forbidden (or the login page with `raise_exception=false`).
 """
-function permission_required(view, perms::AbstractString...; login_url = nothing, raise_exception = true)
+function permission_required(view, perms::AbstractString...; login_url = nothing, raise_exception = true, redirect_field_name = "next")
     ps = collect(String, perms)
     w = function (req; kw...)
         u = req.user
-        is_authenticated(u) || return redirect_to_login(req, something(login_url, settings.LOGIN_URL))
+        is_authenticated(u) || return redirect_to_login(req, something(login_url, settings.LOGIN_URL); redirect_field_name = redirect_field_name)
         if !has_perms(u, ps)
             raise_exception && throw(PermissionDenied("You don't have permission to do this."))
             return redirect_to_login(req, something(login_url, settings.LOGIN_URL))

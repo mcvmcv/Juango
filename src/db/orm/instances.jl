@@ -172,9 +172,21 @@ Base.@nospecializeinfer function Base.delete!(@nospecialize(obj::Model); db = no
 end
 
 "Reload field values from the database."
-Base.@nospecializeinfer function refresh!(@nospecialize(obj::Model))
+Base.@nospecializeinfer function refresh!(@nospecialize(obj::Model); fields = nothing)
     T = typeof(obj)
     db = instance_db(obj)
+    if fields !== nothing                     # only these fields (Django's refresh_from_db(fields=...))
+        names = Symbol.(collect(fields))
+        atts = [attname(getfield_meta(T, n)) for n in names]
+        row = with_db(() -> only(values(filter(base_objects(T); id = obj.id), String.(atts)...)), db)
+        data = (getfield(obj, :_data)::Dict{Symbol,Any})
+        cache = (getfield(obj, :_cache)::Dict{Symbol,Any})
+        for (n, a) in zip(names, atts)
+            data[a] = row[a]
+            delete!(cache, n)                 # a related object loaded through this field
+        end
+        return obj
+    end
     fresh = with_db(() -> get(base_objects(T); id = obj.id), db)
     merge!((getfield(obj, :_data)::Dict{Symbol,Any}), (getfield(fresh, :_data)::Dict{Symbol,Any}))
     empty!((getfield(obj, :_cache)::Dict{Symbol,Any}))
@@ -195,10 +207,11 @@ Base.@nospecializeinfer function get_or_create(@nospecialize(T::Type{<:Model}); 
 end
 
 "`(obj, created::Bool)` — update the object matching lookups with `defaults`, or create it."
-Base.@nospecializeinfer function update_or_create(@nospecialize(T::Type{<:Model}); defaults = Dict{Symbol,Any}(), kw...)
+Base.@nospecializeinfer function update_or_create(@nospecialize(T::Type{<:Model}); defaults = Dict{Symbol,Any}(), create_defaults = nothing, kw...)
     atomic() do
         o = first(filter(objects(T); kw...))
-        o === nothing && return (create(T; kw..., pairs_of(defaults)...), true)
+        # create_defaults (Django 5.0): what a new object gets instead of defaults
+        o === nothing && return (create(T; kw..., pairs_of(something(create_defaults, defaults))...), true)
         for (k, v) in pairs_of(defaults)
             setproperty!(o, Symbol(k), v)
         end
@@ -248,26 +261,6 @@ end
 "The `step` of a number input for a decimal with `places` digits after the point (\"0.01\")."
 decimal_step(places) = places === nothing ? "any" : places == 0 ? "1" : "0." * "0"^(places - 1) * "1"
 
-"Django's DecimalValidator: too many digits in total, after the point, or before it."
-function decimal_errors(f::Field, v)
-    d = v isa Decimal ? v : something(tryparse(Decimal, string(v)), Some(nothing))
-    d === nothing && return [gettext("Enter a number.")]
-    digits, decimals = decimal_digits(d)
-    md, dp = f.max_digits, f.decimal_places
-    if md !== nothing && digits > md
-        return [interpolate(ngettext("Ensure that there are no more than %(max)s digit in total.",
-                                     "Ensure that there are no more than %(max)s digits in total.", md), Dict("max" => md))]
-    elseif dp !== nothing && decimals > dp
-        return [interpolate(ngettext("Ensure that there are no more than %(max)s decimal place.",
-                                     "Ensure that there are no more than %(max)s decimal places.", dp), Dict("max" => dp))]
-    elseif md !== nothing && dp !== nothing && digits - decimals > md - dp
-        return [interpolate(ngettext("Ensure that there are no more than %(max)s digit before the decimal point.",
-                                     "Ensure that there are no more than %(max)s digits before the decimal point.", md - dp),
-                            Dict("max" => md - dp))]
-    end
-    String[]
-end
-
 """
 Run per-field validation on a cleaned (typed) value; returns a vector of messages.
 Validators are functions `v -> true/nothing` (ok) or an error message `String` / `false`.
@@ -276,52 +269,59 @@ function validate_field(f::Field, v)
     errs = String[]
     isempty_val = v === nothing || (v isa AbstractString && isempty(v))
     if isempty_val
-        (!f.blank && f.kind !== :bool) && push!(errs, gettext("This field is required."))
+        (!f.blank && f.kind !== :bool) && push!(errs, field_message(f, "required", gettext("This field is required.")))
         return errs
     end
     if f.kind === :ipaddress
         r = clean_ip(string(v), f.related.protocol, f.related.unpack_ipv4)
-        r isa Tuple && return [r[1]]
+        r isa Tuple && return [field_message(f, "invalid", r[1])]
     end
     if f.kind === :binary && f.max_length !== nothing && v isa AbstractVector{UInt8} && length(v) > f.max_length
-        push!(errs, interpolate(gettext("Ensure this value has at most %(max)d bytes (it has %(len)d)."), Dict("max" => f.max_length, "len" => length(v))))
+        push!(errs, field_message(f, "max_length", gettext("Ensure this value has at most %(max)d bytes (it has %(len)d)."),
+                                  Dict("max" => f.max_length, "len" => length(v), "limit_value" => f.max_length, "show_value" => length(v))))
     end
     if f.max_length !== nothing && v isa AbstractString && f.kind !== :ipaddress && length(v) > f.max_length
-        push!(errs, interpolate(gettext("Ensure this value has at most %(max)d characters (it has %(len)d)."), Dict("max" => f.max_length, "len" => length(v))))
+        push!(errs, field_message(f, "max_length", gettext("Ensure this value has at most %(max)d characters (it has %(len)d)."),
+                                  Dict("max" => f.max_length, "len" => length(v), "limit_value" => f.max_length, "show_value" => length(v))))
     end
-    f.kind === :email && !occursin(EMAIL_RE, string(v)) && push!(errs, gettext("Enter a valid email address."))
-    f.kind === :slug && !occursin(SLUG_RE, string(v)) && push!(errs, gettext("Enter a valid “slug” consisting of letters, numbers, underscores or hyphens."))
-    f.kind === :url && !occursin(URL_RE, string(v)) && push!(errs, gettext("Enter a valid URL."))
-    f.kind === :decimal && append!(errs, decimal_errors(f, v))
+    f.kind === :email && !occursin(EMAIL_RE, string(v)) && push!(errs, field_message(f, "invalid", gettext("Enter a valid email address.")))
+    f.kind === :slug && !occursin(SLUG_RE, string(v)) &&
+        push!(errs, field_message(f, "invalid", gettext("Enter a valid “slug” consisting of letters, numbers, underscores or hyphens.")))
+    f.kind === :url && !occursin(URL_RE, string(v)) && push!(errs, field_message(f, "invalid", gettext("Enter a valid URL.")))
+    if f.kind === :decimal
+        r = validation_error(DecimalValidator(f.max_digits, f.decimal_places), v)
+        r === nothing || push!(errs, field_message(f, r[1], r[2]))
+    end
     if f.kind in INT_KINDS && v isa Integer
         lo, hi = INT_RANGES[f.kind]
-        v < lo && push!(errs, interpolate(gettext("Ensure this value is greater than or equal to %(limit_value)s."), Dict("limit_value" => lo)))
-        v > hi && push!(errs, interpolate(gettext("Ensure this value is less than or equal to %(limit_value)s."), Dict("limit_value" => hi)))
+        v < lo && push!(errs, field_message(f, "min_value", gettext("Ensure this value is greater than or equal to %(limit_value)s."), Dict("limit_value" => lo)))
+        v > hi && push!(errs, field_message(f, "max_value", gettext("Ensure this value is less than or equal to %(limit_value)s."), Dict("limit_value" => hi)))
     end
     cs = field_choices(f)
     if cs !== nothing && !any(c -> value_eq(c.first, v) || string(c.first) == string(v), cs)
-        push!(errs, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v)))
+        push!(errs, field_message(f, "invalid_choice", gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v)))
     end
-    for val in f.validators
-        r = val(v)
-        r isa AbstractString && push!(errs, r)
-        r === false && push!(errs, gettext("Enter a valid value."))
-    end
+    append!(errs, validator_errors(f, v))
     errs
 end
 
 """
-    ValidationError(msg)
+    ValidationError(msg; code = nothing, params = nothing)
     ValidationError([msg, ...])
     ValidationError(Dict(:field => ["msg", ...], ...))
 
 Raised by validation hooks such as a model's `Juango.clean` (and accepted from form `clean`
 functions). A message on its own belongs to the whole object (`:__all__`); a Dict names fields.
+From a validator, `code` lets a field's `error_messages` replace the message, and `params` fill
+in its `%(name)s` placeholders.
 """
 struct ValidationError <: Exception
     errors::Dict{Symbol,Vector{String}}
+    code::Union{Nothing,String}       # for one message: a field's error_messages can replace it by this code
 end
-ValidationError(msg::AbstractString) = ValidationError(Dict(:__all__ => [String(msg)]))
+ValidationError(errors::Dict{Symbol,Vector{String}}) = ValidationError(errors, nothing)
+ValidationError(msg::AbstractString; code = nothing, params = nothing) =
+    ValidationError(Dict(:__all__ => [params === nothing ? String(msg) : interpolate(msg, params)]), code === nothing ? nothing : string(code))
 ValidationError(msgs::AbstractVector) = ValidationError(Dict(:__all__ => String[string(m) for m in msgs]))
 ValidationError(d::AbstractDict) =
     ValidationError(Dict{Symbol,Vector{String}}(Symbol(k) => (v isa AbstractString ? [String(v)] : String[string(x) for x in v]) for (k, v) in d))

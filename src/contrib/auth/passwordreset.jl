@@ -51,12 +51,30 @@ password_problems(p; user = nothing) = validate_password(p; user = user)
 
 "Run the password validators on a valid set-password form's new password, for `user`. Returns whether it passed."
 function check_new_password!(form::Form, user)
-    p = get(form.cleaned_data, :new_password1, nothing)
+    admin = form.name == "AdminPasswordChangeForm"
+    p = get(form.cleaned_data, admin ? :password1 : :new_password1, nothing)
     p === nothing && return false
     for msg in validate_password(p; user = user)
-        add_error!(form, :new_password2, msg)
+        add_error!(form, admin ? :password2 : :new_password2, msg)
     end
     isempty(form.errors)
+end
+
+"""
+    AdminPasswordChangeForm(data = nothing)
+
+An administrator setting someone's password (Django's): `password1` and `password2`, which must
+match and pass AUTH_PASSWORD_VALIDATORS (`check_new_password!(form, user)` runs those).
+Then `set_password!(user, form.cleaned_data[:password1]); save!(user)`.
+"""
+@form AdminPasswordChangeForm begin
+    password1 = CharField(widget = :password, max_length = 4096, label = "Password")
+    password2 = CharField(widget = :password, max_length = 4096, label = "Password (again)")
+end
+function clean_form(f::Form, ::Val{:AdminPasswordChangeForm})
+    p1, p2 = get(f.cleaned_data, :password1, nothing), get(f.cleaned_data, :password2, nothing)
+    (p1 === nothing || p2 === nothing) && return
+    p1 == p2 || return add_error!(f, :password2, gettext("The two password fields didn’t match."))
 end
 
 @form PasswordChangeForm begin

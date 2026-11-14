@@ -237,6 +237,7 @@ Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields:
                    modelmeta(x).name == name && parentmodule(x) == parentmodule(T)), MODEL_LIST)
     push!(MODEL_LIST, T)
     invalidate_relations!()
+    any_receivers(class_prepared) && send(class_prepared, T)
     for f in m2m
         f.through === nothing && (f.through = make_through_model(T, m, f))
     end
@@ -321,7 +322,21 @@ end
 
 "Name of a foreign key's reverse relation (`post_set` or its `related_name`)."
 reverse_name(fk::Field) = fk.related_name !== nothing ? fk.related_name :
-    fk.one_to_one ? Symbol(lowercase(modelmeta(fk.model).name)) : Symbol(lowercase(modelmeta(fk.model).name), :_set)
+    something(default_related_name(fk.model),
+              fk.one_to_one ? Symbol(lowercase(modelmeta(fk.model).name)) : Symbol(lowercase(modelmeta(fk.model).name), :_set))
+
+"""
+The model's `Meta(default_related_name = "...")`, the reverse name of its relations that don't name
+one (Django's), with `%(class)s` and `%(app_label)s` filled in; `nothing` without it.
+"""
+Base.@nospecializeinfer function default_related_name(@nospecialize(M))
+    M isa Type || return nothing
+    m = modelmeta_or_nothing(M)
+    m === nothing && return nothing
+    d = get(m.extra, :default_related_name, nothing)
+    d === nothing && return nothing
+    Symbol(replace(string(d), "%(class)s" => lowercase(m.name), "%(app_label)s" => lowercase(m.app)))
+end
 
 "Many-to-many relations reachable from `T`: (name, field, forward::Bool)."
 Base.@nospecializeinfer m2m_relations(@nospecialize(T::Type)) = cached_relations(compute_m2m_relations, :m2m, T)
@@ -333,7 +348,7 @@ Base.@nospecializeinfer function compute_m2m_relations(@nospecialize(T::Type))
     for M in MODEL_LIST, f in modelmeta(M).m2m
         model_in_use(M) || continue
         related_model(f) === T || continue
-        push!(out, (f.related_name === nothing ? Symbol(lowercase(modelmeta(M).name), :_set) : f.related_name, f, false))
+        push!(out, (f.related_name === nothing ? something(default_related_name(M), Symbol(lowercase(modelmeta(M).name), :_set)) : f.related_name, f, false))
     end
     out
 end
@@ -352,7 +367,7 @@ Base.@nospecializeinfer function find_m2m_query(@nospecialize(T::Type), name)
     for r in m2m_relations(T)
         f = r[2]
         q = r[3] ? string(r[1]) :
-            string(something(f.related_query_name, f.related_name, Symbol(lowercase(modelmeta(f.model).name))))
+            string(something(f.related_query_name, f.related_name, default_related_name(f.model), Symbol(lowercase(modelmeta(f.model).name))))
         (q == name || string(r[1]) == name) && return r
     end
     nothing
@@ -412,6 +427,7 @@ function default_value(f::Field)
 end
 
 Base.@nospecializeinfer function construct(@nospecialize(T::Type{<:Model}); kwargs...)
+    any_receivers(pre_init) && send(pre_init, T; kwargs = Dict{Symbol,Any}(kwargs))
     meta = modelmeta(T)
     obj = T(Dict{Symbol,Any}(:id => nothing), Dict{Symbol,Any}())
     data = (getfield(obj, :_data)::Dict{Symbol,Any})
@@ -437,6 +453,7 @@ Base.@nospecializeinfer function construct(@nospecialize(T::Type{<:Model}); kwar
         tattr!(obj, Val(k), kw[k]) === NOTFOUND || delete!(kw, k)
     end
     isempty(kw) || throw(ArgumentError("$T got unexpected field(s): $(join(keys(kw), ", "))"))
+    any_receivers(post_init) && send(post_init, T; instance = obj)
     obj
 end
 

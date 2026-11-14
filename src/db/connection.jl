@@ -558,8 +558,20 @@ function checkout(b::DatabaseBackend)
         end
         if create
             try
-                return PooledConnection(open_connection(b), time(), time())
+                pc = PooledConnection(open_connection(b), time(), time())
+                if any_receivers(connection_created)       # receivers' execute() runs on this new connection
+                    tdb = task_db()
+                    saved = tdb.conn
+                    tdb.conn = pc
+                    try
+                        send(connection_created, b; connection = pc.conn, alias = current_alias())
+                    finally
+                        tdb.conn = saved
+                    end
+                end
+                return pc
             catch
+                pc === nothing || (try close_connection(b, pc.conn) catch end)    # a receiver failed
                 lock(() -> (p.total -= 1; notify(p.freed)), p.lock)
                 rethrow()
             end
@@ -647,7 +659,10 @@ function connection()
     st = db_state()
     lock(DB_LOCK) do
         supports_pooling(st.backend) && error("connection() is for single-connection backends; pooled backends lend connections per statement")
-        st.conn === nothing && (st.conn = open_connection(st.backend))
+        if st.conn === nothing
+            st.conn = open_connection(st.backend)
+            any_receivers(connection_created) && send(connection_created, st.backend; connection = st.conn, alias = current_alias())
+        end
         st.conn
     end
 end
@@ -665,7 +680,33 @@ function count_queries(f)
     r, QUERY_COUNT[] - n0
 end
 
+"""
+    execute_wrapper(wrapper) do ... end
+
+Call `wrapper(execute, sql, params, context)` around every SQL statement the block runs on this
+task (and the tasks it starts with `run_async`), as Django's `connection.execute_wrapper`.
+`execute(sql, params)` runs it (the wrapper may change them, time it, retry, or not run it and
+throw); `context` has `:alias` and `:backend`. Wrappers nest, the outer one outermost.
+
+    blocker(execute, sql, params, context) = error("no queries in templates")
+    execute_wrapper(blocker) do
+        render_to_string("page.html", ctx)
+    end
+"""
+function execute_wrapper(f, wrapper)
+    tls = task_local_storage()
+    old = get(tls, :juango_execute_wrappers, nothing)
+    tls[:juango_execute_wrappers] = old === nothing ? Any[wrapper] : vcat(old, Any[wrapper])
+    try
+        f()
+    finally
+        old === nothing ? delete!(tls, :juango_execute_wrappers) : (tls[:juango_execute_wrappers] = old)
+    end
+end
+
 Base.@nospecializeinfer function run_on(@nospecialize(f), b, conn, sql, @nospecialize(params))
+    ws = get(task_local_storage(), :juango_execute_wrappers, nothing)
+    ws === nothing || return run_wrapped(f, b, conn, sql, params, ws, 1)
     Threads.atomic_add!(QUERY_COUNT, 1)
     settings.SQL_DEBUG && @info "SQL" sql params
     ps = Any[adapt_param(b, p) for p in params]
@@ -682,6 +723,24 @@ Base.@nospecializeinfer function run_on(@nospecialize(f), b, conn, sql, @nospeci
         e2 = translate_error(b, e)
         rec === nothing || record_query!(rec, sql, params, time() - t0, sprint(showerror, e2))
         e2 === e ? rethrow() : throw(e2)
+    end
+end
+
+Base.@nospecializeinfer function run_wrapped(@nospecialize(f), b, conn, sql, @nospecialize(params), ws, i::Int)
+    inner = if i == length(ws)
+        (s, p) -> with_execute_wrappers_off(() -> run_on(f, b, conn, s, p))
+    else
+        (s, p) -> run_wrapped(f, b, conn, s, p, ws, i + 1)
+    end
+    ws[i](inner, sql, params, Dict{Symbol,Any}(:alias => current_alias(), :backend => b))
+end
+function with_execute_wrappers_off(g)
+    tls = task_local_storage()
+    ws = pop!(tls, :juango_execute_wrappers, nothing)
+    try
+        g()
+    finally
+        ws === nothing || (tls[:juango_execute_wrappers] = ws)
     end
 end
 
@@ -726,17 +785,23 @@ connection for the current task; other tasks don't see its changes until it comm
     atomic() do
         save!(order); save!(invoice)
     end
+
+`durable = true` refuses to run inside another atomic block (Django 3.2), so when it returns
+the work is committed, not just part of an outer transaction that may still roll back. (The
+transactions `rollback_after` opens for tests don't count.)
 """
-function atomic(f; db = nothing)
-    db === nothing || return with_db(() -> atomic(f), db)
+function atomic(f; db = nothing, durable::Bool = false)
+    db === nothing || return with_db(() -> atomic(f; durable = durable), db)
     st0 = db_state()
     b = st0.backend
-    supports_pooling(b) || return lock(DB_LOCK) do
+    supports_pooling(b) || return lock(DB_LOCK) do         # (the depth is shared: check it holding the lock)
+        durable && check_durable(st0.depth)
         r = transaction(f, b, st0)
         st0.depth == 0 && run_commit_hooks!(st0)
         r
     end
     st = task_db()
+    durable && check_durable(st.depth)
     outer = st.depth == 0
     outer && (st.conn = checkout(b))
     r = try
@@ -753,6 +818,9 @@ function atomic(f; db = nothing)
     r
 end
 
+check_durable(depth::Int) = depth > get(task_local_storage(), :juango_test_atomic_depth, 0)::Int &&
+    throw(TransactionManagementError("A durable atomic block cannot be nested within another atomic block."))
+
 # `h` is the DatabaseState (non-pooled) or TaskDB (pooled) holding the depth and hooks.
 Base.@nospecializeinfer function transaction(@nospecialize(f), b, h::Union{DatabaseState,TaskDB})
     depth = h.depth
@@ -762,9 +830,16 @@ Base.@nospecializeinfer function transaction(@nospecialize(f), b, h::Union{Datab
     try
         r = f()
         h.depth = depth
-        execute(depth == 0 ? commit_sql(b) : release_savepoint_sql(b, sp))
+        if take_rollback_mark!(depth + 1)                  # set_rollback!(true): undo without an exception
+            filter!(k -> k.level <= depth, h.hooks)
+            execute(depth == 0 ? rollback_sql(b) : rollback_savepoint_sql(b, sp))
+            depth == 0 || execute(release_savepoint_sql(b, sp))
+        else
+            execute(depth == 0 ? commit_sql(b) : release_savepoint_sql(b, sp))
+        end
         r
     catch
+        take_rollback_mark!(depth + 1)
         h.depth = depth
         filter!(k -> k.level <= depth, h.hooks)            # callbacks of the rolled-back block
         try
@@ -777,6 +852,75 @@ Base.@nospecializeinfer function transaction(@nospecialize(f), b, h::Union{Datab
 end
 
 commit_holder() = supports_pooling(backend()) ? task_db() : db_state()
+
+# set_rollback!: the atomic levels (per database) marked to roll back when they end
+rollback_marks() = get!(() -> Dict{String,Set{Int}}(), task_local_storage(), :juango_rollback_marks)::Dict{String,Set{Int}}
+function take_rollback_mark!(level::Int)
+    marks = get(task_local_storage(), :juango_rollback_marks, nothing)
+    marks === nothing && return false
+    s = get(marks, current_alias(), nothing)
+    s === nothing ? false : level in s ? (delete!(s, level); true) : false
+end
+
+"""
+    set_rollback!(flag = true; db = nothing)    get_rollback(; db = nothing) -> Bool
+
+Mark the innermost atomic block to roll back when it ends, without raising (Django's
+`transaction.set_rollback`): for a view that catches an error and still returns a response.
+`set_rollback!(false)` takes the mark off. Outside an atomic block it's an error.
+"""
+function set_rollback!(flag::Bool = true; db = nothing)
+    db === nothing || return with_db(() -> set_rollback!(flag), db)
+    d = commit_holder().depth
+    d == 0 && throw(TransactionManagementError("The rollback flag doesn't work outside of an atomic block."))
+    s = get!(() -> Set{Int}(), rollback_marks(), current_alias())
+    flag ? push!(s, d) : delete!(s, d)
+    nothing
+end
+function get_rollback(; db = nothing)
+    db === nothing || return with_db(() -> get_rollback(), db)
+    d = commit_holder().depth
+    d == 0 && throw(TransactionManagementError("The rollback flag doesn't work outside of an atomic block."))
+    marks = get(task_local_storage(), :juango_rollback_marks, nothing)
+    marks !== nothing && d in get(marks, current_alias(), Set{Int}())
+end
+
+"Whether statements commit on their own (outside atomic blocks, which is always the case in Juango)."
+get_autocommit(; db = nothing) = db === nothing ? commit_holder().depth == 0 : with_db(() -> get_autocommit(), db)
+
+"""
+    sid = savepoint()    savepoint_commit(sid)    savepoint_rollback(sid)
+
+Django's explicit savepoints, inside an atomic block: `savepoint_rollback` undoes what was done
+since `savepoint()` (and drops the `on_commit` callbacks registered since), `savepoint_commit`
+keeps it. Nested `atomic()` blocks are usually simpler.
+"""
+function savepoint(; db = nothing)
+    db === nothing || return with_db(() -> savepoint(), db)
+    h = commit_holder()
+    h.depth == 0 && throw(TransactionManagementError("savepoint() needs an atomic block"))
+    n = (get(task_local_storage(), :juango_savepoint_n, 0)::Int) + 1
+    task_local_storage(:juango_savepoint_n, n)
+    sid = "juango_usp_$n"
+    execute(savepoint_sql(backend(), sid))
+    get!(() -> Dict{String,Int}(), task_local_storage(), :juango_savepoint_hooks)[sid] = length(h.hooks)
+    sid
+end
+function savepoint_commit(sid::AbstractString; db = nothing)
+    db === nothing || return with_db(() -> savepoint_commit(sid), db)
+    execute(release_savepoint_sql(backend(), sid))
+    delete!(get(task_local_storage(), :juango_savepoint_hooks, Dict{String,Int}()), sid)
+    nothing
+end
+function savepoint_rollback(sid::AbstractString; db = nothing)
+    db === nothing || return with_db(() -> savepoint_rollback(sid), db)
+    b = backend()
+    execute(rollback_savepoint_sql(b, sid))
+    execute(release_savepoint_sql(b, sid))
+    n = pop!(get(task_local_storage(), :juango_savepoint_hooks, Dict{String,Int}()), sid, nothing)
+    n === nothing || (h = commit_holder(); length(h.hooks) > n && resize!(h.hooks, n))
+    nothing
+end
 
 function run_commit_hooks!(h)
     isempty(h.hooks) && return nothing

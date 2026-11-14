@@ -68,6 +68,8 @@ function ValueRange(lo, hi; bounds = "[)")
     T = lo === nothing ? typeof(hi) : typeof(lo)
     ValueRange{T}(canonical(lo, hi, bounds)...)
 end
+# Django's window frame class has this name too: with keywords only, it's a RANGE frame (see RowRange)
+ValueRange(; start = nothing, stop = nothing, exclusion = nothing) = WindowFrame("RANGE", start, stop, exclusion)
 step_of(x::Integer) = 1
 step_of(x::Date) = Day(1)
 step_of(x) = nothing

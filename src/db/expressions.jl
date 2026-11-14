@@ -77,6 +77,13 @@ Upper(x) = Func(:upper, [ref(x)])
 Length(x) = Func(:length, [ref(x)])
 "The first argument that is not NULL."
 Coalesce(xs...) = Func(:coalesce, Any[ref(x) for x in xs])
+"""
+    JSONObject(; name = :name, total = F(:price) * 2, ...)
+
+A JSON object built in the database (Django 3.2), which comes back as a Dict: the keys are the
+keyword names, the values expressions (a field name, `F(...)`, a function, ...).
+"""
+JSONObject(; kw...) = Func(:jsonobject, Any[x for (k, v) in kw for x in (string(k), ref(v))])
 "Join values as text (NULL counts as empty)."
 Concat(xs...) = Func(:concat, Any[ref(x) for x in xs])
 "Convert to a field kind: `Cast(:views, :float)`, `Cast(:n, :string)`."
@@ -184,6 +191,51 @@ Rank() = WindowFunc("RANK", Any[])
 DenseRank() = WindowFunc("DENSE_RANK", Any[])
 Lag(x, offset::Integer = 1) = WindowFunc("LAG", Any[ref(x), Value(offset)])
 Lead(x, offset::Integer = 1) = WindowFunc("LEAD", Any[ref(x), Value(offset)])
+"The value of `x` in the first row of the window frame."
+FirstValue(x) = WindowFunc("FIRST_VALUE", Any[ref(x)])
+"The value of `x` in the last row of the window frame (give the Window a frame to the end: `frame = RowRange()`)."
+LastValue(x) = WindowFunc("LAST_VALUE", Any[ref(x)])
+"The value of `x` in the `n`th row of the window frame (1-based)."
+NthValue(x, n::Integer = 1) = (n >= 1 || throw(ArgumentError("NthValue: n must be at least 1")); WindowFunc("NTH_VALUE", Any[ref(x), Value(n)]))
+"Which of `n` roughly equal buckets the row is in (1 to n)."
+Ntile(n::Integer = 1) = (n >= 1 || throw(ArgumentError("Ntile: n must be at least 1")); WindowFunc("NTILE", Any[Value(n)]))
+"The row's relative rank, from 0 to 1: (rank - 1) / (rows - 1)."
+PercentRank() = WindowFunc("PERCENT_RANK", Any[])
+"The fraction of rows up to and including the row's peers, from 0 to 1."
+CumeDist() = WindowFunc("CUME_DIST", Any[])
+
+"""
+    RowRange(; start = nothing, stop = nothing, exclusion = nothing)
+    ValueRange(; start = nothing, stop = nothing, exclusion = nothing)
+
+A window frame, as Django's: `Window(Sum(:amount); order_by = ["day"], frame = RowRange(start = -2, stop = 0))`
+is a sum over the row and the two before it (`ROWS BETWEEN 2 PRECEDING AND CURRENT ROW`).
+`ValueRange` (`RANGE`) counts in the ordering's values instead of rows. `start`/`stop`: `nothing`
+is unbounded, 0 the current row, a negative number rows (or values) before, a positive number after.
+`exclusion` (PostgreSQL and SQLite): `:current_row`, `:group`, `:ties` or `:no_others`.
+"""
+struct WindowFrame
+    kind::String                      # "ROWS" or "RANGE"
+    start::Union{Nothing,Int}
+    stop::Union{Nothing,Int}
+    exclusion::Union{Nothing,Symbol}
+    function WindowFrame(kind, start, stop, exclusion)
+        exclusion === nothing || exclusion in (:current_row, :group, :ties, :no_others) ||
+            throw(ArgumentError("exclusion must be :current_row, :group, :ties or :no_others"))
+        start !== nothing && stop !== nothing && start > stop && throw(ArgumentError("a window frame's start must not be after its stop"))
+        new(string(kind), start, stop, exclusion)
+    end
+end
+RowRange(; start = nothing, stop = nothing, exclusion = nothing) = WindowFrame("ROWS", start, stop, exclusion)
+frame_bound(n, unbounded) = n === nothing ? "UNBOUNDED $unbounded" : n == 0 ? "CURRENT ROW" : n < 0 ? "$(-n) PRECEDING" : "$n FOLLOWING"
+function frame_sql(b::DatabaseBackend, f::WindowFrame)
+    s = "$(f.kind) BETWEEN $(frame_bound(f.start, "PRECEDING")) AND $(frame_bound(f.stop, "FOLLOWING"))"
+    if f.exclusion !== nothing
+        b isa MySQLBackend && throw(ArgumentError("MySQL and MariaDB don't support window frame exclusion"))
+        s *= " EXCLUDE " * uppercase(replace(string(f.exclusion), "_" => " "))
+    end
+    s
+end
 
 """
     Window(expr; partition_by=[], order_by=[])
@@ -195,9 +247,10 @@ struct Window <: Expression
     expr::Expression
     partition_by::Vector{Any}
     order_by::Vector{Any}            # "field" / "-field" strings and OrderBy terms
+    frame::Union{Nothing,WindowFrame}
 end
-Window(expr; partition_by = [], order_by = []) =
-    Window(expr, Any[ref(p) for p in partition_by], Any[order_item(o) for o in order_by])
+Window(expr; partition_by = [], order_by = [], frame = nothing) =
+    Window(expr, Any[ref(p) for p in partition_by], Any[order_item(o) for o in order_by], frame)
 
 """
     Asc(expr; nulls_first = false, nulls_last = false)
@@ -417,6 +470,11 @@ function compile_expr(c::SQLCompiler, e::Func)
     n === :upper && return "UPPER($(sqls[1]))", ps
     n === :length && return "$(length_function(b))($(sqls[1]))", ps
     n === :coalesce && return "COALESCE($(join(sqls, ", ")))", ps
+    if n === :jsonobject                               # keys are literals (PostgreSQL can't type a parameter here)
+        keys_ = [sql_string_literal(b, string(e.args[i])) for i in 1:2:length(e.args)]
+        items = join([k * ", " * v for (k, v) in zip(keys_, sqls)], ", ")
+        return (b isa PostgresBackend ? "JSON_BUILD_OBJECT(" : "JSON_OBJECT(") * items * ")", ps
+    end
     n === :concat && return "(" * join(["COALESCE(CAST($s AS $(cast_type(b, :text))), '')" for s in sqls], " || ") * ")", ps
     n === :cast && return "CAST($(sqls[1]) AS $(cast_type(b, e.args[2] === :string ? :text : e.args[2])))", ps
     n === :now && return "?", Any[timezone_now()]     # Julia's clock and local time, like the DateTimes Juango stores
@@ -547,6 +605,7 @@ function compile_expr(c::SQLCompiler, e::Window)
         end
         push!(over, "ORDER BY " * join(os, ", "))
     end
+    e.frame === nothing || push!(over, frame_sql(backend(), e.frame))
     "$sql OVER ($(join(over, " ")))", ps
 end
 
@@ -630,17 +689,72 @@ Base.@nospecializeinfer decimal_source(@nospecialize(T), e::Aggregate) = e.func 
 Base.@nospecializeinfer decimal_source(@nospecialize(T), e::CombinedExpression) = something(decimal_source(T, e.lhs), decimal_source(T, e.rhs), Some(nothing))
 
 """
-A computed value (annotation or aggregate) as Julia sees it: Decimals for expressions over a
-DecimalField (rounded to its places, except for averages and arithmetic), other non-integer
+    output_field(T, e) -> Field or nothing
+
+The field an expression's values have the type of, as Django's `output_field`: a field reference
+(through annotations too), `Max`/`Min` of one, `Coalesce`/`Greatest`/`Least`/`NullIf` (their first
+argument with a field), and a `Subquery` selecting one value (the selected field, in the
+subquery's model). `nothing` for anything else (counts, sums and arithmetic have their own rules).
+"""
+Base.@nospecializeinfer output_field(@nospecialize(T), @nospecialize(e)) = nothing
+Base.@nospecializeinfer function output_field(@nospecialize(T), e::F)
+    name = e.name
+    try
+        f = last(resolve_path(SQLCompiler(T), modelmeta(T).table, T, name))
+        f isa Field ? f : nothing
+    catch
+        nothing
+    end
+end
+Base.@nospecializeinfer output_field(@nospecialize(T), e::Aggregate) =
+    e.func in ("MIN", "MAX") && e.arg !== nothing ? output_field(T, e.arg) : nothing
+Base.@nospecializeinfer function output_field(@nospecialize(T), e::Func)
+    e.name in (:coalesce, :greatest, :least, :nullif) || return nothing
+    for a in e.args
+        f = output_field(T, a)
+        f === nothing || return f
+    end
+    nothing
+end
+Base.@nospecializeinfer output_field(@nospecialize(T), e::WindowFunc) =
+    e.name in ("FIRST_VALUE", "LAST_VALUE", "NTH_VALUE", "LAG", "LEAD") ? output_field(T, e.args[1]) : nothing
+Base.@nospecializeinfer output_field(@nospecialize(T), e::Window) = output_field(T, e.expr)
+Base.@nospecializeinfer function output_field(@nospecialize(T), e::Subquery)
+    qs = e.qs
+    qs isa QuerySet && qs.values_fields !== nothing && length(qs.values_fields) == 1 || return nothing
+    M = model_of(qs)
+    name = Symbol(qs.values_fields[1])
+    for (k, a) in qs.annotations                     # values() of one of the subquery's annotations
+        k === name && return output_field(M, a)
+    end
+    output_field(M, F(string(name)))
+end
+
+"Field kinds a computed value is converted to through its `output_field` (the text and numbers some backends give back)."
+const TYPED_OUTPUT_KINDS = (:date, :datetime, :time, :uuid, :bool, :duration)
+
+"""
+A computed value (annotation or aggregate) as Julia sees it: through its `output_field` for
+dates, times, UUIDs and booleans (SQLite gives text and integers), Decimals for expressions over
+a DecimalField (rounded to its places, except for averages and arithmetic), other non-integer
 numbers as Float64.
 """
-Base.@nospecializeinfer function expr_value(@nospecialize(T), e, v)
+Base.@nospecializeinfer expr_value(@nospecialize(T), e, v) = expr_value(T, e, v, typed_output(T, e))
+"The output field to convert an expression's values through (`expr_value`), or nothing: work it out once per query."
+Base.@nospecializeinfer function typed_output(@nospecialize(T), @nospecialize(e))
+    e isa Union{F,Aggregate,Func,Subquery,Window,WindowFunc} || return nothing
+    of = output_field(T, e)
+    of !== nothing && of.kind in TYPED_OUTPUT_KINDS ? of : nothing
+end
+Base.@nospecializeinfer function expr_value(@nospecialize(T), e, v, of::Union{Nothing,Field})
     v === nothing && return nothing
     e isa Exists && return v isa Bool ? v : v != 0          # SQLite and MySQL give 0/1
     if e isa Aggregate
         e.func == "ARRAY_AGG" && return v isa AbstractString ? JSON.parse(v) : v
         e.func in ("BOOL_AND", "BOOL_OR") && return v isa Bool ? v : v != 0
     end
+    of === nothing || return from_db(of, v)
+    e isa Func && e.name === :jsonobject && return v isa AbstractString ? JSON.parse(v) : v
     if e isa Union{CombinedExpression,Aggregate} || (e isa Func && e.name === :trunc)
         k = try temporal_kind(SQLCompiler(T), e) catch; nothing end
         k === :duration && return to_duration(v)

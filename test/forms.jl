@@ -312,3 +312,168 @@ end
                    formfield_callback = f -> f.name === :body ? nothing : (f.help_text = "from the callback"; f))
     @test [x.name for x in cb.fields] == [:title, :status] && all(x -> x.help_text == "from the callback", cb.fields)
 end
+
+@testset "validators and error_messages (#144)" begin
+    # the validators, on their own
+    @test RegexValidator(r"^[A-Z]{2}\d+$")("AB12") === nothing && RegexValidator(r"^[A-Z]{2}\d+$")("ab") == "Enter a valid value."
+    @test RegexValidator("x"; inverse_match = true, message = "no x")("axb") == "no x"
+    @test validate_email("a.b+c@example.org") === nothing && validate_email("a@b") !== nothing && validate_email("x@localhost") === nothing
+    @test validate_email("a..b@example.org") !== nothing && validate_email("no at sign") !== nothing
+    @test URLValidator()("https://example.com:8000/p?q=1#f") === nothing && URLValidator()("http://localhost/") === nothing
+    @test URLValidator()("ftp://10.0.0.1/x") === nothing && URLValidator()("javascript:alert(1)") !== nothing
+    @test URLValidator(schemes = ["https"])("http://example.com") !== nothing && URLValidator()("http://exa mple.com") !== nothing
+    @test MinValueValidator(1)(0) == "Ensure this value is greater than or equal to 1." && MinValueValidator(1)(1) === nothing
+    @test MaxValueValidator(10)(11) !== nothing && MinLengthValidator(3)("ab") == "Ensure this value has at least 3 characters (it has 2)."
+    @test MaxLengthValidator(2)("abc") == "Ensure this value has at most 2 characters (it has 3)."
+    @test StepValueValidator(5)(10) === nothing && StepValueValidator(5)(7) == "Ensure this value is a multiple of step size 5."
+    @test StepValueValidator(0.1)(0.3) === nothing && StepValueValidator(3; offset = 1)(4) === nothing && StepValueValidator(3; offset = 1)(5) !== nothing
+    @test Juango.validation_error(DecimalValidator(5, 2), Juango.Decimal("1234.5"))[1] == "max_whole_digits"
+    @test Juango.validation_error(DecimalValidator(5, 2), Juango.Decimal("1.234"))[1] == "max_decimal_places"
+    @test ProhibitNullCharactersValidator()("a\0b") == "Null characters are not allowed."
+    @test validate_slug("ok-slug_1") === nothing && validate_slug("not ok") !== nothing && validate_unicode_slug("café") === nothing
+    @test validate_ipv4_address("10.1.2.3") === nothing && validate_ipv4_address("::1") !== nothing && validate_ipv46_address("::1") === nothing
+    @test validate_comma_separated_integer_list("1,22,3") === nothing && validate_comma_separated_integer_list("1,-2") !== nothing
+    @test int_list_validator(sep = ";", allow_negative = true)("1;-2") === nothing
+
+    # on form fields: limits as options, messages by code
+    F(data) = (f = Form([:qty => IntegerField(min_value = 1, max_value = 10, step_size = 3,
+                                              error_messages = Dict("min_value" => "At least %(limit_value)s, please.", "invalid" => "Digits only.")),
+                         :code => CharField(max_length = 5, min_length = 2, validators = [RegexValidator(r"^[A-Z]+$"; code = "letters")],
+                                            error_messages = Dict("required" => "A code!", "letters" => "Capitals only.", "max_length" => "≤ %(limit_value)s")),
+                         :tag => CharField(blank = true, validators = [v -> v == "bad" ? throw(ValidationError("nope"; code = "badtag")) : nothing],
+                                           error_messages = Dict("badtag" => "Not that tag."))];
+                        data = data); is_valid(f); f)
+    f = F(Dict("qty" => "-2", "code" => "", "tag" => "bad"))          # (-2 is on a step from 1: only too small)
+    @test f.errors[:qty] == ["At least 1, please."] && f.errors[:code] == ["A code!"] && f.errors[:tag] == ["Not that tag."]
+    f = F(Dict("qty" => "x", "code" => "abcdef"))
+    @test f.errors[:qty] == ["Digits only."] && f.errors[:code] == ["≤ 5", "Capitals only."]
+    f = F(Dict("qty" => "5", "code" => "A"))
+    @test f.errors[:qty] == ["Ensure this value is a multiple of step size 3, starting from 1, e.g. 1, 4, 7, and so on."]
+    @test f.errors[:code] == ["Ensure this value has at least 2 characters (it has 1)."]
+    @test is_valid(F(Dict("qty" => "7", "code" => "AB")))
+
+    # ValidationError with params; model field error_messages and ModelForm's override
+    @test only(ValidationError("Too many: %(n)s"; params = Dict("n" => 3)).errors[:__all__]) == "Too many: 3"
+    mf = ModelForm(Author; data = Dict("name" => "", "email" => "not-an-email"),
+                   error_messages = Dict(:name => Dict("required" => "Who wrote it?"), :email => Dict("invalid" => "That's no address.")))
+    @test !is_valid(mf) && mf.errors[:name] == ["Who wrote it?"] && mf.errors[:email] == ["That's no address."]
+    fld = CharField(max_length = 3, error_messages = Dict(:max_length => "Short, please"))
+    @test Juango.validate_field(fld, "abcd") == ["Short, please"]
+end
+
+@testset "forms: localised input, SelectDateWidget, NullBooleanField, structured errors (#145)" begin
+    D(data; kw...) = (f = Form([:d => DateField(; kw...)]; data = data); is_valid(f) ? f.cleaned_data[:d] : f.errors[:d])
+    @test D(Dict("d" => "2026-11-15")) == Date(2026, 11, 15)
+    @test D(Dict("d" => "11/15/2026")) == Date(2026, 11, 15) && D(Dict("d" => "Nov 15, 2026")) == Date(2026, 11, 15)   # English formats
+    @test D(Dict("d" => "11/15/26")) == Date(2026, 11, 15) && D(Dict("d" => "1/2/70")) == Date(1970, 1, 2)            # two-digit years
+    @test D(Dict("d" => "15.11.2026")) == ["Enter a valid date."]
+    with_language("de") do
+        @test D(Dict("d" => "15.11.2026")) == Date(2026, 11, 15) && D(Dict("d" => "2026-11-15")) == Date(2026, 11, 15)
+        @test D(Dict("d" => "11/15/2026")) isa Vector{String}                  # an error (in German)
+    end
+    @test D(Dict("d" => "15|11|2026"); input_formats = ["%d|%m|%Y"]) == Date(2026, 11, 15)
+    override_settings(DATE_INPUT_FORMATS = ["%d %m %Y"]) do
+        with_language("sv") do                                       # a language without formats of its own
+            @test D(Dict("d" => "15 11 2026")) == Date(2026, 11, 15)
+        end
+    end
+    T(data; kw...) = (f = Form([:t => DateTimeField(; kw...)]; data = data); is_valid(f) ? f.cleaned_data[:t] : f.errors[:t])
+    @test T(Dict("t" => "11/15/2026 14:30")) == DateTime(2026, 11, 15, 14, 30) && T(Dict("t" => "2026-11-15T14:30")) == DateTime(2026, 11, 15, 14, 30)
+    with_language("fr") do
+        @test T(Dict("t" => "15/11/2026 14:30:05")) == DateTime(2026, 11, 15, 14, 30, 5)
+    end
+    N(s; kw...) = (f = Form([:n => DecimalField(; max_digits = 10, decimal_places = 2, kw...)]; data = Dict("n" => s)); is_valid(f) ? f.cleaned_data[:n] : f.errors[:n])
+    with_language("de") do
+        @test N("1.234,5"; localize = true) == Juango.Decimal("1234.5")
+        @test N("1.234,5") isa Vector{String}                        # only with localize = true, as Django
+    end
+
+    # SelectDateWidget
+    sdw = SelectDateWidget(years = 2024:2027)
+    F(data) = Form([:born => DateField(widget = sdw, blank = true)]; data = data)
+    f = F(Dict("born_year" => "2026", "born_month" => "3", "born_day" => "7"))
+    @test is_valid(f) && f.cleaned_data[:born] == Date(2026, 3, 7)
+    f = F(Dict("born_year" => "2026", "born_month" => "", "born_day" => "7"))
+    @test !is_valid(f) && f.errors[:born] == ["Enter a valid date."]
+    @test is_valid(F(Dict("born_year" => "", "born_month" => "", "born_day" => ""))) && F(Dict()).data !== nothing
+    html = as_p(Form([:born => DateField(widget = sdw)]; initial = Dict(:born => Date(2025, 12, 31)))).s
+    @test occursin("name=\"born_year\"", html) && occursin("<option value=\"2025\" selected>", html)
+    @test occursin("<option value=\"12\" selected>December</option>", html) && occursin("<option value=\"31\" selected>", html)
+    @test findfirst("born_month", html)[1] < findfirst("born_day", html)[1]            # English: month, day, year
+    with_language("de") do
+        h = as_p(Form([:born => DateField(widget = sdw)])).s
+        @test findfirst("born_day", h)[1] < findfirst("born_month", h)[1]
+    end
+    # SplitHiddenDateTimeWidget
+    h = as_p(Form([:when => SplitDateTimeField(widget = SplitHiddenDateTimeWidget())]; initial = Dict(:when => DateTime(2024, 1, 2, 3, 4)))).s
+    @test occursin("type=\"hidden\" name=\"when_0\"", h) && occursin("type=\"hidden\" name=\"when_1\"", h)
+
+    # NullBooleanField
+    NB(v) = (f = Form([:ok => NullBooleanField()]; data = Dict("ok" => v)); is_valid(f) ? f.cleaned_data[:ok] : f.errors[:ok])
+    @test NB("true") === true && NB("false") === false && NB("unknown") === nothing && NB("") === nothing
+    @test occursin("<option value=\"unknown\"", as_p(Form([:ok => NullBooleanField()])).s)
+
+    # errors as data, field order, required attributes, legend
+    g = Form([:a => CharField(), :b => IntegerField()]; data = Dict("a" => "", "b" => "x"), field_order = [:b])
+    @test [x.name for x in g.fields] == [:b, :a]
+    is_valid(g); add_error!(g, nothing, "whole form")                 # (validating clears errors: add it after)
+    @test errors_json_data(g)["b"] == [Dict("message" => "Enter a whole number.", "code" => "")]
+    @test JSON.parse(errors_as_json(g))["a"][1]["message"] == "This field is required." && Juango.non_field_errors(g) == ["whole form"]
+    @test !occursin(" required", as_p(Form([:a => CharField()]; use_required_attribute = false)).s)
+    @test occursin(" required", as_p(Form([:a => CharField()])).s)
+    FS = formset_factory((d; prefix, initial) -> Form([:qty => IntegerField()]; data = d, prefix = prefix, initial = initial); extra = 1)
+    @test !occursin(" required", as_p(first(FS())).s)                # formsets: none, as Django
+    bf = Form([:size => CharField(choices = ["s" => "Small"], widget = :radio, label = "Size")])[:size]
+    @test legend_tag(bf) == "<legend>Size</legend>"
+end
+
+@testset "model formsets with a custom row form; set_field! (#156)" begin
+    rollback_after() do
+        a1 = create(Author; name = "MF156 a", email = "a@x156.io"); a2 = create(Author; name = "MF156 b", email = "b@x156.io")
+        # a row form of its own: an extra field, initial values from the instance, its own clean
+        function row(; data, instance, prefix, initial)
+            init = instance === nothing ? initial : merge(Dict{Symbol,Any}(initial), Dict(:shout => uppercase(instance.name)))
+            f = ModelForm(Author; data = data, instance = instance, prefix = prefix, initial = init, fields = [:name, :email],
+                          extra_fields = [:shout => CharField(blank = true)],
+                          clean = f -> (get(f.cleaned_data, :name, "") == "bad" && add_error!(f, :name, "No.")))
+            set_field!(f, :email, EmailField(blank = true, help_text = "optional"))    # replaced in place
+            f
+        end
+        FS = modelformset_factory(Author; form = row, extra = 0)
+        fs = FS(; queryset = order_by(filter(Author; name__startswith = "MF156"), "name"))
+        Juango.build_forms!(fs)
+        @test length(fs.forms) == 2 && [x.name for x in fs.forms[1].fields] == [:id, :name, :email, :shout]   # (the formset adds id)
+        @test fs.forms[1].initial[:shout] == "MF156 A" && fs.forms[1][:email].field.help_text == "optional"
+        data = Dict("form-TOTAL_FORMS" => "2", "form-INITIAL_FORMS" => "2",
+                    "form-0-id" => string(a1.id), "form-0-name" => "MF156 a2", "form-0-email" => "", "form-0-shout" => "x",
+                    "form-1-id" => string(a2.id), "form-1-name" => "bad", "form-1-email" => "b@x156.io")
+        fs = FS(data; queryset = order_by(filter(Author; name__startswith = "MF156"), "name"))
+        @test !is_valid(fs) && fs.forms[2].errors[:name] == ["No."]
+        data["form-1-name"] = "MF156 b2"
+        fs = FS(data; queryset = order_by(filter(Author; name__startswith = "MF156"), "name"))
+        @test is_valid(fs)
+        save!(fs)
+        @test get(Author; id = a1.id).name == "MF156 a2" && get(Author; id = a1.id).email == "" && get(Author; id = a2.id).name == "MF156 b2"
+        # the ModelForm options pass through
+        FS2 = modelformset_factory(Author; fields = [:name], help_texts = Dict(:name => "Full name"), extra = 1,
+                                   extra_fields = [:note => CharField(blank = true)])
+        f = first(FS2())
+        @test f[:name].field.help_text == "Full name" && [x.name for x in f.fields] == [:id, :name, :note]
+        # inline formsets too
+        IF = inlineformset_factory(Author, Article; form = (; data, instance, prefix, initial) ->
+                                       ModelForm(Article; data, instance, prefix, initial, fields = [:title], labels = Dict(:title => "Heading")),
+                                   extra = 1)
+        @test Juango.label(first(IF(; instance = a1))[:title].field) == "Heading"
+    end
+    # set_field! and delete_field! on any form
+    g = Form([:a => CharField(), :b => CharField()])
+    set_field!(g, :c, IntegerField(); after = :a)
+    @test [x.name for x in g.fields] == [:a, :c, :b]
+    set_field!(g, :b, IntegerField(); before = :a)
+    @test [x.name for x in g.fields] == [:b, :a, :c] && g.fields[1].kind in Juango.INT_KINDS
+    set_field!(g, :d, CharField())
+    @test g.fields[end].name === :d
+    @test_throws ArgumentError set_field!(g, :e, CharField(); after = :nope)
+    delete_field!(g, :a)
+    @test [x.name for x in g.fields] == [:b, :c, :d]
+end

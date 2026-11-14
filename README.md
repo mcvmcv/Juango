@@ -93,6 +93,10 @@ filter(Post, Q(status="p") | Q(published=true))
 filter(Post, Q(container__isnull=true) ⊻ Q(material__isnull=true))   # xor: an odd number true (also in CheckConstraints)
 order_by(Post, Desc(:published_at; nulls_last = true), "title")   # expressions too; NULLs placed alike on every database
 order_by(objects(Post))          # no ordering at all, not even Meta.ordering (also left out of aggregate annotate queries)
+contains(qs, post); post in qs     # one EXISTS query (none if qs was already fetched)
+update_or_create(Post; slug = "x", defaults = Dict(:title => "new"), create_defaults = Dict(:title => "first"))
+refresh!(post; fields = [:views])  # reload just these
+annotate(qs; card = JSONObject(title = :title, who = "author__name"))   # a Dict per row
 values_list(Event, :data__run; flat = true)                        # a key inside a JSON field (also values, order_by)
 exclude(Post; status="d")[1:10]  # slicing → LIMIT/OFFSET
 get(Post; slug="hello")          # throws DoesNotExist / MultipleObjectsReturned
@@ -116,6 +120,14 @@ end
 ```
 
 In tests inside `rollback_after`, `capture_on_commit_callbacks(f; execute = true)` returns (and runs) the callbacks `f` registered.
+
+More of Django's `transaction` module:
+- **`atomic(f; durable = true)`** refuses to run inside another atomic block, so when it returns the work is committed. Blocks opened by `rollback_after` in tests don't count.
+- **`set_rollback!(true)`** rolls the innermost block back when it ends, without an exception. `get_rollback()` reads the flag.
+- **`savepoint()`** returns an id for `savepoint_commit` and `savepoint_rollback`; a rollback also drops the `on_commit` callbacks registered since.
+- **`execute_wrapper(wrapper) do ... end`** calls `wrapper(execute, sql, params, context)` around each statement the block runs: for blocking queries, timing them, adding comments or retrying.
+
+The signals `connection_created` (run per-connection `SET`s; the receiver's `execute` uses the new connection), `got_request_exception`, `setting_changed`, `pre_init`/`post_init` and `class_prepared` are sent as in Django.
 
 Add your own lookups and transforms with `Juango.register_lookup` and `Juango.register_transform` (Django's `register_lookup`). They work in `filter`, `exclude` and `Q`, across relations, and transforms chain:
 
@@ -381,7 +393,7 @@ values_list(objects(Post), :title, :author__name)               # tuples; flat=t
 - **Subqueries:**
   - `annotate(objects(Author); latest = Subquery(values(order_by(filter(Post; author=OuterRef(:id)), "-created"), :title)[1:1]))`
   - `filter(objects(Author), Exists(filter(Post; author=OuterRef(:id))))`, negated with `!Exists(...)`
-- **Window functions:** `annotate(qs; rank = Window(RowNumber(); partition_by=[:author], order_by=["-views"]))`, also with `Rank`, `DenseRank`, `Lag`, `Lead` and aggregates over a window. You can order and filter by them: `filter(qs; rank = 1)` wraps the query, because SQL can't filter on a window function directly. Plain conditions in the same queryset apply before the window is computed, as in Django.
+- **Window functions:** `annotate(qs; rank = Window(RowNumber(); partition_by=[:author], order_by=["-views"]))`, also with `Rank`, `DenseRank`, `Lag`, `Lead`, `FirstValue`, `LastValue`, `NthValue`, `Ntile`, `PercentRank`, `CumeDist` and aggregates over a window. A frame narrows the window: `Window(Sum(:amount); order_by = ["day"], frame = RowRange(start = -6, stop = 0))` is a seven-row moving sum, `RowRange(stop = 0)` a running total, and `ValueRange(...)` counts in the ordering's values (`RANGE`). `exclusion = :current_row` (or `:group`, `:ties`) works on PostgreSQL and SQLite. You can order and filter by them: `filter(qs; rank = 1)` wraps the query, because SQL can't filter on a window function directly. Plain conditions in the same queryset apply before the window is computed, as in Django.
 - **`FilteredRelation`:** join a relation with an extra condition in the JOIN's `ON` clause, so authors without a match are kept and aggregates see only matching rows. It works with forward and reverse relations, one level deep:
   - `qs = annotate(Author; pub = FilteredRelation(:posts; condition = Q(posts__published = true)))`
   - `annotate(qs; n = Count(:pub))`, `filter(qs; pub__title__contains = "Julia")`, `exclude(qs; pub__views = 0)`, `order_by(qs, "pub__views")`
@@ -457,6 +469,8 @@ objects(Post) |> published |> order_by("-created")
 - **`default_queryset`** is what `objects`, `filter(Model; ...)`, reverse relations and the admin see. Build it on `base_objects(Model)`, never on `objects(Model)`, which would recurse.
 - **`base_objects`** is the unfiltered table. Foreign-key access, cascading deletes and uniqueness checks always use it, like Django's base manager.
 - **Admin:** `Admin.register!(Post; queryset = req -> ...)` sets what the admin lists and edits.
+
+`Meta(default_related_name = "%(class)s_items")` names the reverse side of a model's relations that don't set `related_name` (and their query name), as Django's.
 
 #### Model inheritance
 
@@ -576,8 +590,11 @@ using Juango.Postgres                                    # CICharField, GinIndex
     token  = UUIDField(default = uuid4)
     email  = CICharField(max_length = 200)              # case-insensitive (citext / NOCASE)
     ages   = IntegerRangeField(null = true)             # also DateRangeField, DateTimeRangeField
-    Meta(indexes = [GinIndex(:data), Index(:email; name = "event_email", unique = true)])
-end
+    Meta(indexes = [GinIndex(:data), Index(:email; name = "event_email", unique = true)])   # also GistIndex, BrinIndex,
+end                                                                                       # SpGistIndex, HashIndex, BloomIndex
+
+# migrations: AddIndexConcurrently / RemoveIndexConcurrently build an index without locking the table
+# (the migration then runs outside a transaction, as Django's atomic = False)
 
 filter(Event; data__owner__name = "Ann", data__score__gt = 5)   # JSON key paths (numbers compare as numbers)
 filter(Event; data__contains = Dict("active" => true), data__has_key = "owner")
@@ -668,6 +685,8 @@ julia --project manage.jl migrate                 # apply everything pending
 julia --project manage.jl migrate 0001            # go back to 0001, unapplying 0002 and later
 julia --project manage.jl migrate zero            # unapply all of the project's migrations
 julia --project manage.jl showmigrations          # [X] applied, [ ] pending
+julia --project manage.jl migrate --plan          # what migrate would do, without doing it
+julia --project manage.jl sqlflush                # the SQL flush would run; sqlsequencereset <app> moves id sequences (PostgreSQL)
 ```
 
 `makemigrations` compares your models with the state the existing migration files describe and writes the difference as operations. These are `CreateModel`, `DeleteModel`, `RenameModel`, `AddField`, `RemoveField`, `AlterField` and `RenameField`. When a column (or table) disappears and an identical one appears under a new name, it asks whether you renamed it. With `--noinput` the answer is no. A generated file looks like this:
@@ -837,6 +856,19 @@ configure!(ROOT_URLCONF=urlpatterns, DATABASE="db.sqlite3", TEMPLATE_DIRS=["temp
 
 Converters: `str int slug path uuid`, plus `register_converter!`.
 
+An app mounted more than once gets an application namespace and an instance namespace per mount,
+as Django's `app_name`: `include_urls(blog_patterns; app_name = "blog", namespace = "news")`. Then
+`reverse_url("blog:post", 3)` and `{% url 'blog:post' 3 %}` give the instance the current request
+is in, or `current_app = "news"`, or the instance named like the app.
+
+View decorators besides `require_GET`/`require_POST`/`require_safe` and `login_required`:
+`csrf_exempt`, `csrf_protect` (for projects without the middleware), `ensure_csrf_cookie`,
+`xframe_options_exempt`/`_deny`/`_sameorigin`, `gzip_page`, `never_cache`, `cache_page`,
+`no_append_slash` and `sensitive_post_parameters(view, "card")` (masked on the error page and in
+error emails). `set_signed_cookie!(resp, name, value)` and `get_signed_cookie(req, name; max_age)`
+keep a cookie the client can read but not change. `HttpResponseGone`, `HttpResponseNotModified`
+and `HttpResponseServerError` complete the response shortcuts.
+
 #### Transactions, error pages and TemplateResponse
 
 ```julia
@@ -894,6 +926,8 @@ path("archive/<int:year>/", A(YearArchiveView)),               # year, date_list
 path("archive/<int:year>/<int:month>/", A(MonthArchiveView)),  # month, object_list, date_list (days), next_month...
 path("archive/<int:year>/<int:month>/<int:day>/", A(DayArchiveView)),
 path("archive/<int:year>/<int:month>/<int:day>/<slug:slug>/", A(DateDetailView)),
+path("archive/week/<int:year>/<int:week>/", A(WeekArchiveView)),  # week (its first day), object_list; week_format = "%U" | "%W" | "%V"
+path("archive/today/", A(TodayArchiveView)),                    # DayArchiveView for today
 ```
 
 Future-dated objects are left out unless `allow_future = true`. An empty period is a 404 unless `allow_empty = true`. YearArchiveView lists its objects only with `make_object_list = true`. The default templates are `<model>_archive.html`, `_archive_year`, `_archive_month`, `_archive_day` and `_detail`. With USE_TZ, days are counted in the current time zone.
@@ -1215,6 +1249,50 @@ form = EventForm(; media = Media(css = Dict("all" => ["css/forms.css"])))
 - A `MultiValueField` reads inputs `name_0`, `name_1`, ..., cleans each with its field, and `compress`es them. An `ArgumentError` thrown by `compress` becomes the field's error.
 - `FORM_RENDERER = TemplateFormRenderer()` renders `{{ form }}` with `juango/forms/div.html` (or your `form_template`). `render_form(form; template)` renders one form with another template.
 
+#### Dates and numbers as people type them
+
+Date, datetime and time fields accept the active language's formats, as Django's locale formats:
+`11/15/2026` and `Nov 15, 2026` in English, `15.11.2026` in German, `15/11/2026` in French. ISO 8601
+is always accepted, and two-digit years fall in 1969-2068. `input_formats = ["%d|%m|%Y"]`
+(strftime directives) adds formats to one field. `DATE_INPUT_FORMATS`, `DATETIME_INPUT_FORMATS` and
+`TIME_INPUT_FORMATS` serve languages Juango has no formats for. Number fields with
+`localize = true` accept `1.234,5` in German.
+
+Widgets and fields:
+- `DateField(widget = SelectDateWidget(years = 2020:2030))` shows three selects, in the order the language writes dates.
+- `SplitDateTimeField(widget = SplitHiddenDateTimeWidget())` puts the date and time in hidden inputs.
+- `NullBooleanField()` gives yes, no or unknown (`true`, `false`, `nothing`).
+
+Forms also have:
+- `errors_json_data(form)` and `errors_as_json(form)`, for API and htmx responses;
+- `Form(...; field_order = [...])` and `order_fields!`;
+- `use_required_attribute = false`. Formset forms never have the `required` attribute, as in Django.
+
+`legend_tag(bf)` labels a radio or checkbox group.
+
+#### Validators and error messages
+
+Model and form fields take `validators = [...]`: Django's set (`RegexValidator`, `EmailValidator`,
+`URLValidator`, `MinValueValidator`, `MaxValueValidator`, `MinLengthValidator`,
+`MaxLengthValidator`, `StepValueValidator`, `DecimalValidator`, `ProhibitNullCharactersValidator`,
+`validate_slug`, `validate_ipv46_address`, `int_list_validator`, ...) or any function returning
+`nothing` when the value is fine and a message otherwise (or throwing `ValidationError(msg; code)`).
+Form fields also take `min_value`, `max_value`, `step_size` and `min_length`, which add those
+validators.
+
+Every message has a code, and `error_messages` replaces it per field. On a model field it carries
+into its ModelForms; `ModelForm(...; error_messages = Dict(:field => Dict(...)))` overrides it:
+
+```julia
+qty = IntegerField(min_value = 1, error_messages = Dict("min_value" => "At least %(limit_value)s.", "invalid" => "Digits only."))
+code = CharField(max_length = 8, validators = [RegexValidator(r"^[A-Z]+$"; code = "caps")],
+                 error_messages = Dict("required" => "A code, please.", "caps" => "Capitals only."))
+```
+
+The codes: `required`, `invalid`, `max_length`, `min_length`, `min_value`, `max_value`,
+`step_size`, `invalid_choice`, `unique`, `max_digits`, `max_decimal_places`, `max_whole_digits`,
+and for files `empty`, `invalid_image` and `contradiction`.
+
 ### Formsets
 
 ```julia
@@ -1285,15 +1363,19 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 ### Auth, sessions, CSRF, messages
 
 - `User` model with PBKDF2-SHA256 password hashes in Django's format, so existing Django hashes verify.
-- `authenticate`, `login!`, `logout!`, `create_user`, `create_superuser`, `login_required`, `staff_member_required`.
+- `authenticate`, `login!`, `logout!`, `create_user`, `create_superuser`, `login_required`, `staff_member_required`. `login_required`, `user_passes_test`, `permission_required`, `LoginView` and `LoginRequiredMixin` take `redirect_field_name` (`"next"`; `nothing` for none). `AllowAllUsersModelBackend()` lets inactive users log in (still without permissions), and `AdminPasswordChangeForm` sets someone else's password.
 - Sessions (`req.session["k"] = v`) are stored where `SESSION_ENGINE` says: `:db` (default), `:cache`, `:cached_db`, `:file` (in `SESSION_FILE_PATH`) or `:signed_cookies` (the signed data itself in the cookie, so nothing on the server, but a session can't be revoked early). The session key rotates on login, and changing a password invalidates existing sessions. Sessions and `req.user` load lazily, as in Django: the store is read when a view first uses the session, and the user is looked up when `req.user` is first read (templates that don't use `user` or `perms` don't load it), so requests that don't need them cost no queries. `clearsessions` removes expired database rows and files.
 - CSRF protection on every method except GET, HEAD, OPTIONS and TRACE: `{% csrf_token %}` or an `X-CSRFToken` header. Mark exceptions with `csrf_exempt(view)`. The token (and its cookie) is only created when a page uses it.
+  - Settings as Django's: `CSRF_HEADER_NAME`, `CSRF_COOKIE_NAME`/`_AGE`/`_DOMAIN`/`_PATH`/`_SECURE`/`_HTTPONLY`/`_SAMESITE`, `CSRF_USE_SESSIONS` (the secret in the session, no cookie) and `CSRF_FAILURE_VIEW` (a view `(req; reason)` for the 403).
   - Pages get a masked form of the token, different on every render, so response compression can't leak it (BREACH). The cookie's plain value is accepted too, for JavaScript that reads it.
   - As in Django, a browser's `Origin` must match the request's scheme and host, or be in `CSRF_TRUSTED_ORIGINS`.
   - Over HTTPS without an `Origin`, the `Referer` must be an https URL of this site.
 - `url_has_allowed_host_and_scheme(url, hosts)` says whether a redirect target (a `next` parameter, say) stays on the site. The login and logout views and `set_language` use it, and it refuses what browsers would read as another site (`//evil`, `/\evil`, `https:evil`).
 - Forms: `AuthenticationForm`, `UserCreationForm` (username, two passwords checked against `AUTH_PASSWORD_VALIDATORS`; `save!` hashes the password), `UserChangeForm` (every field but the password; `Juango.password_summary(user)` describes the stored hash safely), `PasswordChangeForm`, `SetPasswordForm`. The admin's "add user" page uses `UserCreationForm`, then opens the user's change page.
-- One-time messages: `message!(req, :success, "Saved")`, rendered with `{% for m in messages %}`.
+- One-time messages: `message!(req, :success, "Saved")`, rendered with `{% for m in messages %}<p class="{{ m.tags }}">{{ m }}</p>{% endfor %}`.
+  - Levels are numbers as in Django (debug 10, info 20, success 25, warning 30, error 40). Custom levels are other numbers, named by `MESSAGE_TAGS`, which can also rename the built-in ones (`Dict(40 => "danger")`). `MESSAGE_LEVEL` drops lower ones.
+  - `extra_tags = "..."` joins `m.tags`. A `format_html`/`mark_safe` message renders as HTML. `peek_messages(req)` reads them without using them up. `using Juango.Messages` gives `success!(req, msg)` and the other shortcuts, plus `set_level!`.
+  - `MESSAGE_STORAGE`: `:session` (the default), `:cookie` (a signed cookie, no session needed) or `:fallback` (the cookie while they fit, then the session). The cookie storages need `MessageMiddleware`, and `manage.jl check` says so.
 
 #### Passwords
 
@@ -1355,6 +1437,7 @@ mail_admins("Disk almost full", details)          # to settings.ADMINS = [("Name
 ```
 
 - **Backends.** `EMAIL_BACKEND` is `:smtp` (the default), `:console`, `:file` (`EMAIL_FILE_PATH`), `:locmem` (messages collect in `Juango.outbox`) or `:dummy`. You can also give it any function that takes a vector of messages.
+- **Many messages.** `send_mass_mail([(subject, body, from, [to...]), ...])` sends them over one connection (SMTP logs in once). `get_connection(:console)` picks a backend for some messages: `send!(msg; connection = conn)`, `send_messages(conn, msgs)`.
 - **SMTP** uses `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD` (AUTH PLAIN), and `EMAIL_USE_TLS` (STARTTLS) or `EMAIL_USE_SSL`, with the server's certificate verified against the system roots. `EMAIL_TIMEOUT` (seconds) limits the whole conversation.
 - **Tests.** The test `Client` switches `:smtp` to `:locmem`, so tests never send real mail and can inspect `outbox`.
 - **Errors.** With `DEBUG = false`, unhandled errors are mailed to `ADMINS`.
@@ -1363,7 +1446,7 @@ mail_admins("Disk almost full", details)          # to settings.ADMINS = [("Name
 
 ### Permissions and groups
 
-`migrate` creates `add_`, `change_`, `delete_` and `view_` permissions for every model, plus any declared with `Meta(permissions = [("publish_post", "Can publish posts")])`. Users get permissions directly or through groups:
+`migrate` creates `add_`, `change_`, `delete_` and `view_` permissions for every model (`Meta(default_permissions = ("add", "view"))` changes that list), plus any declared with `Meta(permissions = [("publish_post", "Can publish posts")])`. Users get permissions directly or through groups:
 
 ```julia
 editors = create(Group; name = "editors")
@@ -1412,7 +1495,11 @@ urlpatterns = [i18n_patterns(path("about/", about; name = "about")),   # /en/abo
 {% translate "Welcome" %}  {% translate "May" context "month name" as m %}
 {% blocktranslate count n=comments|length %}{{ n }} comment{% plural %}{{ n }} comments{% endblocktranslate %}
 {% get_current_language as LANGUAGE_CODE %}  {% language "de" %}...{% endlanguage %}  {% load l10n %}{{ price|localize }}
+{% get_language_info for "de" as lang %}{{ lang.name_local }}      {# Deutsch; also name, name_translated, bidi #}
+{% get_language_info_list for LANGUAGES as langs %}  {{ code|language_name_local }}
 ```
+
+`get_language_info("pt-br")` gives the same in Julia.
 
 - **Catalogues** are standard gettext files at `locale/<lang>/LC_MESSAGES/juango.po`, editable in Poedit, Weblate and similar tools.
   - `manage.jl makemessages -l de` collects strings from `.jl` files and templates and keeps existing translations.
@@ -1518,6 +1605,8 @@ const home = cache_page(home_view; timeout = 60)   # whole GET responses, keyed 
 ```
 {% cache 600 "sidebar" user.id %} ...expensive fragment... {% endcache %}
 ```
+
+`cache_delete(make_template_fragment_key("sidebar", [user.id]))` drops one such fragment when its data changes.
 
 - **Backends.** `CACHES` names one or more caches: `Dict("default" => Dict(:backend => :locmem, :max_entries => 1000, :timeout => 300))`. The backends are:
   - `:locmem` (per process, LRU)
@@ -1714,6 +1803,17 @@ Admin.register!(Person;
 
 - **Filters.** `:field => :empty` filters on empty values and `:fk => :related_only` lists only the related objects in use.
 - **Permissions per object.** `has_*_permission(req, obj)` is asked for the model (with `obj = nothing`) and for each object, so a change page can be view-only for some objects. Custom views in `urls` run behind the admin's login and permission checks.
+- **Hooks**, as Django's ModelAdmin methods:
+  - `save_model = (req, obj, form, change) -> ...`: stamp `obj.created_by = req.user`, then `save!(obj)`.
+  - `save_related`, `delete_model`, `delete_queryset`: the rest of saving, and deleting.
+  - `response_add`/`response_change`/`response_delete`: where to go afterwards.
+  - `get_form`: build the change form yourself.
+  - `formfield_for_foreignkey`/`_manytomany`/`_choice_field = (req, field) -> field`: narrow a select per request, for example `ModelChoiceField(filter(Team; org = req.user.org))`.
+  - `formfield_overrides = Dict(:text => Dict(:widget => ...))` and `radio_fields = [:status]`.
+- **Change list:**
+  - Clicking a column header sorts by it (`?o=2.-1`). Columns of model fields sort, and `Admin.display(f; description, boolean, ordering, empty_value)` columns sort when given an `ordering`.
+  - `list_display_links`, `sortable_by`, `empty_value_display` and `search_help_text`.
+  - `save_on_top = true` repeats the save buttons above the form.
 
 **More than one admin site:**
 
@@ -1744,7 +1844,7 @@ r = post(c, "/posts/new/", Dict("title" => "X", ...); follow=true)
 
 The client keeps cookies, skips CSRF unless you pass `Client(enforce_csrf=true)`, and never opens a socket.
 
-**A throwaway test database.** `julia --project manage.jl test [--keepdb] [file ...]` runs the tests against a database of their own, so they never touch the development one: SQLite in memory, or `test_<name>` on the same PostgreSQL or MySQL server (created, migrated, and dropped afterwards; `--keepdb` reuses it). `TEST_DATABASE` names another. A suite run with `julia test/runtests.jl` or `Pkg.test()` does the same with:
+**A throwaway test database.** `julia --project manage.jl test [--keepdb] [--failfast] [--reverse] [--shuffle[=SEED]] [-k PATTERN] [file ...]` runs each test file, carrying on after a failing one unless `--failfast` (`-k` picks files by name; `--shuffle` prints its seed so an order that fails can be repeated). It runs the tests against a database of their own, so they never touch the development one: SQLite in memory, or `test_<name>` on the same PostgreSQL or MySQL server (created, migrated, and dropped afterwards; `--keepdb` reuses it). `TEST_DATABASE` names another. A suite run with `julia test/runtests.jl` or `Pkg.test()` does the same with:
 
 ```julia
 db = Juango.Testing.setup_test_database()          # (keepdb = true to reuse it)
@@ -1786,6 +1886,12 @@ end
 @test assert_redirects(get(Client(), "/secret/"), "/accounts/login/?next=%2Fsecret%2F")
 @test assert_num_queries(() -> collect(select_related(objects(Post), :author)), 1)
 @test assert_form_error(form, :title, "This field is required.")
+@test assert_html_equal(html, "<p class='a b'>Hi</p>")   # whitespace, attribute and class order ignored
+@test assert_in_html("<li>one</li>", r; count = 2)      # also assert_contains(r, ...; html = true)
+@test assert_json_equal(r, Dict("ok" => true))           # a response or a JSON string, key order ignored
+@test assert_queryset_equal(order_by(qs, "title"), ["a", "b"]; transform = p -> p.title)   # ordered = false too
+@test assert_formset_error(formset, 1, :qty, "Enter a whole number.")   # form 1; nothing: the non-form errors
+@test assert_field_output(IntegerField(), Dict("3" => 3), Dict("x" => ["Enter a whole number."]))
 
 req = get(RequestFactory(), "/posts/"; data = Dict("page" => 2))   # call a view directly, no middleware
 req.user = user
@@ -1796,7 +1902,7 @@ The `assert_*` functions return `true` or throw an `AssertionError` that says wh
 
 ### Static files
 
-`collectstatic` copies `STATIC_DIRS` and each app's `static/` into `STATIC_ROOT`. With `STATICFILES_STORAGE = :manifest` it also writes copies with a content hash in the name (`css/site.55e7cbb9ba48.css`) and a `staticfiles.json` manifest. It rewrites `url(...)` and `@import` references inside CSS to the hashed names. Then, with `DEBUG` off, `{% static "css/site.css" %}` gives the hashed URL, so a web server can tell browsers to cache static files forever. A name missing from the manifest raises an error.
+`collectstatic` copies `STATIC_DIRS` and each app's `static/` into `STATIC_ROOT`. Where static files are looked for is `STATICFILES_FINDERS` (default `[FileSystemFinder(), AppDirectoriesFinder()]`); a finder of your own subtypes `Juango.StaticFinder` and defines `find_static(finder, path)` and `list_static(finder)`. `{% get_static_prefix %}` and `{% get_media_prefix %}` give `STATIC_URL` and `MEDIA_URL`. With `STATICFILES_STORAGE = :manifest` it also writes copies with a content hash in the name (`css/site.55e7cbb9ba48.css`) and a `staticfiles.json` manifest. It rewrites `url(...)` and `@import` references inside CSS to the hashed names. Then, with `DEBUG` off, `{% static "css/site.css" %}` gives the hashed URL, so a web server can tell browsers to cache static files forever. A name missing from the manifest raises an error.
 
 ### Model introspection
 

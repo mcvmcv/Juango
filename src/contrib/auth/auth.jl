@@ -188,6 +188,27 @@ function backend_authenticate(::ModelBackend, req; password = nothing, kw...)
     u.is_active && ok ? u : nothing
 end
 backend_get_user(::ModelBackend, id) = first(filter(objects(get_user_model()); id = id, is_active = true))
+
+"""
+    AllowAllUsersModelBackend()
+
+ModelBackend that also lets inactive users log in (Django's), for projects that show an inactive
+account its own page ("your account is suspended") instead of refusing the login. Inactive users
+still have no permissions.
+"""
+struct AllowAllUsersModelBackend end
+function backend_authenticate(::AllowAllUsersModelBackend, req; password = nothing, kw...)
+    T = get_user_model()
+    uf = username_field(T)
+    name = get(kw, uf, get(kw, :username, nothing))
+    (name === nothing || password === nothing) && return nothing
+    u = first(filter(objects(T), Q(uf => name)))
+    u === nothing && (make_password(password); return nothing)
+    check_password(u, password) ? u : nothing
+end
+backend_get_user(::AllowAllUsersModelBackend, id) = first(filter(objects(get_user_model()); id = id))
+backend_has_perm(::AllowAllUsersModelBackend, u, perm, obj) = backend_has_perm(ModelBackend(), u, perm, obj)
+backend_get_all_permissions(::AllowAllUsersModelBackend, u, obj) = backend_get_all_permissions(ModelBackend(), u, obj)
 function backend_has_perm(::ModelBackend, u, perm, obj)
     (u isa AbstractUser && u.is_active && obj === nothing) || return nothing
     perm in model_permissions(u) ? true : nothing
@@ -339,17 +360,22 @@ end
 
 # --- decorators ------------------------------------------------------------------------------
 
-redirect_to_login(req::Request, login_url = settings.LOGIN_URL) =
-    HttpResponseRedirect(login_url * (occursin('?', login_url) ? "&" : "?") * "next=" * urlquote(full_path(req)))
+"The login page, with where to come back to in `redirect_field_name` (\"next\"; `nothing` for no parameter)."
+function redirect_to_login(req::Request, login_url = settings.LOGIN_URL; redirect_field_name = "next")
+    redirect_field_name === nothing && return HttpResponseRedirect(login_url)
+    HttpResponseRedirect(login_url * (occursin('?', login_url) ? "&" : "?") * string(redirect_field_name) * "=" * urlquote(full_path(req)))
+end
 
 """
-    login_required(view; login_url=settings.LOGIN_URL)
+    login_required(view; login_url=settings.LOGIN_URL, redirect_field_name="next")
 
-Wrap a view so anonymous users are redirected to the login page.
+Wrap a view so anonymous users are redirected to the login page, with the page they asked for in
+`?next=` (`redirect_field_name` renames it; `nothing` leaves it out).
 """
-function login_required(view; login_url = nothing)
+function login_required(view; login_url = nothing, redirect_field_name = "next")
     w = function (req; kw...)
-        is_authenticated(req.user) || return redirect_to_login(req, something(login_url, settings.LOGIN_URL))
+        is_authenticated(req.user) ||
+            return redirect_to_login(req, something(login_url, settings.LOGIN_URL); redirect_field_name = redirect_field_name)
         view(req; kw...)
     end
     propagate_flags!(w, view)
@@ -367,8 +393,9 @@ function staff_member_required(view; login_url = nothing)
 end
 
 "`user_passes_test(view, test)`: redirect to login unless `test(req.user)`."
-function user_passes_test(view, test; login_url = nothing)
-    w = (req; kw...) -> test(req.user) ? view(req; kw...) : redirect_to_login(req, something(login_url, settings.LOGIN_URL))
+function user_passes_test(view, test; login_url = nothing, redirect_field_name = "next")
+    w = (req; kw...) -> test(req.user) ? view(req; kw...) :
+        redirect_to_login(req, something(login_url, settings.LOGIN_URL); redirect_field_name = redirect_field_name)
     propagate_flags!(w, view)
 end
 
@@ -379,18 +406,19 @@ end
     password = CharField(widget = :password, max_length = 4096)
 end
 
-"The `next` parameter if it's safe to redirect to (this site), else `fallback`."
-function safe_next(req, fallback)
-    n = get(req.GET, "next", get(req.POST, "next", ""))
+"The `next` parameter (or `field`) if it's safe to redirect to (this site), else `fallback`."
+function safe_next(req, fallback, field = "next")
+    n = get(req.GET, field, get(req.POST, field, ""))
     url_has_allowed_host_and_scheme(n, [get_host(req)]; require_https = is_secure(req)) ? n : fallback
 end
 
 """
     LoginView(; template="registration/login.html", redirect_url=settings.LOGIN_REDIRECT_URL)
 
-A login page view. The template gets `form` and `next`.
+A login page view. The template gets `form` and `next` (and `redirect_field_name`, the
+parameter's name: `next` unless `redirect_field_name` says otherwise).
 """
-function LoginView(; template = "registration/login.html", redirect_url = nothing, require_staff = false)
+function LoginView(; template = "registration/login.html", redirect_url = nothing, require_staff = false, redirect_field_name = "next")
     login_not_required(name_view!(function (req::Request; kw...)
         form = AuthenticationForm(req.method == "POST" ? req.POST : nothing)
         if req.method == "POST" && is_valid(form)
@@ -401,10 +429,11 @@ function LoginView(; template = "registration/login.html", redirect_url = nothin
                     "Please enter a correct username and password. Note that both fields may be case-sensitive.")
             else
                 login!(req, u)
-                return HttpResponseRedirect(safe_next(req, something(redirect_url, settings.LOGIN_REDIRECT_URL)))
+                return HttpResponseRedirect(safe_next(req, something(redirect_url, settings.LOGIN_REDIRECT_URL), redirect_field_name))
             end
         end
-        render(req, template, Dict("form" => form, "next" => safe_next(req, "")))
+        render(req, template, Dict("form" => form, "next" => safe_next(req, "", redirect_field_name),
+                                   "redirect_field_name" => redirect_field_name))
     end, "LoginView"))
 end
 

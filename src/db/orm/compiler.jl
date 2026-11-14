@@ -148,7 +148,8 @@ end
 Base.@nospecializeinfer function find_reverse(@nospecialize(T::Type), name)
     for (rn, M, rf) in reverse_relations(T)
         (string(rn) == name || !startswith(string(rn), "+") &&
-            string(something(rf.related_query_name, Symbol(lowercase(modelmeta(M).name)))) == name) && return (rn, M, rf)
+            string(something(rf.related_query_name, rf.related_name === nothing ? default_related_name(M) : nothing,
+                             Symbol(lowercase(modelmeta(M).name)))) == name) && return (rn, M, rf)
     end
     nothing
 end

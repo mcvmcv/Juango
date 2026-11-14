@@ -46,7 +46,8 @@ function cmd_runserver(args)
             port = parse(Int, a)
         end
     end
-    runserver(host, port; certfile = get(flags, "cert", nothing), keyfile = get(flags, "key", nothing))
+    runserver(host, port; certfile = get(flags, "cert", nothing), keyfile = get(flags, "key", nothing),
+              reload = !haskey(flags, "noreload"))
 end
 
 function prompt(msg, default = "")
@@ -175,9 +176,8 @@ function sendtestemail(recipients::AbstractString...; managers::Bool = false, ad
     n
 end
 
-"Where a static file is found: every matching path in the static directories, the one served first first."
-findstatic(path::AbstractString) =
-    [p for p in (normpath(joinpath(abspath(d), path)) for d in static_dirs()) if isfile(p)]
+"Where a static file is found: every match across STATICFILES_FINDERS, the one served first first."
+findstatic(path::AbstractString) = String[p for f in static_finders() for p in find_static(f, path)]
 
 """
     remove_stale_contenttypes(; include_stale_apps = false, confirm = true) -> Vector{ContentType}
@@ -232,6 +232,7 @@ function cmd_migrate(args)
         target = last(ks)[2]
     end
     haskey(flags, "prune") && return migrate(; app = app, prune = true, database = get(flags, "database", nothing))
+    haskey(flags, "plan") && return (migrate(; app = app, target = target, plan_only = true, database = get(flags, "database", nothing)); nothing)
     migrate(; app = app, target = target, fake = haskey(flags, "fake"), sync = haskey(flags, "sync"),
             fake_initial = !haskey(flags, "no-fake-initial"), database = get(flags, "database", nothing))
 end
@@ -273,27 +274,71 @@ function cmd_flush(args)
     println("Emptied $n table(s).")
 end
 
-# test [file ...]: run the project's tests (test/runtests.jl, or tests/test_*.jl)
+# test [--keepdb] [--failfast] [--reverse] [--shuffle[=SEED]] [-k PATTERN ...] [file ...]
+"""
+Run the project's tests (test/runtests.jl, or tests/test_*.jl, or the files given) against a
+throwaway test database. Each file runs even when an earlier one fails, unless `--failfast`; the
+command fails when any did. `-k PATTERN` (repeatable) keeps the files whose path contains a
+pattern; `--reverse` and `--shuffle[=SEED]` change the order, to catch tests that depend on
+others (the seed is printed, so a failing order can be repeated).
+"""
 function cmd_test(args)
-    pos, flags = parse_flags(args)
-    files = if !isempty(pos)
-        pos
-    elseif isfile(joinpath("test", "runtests.jl"))
-        [joinpath("test", "runtests.jl")]
-    else
-        sort([joinpath("tests", f) for f in (isdir("tests") ? readdir("tests") : String[]) if startswith(f, "test") && endswith(f, ".jl")])
+    files, patterns = String[], String[]
+    flags = Dict{String,String}()
+    i = 1
+    while i <= length(args)
+        a = args[i]
+        if a == "-k"
+            i < length(args) || error("usage: test -k PATTERN")
+            push!(patterns, args[i+1])
+            i += 2
+            continue
+        elseif startswith(a, "--")
+            k, v = occursin('=', a) ? split(a[3:end], '='; limit = 2) : (a[3:end], "true")
+            flags[String(k)] = String(v)
+        else
+            push!(files, a)
+        end
+        i += 1
     end
-    isempty(files) && return println("No tests found (test/runtests.jl or tests/test_*.jl).")
+    if isempty(files)
+        files = if isfile(joinpath("test", "runtests.jl"))
+            [joinpath("test", "runtests.jl")]
+        else
+            sort([joinpath("tests", f) for f in (isdir("tests") ? readdir("tests") : String[]) if startswith(f, "test") && endswith(f, ".jl")])
+        end
+    end
+    isempty(patterns) || filter!(f -> any(p -> occursin(p, f), patterns), files)
+    isempty(files) && return println("No tests found (test/runtests.jl or tests/test_*.jl$(isempty(patterns) ? "" : " matching -k")).")
+    haskey(flags, "reverse") && reverse!(files)
+    if haskey(flags, "shuffle")
+        seed = flags["shuffle"] == "true" ? Int(rand(RandomDevice(), UInt16)) : parse(Int, flags["shuffle"])
+        println("Shuffling the test files with seed $seed (--shuffle=$seed repeats this order)")
+        shuffle!(MersenneTwister(seed), files)
+    end
     # a throwaway database, migrated, so the tests never touch the development one (--keepdb reuses it)
     db = setup_test_database(; keepdb = haskey(flags, "keepdb"), verbose = true)
+    failed = String[]
     try
         for f in files
             println("Running ", f)
-            Base.include(Main, abspath(f))
+            try
+                Base.include(Main, abspath(f))
+            catch e
+                push!(failed, f)
+                # a failing @testset has printed its report already; anything else gets its stack trace
+                e isa LoadError && nameof(typeof(e.error)) === :TestSetException || showerror(stderr, e, catch_backtrace())
+                if haskey(flags, "failfast")
+                    println(stderr, "Stopping after the first failing file (--failfast).")
+                    break
+                end
+            end
         end
     finally
         teardown_test_database(db; verbose = true)
     end
+    isempty(failed) || error("tests failed in: " * join(failed, ", "))
+    nothing
 end
 
 # loaddata fixture [fixture ...]
@@ -344,8 +389,11 @@ function cmd_shell(args)
 end
 
 for (n, h, f) in (
-    ("runserver", "Start the development server: runserver [host:]port [--cert cert.pem --key key.pem]", cmd_runserver),
-    ("migrate", "Apply migrations: migrate [app] [target|zero] [--fake] [--no-fake-initial] [--sync] [--prune] [--database ALIAS]", cmd_migrate),
+    ("runserver", "Start the development server: runserver [host:]port [--cert cert.pem --key key.pem] [--noreload]", cmd_runserver),
+    ("migrate", "Apply migrations: migrate [app] [target|zero] [--plan] [--fake] [--no-fake-initial] [--sync] [--prune] [--database ALIAS]", cmd_migrate),
+    ("sqlflush", "Print the SQL that flush would run", _ -> foreach(s -> println(s, ";"), flush_sql())),
+    ("sqlsequencereset", "Print the SQL that moves id sequences past the existing rows: sqlsequencereset <app> ...",
+     args -> foreach(s -> println(s, ";"), sequence_reset_sql(isempty(args) ? nothing : String.(args)))),
     ("optimizemigration", "Rewrite a migration with fewer operations: optimizemigration <app> <migration> [--check]", cmd_optimizemigration),
     ("makemigrations", "Write migrations for model changes (--name, --empty, --merge, --update, --dry-run, --check, --noinput, --app)", cmd_makemigrations),
     ("showmigrations", "List migrations and whether they are applied", _ -> showmigrations()),
@@ -361,7 +409,7 @@ for (n, h, f) in (
     ("flush", "Delete all data from the database: flush [--noinput]", cmd_flush),
     ("dbshell", "Open the database's command-line client", _ -> run(dbshell_cmd())),
     ("inspectdb", "Write models for existing tables: inspectdb [table ...]", args -> print(inspectdb(isempty(first(parse_flags(args))) ? nothing : first(parse_flags(args))))),
-    ("test", "Run the project's tests against a throwaway test database: test [--keepdb] [file ...]", cmd_test),
+    ("test", "Run the project's tests against a throwaway test database: test [--keepdb] [--failfast] [--reverse] [--shuffle[=SEED]] [-k PATTERN] [file ...]", cmd_test),
     ("dumpdata", "Write the database's objects as a fixture: dumpdata [app[.Model] ...] [--format json|jsonl|yaml|xml] [--indent N] [--output FILE]", cmd_dumpdata),
     ("loaddata", "Load fixtures: loaddata <name or file> ...", cmd_loaddata),
     ("squashmigrations", "Combine migrations into one: squashmigrations <app> [start] <stop> [--name NAME]", cmd_squashmigrations),
@@ -477,6 +525,16 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
         "manage.jl" => """
         #!/usr/bin/env julia
         # Project management script: julia --project manage.jl <command>
+
+        # `runserver` reloads your code when it changes, with Revise.jl installed in your global
+        # environment (`julia -e 'using Pkg; Pkg.add("Revise")'`); --noreload turns it off.
+        if "runserver" in ARGS && !("--noreload" in ARGS)
+            try
+                @eval using Revise
+            catch
+                @info "Install Revise.jl (in your global environment) and runserver reloads code when it changes."
+            end
+        end
         include(joinpath(@__DIR__, "project.jl"))
         Juango.execute_from_command_line(ARGS)
         """,
@@ -487,11 +545,14 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
 
         const BASE_DIR = @__DIR__
 
-        include(joinpath(BASE_DIR, "models.jl"))
-        include(joinpath(BASE_DIR, "admin.jl"))
-        include(joinpath(BASE_DIR, "views.jl"))
-        include(joinpath(BASE_DIR, "urls.jl"))
-        include(joinpath(BASE_DIR, "settings.jl"))
+        # project_include: tracked by Revise for runserver's reloading when Revise is loaded
+        Juango.project_include(joinpath(BASE_DIR, "models.jl"))
+        Juango.project_include(joinpath(BASE_DIR, "admin.jl"))
+        Juango.project_include(joinpath(BASE_DIR, "views.jl"))
+        Juango.project_include(joinpath(BASE_DIR, "urls.jl"))
+        Juango.project_include(joinpath(BASE_DIR, "settings.jl"))
+        # after a reload, apply the settings again (they hold `urlpatterns`, which urls.jl may have rebuilt)
+        Juango.on_reload!(() -> Base.include(@__MODULE__, joinpath(BASE_DIR, "settings.jl")))
         """,
         "settings.jl" => """
         configure!(
@@ -688,17 +749,13 @@ function collectstatic(; clear = false, verbose = false)
     isempty(root) && throw(ImproperlyConfigured("set STATIC_ROOT to the directory collectstatic should copy files to"))
     clear && isdir(root) && foreach(p -> rm(joinpath(root, p); recursive = true), readdir(root))
     seen = Set{String}()
-    for dir in static_dirs()
-        for (d, _, fs) in walkdir(dir), f in fs
-            src = joinpath(d, f)
-            rel = relpath(src, dir)
-            (rel in seen || f == ".gitkeep") && continue
-            push!(seen, rel)
-            dst = joinpath(root, rel)
-            mkpath(dirname(dst))
-            cp(src, dst; force = true)
-            verbose && println("  ", rel)
-        end
+    for finder in static_finders(), (rel, src) in list_static(finder)   # the first finder with a path wins
+        rel in seen && continue
+        push!(seen, rel)
+        dst = joinpath(root, rel)
+        mkpath(dirname(dst))
+        cp(src, dst; force = true)
+        verbose && println("  ", rel)
     end
     manifest_storage() && post_process_manifest!(root, [replace(r, '\\' => '/') for r in seen])
     length(seen)

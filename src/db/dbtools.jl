@@ -5,6 +5,50 @@ managed_tables() = unique([modelmeta(T).table for T in all_models()
                            if !modelmeta(T).proxy && model_in_use(T) && get(modelmeta(T).extra, :managed, true) !== false])
 
 """
+    flush_sql(; reset_sequences = true) -> Vector{String}
+
+The statements `flush!` runs (`manage.jl sqlflush` prints them): empty every managed table, and
+restart the ids where the database allows.
+"""
+function flush_sql(; reset_sequences = true)
+    b = backend()
+    tables = [t for t in managed_tables() if table_exists(b, t)]
+    isempty(tables) && return String[]
+    q(t) = quote_name(b, t)
+    b isa PostgresBackend && return ["TRUNCATE " * join(q.(tables), ", ") * (reset_sequences ? " RESTART IDENTITY" : "") * " CASCADE"]
+    if b isa MySQLBackend
+        return vcat(["SET FOREIGN_KEY_CHECKS = 0"], [reset_sequences ? "TRUNCATE TABLE $(q(t))" : "DELETE FROM $(q(t))" for t in tables],
+                    ["SET FOREIGN_KEY_CHECKS = 1"])
+    end
+    out = ["DELETE FROM $(q(t))" for t in tables]
+    if reset_sequences && table_exists(b, "sqlite_sequence")
+        push!(out, "DELETE FROM sqlite_sequence WHERE name IN (" * join([sql_string_literal(b, t) for t in tables], ", ") * ")")
+    end
+    out
+end
+
+"""
+    sequence_reset_sql(apps = nothing) -> Vector{String}
+
+PostgreSQL: statements that move each table's id sequence past its largest id (after rows were
+loaded with explicit ids; `manage.jl sqlsequencereset app`). Other databases keep their counters
+right themselves, so there are none.
+"""
+function sequence_reset_sql(apps = nothing)
+    b = backend()
+    b isa PostgresBackend || return String[]
+    out = String[]
+    for T in all_models()
+        m = modelmeta(T)
+        (m.proxy || !model_in_use(T) || is_composite(T) || pk_kind(T) === :uuid) && continue
+        apps === nothing || m.app in apps || continue
+        t = quote_name(b, m.table)
+        push!(out, "SELECT setval(pg_get_serial_sequence($(sql_string_literal(b, t)), 'id'), COALESCE(MAX(\"id\"), 1), MAX(\"id\") IS NOT NULL) FROM $t")
+    end
+    out
+end
+
+"""
     flush!(; reset_sequences = true) -> Int
 
 Delete every row of every table Juango manages (not the record of applied migrations), then
@@ -13,28 +57,20 @@ from 1 again where the database allows.
 """
 function flush!(; reset_sequences = true)
     b = backend()
-    tables = [t for t in managed_tables() if table_exists(b, t)]
-    isempty(tables) && return 0
-    q(t) = quote_name(b, t)
-    if b isa PostgresBackend
-        execute("TRUNCATE " * join(q.(tables), ", ") * (reset_sequences ? " RESTART IDENTITY" : "") * " CASCADE")
-    elseif b isa MySQLBackend
-        atomic() do                                       # one connection, so the setting applies
-            execute("SET FOREIGN_KEY_CHECKS = 0")
+    stmts = flush_sql(; reset_sequences = reset_sequences)
+    isempty(stmts) && return 0
+    if b isa MySQLBackend                                 # one connection, so SET FOREIGN_KEY_CHECKS applies
+        atomic() do
             try
-                foreach(t -> execute(reset_sequences ? "TRUNCATE TABLE $(q(t))" : "DELETE FROM $(q(t))"), tables)
+                foreach(execute, stmts[1:end-1])
             finally
-                execute("SET FOREIGN_KEY_CHECKS = 1")
+                execute(stmts[end])                       # SET FOREIGN_KEY_CHECKS = 1
             end
         end
     else
-        atomic() do
-            foreach(t -> execute("DELETE FROM $(q(t))"), tables)
-            if reset_sequences && table_exists(b, "sqlite_sequence")
-                execute("DELETE FROM sqlite_sequence WHERE name IN (" * join(fill("?", length(tables)), ", ") * ")", tables)
-            end
-        end
+        atomic(() -> foreach(execute, stmts))
     end
+    tables = [t for t in managed_tables() if table_exists(b, t)]
     lock(() -> empty!(CT_CACHE), CT_LOCK)
     update_contenttypes!()
     update_permissions!()

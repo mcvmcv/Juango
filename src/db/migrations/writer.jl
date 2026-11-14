@@ -39,6 +39,8 @@ op_code(op::AddIndex) = "AddIndex($(jl(op.table)), $(index_code(op.index)))"
 op_code(op::AddConstraint) = "AddConstraint($(jl(op.table)), $(Juango.constraint_code(op.constraint)))"
 op_code(op::RemoveConstraint) = "RemoveConstraint($(jl(op.table)), $(jl(op.name)))"
 op_code(op::RemoveIndex) = "RemoveIndex($(jl(op.table)), $(jl(op.name)))"
+op_code(op::AddIndexConcurrently) = "AddIndexConcurrently($(jl(op.table)), $(index_code(op.index)))"
+op_code(op::RemoveIndexConcurrently) = "RemoveIndexConcurrently($(jl(op.table)), $(jl(op.name)))"
 op_code(op::AlterUniqueTogether) = "AlterUniqueTogether($(jl(op.table)), $(jl(op.unique_together)))"
 op_code(op::DeleteModel) = "DeleteModel($(jl(op.table)))"
 op_code(op::RenameModel) = "RenameModel($(jl(op.old)), $(jl(op.new))" * (op.model === nothing ? ")" : "; model = $(jl(op.model)))")

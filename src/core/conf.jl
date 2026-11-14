@@ -80,6 +80,9 @@ function default_settings()
         :LOCALE_PATHS => String[],
         :LANGUAGE_COOKIE_NAME => "juango_language",
         :USE_THOUSAND_SEPARATOR => false,
+        :DATE_INPUT_FORMATS => nothing,                # strftime formats forms accept, for languages without their own (nothing: Django's English ones)
+        :DATETIME_INPUT_FORMATS => nothing,            # nothing: each date format, with each time format
+        :TIME_INPUT_FORMATS => nothing,                # nothing: %H:%M:%S, %H:%M:%S.%f, %H:%M
         :MEDIA_ROOT => "",
         :MEDIA_URL => "/media/",
         :DEFAULT_FILE_STORAGE => nothing,
@@ -117,6 +120,17 @@ function default_settings()
         :SESSION_COOKIE_SECURE => false,
         :CSRF_COOKIE_NAME => "csrftoken",
         :CSRF_COOKIE_SECURE => false,
+        :CSRF_COOKIE_HTTPONLY => false,
+        :CSRF_COOKIE_SAMESITE => "Lax",
+        :CSRF_COOKIE_DOMAIN => nothing,
+        :CSRF_COOKIE_PATH => "/",
+        :CSRF_COOKIE_AGE => 60 * 60 * 24 * 365,
+        :CSRF_HEADER_NAME => "X-CSRFToken",                # also Django's spelling, HTTP_X_CSRFTOKEN
+        :CSRF_USE_SESSIONS => false,                        # the secret in the session instead of a cookie
+        :CSRF_FAILURE_VIEW => nothing,                      # a view (req; reason) -> response for CSRF failures (403)
+        :MESSAGE_STORAGE => :session,                       # :session, :cookie or :fallback (the cookie ones need MessageMiddleware)
+        :MESSAGE_LEVEL => 20,                               # messages below this level (info) are dropped
+        :MESSAGE_TAGS => Dict{Int,String}(),                # level => CSS tag, added to or replacing debug/info/success/warning/error
         :CSRF_TRUSTED_ORIGINS => String[],
         :PASSWORD_ITERATIONS => 260_000,
         :SQL_DEBUG => false,
@@ -153,13 +167,21 @@ end
 Update settings. Any keyword is accepted; unknown names become custom settings
 readable through `settings.NAME`.
 """
-function configure!(; kwargs...)
+configure!(; kwargs...) = apply_settings!(kwargs, true)
+
+"Set settings (`enter = false` when override_settings restores them, for `setting_changed`)."
+function apply_settings!(kwargs, enter::Bool)
     isempty(SETTINGS) && merge!(SETTINGS, default_settings())
     for (k, v) in kwargs
         SETTINGS[k] = v
     end
     foreach(h -> h(), SETTINGS_CHANGED_HOOKS)
     haskey(kwargs, :INSTALLED_APPS) && installed_apps()       # fail early, and run the apps' ready hooks
+    if any_receivers(setting_changed)
+        for (k, v) in kwargs
+            send(setting_changed, :settings; setting = k, value = v, enter = enter)
+        end
+    end
     nothing
 end
 

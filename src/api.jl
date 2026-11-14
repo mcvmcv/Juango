@@ -21,6 +21,7 @@ export settings, configure!
 # requests and responses
 export Request, HttpResponse, JsonResponse, HttpResponseRedirect, HttpResponsePermanentRedirect,
        HttpResponseNotFound, HttpResponseForbidden, HttpResponseBadRequest, HttpResponseNotAllowed,
+       HttpResponseGone, HttpResponseNotModified, HttpResponseServerError, set_signed_cookie!, get_signed_cookie,
        StreamingHttpResponse, FileResponse, content_disposition, TemplateResponse, Http404, PermissionDenied, BadRequest, QueryDict, getlist,
        set_cookie!, delete_cookie!, getheader, setheader!, json_body
 export EventStreamResponse, sse_event, websocket, ws_send, ws_receive, ws_close, ws_isopen
@@ -36,6 +37,10 @@ export Model, @model, @abstract_model, Field, CharField, TextField, EmailField, 
        BooleanField, DateTimeField, DateField, TimeField, DurationField, JSONField, ArrayField,
        UUIDField, BinaryField, GenericIPAddressField, FilePathField, IntegerRangeField, DateRangeField,
        DateTimeRangeField, ValueRange, FileField, ImageField, UploadedFile, FileExtensionValidator,
+       Validator, RegexValidator, EmailValidator, URLValidator, MinValueValidator, MaxValueValidator, MinLengthValidator,
+       MaxLengthValidator, StepValueValidator, DecimalValidator, ProhibitNullCharactersValidator, validate_email, validate_slug,
+       validate_unicode_slug, validate_ipv4_address, validate_ipv6_address, validate_ipv46_address, int_list_validator,
+       validate_comma_separated_integer_list,
        MaxFileSizeValidator, ForeignKey, OneToOneField, ManyToManyField, ForeignObject, GeneratedField,
        DB_DEFAULT, CompositePrimaryKey, CheckConstraint, UniqueConstraint, Index, get_absolute_url,
        Decimal, @dec_str, @choices, Choice, ChoiceSet, get_display
@@ -46,7 +51,8 @@ export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_lis
        none, in_bulk, dates, datetimes, raw, explain, iterator, select_for_update, intersection,
        difference, create, get_or_create, update_or_create, update!, save!, refresh!, full_clean,
        clean_fields, validate_unique, validate_constraints, get_next_by, get_previous_by, bulk_create,
-       bulk_update, add!, remove!, set!, clear!, through, atomic, on_commit, using_db,
+       bulk_update, add!, remove!, set!, clear!, through, atomic, on_commit, using_db, set_rollback!, get_rollback,
+       get_autocommit, savepoint, savepoint_commit, savepoint_rollback, execute_wrapper,
        DoesNotExist, MultipleObjectsReturned, ProtectedError, RestrictedError, SET, IntegrityError, DatabaseError, ValidationError, TransactionManagementError
 export run_async, sync_to_async, aget, acreate, acount, aexists, afirst, alast, acollect, aget_or_create,
        aupdate_or_create, abulk_create, abulk_update, aaggregate, ain_bulk, aupdate!, adelete!, asave!,
@@ -56,7 +62,8 @@ export F, Value, Count, Sum, Avg, Min, Max, Lower, Upper, Length, Coalesce, Conc
        Extract, ExtractYear, ExtractQuarter, ExtractMonth, ExtractWeek, ExtractWeekDay, ExtractIsoWeekDay,
        ExtractIsoYear, ExtractDay, ExtractHour, ExtractMinute, ExtractSecond, Trunc, TruncYear,
        TruncQuarter, TruncMonth, TruncWeek, TruncDay, TruncDate, TruncTime, TruncHour, TruncMinute,
-       TruncSecond, When, Case, OuterRef, Subquery, Exists, Window, Asc, Desc,
+       TruncSecond, When, Case, OuterRef, Subquery, Exists, Window, Asc, Desc, RowRange, FirstValue, LastValue, NthValue,
+       Ntile, PercentRank, CumeDist, JSONObject,
        RowNumber, Rank, DenseRank, Lag, Lead
 # migrations
 export migrate, makemigrations
@@ -65,21 +72,24 @@ export Form, @form, ModelForm, is_valid, add_widget_attrs!, add_error!, as_p, cl
        changed_fields, FormSet, formset_factory, modelformset_factory, inlineformset_factory,
        Widget, MultiWidget, MultiValueField, SplitDateTimeField, Media, ModelChoiceField,
        ModelMultipleChoiceField, TypedChoiceField, TypedMultipleChoiceField, MultipleChoiceField, RegexField,
-       ComboField, as_field_group, as_div, as_table
+       ComboField, as_field_group, as_div, as_table, NullBooleanField, SelectDateWidget, SplitHiddenDateTimeWidget,
+       order_fields!, non_field_errors, errors_json_data, errors_as_json, legend_tag, set_field!, delete_field!
 # views
 export render, redirect, get_object_or_404, get_list_or_404, TemplateView, RedirectView, ListView,
        DetailView, CreateView, UpdateView, DeleteView, FormView, ArchiveIndexView, YearArchiveView,
-       MonthArchiveView, DayArchiveView, DateDetailView, ViewCall, default_hook, Paginator, page, get_page,
-       require_http_methods, require_GET, require_POST, csrf_exempt, non_atomic_requests, get_csrf_token,
+       MonthArchiveView, DayArchiveView, DateDetailView, WeekArchiveView, TodayArchiveView, ViewCall, default_hook, Paginator, page, get_page,
+       require_http_methods, require_GET, require_POST, require_safe, csrf_exempt, non_atomic_requests, get_csrf_token,
+       ensure_csrf_cookie, csrf_protect, requires_csrf_token, xframe_options_exempt, xframe_options_deny,
+       xframe_options_sameorigin, gzip_page, no_append_slash, sensitive_post_parameters,
        LoginRequiredMixin, PermissionRequiredMixin, UserPassesTestMixin
 # auth and messages
 export User, AbstractUser, AnonymousUser, USER_MODEL, get_user_model, authenticate, login!, logout!,
        create_user, create_superuser, get_username, get_full_name, get_short_name, set_password!, check_password, make_password, is_authenticated, login_required,
        staff_member_required, Permission, Group, has_perm, has_perms, permission_required, ModelBackend,
-       validate_password, update_session_auth_hash!, UserCreationForm, UserChangeForm, login_not_required,
+       validate_password, update_session_auth_hash!, UserCreationForm, UserChangeForm, AdminPasswordChangeForm, AllowAllUsersModelBackend, login_not_required,
        LoginRequiredMiddleware, RemoteUserMiddleware, PersistentRemoteUserMiddleware, RemoteUserBackend,
        PasswordChangeView, PasswordChangeDoneView, PasswordResetView, PasswordResetConfirmView
-export message!, get_messages, url_has_allowed_host_and_scheme
+export message!, get_messages, peek_messages, MessageMiddleware, url_has_allowed_host_and_scheme
 export HtmxDetails, is_htmx, hx_redirect, hx_refresh, hx_location, hx_stop_polling, hx_push_url, hx_replace_url,
        hx_retarget, hx_reswap, hx_reselect, hx_trigger, form_status, HtmxMiddleware, HTMX_STOP_POLLING
 export LiveView, live, mount, handle_event, handle_info, live_context, live_redirect, subscribe, unsubscribe, publish,
@@ -90,9 +100,10 @@ export FilterSet, Filter, CharFilter, NumberFilter, BooleanFilter, ChoiceFilter,
 # signals
 export Signal, connect!, disconnect!, receiver, send, pre_save, post_save, pre_delete, post_delete,
        m2m_changed, request_started, request_finished, user_logged_in, user_logged_out,
-       user_login_failed, pre_migrate, post_migrate
+       user_login_failed, pre_migrate, post_migrate, connection_created, got_request_exception, setting_changed,
+       pre_init, post_init, class_prepared
 # translations and time zones
-export gettext, ngettext, pgettext, npgettext, gettext_lazy, ngettext_lazy, pgettext_lazy, @t_str,
+export gettext, ngettext, pgettext, npgettext, gettext_lazy, ngettext_lazy, pgettext_lazy, @t_str, get_language_info,
        interpolate, get_language, activate!, deactivate!, with_language, LocaleMiddleware, i18n_patterns,
        i18n_urls, timezone_now, make_aware, make_naive, localtime, localdate, with_timezone, activate_timezone!,
        deactivate_timezone!, get_current_timezone, TimezoneMiddleware
@@ -103,6 +114,7 @@ export cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, ge
        ContentSecurityPolicyMiddleware, CSP, csp_nonce
 # mail
 export send_mail, mail_admins, mail_managers, EmailMessage, EmailMultiAlternatives, send!, attach!, attach_file,
+       send_mass_mail, get_connection, send_messages,
        attach_alternative!
 # apps, contrib apps, tasks
 export App, get_model, concrete_fields, many_to_many, attname, column, is_relation, is_primary_key, related_model,
@@ -149,7 +161,7 @@ public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, sitema
        sitemap_index_view, flatpage, flatpage_urls, FlatpageFallbackMiddleware, RequestSite,
        clear_site_cache!, Redirect, RedirectFallbackMiddleware, background, TaskDef, db_worker
 # apps, settings, commands
-public build, build_workload, CheckMessage, register_check!, run_checks, diffsettings, sendtestemail, findstatic,
+public build, build_workload, project_include, on_reload!, CheckMessage, register_check!, run_checks, diffsettings, sendtestemail, findstatic,
        remove_stale_contenttypes, installed_apps, is_installed, get_app, model_label, app_models, static_dirs, default_settings,
        startproject, startapp, collectstatic, register_command!, slugify
 
@@ -160,12 +172,16 @@ using ..Juango: Client, RequestFactory, request, post, force_login!, text, outbo
     capture_on_commit_callbacks, with_live_server, live_server_url, override_settings, assert_contains,
     assert_not_contains, assert_redirects, assert_template_used, assert_template_not_used,
     assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx,
-    live_test, live_event!, live_info!, live_flush!, setup_test_database, teardown_test_database, consume_stream!
+    live_test, live_event!, live_info!, live_flush!, setup_test_database, teardown_test_database, consume_stream!,
+    assert_html_equal, assert_html_not_equal, assert_in_html, assert_json_equal, assert_json_not_equal,
+    assert_queryset_equal, assert_formset_error, assert_field_output
 export Client, RequestFactory, request, post, force_login!, text, outbox, rollback_after,
     capture_on_commit_callbacks, with_live_server, live_server_url, override_settings, assert_contains,
     assert_not_contains, assert_redirects, assert_template_used, assert_template_not_used,
     assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx,
-    live_test, live_event!, live_info!, live_flush!, setup_test_database, teardown_test_database, consume_stream!
+    live_test, live_event!, live_info!, live_flush!, setup_test_database, teardown_test_database, consume_stream!,
+    assert_html_equal, assert_html_not_equal, assert_in_html, assert_json_equal, assert_json_not_equal,
+    assert_queryset_equal, assert_formset_error, assert_field_output
 end
 
 module Functions
@@ -191,10 +207,10 @@ end
 module Postgres
 using ..Juango: HStoreField, CICharField, SearchVector, SearchQuery, SearchRank, TrigramSimilarity,
     TrigramWordSimilarity, TrigramStrictWordSimilarity, TrigramDistance, TrigramWordDistance, Unaccent,
-    ExclusionConstraint, GinIndex
+    ExclusionConstraint, GinIndex, GistIndex, BrinIndex, SpGistIndex, HashIndex, BloomIndex
 export HStoreField, CICharField, SearchVector, SearchQuery, SearchRank, TrigramSimilarity,
     TrigramWordSimilarity, TrigramStrictWordSimilarity, TrigramDistance, TrigramWordDistance, Unaccent,
-    ExclusionConstraint, GinIndex
+    ExclusionConstraint, GinIndex, GistIndex, BrinIndex, SpGistIndex, HashIndex, BloomIndex
 end
 
 public Testing, GIS, Postgres, Functions, Migrations

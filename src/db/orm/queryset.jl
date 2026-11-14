@@ -572,9 +572,12 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
     for i in eachindex(rows)
         objs[i] = set_instance_db!(from_row(T, rows[i], plan))
     end
-    for (k, v) in qs.annotations, (o, r) in zip(objs, rows)
+    for (k, v) in qs.annotations
         is_filtered_relation(v) && continue
-        (getfield(o, :_data)::Dict{Symbol,Any})[k] = expr_value(T, v, get(r, k, nothing))
+        of = typed_output(T, v)
+        for (o, r) in zip(objs, rows)
+            (getfield(o, :_data)::Dict{Symbol,Any})[k] = expr_value(T, v, get(r, k, nothing), of)
+        end
     end
     if !isempty(related)
         for (obj, row) in zip(objs, rows)
@@ -613,6 +616,7 @@ Base.@nospecializeinfer function fetch_values(@nospecialize(qs::QuerySet))
         _, fld = resolve_path(SQLCompiler(T), modelmeta(T).table, T, f)
         fld === nothing || (convs[Symbol(f)] = fld)
     end
+    outs = Dict{Symbol,Union{Nothing,Field}}(k => typed_output(T, v) for (k, v) in qs.annotations if !is_filtered_relation(v))
     out = Dict{Symbol,Any}[]
     for r in execute(sql, ps)
         d = Dict{Symbol,Any}()
@@ -622,7 +626,7 @@ Base.@nospecializeinfer function fetch_values(@nospecialize(qs::QuerySet))
             d[k] = haskey(convs, k) ? from_db(convs[k], v) : v
         end
         for (k, v) in qs.annotations
-            is_filtered_relation(v) || (d[k] = expr_value(T, v, get(r, k, nothing)))
+            is_filtered_relation(v) || (d[k] = expr_value(T, v, get(r, k, nothing), outs[k]))
         end
         push!(out, d)
     end
@@ -729,6 +733,21 @@ Base.@nospecializeinfer function Base.getindex(@nospecialize(qs::QuerySet), i::I
     isempty(v) && throw(BoundsError(qs, i))
     v[1]
 end
+
+"""
+    contains(qs, obj) -> Bool    (also `obj in qs`)
+
+Whether the queryset includes `obj` (Django 4.0's `QuerySet.contains`): one query, or none if
+the queryset has already been evaluated.
+"""
+Base.@nospecializeinfer function Base.contains(@nospecialize(qs::QuerySet), @nospecialize(obj::Model))
+    obj isa model_of(qs) || concrete_model(typeof(obj)) === concrete_model(model_of(qs)) ||
+        throw(ArgumentError("contains: $(typeof(obj)) isn't a $(model_of(qs))"))
+    obj.pk === nothing && throw(ArgumentError("contains: the object isn't saved"))
+    qs.cache === nothing || return any(o -> o isa Model && o.pk == obj.pk, qs.cache)
+    exists(filter(qs; pk = obj.pk))
+end
+Base.@nospecializeinfer Base.in(@nospecialize(obj::Model), @nospecialize(qs::QuerySet)) = contains(qs, obj)
 
 Base.@nospecializeinfer default_order(@nospecialize(qs::QuerySet)) =
     order_cleared(qs) ? Any["id"] :

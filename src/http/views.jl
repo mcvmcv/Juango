@@ -106,6 +106,18 @@ end
 require_http_methods(methods) = view -> require_http_methods(view, methods)
 require_GET(view) = require_http_methods(view, ["GET", "HEAD"])
 require_POST(view) = require_http_methods(view, ["POST"])
+"GET and HEAD only (Django's `require_safe`, for views that must not change anything)."
+require_safe(view) = require_http_methods(view, ["GET", "HEAD"])
+
+"""
+    gzip_page(view)
+
+Compress this view's responses when the client accepts gzip, as GZipMiddleware does for every view.
+"""
+function gzip_page(view)
+    w = (req; kw...) -> GZipMiddleware(r -> to_response(view(r; kw...)))(req)
+    propagate_flags!(w, view)
+end
 
 # --- pagination ------------------------------------------------------------------------------
 
@@ -236,7 +248,7 @@ end
 const GENERIC_OPTIONS = Set([:template, :extra_context, :queryset, :paginate_by, :context_object_name, :allow_empty,
     :pk_kwarg, :slug_kwarg, :slug_field, :fields, :success_url, :success_message, :initial, :login_required,
     :permission_required, :test_func, :login_url, :raise_exception, :date_field, :allow_future, :make_object_list,
-    :form, :object_permission_required])
+    :form, :object_permission_required, :week_format])
 
 """
 The view's object (the `get_object` hook), refused with 403 unless the user has every
@@ -258,7 +270,8 @@ end
 
 const TEMPLATE_SUFFIX = Dict(:ListView => "_list", :DetailView => "_detail", :CreateView => "_form", :UpdateView => "_form",
     :DeleteView => "_confirm_delete", :ArchiveIndexView => "_archive", :YearArchiveView => "_archive_year",
-    :MonthArchiveView => "_archive_month", :DayArchiveView => "_archive_day", :DateDetailView => "_detail")
+    :MonthArchiveView => "_archive_month", :DayArchiveView => "_archive_day", :DateDetailView => "_detail",
+    :WeekArchiveView => "_archive_week", :TodayArchiveView => "_archive_day")
 
 HOOK_DEFAULTS[:get_template_names] = function (v)
     t = opt(v, :template)
@@ -586,6 +599,60 @@ DayArchiveView(::Type{T}; kw...) where {T<:Model} =
     end
 
 """
+    week_start(year, week, format = "%U") -> Date
+
+The first day of a week as Django's `week_format` numbers them: `"%U"` (weeks start on Sunday,
+week 1 has the year's first Sunday), `"%W"` (the same from Monday) or `"%V"` (ISO 8601: Monday,
+week 1 holds January 4th; `year` is then the ISO year).
+"""
+function week_start(year::Integer, week::Integer, format = "%U")
+    jan1 = Date(year, 1, 1)
+    format == "%V" && (jan4 = Date(year, 1, 4); return jan4 - Day(dayofweek(jan4) - 1) + Week(week - 1))
+    first_ = format == "%W" ? jan1 + Day(mod(1 - dayofweek(jan1), 7)) :     # the year's first Monday
+             format == "%U" ? jan1 + Day(mod(7 - dayofweek(jan1), 7)) :     # its first Sunday
+             throw(ArgumentError("week_format must be \"%U\", \"%W\" or \"%V\""))
+    first_ + Week(week - 1)
+end
+
+"""
+    WeekArchiveView(Model; date_field, week_format="%U", allow_future=false, allow_empty=false, paginate_by=nothing, hooks...)
+
+URL kwargs `year`, `week`. The template (`<model>_archive_week.html`) gets `week` (its first
+day), `object_list` and `next_week`/`previous_week`.
+"""
+WeekArchiveView(::Type{T}; kw...) where {T<:Model} =
+    generic_view(:WeekArchiveView, T, kw) do v
+        fmt = string(opt(v, :week_format, "%U"))
+        w = try
+            week_start(url_int(v, :year), url_int(v, :week), fmt)
+        catch e
+            e isa ArgumentError && rethrow()
+            throw(Http404("Invalid week"))
+        end
+        start_of(d) = d - Day(fmt == "%U" ? mod(dayofweek(d), 7) : dayofweek(d) - 1)
+        all_ = dated_queryset(v)
+        qs = order_by(in_period(v, all_, w, w + Week(1)), string(date_field(v)))
+        archive_response(v, qs, Dict{String,Any}("week" => w,
+            "next_week" => next_period(v, all_, w + Week(1), start_of),
+            "previous_week" => previous_period(v, all_, w, start_of)))
+    end
+
+"""
+    TodayArchiveView(Model; date_field, allow_future=false, allow_empty=false, paginate_by=nothing, hooks...)
+
+`DayArchiveView` for today (in the current time zone), with no URL kwargs. Same template and context.
+"""
+TodayArchiveView(::Type{T}; kw...) where {T<:Model} =
+    generic_view(:TodayArchiveView, T, kw) do v
+        d = localdate()
+        all_ = dated_queryset(v)
+        qs = order_by(in_period(v, all_, d, d + Day(1)), string(date_field(v)))
+        archive_response(v, qs, Dict{String,Any}("day" => d,
+            "next_day" => next_period(v, all_, d + Day(1), identity),
+            "previous_day" => previous_period(v, all_, d, identity)))
+    end
+
+"""
     DateDetailView(Model; date_field, allow_future=false, pk_kwarg=:id, slug_kwarg=:slug, hooks...)
 
 One object, found by `year`/`month`/`day` plus pk or slug: a 404 unless it is dated that day.
@@ -607,7 +674,7 @@ end
 # --- mixins as wrappers ---
 
 "`LoginRequiredMixin(view)`: the same as `login_required(view)` (or the `login_required = true` option)."
-LoginRequiredMixin(view; login_url = nothing) = login_required(view; login_url = login_url)
+LoginRequiredMixin(view; login_url = nothing, redirect_field_name = "next") = login_required(view; login_url = login_url, redirect_field_name = redirect_field_name)
 "`PermissionRequiredMixin(view, \"app.perm\"...)`: the same as `permission_required` (or the option)."
 PermissionRequiredMixin(view, perms::AbstractString...; kw...) = permission_required(view, perms...; kw...)
 "`UserPassesTestMixin(view, user -> Bool)`: the same as `user_passes_test` (or the `test_func` option)."

@@ -130,6 +130,7 @@ Stream handler for `HTTP.listen`: like `http_handler`, plus streaming responses 
 are produced and WebSocket handshakes for `websocket` views.
 """
 function stream_handler(stream::HTTP.Stream; secure::Bool = false)
+    RELOAD[] && reload_if_changed()                   # runserver with Revise: changed code first
     hreq = HTTP.startread(stream)
     body = read_body(stream, hreq, body_limit(hreq))
     if body === nothing             # Django's RequestDataTooBig
@@ -177,8 +178,69 @@ function stream_handler(stream::HTTP.Stream; secure::Bool = false)
     write_response(stream, req, resp)
 end
 
+# --- reloading code (runserver with Revise.jl) --------------------------------------------------------
+#
+# Revise.jl updates functions in place when their files change. Julia can't redefine a struct, so a
+# changed @model needs a restart; everything else (views, urls, forms, admin, settings, Juango's own
+# code when it's dev'd) takes effect on the next request.
+
+const RELOAD = Ref(false)
+const RELOAD_HOOKS = Function[]
+const RELOAD_LOCK = ReentrantLock()
+
 """
-    runserver(host="127.0.0.1", port=8000; block=true, certfile=nothing, keyfile=nothing)
+    project_include(path)
+
+`include` a project file into `Main`, tracked by Revise when it's loaded (so `runserver` picks up
+changes to it). The project.jl that `startproject` writes uses it.
+"""
+project_include(path::AbstractString) = (R = revise_module(); R === nothing ? Base.include(Main, path) :
+                                         Base.invokelatest(R.includet, Main, path))
+
+"Run `f()` after runserver has reloaded changed code (the generated project.jl re-applies its settings)."
+on_reload!(f) = (push!(RELOAD_HOOKS, f); f)
+
+"The loaded Revise module, or nothing."
+revise_module() = (m = get(Base.loaded_modules, Base.PkgId(Base.UUID("295af30f-e4ad-537b-8983-00126c2a3abe"), "Revise"), nothing);
+                   m isa Module ? m : nothing)
+
+"""
+Apply changed code before a request (`runserver` with Revise): if any tracked file changed,
+`Revise.revise()`, then the reload hooks, then Juango's caches (middleware chain, URL resolver,
+model relations) are cleared. `R` is the Revise module.
+"""
+function reload_if_changed(R = revise_module())
+    (RELOAD[] && R !== nothing) || return false
+    queue = isdefined(R, :revision_queue) ? R.revision_queue : nothing
+    queue !== nothing && isempty(queue) && return false
+    lock(RELOAD_LOCK) do
+        try
+            Base.invokelatest(R.revise)
+        catch e
+            msg = sprint(showerror, e)
+            if occursin("redefinition", msg)
+                @warn "Restart the server: a struct (a @model?) changed, which Julia can't redefine.\n$msg"
+            else
+                @error "Reloading failed" exception = (e, catch_backtrace())
+            end
+            return false
+        end
+        for h in RELOAD_HOOKS
+            try
+                Base.invokelatest(h)
+            catch e
+                @error "A reload hook failed" exception = (e, catch_backtrace())
+            end
+        end
+        foreach(h -> h(), SETTINGS_CHANGED_HOOKS)         # handler chain, URL reverse index, ...
+        invalidate_relations!()
+        @info "Reloaded changed code."
+        true
+    end
+end
+
+"""
+    runserver(host="127.0.0.1", port=8000; block=true, certfile=nothing, keyfile=nothing, reload=true)
 
 Start the development server. With `block=false` the server runs in the background and the
 `HTTP.Server` is returned (stop it with `close(server)`).
@@ -188,7 +250,7 @@ to serve HTTPS, where browsers pick HTTP/2. Start Julia with an interactive thre
 `julia --threads=4,1`, so the server keeps answering while views run on the other threads.
 """
 function runserver(host::AbstractString = "127.0.0.1", port::Integer = 8000; block::Bool = true, quiet = false,
-                   certfile = nothing, keyfile = nothing)
+                   certfile = nothing, keyfile = nothing, reload::Bool = true)
     (certfile === nothing) == (keyfile === nothing) ||
         throw(ArgumentError("runserver: pass both certfile and keyfile, or neither"))
     scheme = certfile === nothing ? "http" : "https"
@@ -199,6 +261,10 @@ function runserver(host::AbstractString = "127.0.0.1", port::Integer = 8000; blo
         println("Juango version $VERSION_STRING (Julia $(VERSION)), DEBUG = $(settings.DEBUG)")
         println("Starting development server at $scheme://$(occursin(':', host) ? "[$host]" : host):$port/")
         println("Quit the server with CONTROL-C.")
+    end
+    RELOAD[] = reload && revise_module() !== nothing
+    if !quiet
+        RELOAD[] && println("Reloading changed code with Revise.jl (--noreload turns it off).")
         flush(stdout)
     end
     server = if certfile === nothing

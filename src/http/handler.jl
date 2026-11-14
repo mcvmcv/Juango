@@ -20,10 +20,8 @@ const MIME_TYPES = Dict(
 "Serve a file from STATIC_DIRS or an app's `static/` (used by `runserver` when `DEBUG`)."
 function serve_static(req::Request)
     rel = req.path[ncodeunits(settings.STATIC_URL)+1:end]
-    for dir in static_dirs()
-        root = normpath(abspath(dir))
-        p = normpath(joinpath(root, rel))
-        (within(root, p) && isfile(p)) || continue
+    p = find_static_file(rel)                         # STATICFILES_FINDERS
+    if p !== nothing
         ext = lowercase(splitext(p)[2])
         resp = HttpResponse(read(p); content_type = get(MIME_TYPES, ext, "application/octet-stream"))
         setheader!(resp, "Cache-Control", "no-cache")
@@ -69,8 +67,10 @@ function dispatch(req::Request)
             inner = call
             call = () -> atomic(inner; db = alias)
         end
-        resp = call()
-        resp.deferred === nothing ? resp : render_template_response!(req, resp)
+        run = () -> (resp = call(); resp.deferred === nothing ? resp : render_template_response!(req, resp))
+        # in an include with an app_name, reverse_url("app:...") and {% url %} stay in this instance
+        rm.app_name === nothing || rm.namespace === nothing ? run() :
+            Base.ScopedValues.with(run, CURRENT_APP => (rm.app_name => rm.namespace))
     catch e
         response_for_exception(req, e, catch_backtrace())
     end
@@ -227,6 +227,7 @@ function response_for_exception(req::Request, e, bt)
         return something(r, HttpResponseBadRequest(settings.DEBUG ? "<h1>Bad Request (400)</h1><p>$(escape_html(e.msg))</p>" :
                                                                     "<h1>Bad Request (400)</h1>"))
     end
+    any_receivers(got_request_exception) && send_robust(got_request_exception, :handler; request = req, exception = e)
     # logged to juango.request: Julia's logger, and mailed to ADMINS when DEBUG is false (see LOGGING)
     log!("juango.request", :error, "Internal Server Error: $(req.path)"; exception = (e, bt), request = req, status_code = 500)
     settings.DEBUG && return technical_500(req, e, bt)

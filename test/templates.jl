@@ -295,3 +295,22 @@ end
     @test tr("{{ nt.0 }}-{{ nt.b }}", Dict("nt" => (a = "x", b = "y"))) == "x-y"
     @test tr("{{ xs.2 }}", Dict("xs" => [1, 2])) == ""
 end
+
+@testset "a date's parts in templates (#155)" begin
+    d = Date(2026, 11, 15)                                            # a Sunday
+    @test tr("{{ d.year }}/{{ d.month }}/{{ d.day }} {{ d.weekday }} {{ d.isoweekday }}", Dict("d" => d)) == "2026/11/15 6 7"
+    dt = DateTime(2026, 11, 15, 9, 5, 7, 250)
+    @test tr("{{ t.hour }}:{{ t.minute }}:{{ t.second }} {{ t.microsecond }} {{ t.date }} {{ t.nope }}", Dict("t" => dt)) == "9:5:7 250000 2026-11-15 "
+    @test tr("{{ t.hour }}h{{ t.minute }}", Dict("t" => Dates.Time(14, 30))) == "14h30"
+    override_settings(USE_TZ = true, TIME_ZONE = "Pacific/Auckland") do      # UTC+13: shown, and taken apart, in local time
+        z = Juango.TimeZones.ZonedDateTime(DateTime(2026, 11, 15, 12, 0), Juango.UTC_TZ)
+        @test tr("{{ z.day }} {{ z.hour }}", Dict("z" => z)) == "16 1"
+    end
+    old = settings.ROOT_URLCONF
+    try
+        configure!(ROOT_URLCONF = vcat(old, [path("day/<int:y>/<int:m>/<int:d>/", req -> HttpResponse(""); name = "t155-day")]))
+        @test tr("{% url 't155-day' d.year d.month d.day %}", Dict("d" => d)) == "/day/2026/11/15/"
+    finally
+        configure!(ROOT_URLCONF = old)
+    end
+end

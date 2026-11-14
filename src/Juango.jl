@@ -52,6 +52,7 @@ include("template/tags.jl")
 include("template/filters.jl")
 include("template/templatetags.jl")
 include("i18n/i18n.jl")
+include("core/validators.jl")
 include("core/signals.jl")
 include("core/signing.jl")
 

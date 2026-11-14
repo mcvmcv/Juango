@@ -33,6 +33,7 @@ mutable struct Form
     clean::Any
     files::Any            # uploaded files (req.FILES) for file fields
     media::Any            # Media (formsextra.jl): the form's own CSS and JavaScript
+    use_required_attribute::Bool   # false: no HTML `required` (the browser won't block a partly filled formset)
 end
 
 """
@@ -42,16 +43,19 @@ end
 `add_error!(form, field_or_nothing, msg)` or modify `form.cleaned_data`.
 """
 function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
-              name = "Form", model = nothing, instance = nothing, files = nothing, media = nothing)
+              name = "Form", model = nothing, instance = nothing, files = nothing, media = nothing,
+              use_required_attribute::Bool = true, field_order = nothing)
     fs = Field[]
     for (n, f) in fields
         f = deepcopy(f)
         f.name = Symbol(n)
         push!(fs, f)
     end
-    Form(string(name), fs, data, Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(initial)),
-         Dict{Symbol,Vector{String}}(), Dict{Symbol,Any}(), model, instance, string(prefix), false, clean, files,
-         media === nothing ? Media() : media)
+    form = Form(string(name), fs, data, Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(initial)),
+                Dict{Symbol,Vector{String}}(), Dict{Symbol,Any}(), model, instance, string(prefix), false, clean, files,
+                media === nothing ? Media() : media, use_required_attribute)
+    field_order === nothing || order_fields!(form, field_order)
+    form
 end
 
 # --- form-only fields --------------------------------------------------------------------------------
@@ -94,6 +98,16 @@ TypedChoiceField(choices; coerce = identity, empty_value = "", kw...) =
     Field(:typedchoice; choices = choices, related = (coerce = coerce, empty_value = empty_value), kw...)
 TypedMultipleChoiceField(choices; coerce = identity, kw...) = Field(:multichoice; choices = choices, related = (coerce = coerce,), kw...)
 MultipleChoiceField(choices; kw...) = TypedMultipleChoiceField(choices; kw...)
+"""
+    NullBooleanField(; kw...)
+
+Yes, no or unknown (`true`, `false`, `nothing`), as Django's, shown as a select (Django's
+`NullBooleanSelect`). It also accepts "1"/"0" and "True"/"False".
+"""
+NullBooleanField(; kw...) =
+    TypedChoiceField(["unknown" => gettext_lazy("Unknown"), "true" => gettext_lazy("Yes"), "false" => gettext_lazy("No")];
+                     coerce = v -> v in ("true", "True", "1", "2") ? true : v in ("false", "False", "0", "3") ? false : nothing,
+                     empty_value = nothing, blank = true, kw...)
 
 """
     RegexField(regex; max_length = nothing, error_message = "Enter a valid value.", kw...)
@@ -154,6 +168,9 @@ Base.@nospecializeinfer form_save_hook(f::Form, ::Val, @nospecialize(obj)) = not
 A form generated from a model's fields. `save!(form)` writes the cleaned data
 into the instance (creating one if needed) and saves it.
 
+`error_messages = Dict(:title => Dict("required" => "Give it a title."))` replaces messages by
+code, over the model field's own `error_messages`.
+
 `extra_fields = [:scope => TypedChoiceField(...)]` adds fields that aren't on the model: placed
 where `fields` lists their names (else at the end), cleaned into `cleaned_data`, and left alone
 by `save!`.
@@ -162,7 +179,7 @@ Base.@nospecializeinfer function ModelForm(@nospecialize(T::Type{<:Model}); data
                    initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
                    labels = Dict{Symbol,String}(), help_texts = Dict{Symbol,String}(),
                    widgets = Dict{Symbol,Symbol}(), field_classes = Dict{Symbol,Any}(),
-                   formfield_callback = nothing, extra_fields = Pair{Symbol,Any}[])
+                   formfield_callback = nothing, extra_fields = Pair{Symbol,Any}[], error_messages = Dict{Symbol,Any}())
     meta = modelmeta(T)
     extras = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in extra_fields)
     chosen = fields === nothing ? vcat([f.name for f in all_fields(T) if f.editable], [f.name for f in meta.m2m if f.editable]) :
@@ -180,6 +197,10 @@ Base.@nospecializeinfer function ModelForm(@nospecialize(T::Type{<:Model}); data
         f = deepcopy(i === nothing ? getfield_meta(T, n) : meta.m2m[i])
         haskey(labels, n) && (f.verbose_name = labels[n])
         haskey(help_texts, n) && (f.help_text = help_texts[n])
+        if haskey(error_messages, n)                 # Meta.error_messages: per field, code => message, over the model field's
+            em = something(f.error_messages, Dict{String,String}())
+            f.error_messages = merge(em, Dict{String,String}(string(k) => string(v) for (k, v) in error_messages[n]))
+        end
         haskey(widgets, n) && (f.widget = widgets[n])
         haskey(field_classes, n) && (f = deepcopy(field_classes[n]))            # a different form field for it
         if formfield_callback !== nothing
@@ -212,6 +233,12 @@ html_id(f::Form, fld::Field) = "id_" * html_name(f, fld)
 function raw_value(f::Form, fld::Field)
     f.data === nothing && return nothing
     fld.kind === :multi && return multi_raw(f, fld)
+    if fld.widget isa SelectDateWidget                 # three selects: name_year, name_month, name_day
+        n = html_name(f, fld)
+        y, m, d = (string(something(get(f.data, n * s, nothing), "")) for s in ("_year", "_month", "_day"))
+        isempty(y) && isempty(m) && isempty(d) && return get(f.data, n, nothing)
+        return (isempty(y) || isempty(m) || isempty(d)) ? "invalid" : "$y-$(lpad(m, 2, '0'))-$(lpad(d, 2, '0'))"
+    end
     fld.kind in MULTI_KINDS && return raw_list(f.data, html_name(f, fld))
     get(f.data, html_name(f, fld), nothing)
 end
@@ -261,6 +288,8 @@ function to_julia(fld::Field, raw)
     s = raw === nothing ? "" : (widget_kind(fld.widget) === :password ? string(raw) : strip(string(raw)))
     k === :typedchoice && isempty(s) && return fld.related.empty_value, nothing     # not coerced, as in Django
     isempty(s) && return ((k in STRING_KINDS || k === :filepath) && !fld.null ? "" : nothing), nothing
+    opts = fld.related isa NamedTuple && haskey(fld.related, :localize) ? fld.related : nothing
+    opts !== nothing && opts.localize && k in (INT_KINDS..., :float, :decimal) && (s = parse_localized_number(s))
     if k in STRING_KINDS
         return String(s), nothing
     elseif k in INT_KINDS
@@ -273,14 +302,11 @@ function to_julia(fld::Field, raw)
         v = tryparse(Decimal, s)
         return v, v === nothing ? gettext("Enter a number.") : nothing
     elseif k === :datetime
-        for fmt in (dateformat"yyyy-mm-ddTHH:MM:SS", dateformat"yyyy-mm-ddTHH:MM", dateformat"yyyy-mm-dd HH:MM:SS",
-                    dateformat"yyyy-mm-dd HH:MM", dateformat"yyyy-mm-ddTHH:MM:SS.s", dateformat"yyyy-mm-dd")
-            v = tryparse(DateTime, s, fmt)
-            v === nothing || return (settings.USE_TZ ? make_aware(v) : v), nothing      # typed in the current time zone
-        end
+        v = parse_input_datetime(s, :datetime; formats = opts === nothing ? nothing : opts.input_formats)
+        v === nothing || return (settings.USE_TZ ? make_aware(v) : v), nothing      # typed in the current time zone
         return nothing, gettext("Enter a valid date/time.")
     elseif k === :date
-        v = tryparse(Date, s, dateformat"yyyy-mm-dd")
+        v = parse_input_datetime(s, :date; formats = opts === nothing ? nothing : opts.input_formats)
         return v, v === nothing ? gettext("Enter a valid date.") : nothing
     elseif k === :ipaddress
         r = clean_ip(s, fld.related.protocol, fld.related.unpack_ipv4)
@@ -290,7 +316,8 @@ function to_julia(fld::Field, raw)
             return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
         return String(s), nothing
     elseif k === :time
-        v = parse_time(s)
+        v = opts !== nothing && opts.input_formats !== nothing ? parse_input_datetime(s, :time; formats = opts.input_formats) : nothing
+        v === nothing && (v = parse_time(s))
         return v, v === nothing ? gettext("Enter a valid time.") : nothing
     elseif k === :duration
         us = try parse_duration_us(s) catch; nothing end
@@ -373,15 +400,17 @@ function is_valid(f::Form)
         end
         v, err = to_julia(fld, raw_value(f, fld))
         if err !== nothing
-            add_error!(f, fld.name, err)
+            add_error!(f, fld.name, field_message(fld, "invalid", err))
             continue
         end
-        errs = fld.kind in MULTI_KINDS ? (isempty(v) && !fld.blank ? [gettext("This field is required.")] : String[]) :
+        errs = fld.kind in MULTI_KINDS ? (isempty(v) && !fld.blank ? [field_message(fld, "required", gettext("This field is required."))] :
+                                          validator_errors(fld, v)) :
                validate_field(fld, v isa Model ? v.id : v)
         if isempty(errs) && f.model !== nothing && fld.unique && v !== nothing && v != ""
             q = filter(objects(f.model), Q(attname(fld) => v))
             (f.instance !== nothing && f.instance.id !== nothing) && (q = filter(q, !Q(id = f.instance.id)))
-            exists(q) && push!(errs, interpolate(gettext("%(model)s with this %(field)s already exists."), Dict("model" => uppercasefirst(string(modelmeta(f.model).verbose_name)), "field" => label(fld))))
+            exists(q) && push!(errs, field_message(fld, "unique", gettext("%(model)s with this %(field)s already exists."),
+                                                   Dict("model" => uppercasefirst(string(modelmeta(f.model).verbose_name)), "field" => label(fld))))
         end
         foreach(e -> add_error!(f, fld.name, e), errs)
         isempty(errs) && (f.cleaned_data[fld.name] = v)
@@ -496,20 +525,16 @@ function clean_file_field(f::Form, fld::Field)
     v = up !== nothing ? up : file_cleared(f, fld) ? nothing : current
     errs = String[]
     if up !== nothing && file_cleared(f, fld)
-        push!(errs, gettext("Please either submit a file or check the clear checkbox, not both."))
+        push!(errs, field_message(fld, "contradiction", gettext("Please either submit a file or check the clear checkbox, not both.")))
     elseif v === nothing
-        fld.blank || push!(errs, gettext("This field is required."))
+        fld.blank || push!(errs, field_message(fld, "required", gettext("This field is required.")))
     elseif up !== nothing
-        up.size == 0 && push!(errs, gettext("The submitted file is empty."))      # (not read: it may be on disk)
+        up.size == 0 && push!(errs, field_message(fld, "empty", gettext("The submitted file is empty.")))      # (not read: it may be on disk)
         fld.max_length !== nothing && length(up.name) > fld.max_length &&
             push!(errs, interpolate(gettext("Ensure this filename has at most %(max)d characters (it has %(len)d)."), Dict("max" => fld.max_length, "len" => length(up.name))))
         fld.kind === :image && image_size(up.data) === nothing &&
-            push!(errs, gettext("Upload a valid image. The file you uploaded was either not an image or a corrupted image."))
-        for val in fld.validators
-            r = val(up)
-            r isa AbstractString && push!(errs, r)
-            r === false && push!(errs, gettext("Enter a valid value."))
-        end
+            push!(errs, field_message(fld, "invalid_image", gettext("Upload a valid image. The file you uploaded was either not an image or a corrupted image.")))
+        append!(errs, validator_errors(fld, up))
     end
     v, errs
 end
@@ -620,14 +645,46 @@ input_type(fld::Field) = widget_kind(fld.widget) === :password ? "password" : wi
     fld.kind === :email ? "email" : fld.kind === :url ? "url" : fld.kind in INT_KINDS || fld.kind in (:float, :decimal) ? "number" :
     fld.kind === :datetime ? "datetime-local" : fld.kind === :date ? "date" : fld.kind === :time ? "time" : "text"
 
+"The three selects of a SelectDateWidget, in the order the language writes dates (day first unless English)."
+function select_date_html(bf::BoundField)
+    f, fld, w = bf.form, bf.field, bf.field.widget
+    name, id = html_name(f, fld), html_id(f, fld)
+    val = display_value(bf)
+    y, m, d = "", "", ""
+    if f.data !== nothing
+        y, m, d = (string(something(get(f.data, name * s, nothing), "")) for s in ("_year", "_month", "_day"))
+    elseif val isa Union{Date,DateTime}
+        y, m, d = string(Dates.year(val)), string(Dates.month(val)), string(Dates.day(val))
+    elseif val isa AbstractString && (dv = tryparse(Date, val)) !== nothing
+        y, m, d = string(Dates.year(dv)), string(Dates.month(dv)), string(Dates.day(dv))
+    end
+    months = something(w.months, [Dates.monthname(i) for i in 1:12])
+    sel(part, opts, cur) = begin
+        io = IOBuffer()
+        print(io, "<select name=\"", escape_html(name * "_" * part), "\" id=\"", escape_html(id * "_" * part), "\"",
+              fld.blank || !f.use_required_attribute ? "" : " required", widget_attrs(Widget(; attrs = w.attrs)), ">")
+        print(io, "<option value=\"\"", isempty(cur) ? " selected" : "", ">", escape_html(w.empty_label), "</option>")
+        for (v, lbl) in opts
+            print(io, "<option value=\"", v, "\"", string(v) == cur ? " selected" : "", ">", escape_html(string(lbl)), "</option>")
+        end
+        print(io, "</select>")
+        String(take!(io))
+    end
+    parts = Dict("day" => sel("day", [(i, i) for i in 1:31], d), "month" => sel("month", [(i, months[i]) for i in 1:12], m),
+                 "year" => sel("year", [(yy, yy) for yy in w.years], y))
+    order = startswith(lowercase(get_language()), "en") ? ("month", "day", "year") : ("day", "month", "year")
+    join((parts[p] for p in order), "")
+end
+
 function widget_html(bf::BoundField)
     f, fld = bf.form, bf.field
     fld.kind === :multi && return multi_widget_html(bf)
+    fld.widget isa SelectDateWidget && return select_date_html(bf)
     fld.widget isa Widget && fld.widget.template_name !== nothing && return widget_template_html(bf)
     widget_kind(fld.widget) in (:radio, :checkboxes) && return choice_list_html(bf)
     name, id = escape_html(html_name(f, fld)), escape_html(html_id(f, fld))
     val = display_value(bf)
-    req = !fld.blank && fld.kind !== :bool ? " required" : ""
+    req = !fld.blank && fld.kind !== :bool && f.use_required_attribute ? " required" : ""
     attrs = " name=\"$name\" id=\"$id\"$req" * widget_attrs(fld.widget)
     haskey(f.errors, fld.name) && (attrs *= " aria-invalid=\"true\"")
     if fld.kind === :bool
@@ -651,7 +708,7 @@ function widget_html(bf::BoundField)
             fld.blank && print(io, " <label><input type=\"checkbox\" name=\"$name-clear\" id=\"$id-clear\"> Clear</label>")
             print(io, "<br>Change: ")
         end
-        r = (!fld.blank && !(cur isa FieldFile)) ? " required" : ""
+        r = (!fld.blank && !(cur isa FieldFile) && f.use_required_attribute) ? " required" : ""
         print(io, "<input type=\"file\" name=\"$name\" id=\"$id\"$r", fld.kind === :image ? " accept=\"image/*\"" : "", ">")
         return String(take!(io))
     elseif fld.kind === :geometry
@@ -803,7 +860,7 @@ function subwidget_tag(w::BoundWidget)
                option_attrs_html(fld.widget, w.value, w.label) * ">" * escape_html(w.label) * "</option>"
     end
     t = (wt == "radioselect" || !is_multiple_choice(fld)) ? "radio" : "checkbox"
-    req = t == "radio" && !fld.blank ? " required" : ""
+    req = t == "radio" && !fld.blank && w.bf.form.use_required_attribute ? " required" : ""
     "<input type=\"$t\" name=\"" * escape_html(html_name(w.bf.form, fld)) * "\" value=\"" * escape_html(w.value) *
         "\" id=\"" * escape_html(subwidget_id(w)) * "\"" * req * widget_attrs(fld.widget) *
         option_attrs_html(fld.widget, w.value, w.label) * (w.selected ? " checked" : "") * ">"
@@ -885,6 +942,71 @@ function add_widget_attrs!(f, form::Form)
     end
     form
 end
+
+"""
+    set_field!(form, name, field; before = nothing, after = nothing) -> form
+
+Add a field to a built form, or replace the field of that name (Django's `form.fields[name] = ...`):
+a replaced field keeps its place unless `before`/`after` (another field's name) say where;
+a new one goes there, or at the end. The field is copied, and named `name`.
+"""
+function set_field!(form::Form, name, field::Field; before = nothing, after = nothing)
+    n = Symbol(name)
+    f = deepcopy(field)
+    f.name = n
+    i = findfirst(x -> x.name === n, form.fields)
+    if i !== nothing && before === nothing && after === nothing
+        form.fields[i] = f
+    else
+        i === nothing || deleteat!(form.fields, i)
+        anchor = something(before, after, Some(nothing))
+        k = anchor === nothing ? nothing : findfirst(x -> x.name === Symbol(anchor), form.fields)
+        anchor !== nothing && k === nothing && throw(ArgumentError("set_field!: the form has no field '$anchor'"))
+        k === nothing ? push!(form.fields, f) : insert!(form.fields, before !== nothing ? k : k + 1, f)
+    end
+    form.validated = false
+    form
+end
+
+"Remove a field from a built form (and its errors and cleaned value); returns the form."
+function delete_field!(form::Form, name)
+    n = Symbol(name)
+    filter!(x -> x.name !== n, form.fields)
+    delete!(form.errors, n); delete!(form.cleaned_data, n)
+    form
+end
+
+"""
+    order_fields!(form, order)
+
+Put these fields first, in this order (Django's `Form.order_fields`); the rest follow as they were.
+Names the form doesn't have are ignored. `Form(...; field_order = [...])` does it on creation.
+"""
+function order_fields!(form::Form, order)
+    names = Symbol.(collect(order))
+    first_ = Field[f for n in names for f in form.fields if f.name === n]
+    rest = Field[f for f in form.fields if !(f.name in names)]
+    form.fields = vcat(first_, rest)
+    form
+end
+
+"""
+    errors_json_data(form) -> Dict{String,Vector{Dict}}    errors_as_json(form) -> String
+
+The form's errors for an API or htmx response, as Django's `form.errors.get_json_data()` and
+`as_json()`: `{"field": [{"message": "...", "code": ""}], "__all__": [...]}`.
+"""
+errors_json_data(form::Form) = (is_valid(form);
+    Dict{String,Vector{Dict{String,String}}}(string(k) => [Dict("message" => m, "code" => "") for m in v] for (k, v) in form.errors))
+errors_as_json(form::Form) = JSON.json(errors_json_data(form))
+
+"""
+    legend_tag(bf)
+
+A `<legend>` with the field's label, for a radio or checkbox group in a `<fieldset>` (Django 4.1's
+`BoundField.legend_tag`); `label_tag` is for single inputs.
+"""
+legend_tag(bf::BoundField) = "<legend>" * escape_html(string(label(bf.field))) * "</legend>"
 
 label_tag(bf::BoundField) = "<label for=\"" * escape_html(html_id(bf.form, bf.field)) * "\">" *
                             escape_html(label(bf.field)) * ":</label>"

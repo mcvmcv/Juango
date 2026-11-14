@@ -82,6 +82,27 @@ struct RemoveIndex <: Operation
     name::String
 end
 
+"""
+    AddIndexConcurrently(table, index)    RemoveIndexConcurrently(table, name)
+
+AddIndex / RemoveIndex with PostgreSQL's `CONCURRENTLY`: the table stays writable while the
+index builds, which matters on big tables in production. PostgreSQL can't do that inside a
+transaction, so a migration with one of these runs without one (as Django's `atomic = False`);
+keep such a migration to that one operation. Other databases do a plain AddIndex / RemoveIndex.
+"""
+struct AddIndexConcurrently <: Operation
+    table::String
+    index::Index
+end
+AddIndexConcurrently(table, ix::Index) = AddIndexConcurrently(string(table), ix)
+struct RemoveIndexConcurrently <: Operation
+    table::String
+    name::String
+end
+"Whether an operation must run outside a transaction on this backend."
+needs_no_transaction(op, b) = false
+needs_no_transaction(::Union{AddIndexConcurrently,RemoveIndexConcurrently}, b) = b isa Juango.PostgresBackend
+
 "Set the multi-column unique constraints of a table (column names)."
 struct AlterUniqueTogether <: Operation
     table::String
@@ -244,6 +265,8 @@ function state_forwards!(op::AlterPrimaryKey, st, app)
 end
 state_forwards!(op::AddIndex, st, app) = (push!(table!(st, op.table).indexes, op.index); st)
 state_forwards!(op::RemoveIndex, st, app) = (filter!(i -> i.name != op.name, table!(st, op.table).indexes); st)
+state_forwards!(op::AddIndexConcurrently, st, app) = state_forwards!(AddIndex(op.table, op.index), st, app)
+state_forwards!(op::RemoveIndexConcurrently, st, app) = state_forwards!(RemoveIndex(op.table, op.name), st, app)
 function state_forwards!(op::AddConstraint, st, app)
     t = table!(st, op.table)
     t.constraints = sort(vcat(filter(c -> c.name != op.constraint.name, t.constraints), [op.constraint]); by = c -> c.name)
@@ -390,6 +413,19 @@ describe(op::AlterPrimaryKey) = "Alter the primary key of $(op.table) to $(op.pk
 describe(op::AlterModelTableComment) = "Alter the comment of table $(op.table)"
 describe(op::AddIndex) = "Create index $(op.index.name) on $(op.table)"
 describe(op::RemoveIndex) = "Remove index $(op.name) from $(op.table)"
+describe(op::AddIndexConcurrently) = "Concurrently create index $(op.index.name) on $(op.table)"
+describe(op::RemoveIndexConcurrently) = "Concurrently remove index $(op.name) from $(op.table)"
+
+# the plain operation's SQL, with CONCURRENTLY on PostgreSQL
+sql_list(v) = v isa AbstractString ? [String(v)] : collect(String, v)
+create_concurrently(v, b) = b isa Juango.PostgresBackend ?
+    [replace(s, r"^CREATE (UNIQUE )?INDEX " => s"CREATE \1INDEX CONCURRENTLY "; count = 1) for s in sql_list(v)] : v
+drop_concurrently(v, b) = b isa Juango.PostgresBackend ?
+    [replace(s, r"^DROP INDEX " => "DROP INDEX CONCURRENTLY "; count = 1) for s in sql_list(v)] : v
+forwards(op::AddIndexConcurrently, b, from, to, deferred) = create_concurrently(forwards(AddIndex(op.table, op.index), b, from, to, deferred), b)
+backwards(op::AddIndexConcurrently, b, from, to, deferred) = drop_concurrently(backwards(AddIndex(op.table, op.index), b, from, to, deferred), b)
+forwards(op::RemoveIndexConcurrently, b, from, to, deferred) = drop_concurrently(forwards(RemoveIndex(op.table, op.name), b, from, to, deferred), b)
+backwards(op::RemoveIndexConcurrently, b, from, to, deferred) = create_concurrently(backwards(RemoveIndex(op.table, op.name), b, from, to, deferred), b)
 describe(op::AddConstraint) = "Create constraint $(op.constraint.name) on $(op.table)"
 describe(op::RemoveConstraint) = "Remove constraint $(op.name) from $(op.table)"
 describe(op::RunSQL) = "Raw SQL operation"

@@ -9,6 +9,7 @@
 {% if form.errors %}<p class="errorlist" style="color:var(--err);font-weight:600">{% translate "Please correct the errors below." %}</p>{% endif %}
 <form method="post"{% if form.is_multipart %} enctype="multipart/form-data"{% endif %}>
   {% csrf_token %}
+  {% if save_on_top %}{% include "admin/submit_line.html" %}{% endif %}
   {% for group in groups %}
   <div class="module">
     {% if group.name %}<h2>{{ group.name }}</h2>{% endif %}
@@ -67,15 +68,7 @@
     {% endif %}
   </div>
   {% endfor %}
-  <div class="submit-row">
-    {% if can_delete %}<a class="deletelink" href="{% url 'admin:delete' model=opts.slug id=object.pk_string %}">{% translate "Delete" %}</a>{% endif %}
-    {% if editable %}
-    {% if save_as %}<input type="submit" name="_saveasnew" value="{% translate "Save as new" %}" class="button secondary">{% endif %}
-    {% if can_add %}<input type="submit" name="_addanother" value="{% translate "Save and add another" %}" class="button secondary">{% endif %}
-    <input type="submit" name="_continue" value="{% translate "Save and continue editing" %}" class="button secondary">
-    <input type="submit" name="_save" value="{% translate "Save" %}">
-    {% endif %}
-  </div>
+  {% include "admin/submit_line.html" %}
 </form>
 <script>
 (function () {

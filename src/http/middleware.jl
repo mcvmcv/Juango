@@ -51,7 +51,7 @@ patch_vary!(resp, h) = (v = getheader(resp, "Vary"); v === nothing ? setheader!(
 function CommonMiddleware(get_response)
     function (req::Request)
         if settings.APPEND_SLASH && req.resolver_match === nothing && !endswith(req.path, "/") &&
-           resolve(req.path * "/") !== nothing
+           (m = resolve(req.path * "/"); m !== nothing && !haskey(NO_APPEND_SLASH, m.view))
             if req.method in ("POST", "PUT", "PATCH") && settings.DEBUG
                 error("You called this URL via $(req.method), but the URL doesn't end in a slash and APPEND_SLASH is set. " *
                       "Juango can't redirect to the slash URL while maintaining $(req.method) data. " *
@@ -127,6 +127,77 @@ const SAFE_METHODS = ("GET", "HEAD", "OPTIONS", "TRACE")
 csrf_exempt(view) = (CSRF_EXEMPT[view] = true; view)
 is_csrf_exempt(view) = haskey(CSRF_EXEMPT, view)
 
+const NO_APPEND_SLASH = IdDict{Any,Bool}()
+"""
+    no_append_slash(view)
+
+Don't redirect `/path` to this view's `/path/` under APPEND_SLASH (Django 3.2), for views whose
+URLs are probed without the slash (APIs, health checks): `/path` stays a 404.
+"""
+no_append_slash(view) = (NO_APPEND_SLASH[view] = true; view)
+
+"""
+    ensure_csrf_cookie(view)
+
+Send the CSRF cookie with this view's response even if its page has no `{% csrf_token %}`: for
+pages whose forms are made by JavaScript, which reads the cookie.
+"""
+function ensure_csrf_cookie(view)
+    w = (req; kw...) -> (get_csrf_token(req); view(req; kw...))
+    propagate_flags!(w, view)
+end
+
+"""
+    csrf_protect(view)
+
+CSRF protection for this view alone, as CsrfViewMiddleware gives every view: for projects
+without the middleware. With it installed, this does nothing more.
+"""
+function csrf_protect(view)
+    w = (req; kw...) -> csrf_process(req, () -> to_response(view(req; kw...)); enforce = true)
+    propagate_flags!(w, view)
+end
+
+"""
+    requires_csrf_token(view)
+
+Django's decorator for views (custom error views) that render `{% csrf_token %}` without the
+middleware's checks. In Juango the token is always available to templates, so this returns the
+view unchanged; it exists so ported code reads the same.
+"""
+requires_csrf_token(view) = view
+
+"""
+    xframe_options_exempt(view)    xframe_options_deny(view)    xframe_options_sameorigin(view)
+
+Per-view `X-Frame-Options`: leave the header off this view's responses (so other sites may frame
+it), or set it to `DENY` / `SAMEORIGIN` whatever `X_FRAME_OPTIONS` says.
+"""
+function xframe_options_exempt(view)
+    w = (req; kw...) -> (req.meta[:xframe_options_exempt] = true; view(req; kw...))
+    propagate_flags!(w, view)
+end
+xframe_options_deny(view) = xframe_header(view, "DENY")
+xframe_options_sameorigin(view) = xframe_header(view, "SAMEORIGIN")
+function xframe_header(view, value)
+    w = (req; kw...) -> (r = to_response(view(req; kw...)); hasheader(r, "X-Frame-Options") || setheader!(r, "X-Frame-Options", value); r)
+    propagate_flags!(w, view)
+end
+
+"""
+    sensitive_post_parameters(view, names...)
+
+Mask these POST parameters (all of them when no names are given) in the DEBUG error page and the
+error emails, as Django's decorator: `sensitive_post_parameters(signup, "password", "card")`.
+Parameters whose names look secret (password, token, key...) are masked anyway.
+"""
+function sensitive_post_parameters(view, names::AbstractString...)
+    hide = isempty(names) ? :all : Set(String.(collect(names)))
+    w = (req; kw...) -> (req.meta[:sensitive_post_parameters] = hide; view(req; kw...))
+    propagate_flags!(w, view)
+end
+sensitive_post_parameters(names::AbstractString...) = view -> sensitive_post_parameters(view, names...)
+
 const LOGIN_NOT_REQUIRED = IdDict{Any,Bool}()
 """
     login_not_required(view)
@@ -180,6 +251,7 @@ function propagate_flags!(wrapper, view)
     is_csrf_exempt(view) && (CSRF_EXEMPT[wrapper] = true)
     is_login_not_required(view) && (LOGIN_NOT_REQUIRED[wrapper] = true)
     haskey(NON_ATOMIC, view) && (NON_ATOMIC[wrapper] = NON_ATOMIC[view])
+    haskey(NO_APPEND_SLASH, view) && (NO_APPEND_SLASH[wrapper] = true)
     VIEW_NAMES[wrapper] = view_label(view)
     wrapper
 end
@@ -235,9 +307,40 @@ end
 "The request's own origin, `scheme://host`."
 request_origin(req::Request) = (is_secure(req) ? "https://" : "http://") * get_host(req)
 
+const CSRF_SESSION_KEY = "_csrftoken"
+
+"The CSRF secret the client holds: its cookie, or with CSRF_USE_SESSIONS the session's (`nothing` if none)."
+function client_csrf_secret(req::Request)
+    if settings.CSRF_USE_SESSIONS
+        s = req.session
+        s === nothing && throw(ImproperlyConfigured("CSRF_USE_SESSIONS needs SessionMiddleware before CsrfViewMiddleware"))
+        v = get(s, CSRF_SESSION_KEY, nothing)
+        return v isa AbstractString ? String(v) : nothing
+    end
+    get(req.COOKIES, settings.CSRF_COOKIE_NAME, nothing)
+end
+
+"The request header the token may come in (CSRF_HEADER_NAME, written either `X-CSRFToken` or Django's `HTTP_X_CSRFTOKEN`)."
+csrf_header_name() = lowercase(replace(replace(string(settings.CSRF_HEADER_NAME), r"^HTTP_" => ""), '_' => '-'))
+
+"Give the client the CSRF secret: in the cookie (with the CSRF_COOKIE_* settings), or in the session."
+function store_csrf_secret!(req::Request, resp::HttpResponse)
+    tok = get_csrf_token(req)
+    if settings.CSRF_USE_SESSIONS
+        req.session[CSRF_SESSION_KEY] = tok
+    else
+        s = settings
+        set_cookie!(resp, s.CSRF_COOKIE_NAME, tok; max_age = s.CSRF_COOKIE_AGE, secure = s.CSRF_COOKIE_SECURE,
+                    httponly = s.CSRF_COOKIE_HTTPONLY, samesite = s.CSRF_COOKIE_SAMESITE, domain = s.CSRF_COOKIE_DOMAIN,
+                    path = s.CSRF_COOKIE_PATH)
+        patch_vary!(resp, "Cookie")
+    end
+    nothing
+end
+
 function check_csrf(req::Request)
-    cookie = get(req.COOKIES, settings.CSRF_COOKIE_NAME, nothing)
-    cookie === nothing && throw(CsrfFailure("CSRF cookie not set."))
+    cookie = client_csrf_secret(req)
+    cookie === nothing && throw(CsrfFailure(settings.CSRF_USE_SESSIONS ? "CSRF token not in the session." : "CSRF cookie not set."))
     origin = header(req, "origin")
     if origin !== nothing
         # the same scheme as the request: an http:// page can't post to the https:// site
@@ -256,7 +359,7 @@ function check_csrf(req::Request)
             throw(CsrfFailure("Referer checking failed - $(m[2]) does not match any trusted origins."))
     end
     tok = get(req.POST, "csrfmiddlewaretoken", nothing)
-    tok === nothing && (tok = header(req, "x-csrftoken"))
+    tok === nothing && (tok = header(req, csrf_header_name()))
     tok === nothing && throw(CsrfFailure("CSRF token missing."))
     secret = unmask_csrf(tok)
     (secret !== nothing && consteq(secret, cookie)) || throw(CsrfFailure("CSRF token incorrect."))
@@ -266,34 +369,41 @@ end
 Rejects unsafe requests (POST/PUT/PATCH/DELETE) that lack a valid CSRF token, and
 sets the CSRF cookie when a token was used.
 """
-function CsrfViewMiddleware(get_response)
-    function (req::Request)
-        cookie = get(req.COOKIES, settings.CSRF_COOKIE_NAME, nothing)
-        # a malformed cookie (not one Juango set) is replaced with a new secret
-        cookie !== nothing && (length(cookie) != CSRF_SECRET_LENGTH || unmask_csrf(cookie) === nothing) && (cookie = nothing)
-        cookie === nothing || (req.meta[:csrf_token] = cookie)
-        rm = req.resolver_match
-        if !(req.method in SAFE_METHODS) && !get(req.meta, :dont_enforce_csrf, false) &&
-           !(rm !== nothing && is_csrf_exempt(rm.view))
-            try
-                check_csrf(req)
-            catch e
-                e isa CsrfFailure || rethrow()
-                return csrf_failure_response(req, e.reason)
-            end
+CsrfViewMiddleware(get_response) = req::Request -> csrf_process(req, () -> get_response(req); enforce = nothing)
+
+"""
+CSRF protection around `call()` (the rest of the request): check an unsafe request's token, then
+give the client the secret if a token was used. Done once per request, by the middleware or by
+`csrf_protect`. `enforce = nothing` follows the view's `csrf_exempt` mark; `true` checks anyway.
+"""
+function csrf_process(req::Request, call; enforce::Union{Nothing,Bool} = nothing)
+    get(req.meta, :csrf_processing_done, false) && return call()
+    req.meta[:csrf_processing_done] = true
+    cookie = client_csrf_secret(req)
+    # a malformed secret (not one Juango set) is replaced with a new one
+    cookie !== nothing && (length(cookie) != CSRF_SECRET_LENGTH || unmask_csrf(cookie) === nothing) && (cookie = nothing)
+    cookie === nothing || (req.meta[:csrf_token] = cookie)
+    rm = req.resolver_match
+    exempt = enforce === nothing ? rm !== nothing && is_csrf_exempt(rm.view) : !enforce
+    if !(req.method in SAFE_METHODS) && !get(req.meta, :dont_enforce_csrf, false) && !exempt
+        try
+            check_csrf(req)
+        catch e
+            e isa CsrfFailure || rethrow()
+            return csrf_failure_response(req, e.reason)
         end
-        resp = get_response(req)
-        if get(req.meta, :csrf_cookie_needs_update, false) || (get(req.meta, :csrf_used, false) && cookie === nothing)
-            set_cookie!(resp, settings.CSRF_COOKIE_NAME, get_csrf_token(req); max_age = 60 * 60 * 24 * 365,
-                        secure = settings.CSRF_COOKIE_SECURE)
-            patch_vary!(resp, "Cookie")
-        end
-        resp
     end
+    resp = call()
+    if get(req.meta, :csrf_cookie_needs_update, false) || (get(req.meta, :csrf_used, false) && cookie === nothing)
+        store_csrf_secret!(req, resp)
+    end
+    resp
 end
 
 function csrf_failure_response(req, reason)
     log!("juango.security.csrf", :warning, "Forbidden (CSRF): $reason: $(req.path)"; request = req, status_code = 403)
+    v = settings.CSRF_FAILURE_VIEW
+    v === nothing || return to_response(v(req; reason = reason))
     body = """<!doctype html><html><head><title>403 Forbidden</title></head><body>
     <h1>Forbidden <span style="color:#666">(403)</span></h1><p>CSRF verification failed. Request aborted.</p>""" *
            (settings.DEBUG ? "<p>Reason given for failure: <code>$(escape_html(reason))</code></p>" *

@@ -149,5 +149,7 @@ Base.@nospecializeinfer function from_row(@nospecialize(T::Type{<:Model}), row::
         data[att] = from_db(f, v)
     end
     composite && (data[:id] = composite_pk(T, data))
-    T(data, Dict{Symbol,Any}())
+    obj = T(data, Dict{Symbol,Any}())
+    any_receivers(post_init) && send(post_init, T; instance = obj)
+    obj
 end

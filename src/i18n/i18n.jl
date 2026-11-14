@@ -379,6 +379,85 @@ const FORMATS = Dict(
 "Number and date formats of the active language (falling back to English)."
 get_format(lang = get_language()) = get(FORMATS, split(lowercase(lang), r"[-_]")[1], FORMATS["en"])
 
+# The date formats forms accept, per language, as Django's locale formats (strftime directives);
+# ISO 8601 is always accepted too. DATE_INPUT_FORMATS & co. are used for languages not listed here.
+const EN_DATE_INPUT = ["%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%b %d %Y", "%b %d, %Y", "%d %b %Y", "%d %b, %Y",
+                       "%B %d %Y", "%B %d, %Y", "%d %B %Y", "%d %B, %Y"]
+const LOCALE_DATE_INPUT = Dict(
+    "en" => EN_DATE_INPUT,
+    "de" => ["%d.%m.%Y", "%d.%m.%y"],
+    "fr" => ["%d/%m/%Y", "%d/%m/%y", "%d.%m.%Y", "%d.%m.%y"],
+    "es" => ["%d/%m/%Y", "%d/%m/%y"],
+    "it" => ["%d/%m/%Y", "%Y/%m/%d", "%d-%m-%Y", "%d-%m-%y", "%d/%m/%y"],
+    "nl" => ["%d-%m-%Y", "%d-%m-%y", "%d/%m/%Y", "%d/%m/%y"],
+    "pt" => ["%d/%m/%Y", "%d/%m/%y"],
+)
+const TIME_INPUT = ["%H:%M:%S", "%H:%M:%S.%f", "%H:%M"]
+
+"The strftime input formats for `kind` (:date, :datetime, :time) in the active language."
+function input_formats(kind::Symbol)
+    lang = split(lowercase(get_language()), r"[-_]")[1]
+    dates = get(() -> String.(something(get(settings, :DATE_INPUT_FORMATS, nothing), EN_DATE_INPUT)), LOCALE_DATE_INPUT, lang)
+    times = String.(something(get(settings, :TIME_INPUT_FORMATS, nothing), TIME_INPUT))
+    kind === :date && return vcat(dates, ["%Y-%m-%d"])
+    kind === :time && return vcat(times, ["%H:%M:%S", "%H:%M"])
+    custom = get(settings, :DATETIME_INPUT_FORMATS, nothing)
+    dts = custom !== nothing ? String.(custom) : vcat([d * " " * t for d in dates for t in times], dates)
+    vcat(dts, ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d"])
+end
+
+const STRFTIME_CODES = Dict('Y' => "yyyy", 'm' => "mm", 'd' => "dd", 'y' => "yy", 'H' => "HH", 'M' => "MM", 'S' => "SS",
+                            'f' => "s", 'b' => "u", 'B' => "U")
+const STRFTIME_CACHE = Dict{String,Union{Nothing,DateFormat}}()
+
+"A strftime format (Django's input formats: \"%d.%m.%Y\") as a Julia `DateFormat`; `nothing` if it has directives Julia can't parse."
+function strftime_dateformat(fmt::AbstractString)
+    get!(STRFTIME_CACHE, fmt) do
+        io = IOBuffer()
+        i = firstindex(fmt)
+        while i <= lastindex(fmt)
+            c = fmt[i]
+            if c == '%' && i < lastindex(fmt)
+                d = fmt[nextind(fmt, i)]
+                code = get(STRFTIME_CODES, d, nothing)
+                code === nothing && d != '%' && return nothing
+                print(io, d == '%' ? "%" : code)
+                i = nextind(fmt, nextind(fmt, i))
+                continue
+            end
+            isletter(c) ? print(io, '\\', c) : print(io, c)          # a literal letter is escaped
+            i = nextind(fmt, i)
+        end
+        DateFormat(String(take!(io)))
+    end
+end
+
+"""
+    parse_input_datetime(s, kind; formats = nothing) -> Date / DateTime / Time or nothing
+
+Parse what someone typed into a date, datetime or time field: `formats` (strftime, or Julia
+`DateFormat`s) if given, else the active language's input formats, then ISO 8601. A two-digit
+year is in 1969-2068, as Python's.
+"""
+function parse_input_datetime(s::AbstractString, kind::Symbol; formats = nothing)
+    T = kind === :date ? Date : kind === :time ? Dates.Time : DateTime
+    fmts = formats === nothing ? input_formats(kind) : vcat(collect(formats), input_formats(kind))
+    for f in fmts
+        df = f isa DateFormat ? f : strftime_dateformat(string(f))
+        df === nothing && continue
+        v = tryparse(kind === :datetime && !(occursin('H', string(df)) ) ? Date : T, s, df)
+        v === nothing && continue
+        v isa Date && kind === :datetime && (v = DateTime(v))
+        f isa AbstractString && occursin("%Y", f) && !(v isa Dates.Time) && Dates.year(v) < 1000 && continue   # %Y: four digits
+        if !(v isa Dates.Time) && f isa AbstractString && occursin("%y", f) && Dates.year(v) < 100     # two-digit year
+            y = Dates.year(v)
+            v += Dates.Year(y < 69 ? 2000 : 1900)
+        end
+        return v
+    end
+    nothing
+end
+
 """
     number_format(x; decimals=nothing, lang=get_language(), grouping=settings.USE_THOUSAND_SEPARATOR)
 
@@ -645,6 +724,58 @@ render!(io::IO, n::LanguageInfoNode, ctx::Context) = (ctx.stack[end][n.var] =
     n.what === :get_current_language_bidi ? get_language_bidi() :
     [Any[first(l), last(l)] for l in settings.LANGUAGES]; nothing)
 
+# --- language info (Django's LANG_INFO) -----------------------------------------------------------------------
+
+const LANG_INFO = Dict(
+    "ar" => ("Arabic", "العربيّة", true), "bg" => ("Bulgarian", "български", false), "ca" => ("Catalan", "català", false),
+    "cs" => ("Czech", "česky", false), "da" => ("Danish", "dansk", false), "de" => ("German", "Deutsch", false),
+    "el" => ("Greek", "Ελληνικά", false), "en" => ("English", "English", false), "en-gb" => ("British English", "British English", false),
+    "es" => ("Spanish", "español", false), "et" => ("Estonian", "eesti", false), "fa" => ("Persian", "فارسی", true),
+    "fi" => ("Finnish", "suomi", false), "fr" => ("French", "français", false), "he" => ("Hebrew", "עברית", true),
+    "hi" => ("Hindi", "हिंदी", false), "hr" => ("Croatian", "Hrvatski", false), "hu" => ("Hungarian", "Magyar", false),
+    "id" => ("Indonesian", "Bahasa Indonesia", false), "it" => ("Italian", "italiano", false), "ja" => ("Japanese", "日本語", false),
+    "ko" => ("Korean", "한국어", false), "lt" => ("Lithuanian", "Lietuviškai", false), "lv" => ("Latvian", "latviešu", false),
+    "mi" => ("Māori", "Te Reo Māori", false), "nb" => ("Norwegian Bokmål", "norsk (bokmål)", false), "nl" => ("Dutch", "Nederlands", false),
+    "pl" => ("Polish", "polski", false), "pt" => ("Portuguese", "Português", false), "pt-br" => ("Brazilian Portuguese", "Português Brasileiro", false),
+    "ro" => ("Romanian", "Română", false), "ru" => ("Russian", "Русский", false), "sk" => ("Slovak", "Slovensky", false),
+    "sl" => ("Slovenian", "Slovenščina", false), "sr" => ("Serbian", "српски", false), "sv" => ("Swedish", "svenska", false),
+    "th" => ("Thai", "ภาษาไทย", false), "tr" => ("Turkish", "Türkçe", false), "uk" => ("Ukrainian", "Українська", false),
+    "ur" => ("Urdu", "اردو", true), "vi" => ("Vietnamese", "Tiếng Việt", false),
+    "zh-hans" => ("Simplified Chinese", "简体中文", false), "zh-hant" => ("Traditional Chinese", "繁體中文", false),
+)
+
+"""
+    get_language_info(code) -> NamedTuple
+
+Django's: `(code, name, name_local, name_translated, bidi)` for a language code (`"pt-br"`,
+`"de"`), falling back from a regional code to its base language. `name_translated` is the name in
+the active language when a translation has it. Unknown codes throw `KeyError`.
+"""
+function get_language_info(code::AbstractString)
+    c = lowercase(replace(string(code), '_' => '-'))
+    k = haskey(LANG_INFO, c) ? c : (b = split(c, '-')[1]; haskey(LANG_INFO, b) ? b : throw(KeyError(code)))
+    name, local_name, bidi = LANG_INFO[k]
+    (code = k, name = name, name_local = local_name, name_translated = gettext(name), bidi = bidi)
+end
+
+"`{% get_language_info for \"de\" as lang %}` (lang.name_local, lang.bidi ...) and `{% get_language_info_list for LANGUAGES as langs %}`."
+struct LanguageInfoForNode <: Node
+    list::Bool
+    code::Any
+    var::String
+end
+function tag_language_info_for(p::Parser, t::Token)
+    bits = split_contents(t.contents)
+    (length(bits) == 5 && bits[2] == "for" && bits[4] == "as") || tsyntax(p, "use {% $(bits[1]) for code as variable %}")
+    LanguageInfoForNode(bits[1] == "get_language_info_list", parse_filter_expr(bits[3]), bits[5])
+end
+function render!(io::IO, n::LanguageInfoForNode, ctx::Context)
+    v = eval_fe(n.code, ctx)
+    info(x) = get_language_info(string(x isa Union{AbstractVector,Tuple,Pair} ? first(x) : x))
+    ctx.stack[end][n.var] = n.list ? [info(x) for x in to_iterable(v)] : info(v)
+    nothing
+end
+
 "`{% language \"de\" %}...{% endlanguage %}`: render a part in another language."
 struct LanguageNode <: Node
     lang::Any
@@ -657,12 +788,16 @@ render!(io::IO, n::LanguageNode, ctx::Context) = write(io, with_language(() -> r
 for (name, f) in ("translate" => tag_translate, "trans" => tag_translate, "blocktranslate" => tag_blocktranslate,
                   "blocktrans" => tag_blocktranslate, "get_current_language" => tag_language_info,
                   "get_available_languages" => tag_language_info, "get_current_language_bidi" => tag_language_info,
-                  "language" => tag_language)
+                  "language" => tag_language, "get_language_info" => tag_language_info_for,
+                  "get_language_info_list" => tag_language_info_for)
     register_tag!(name, f)
 end
 # Library filters ({% load l10n %}, {% load i18n %}); the i18n tags are always available
 const L10N_LIBRARY = filter!(TagLibrary("l10n"), "localize", (v, _) -> localize(v))
 const I18N_LIBRARY = filter!(TagLibrary("i18n"), "language_name", (v, _) -> language_name(string(v)))
+filter!(I18N_LIBRARY, "language_name_local", (v, _) -> get_language_info(string(v)).name_local)
+filter!(I18N_LIBRARY, "language_name_translated", (v, _) -> get_language_info(string(v)).name_translated)
+filter!(I18N_LIBRARY, "language_bidi", (v, _) -> get_language_info(string(v)).bidi)
 
 # --- makemessages / compilemessages ---------------------------------------------------------------------------------
 

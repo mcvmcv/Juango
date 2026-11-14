@@ -55,7 +55,7 @@ Base.@nospecializeinfer function compute_reverse_fobjs(@nospecialize(T::Type))
     out = Tuple{Symbol,Any,Field}[]
     for M in MODEL_LIST, f in foreign_objects(M)
         concrete_model(related_model(f)) === concrete_model(T) || continue
-        push!(out, (something(f.related_name, Symbol(lowercase(modelmeta(M).name), :_set)), M, f))
+        push!(out, (something(f.related_name, default_related_name(M), Symbol(lowercase(modelmeta(M).name), :_set)), M, f))
     end
     out
 end

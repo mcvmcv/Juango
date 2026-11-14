@@ -359,8 +359,50 @@ function set_cookie!(r::HttpResponse, name, value; max_age = nothing, expires = 
     push!(r.cookies, s)
     r
 end
-delete_cookie!(r::HttpResponse, name; path = "/") =
-    set_cookie!(r, name, ""; max_age = 0, expires = DateTime(1970, 1, 1), path = path)
+delete_cookie!(r::HttpResponse, name; path = "/", domain = nothing) =
+    set_cookie!(r, name, ""; max_age = 0, expires = DateTime(1970, 1, 1), path = path, domain = domain)
+
+signed_cookie_salt(name, salt) = string("juango.signed_cookies.", name, salt)
+
+"""
+    set_signed_cookie!(resp, name, value; salt = "", kwargs...)
+
+Set a cookie whose value is signed with SECRET_KEY (and `salt`) and timestamped, so it can't be
+changed by the client without `get_signed_cookie` noticing. It is not encrypted: the client can
+read it. Takes `set_cookie!`'s keywords.
+"""
+function set_signed_cookie!(r::HttpResponse, name, value; salt = "", kwargs...)
+    payload = b64url(Vector{UInt8}(codeunits(string(value)))) * ":" * string(round(Int, time()); base = 36)
+    set_cookie!(r, name, sign_value(payload; salt = signed_cookie_salt(name, salt)); kwargs...)
+end
+
+"""
+    get_signed_cookie(req, name; default, salt = "", max_age = nothing) -> String
+
+The value of a cookie set with `set_signed_cookie!`. Without a `default`, a missing cookie
+throws `KeyError`, a tampered one `BadSignature` and one older than `max_age` seconds
+`SignatureExpired`; with a `default`, those return it instead (as Django).
+"""
+function get_signed_cookie(req::Request, name; default = NO_COOKIE_DEFAULT, salt = "", max_age = nothing)
+    raw = get(req.COOKIES, string(name), nothing)
+    if raw === nothing
+        default === NO_COOKIE_DEFAULT && throw(KeyError(name))
+        return default
+    end
+    try
+        v = unsign_value(raw; salt = signed_cookie_salt(name, salt))
+        i = findlast(':', v)
+        i === nothing && throw(BadSignature("no timestamp"))
+        ts = parse(Int, v[i+1:end]; base = 36)
+        max_age !== nothing && time() - ts > max_age && throw(SignatureExpired("signature is $(round(Int, time() - ts)) seconds old"))
+        String(b64url_decode(v[1:i-1]))
+    catch e
+        (e isa Union{BadSignature,SignatureExpired,ArgumentError} && default !== NO_COOKIE_DEFAULT) || rethrow()
+        default
+    end
+end
+struct NoCookieDefault end
+const NO_COOKIE_DEFAULT = NoCookieDefault()
 
 "JSON response. `data` may be any JSON-serialisable value."
 JsonResponse(data; status = 200, kw...) =
@@ -374,6 +416,14 @@ HttpResponsePermanentRedirect(url) = HttpResponseRedirect(url; status = 301)
 HttpResponseNotFound(content = "<h1>Not Found</h1>") = HttpResponse(content; status = 404)
 HttpResponseForbidden(content = "<h1>403 Forbidden</h1>") = HttpResponse(content; status = 403)
 HttpResponseBadRequest(content = "<h1>Bad Request (400)</h1>") = HttpResponse(content; status = 400)
+HttpResponseGone(content = "<h1>Gone</h1>") = HttpResponse(content; status = 410)
+HttpResponseServerError(content = "<h1>Server Error (500)</h1>") = HttpResponse(content; status = 500)
+"A 304 response: no body and no Content-Type (as Django's)."
+function HttpResponseNotModified()
+    r = HttpResponse(""; status = 304)
+    filter!(h -> !header_eq(h.first, "Content-Type"), r.headers)
+    r
+end
 function HttpResponseNotAllowed(methods)
     r = HttpResponse("<h1>405 Method Not Allowed</h1>"; status = 405)
     setheader!(r, "Allow", join(methods, ", "))

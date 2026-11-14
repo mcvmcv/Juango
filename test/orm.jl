@@ -1298,6 +1298,86 @@ end
     end
 end
 
+@testset "computed values take their output field's type (#154)" begin
+    rollback_after() do      # (leaves no rows for later testsets)
+        for (i, d) in enumerate((Date(2026, 7, 15), Date(2026, 3, 1), Date(2025, 12, 31)))
+            create(Bulletin; slug = "b154-$i", pub_date = DateTime(d) + Hour(9), title = "b154 $i", day = d)
+        end
+        bs = filter(Bulletin; slug__startswith = "b154-")
+        agg = aggregate(bs; last = Max(:day), first = Min(:day), latest = Max(:pub_date))
+        @test agg[:last] === Date(2026, 7, 15) && agg[:first] === Date(2025, 12, 31)
+        @test agg[:latest] isa Union{DateTime,Juango.TimeZones.ZonedDateTime} && Dates.year(agg[:latest]) == 2026
+        r = only(annotate(values(bs, :score), last = Max(:day)))                  # grouped values()
+        @test r[:last] === Date(2026, 7, 15)
+        @test all(b -> b.d isa Date, annotate(bs; d = Coalesce(:day, Value(Date(2000, 1, 1)))))
+        @test all(b -> b.same === b.day, annotate(bs; same = F(:day)))
+        au = create(Author; name = "S154", email = "s154@x")
+        create(Article; title = "s154 one", author = au, published = true)
+        latest = values(order_by(filter(Article; author = OuterRef(:id)), "-created"), :created)[1:1]
+        a = only(annotate(filter(Author; id = au.id); made = Subquery(latest), pub = Subquery(values(filter(Article; author = OuterRef(:id)), :published)[1:1])))
+        @test a.made isa Union{DateTime,Juango.TimeZones.ZonedDateTime} && a.pub === true
+        @test aggregate(bs; n = Count(:id))[:n] == 3                              # counts stay integers
+    end
+end
+
+@testset "ORM: window frames and functions, JSONObject, contains, create_defaults, refresh fields (#146)" begin
+    rollback_after() do      # (leaves no rows for later testsets)
+        au = create(Author; name = "W146", email = "w146@x")
+        for (t, v) in (("w146 a", 10), ("w146 b", 20), ("w146 c", 30), ("w146 d", 40))
+            create(Article; title = t, author = au, views = v)
+        end
+        qs = filter(Article; title__startswith = "w146")
+        get_(name; kw...) = [a.x for a in order_by(annotate(qs; x = Window(kw[:e]; order_by = ["title"], frame = get(kw, :frame, nothing))), "title")]
+        @test get_(:x; e = Sum(:views), frame = RowRange(start = -1, stop = 0)) == [10, 30, 50, 70]      # moving sum of two
+        @test get_(:x; e = Sum(:views), frame = RowRange(start = nothing, stop = 0)) == [10, 30, 60, 100] # running total
+        @test get_(:x; e = Sum(:views), frame = RowRange()) == [100, 100, 100, 100]
+        within10 = annotate(qs; x = Window(Sum(:views); order_by = ["views"], frame = ValueRange(start = -10, stop = 10)))
+        @test [a.x for a in order_by(within10, "views")] == [30, 60, 90, 70]      # RANGE: the views within 10 of the row's
+        @test get_(:x; e = FirstValue(:views)) == [10, 10, 10, 10]
+        @test get_(:x; e = LastValue(:views), frame = RowRange()) == [40, 40, 40, 40]
+        @test get_(:x; e = NthValue(:views, 2), frame = RowRange()) == [20, 20, 20, 20]
+        @test get_(:x; e = Ntile(2)) == [1, 1, 2, 2]
+        @test get_(:x; e = PercentRank()) ≈ [0, 1/3, 2/3, 1] && get_(:x; e = CumeDist()) ≈ [0.25, 0.5, 0.75, 1]
+        @test_throws ArgumentError RowRange(start = 2, stop = 1)
+        @test_throws ArgumentError RowRange(exclusion = :everything)
+        if !IS_MYSQL
+            @test get_(:x; e = Sum(:views), frame = RowRange(start = -1, stop = 1, exclusion = :current_row)) == [20, 40, 60, 30]
+        end
+        firsts = [a.f for a in annotate(qs; f = Window(FirstValue(:created); order_by = ["title"]))]
+        @test all(f -> f isa Union{DateTime,Juango.TimeZones.ZonedDateTime}, firsts)                     # typed, on SQLite too
+        # JSONObject
+        o = first(annotate(order_by(qs, "title"); j = JSONObject(title = :title, views = :views, who = "author__name")))
+        @test o.j == Dict("title" => "w146 a", "views" => 10, "who" => "W146")
+        # contains / in
+        a1 = first(order_by(qs, "title"))
+        @test contains(qs, a1) && a1 in qs && !contains(filter(qs; views__gt = 10), a1)
+        @test_throws ArgumentError contains(qs, Article(; title = "unsaved", author = au))
+        # update_or_create with create_defaults
+        o, created = update_or_create(Topic; name = "w146 topic", defaults = Dict(:name => "w146 updated"), create_defaults = Dict(:name => "w146 created"))
+        @test created && o.name == "w146 created"
+        o2, created2 = update_or_create(Topic; name = "w146 created", defaults = Dict(:name => "w146 updated"), create_defaults = Dict(:name => "x"))
+        @test !created2 && o2.name == "w146 updated"
+        # refresh!(obj; fields)
+        a1.title = "local change"; a1.views = -1
+        update!(filter(Article; id = a1.id); views = 99, title = "w146 z")
+        refresh!(a1; fields = [:views])
+        @test a1.views == 99 && a1.title == "local change"              # only that field reloaded
+        @test refresh!(a1).title == "w146 z"
+        # Meta(default_related_name): Doc's owner has no related_name
+        m = Juango.modelmeta(Doc)
+        try
+            m.extra[:default_related_name] = "%(class)s_files"
+            Juango.invalidate_relations!()
+            d = create(Doc; title = "d146", owner = au)
+            @test [x.title for x in getproperty(au, :doc_files)] == ["d146"]
+            @test only(filter(Author; doc_files__title = "d146")).id == au.id
+        finally
+            delete!(m.extra, :default_related_name)
+            Juango.invalidate_relations!()
+        end
+    end
+end
+
 @testset "DecimalField" begin
     @test_throws ArgumentError DecimalField(max_digits = 3, decimal_places = 4)
     @test_throws UndefKeywordError DecimalField(max_digits = 3)

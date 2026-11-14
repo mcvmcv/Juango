@@ -66,26 +66,39 @@ struct URLResolver
     regex::Regex
     params::Vector{Tuple{Symbol,String}}
     patterns::Vector{Any}
-    namespace::Union{Nothing,String}
+    namespace::Union{Nothing,String}     # the instance namespace
+    app_name::Union{Nothing,String}      # the application namespace
 end
+URLResolver(route, regex, params, patterns, namespace) = URLResolver(route, regex, params, patterns, namespace, nothing)
 
 struct Include
     patterns::Vector{Any}
     namespace::Union{Nothing,String}
+    app_name::Union{Nothing,String}
 end
 
 "A URL pattern (or a whole included set) with every view wrapped by `f` (e.g. a permission check)."
 wrap_view(p::URLPattern, f) = URLPattern(p.route, p.regex, p.params, f(p.view), p.name, p.defaults)
-wrap_view(r::URLResolver, f) = URLResolver(r.route, r.regex, r.params, Any[wrap_view(x, f) for x in r.patterns], r.namespace)
+wrap_view(r::URLResolver, f) = URLResolver(r.route, r.regex, r.params, Any[wrap_view(x, f) for x in r.patterns], r.namespace, r.app_name)
 wrap_view(x, f) = x
 
 """
-    include_urls(patterns; namespace=nothing)
+    include_urls(patterns; namespace = nothing, app_name = nothing)
 
 Mount another list of URL patterns, optionally namespaced (`reverse_url("ns:name")`).
+
+`app_name` is the application namespace, as Django's `app_name` in an app's urls.py; `namespace`
+is the instance namespace, which defaults to it. An app mounted twice gets one `app_name` and two
+instance namespaces, and `reverse_url("app:name")` picks the instance: `current_app = "..."` when
+given, else the one the current request was resolved in, else the instance named like the app,
+else the last one mounted.
+
+    path("blog/", include_urls(blog_urls; app_name = "blog")),                     # reverse_url("blog:post", 1)
+    path("news/", include_urls(blog_urls; app_name = "blog", namespace = "news")),  # also "news:post"
 """
-include_urls(patterns; namespace = nothing) =
-    Include(collect(Any, patterns), namespace === nothing ? nothing : string(namespace))
+include_urls(patterns; namespace = nothing, app_name = nothing) =
+    Include(collect(Any, patterns), something(namespace, app_name, Some(nothing)) === nothing ? nothing : string(something(namespace, app_name)),
+            app_name === nothing ? nothing : string(app_name))
 
 """
     path(route, view; name=nothing, kwargs...)
@@ -104,7 +117,7 @@ end
 
 function path(route::AbstractString, inc::Include)
     rx, params = compile_route(route; endpoint = false)
-    URLResolver(String(route), rx, params, inc.patterns, inc.namespace)
+    URLResolver(String(route), rx, params, inc.patterns, inc.namespace, inc.app_name)
 end
 
 """
@@ -127,8 +140,10 @@ struct ResolverMatch
     namespace::Union{Nothing,String}
     route::String
     language::Union{Nothing,String}      # the language prefix matched by i18n_patterns
+    app_name::Union{Nothing,String}      # the application namespaces of the includes it's in ("blog")
 end
-ResolverMatch(view, kwargs, name, ns, route) = ResolverMatch(view, kwargs, name, ns, route, nothing)
+ResolverMatch(view, kwargs, name, ns, route) = ResolverMatch(view, kwargs, name, ns, route, nothing, nothing)
+ResolverMatch(view, kwargs, name, ns, route, language) = ResolverMatch(view, kwargs, name, ns, route, language, nothing)
 
 """
     i18n_patterns(patterns...; prefix_default_language=true)
@@ -166,31 +181,31 @@ end
 
 joinns(a, b) = a === nothing ? b : b === nothing ? a : a * ":" * b
 
-function _resolve(patterns, p::AbstractString, kwargs, ns, prefix)
+function _resolve(patterns, p::AbstractString, kwargs, ns, prefix, app = nothing)
     for pat in patterns
         if pat isa URLPattern
             m = match(pat.regex, p)
             m === nothing && continue
             kw = merge(kwargs, capture_kwargs(m, pat.params), pat.defaults)
-            return ResolverMatch(pat.view, kw, pat.name, ns, prefix * pat.route)
+            return ResolverMatch(pat.view, kw, pat.name, ns, prefix * pat.route, nothing, app)
         elseif pat isa URLResolver
             m = match(pat.regex, p)
             m === nothing && continue
             rest = p[ncodeunits(m.match)+1:end]
             r = _resolve(pat.patterns, rest, merge(kwargs, capture_kwargs(m, pat.params)),
-                         joinns(ns, pat.namespace), prefix * pat.route)
+                         joinns(ns, pat.namespace), prefix * pat.route, joinns(app, pat.app_name))
             r === nothing || return r
         elseif pat isa AbstractVector
-            r = _resolve(pat, p, kwargs, ns, prefix)
+            r = _resolve(pat, p, kwargs, ns, prefix, app)
             r === nothing || return r
         elseif pat isa LocalePrefix
             m = match(r"^([A-Za-z]{2}(?:-[A-Za-z0-9]+)?)/", p)
             if m !== nothing && lowercase(m[1]) in supported_codes() && (pat.prefix_default || lowercase(m[1]) != default_language())
-                r = _resolve(pat.patterns, p[ncodeunits(m.match)+1:end], kwargs, ns, prefix * m.match)
-                r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, lowercase(m[1]))
+                r = _resolve(pat.patterns, p[ncodeunits(m.match)+1:end], kwargs, ns, prefix * m.match, app)
+                r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, lowercase(m[1]), r.app_name)
             elseif !pat.prefix_default
-                r = _resolve(pat.patterns, p, kwargs, ns, prefix)
-                r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, default_language())
+                r = _resolve(pat.patterns, p, kwargs, ns, prefix, app)
+                r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, default_language(), r.app_name)
             end
         end
     end
@@ -239,8 +254,43 @@ function ReverseEntry(route::AbstractString, params)
 end
 
 const REVERSE_CACHE = IdDict{Any,Dict{String,Vector{ReverseEntry}}}()
+"Per URLconf: application namespace => its instance namespaces, in the order they're mounted."
+const APP_INSTANCES = IdDict{Any,Dict{String,Vector{String}}}()
 const REVERSE_LOCK = ReentrantLock()
-push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> empty!(REVERSE_CACHE), REVERSE_LOCK))
+push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> (empty!(REVERSE_CACHE); empty!(APP_INSTANCES)), REVERSE_LOCK))
+
+function collect_app_instances!(apps, patterns, ns, app)
+    for pat in patterns
+        if pat isa URLResolver
+            ns2, app2 = joinns(ns, pat.namespace), joinns(app, pat.app_name)
+            if pat.app_name !== nothing && ns2 !== nothing
+                v = get!(apps, app2, String[])
+                ns2 in v || push!(v, ns2)
+            end
+            collect_app_instances!(apps, pat.patterns, ns2, app2)
+        elseif pat isa AbstractVector
+            collect_app_instances!(apps, pat, ns, app)
+        elseif pat isa LocalePrefix
+            collect_app_instances!(apps, pat.patterns, ns, app)
+        end
+    end
+    apps
+end
+
+"""
+The instance namespace to reverse `app:...` in: `current_app` if it's one of the app's instances,
+else the current request's (CURRENT_APP), else the instance named like the app, else the last
+one mounted (Django's rules). `nothing` when `app` isn't an application namespace.
+"""
+function pick_instance(apps, app::AbstractString, current_app)
+    insts = get(apps, app, nothing)
+    insts === nothing && return nothing
+    current_app !== nothing && string(current_app) in insts && return string(current_app)
+    cur = CURRENT_APP[]
+    cur !== nothing && cur.first == app && cur.second in insts && return cur.second
+    app in insts && return app
+    insts[end]
+end
 
 function build_reverse_index!(idx, patterns, prefix, ns)
     for pat in patterns
@@ -279,12 +329,19 @@ Build the URL for the named pattern. Use `"namespace:name"` for included pattern
     reverse_url("article"; id=3)        # "/articles/3/"
     reverse_url("blog:post", 3)         # positional arguments also work
 """
-function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLCONF, query = nothing, kwargs...)
-    idx = lock(REVERSE_LOCK) do
-        get!(() -> build_reverse_index!(Dict{String,Vector{ReverseEntry}}(), urlconf, "", nothing), REVERSE_CACHE, urlconf)
+function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLCONF, query = nothing, current_app = nothing, kwargs...)
+    idx, apps = lock(REVERSE_LOCK) do
+        get!(() -> build_reverse_index!(Dict{String,Vector{ReverseEntry}}(), urlconf, "", nothing), REVERSE_CACHE, urlconf),
+        get!(() -> collect_app_instances!(Dict{String,Vector{String}}(), urlconf, nothing, nothing), APP_INSTANCES, urlconf)
+    end
+    i = findlast(':', name)
+    inst = nothing
+    if i !== nothing                                   # an application namespace: pick its instance
+        inst = pick_instance(apps, name[1:prevind(name, i)], current_app)
+        inst === nothing || (name = inst * name[i:end])
     end
     app = CURRENT_APP[]
-    if app !== nothing && startswith(name, app.first * ":")
+    if inst === nothing && app !== nothing && startswith(name, app.first * ":")     # (an admin site's own name)
         alias = app.second * name[length(app.first)+1:end]
         haskey(idx, alias) && (name = alias)
     end

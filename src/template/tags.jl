@@ -533,6 +533,25 @@ function render!(io::IO, n::StaticNode, ctx::Context)
     n.asvar === nothing ? write(io, escape_html(url)) : (ctx[n.asvar] = url)
 end
 
+# {% get_static_prefix %} and {% get_media_prefix %} (or `... as name`): STATIC_URL and MEDIA_URL
+struct PrefixNode <: Node
+    setting::Symbol
+    asvar::Union{Nothing,String}
+end
+function prefix_tag(setting::Symbol)
+    (p, t) -> begin
+        bits = split_contents(t.contents)
+        (length(bits) == 1 || (length(bits) == 3 && bits[2] == "as")) ||
+            throw(TemplateSyntaxError("'$(bits[1])' takes no arguments, or 'as name'"))
+        PrefixNode(setting, length(bits) == 3 ? bits[3] : nothing)
+    end
+end
+function render!(io::IO, n::PrefixNode, ctx::Context)
+    v = string(getproperty(settings, n.setting))
+    n.asvar === nothing ? write(io, escape_html(v)) : (ctx[n.asvar] = v)
+    nothing
+end
+
 tag_load(p, t) = load_libraries!(p, t)       # templatetags.jl
 
 # --- comment / verbatim / spaceless / autoescape ----------------------------------------
@@ -641,7 +660,8 @@ render!(io::IO, n::NowNode, ctx::Context) =
 for (name, f) in (
     "if" => tag_if, "for" => tag_for, "block" => tag_block, "extends" => tag_extends,
     "include" => tag_include, "with" => tag_with, "url" => tag_url, "csrf_token" => tag_csrf_token,
-    "static" => tag_static, "load" => tag_load, "comment" => tag_comment, "verbatim" => tag_verbatim,
+    "static" => tag_static, "get_static_prefix" => prefix_tag(:STATIC_URL), "get_media_prefix" => prefix_tag(:MEDIA_URL),
+    "load" => tag_load, "comment" => tag_comment, "verbatim" => tag_verbatim,
     "spaceless" => tag_spaceless, "autoescape" => tag_autoescape, "cycle" => tag_cycle,
     "firstof" => tag_firstof, "now" => tag_now)
     TAGS[name] = f

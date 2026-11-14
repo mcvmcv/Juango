@@ -108,6 +108,9 @@ adapt_param(b::SQLiteBackend, z::TimeZones.ZonedDateTime) = adapt_param(b, DateT
 # --- templates ---------------------------------------------------------------------------------------------------
 
 todatetime(z::TimeZones.ZonedDateTime) = local_wall_clock(z)
+# an aware datetime's parts are those of the time templates show it in (the current time zone, or
+# the wall clock under {% localtime off %}), so a URL built from them names the day the page shows
+tattr(z::TimeZones.ZonedDateTime, v::Val) = tattr(local_wall_clock(z), v)
 local_wall_clock(z) = get(task_local_storage(), :juango_localtime_off, false) ? DateTime(z) : make_naive(z)
 display_string(z::TimeZones.ZonedDateTime) = format_date(z, get_format().datetime)
 json_scalar(z::TimeZones.ZonedDateTime) = string(TimeZones.astimezone(z, UTC_TZ))

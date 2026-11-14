@@ -99,7 +99,30 @@ mutable struct ModelAdmin
     get_ordering::Any
     get_readonly_fields::Any             # nothing, or (req, obj) -> names
     get_fields::Any                      # nothing, or (req, obj) -> names
+    options::Dict{Symbol,Any}            # the hooks and options below (save_model, list_display_links, ...)
 end
+option(ma::ModelAdmin, k::Symbol, default = nothing) = get(ma.options, k, default)
+
+"""
+    Admin.display(f; description = nothing, boolean = false, ordering = nothing, empty_value = nothing)
+
+A computed `list_display` column, as Django's `@admin.display`: `f(obj)` gives the value,
+`description` the header, `boolean = true` shows it as a ✔/✘ icon, `ordering = "field"` (or
+`"-field"`, or a lookup like `"author__name"`) makes the column sortable by that field, and
+`empty_value` is shown for `nothing`.
+
+    Admin.register!(Post; list_display = [:title, Admin.display(p -> count(p.comments); description = "Comments")])
+"""
+struct Display
+    f::Function
+    description::Union{Nothing,String}
+    boolean::Bool
+    ordering::Union{Nothing,String}
+    empty_value::Union{Nothing,String}
+end
+display(f::Function; description = nothing, boolean::Bool = false, ordering = nothing, empty_value = nothing) =
+    Display(f, description === nothing ? nothing : string(description), boolean, ordering === nothing ? nothing : string(ordering),
+            empty_value === nothing ? nothing : string(empty_value))
 
 """
     Admin.ListFilter(title, parameter; lookups, queryset)
@@ -185,6 +208,26 @@ Expose a model in the admin.
   `UserCreationForm`); after adding, the change page opens.
 * `password_fields`: rendered as password inputs and hashed on save (unchanged when blank).
 * `queryset = req -> ...`: what the admin lists and edits (default `objects(Model)`).
+
+Hooks (Django's ModelAdmin methods):
+* `save_model = (req, obj, form, change) -> ...` saves the object (`save!(obj)` by default): set
+  `obj.created_by = req.user` here. `save_related = (req, form, inlines, change) -> ...` saves the
+  many-to-many fields and inlines after it. `delete_model = (req, obj) -> ...` and
+  `delete_queryset = (req, qs) -> ...` delete (the latter for "Delete selected").
+* `response_add` / `response_change = (req, obj) -> response`, `response_delete = (req, name) -> response`:
+  where to go after saving or deleting.
+* `get_form = (req, obj, data, files) -> form` builds the change form.
+* `formfield_for_foreignkey`, `formfield_for_manytomany`, `formfield_for_choice_field =
+  (req, field) -> field or nothing`: replace a field of the form, to narrow a select's queryset
+  per request (`ModelChoiceField(filter(...))`). `formfield_overrides = Dict(:text => Dict(:widget => ...))`
+  changes every form field of a kind. `radio_fields = [:status]` shows choices as radio buttons.
+
+Change list options:
+* `list_display_links`: the columns that link to the change page (default the first; `[]` for
+  none). Columns of model fields, and `Admin.display(...; ordering = ...)` ones, sort when their
+  header is clicked (`?o=2.-1`); `sortable_by = [...]` limits which.
+* `empty_value_display = "-"`, `search_help_text`, `save_on_top = true` (save buttons above the
+  form too).
 """
 function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol[], list_filter = Symbol[],
                    ordering = String[], fields = nothing, exclude = Symbol[], list_per_page = 25,
@@ -195,7 +238,12 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    add_form = nothing, site::AdminSite = Admin.site, has_view_permission = nothing, has_change_permission = nothing,
                    has_add_permission = nothing, has_delete_permission = nothing, list_select_related = nothing,
                    show_full_result_count = true, urls = Any[], get_list_display = nothing, get_list_filter = nothing,
-                   get_search_fields = nothing, get_ordering = nothing, get_readonly_fields = nothing, get_fields = nothing)
+                   get_search_fields = nothing, get_ordering = nothing, get_readonly_fields = nothing, get_fields = nothing,
+                   save_model = nothing, save_related = nothing, delete_model = nothing, delete_queryset = nothing,
+                   response_add = nothing, response_change = nothing, response_delete = nothing, get_form = nothing,
+                   formfield_for_foreignkey = nothing, formfield_for_manytomany = nothing, formfield_for_choice_field = nothing,
+                   formfield_overrides = Dict{Symbol,Any}(), radio_fields = Symbol[], list_display_links = nothing,
+                   sortable_by = nothing, empty_value_display = "-", search_help_text = nothing, save_on_top = false)
     modelmeta(T)  # validates T is a model
     slug = model_name(T)
     acts = AdminAction[to_action(a) for a in actions]
@@ -215,7 +263,18 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                                 date_hierarchy === nothing ? nothing : Symbol(date_hierarchy), save_as, add_form,
                                 has_view_permission, has_change_permission, has_add_permission, has_delete_permission,
                                 list_select_related, show_full_result_count, collect(Any, urls), get_list_display,
-                                get_list_filter, get_search_fields, get_ordering, get_readonly_fields, get_fields)
+                                get_list_filter, get_search_fields, get_ordering, get_readonly_fields, get_fields,
+                                Dict{Symbol,Any}(:save_model => save_model, :save_related => save_related, :delete_model => delete_model,
+                                                 :delete_queryset => delete_queryset, :response_add => response_add,
+                                                 :response_change => response_change, :response_delete => response_delete,
+                                                 :get_form => get_form, :formfield_for_foreignkey => formfield_for_foreignkey,
+                                                 :formfield_for_manytomany => formfield_for_manytomany,
+                                                 :formfield_for_choice_field => formfield_for_choice_field,
+                                                 :formfield_overrides => formfield_overrides, :radio_fields => Symbol.(collect(radio_fields)),
+                                                 :list_display_links => list_display_links === nothing ? nothing : collect(Any, list_display_links),
+                                                 :sortable_by => sortable_by === nothing ? nothing : Symbol.(collect(sortable_by)),
+                                                 :empty_value_display => string(empty_value_display), :search_help_text => search_help_text,
+                                                 :save_on_top => save_on_top))
     filter!(!=(slug), site.order)
     push!(site.order, slug)
     T
@@ -324,6 +383,7 @@ end
 
 function header_label(ma::ModelAdmin, col)
     col isa Pair && return string(col.first)
+    col isa Display && return something(col.description, "")
     col === :__str__ && return uppercasefirst(modelmeta(ma.model).verbose_name)
     f = findfield(modelmeta(ma.model), Symbol(col))
     f === nothing ? uppercasefirst(replace(string(col), '_' => ' ')) : label(f)
@@ -331,13 +391,72 @@ end
 
 Base.@nospecializeinfer function raw_cell(ma::ModelAdmin, @nospecialize(obj), col)
     col isa Pair && return col.second(obj)
+    col isa Display && return col.f(obj)
     col === :__str__ && return string(obj)
     f = findfield(modelmeta(ma.model), Symbol(col))
     val = getproperty(obj, Symbol(col))
     f !== nothing && f.choices !== nothing && return Juango.choice_label(Juango.field_choices(f), val)
     val
 end
-Base.@nospecializeinfer cell_value(ma::ModelAdmin, @nospecialize(obj), col) = format_value(raw_cell(ma, obj, col))
+Base.@nospecializeinfer function cell_value(ma::ModelAdmin, @nospecialize(obj), col)
+    v = raw_cell(ma, obj, col)
+    if v === nothing || v == ""
+        return col isa Display && col.empty_value !== nothing ? col.empty_value : option(ma, :empty_value_display, "-")
+    end
+    col isa Display && col.boolean && return format_value(Bool(v))
+    format_value(v)
+end
+
+"The ORDER BY a list_display column sorts by (`nothing`: not sortable): a field's name, or a display's `ordering`."
+function column_ordering(ma::ModelAdmin, col)
+    sb = option(ma, :sortable_by)
+    name = col isa Symbol ? col : col isa Display ? nothing : col isa AbstractString ? Symbol(col) : nothing
+    sb !== nothing && !(name in sb) && !(col isa Display && col.ordering !== nothing && Symbol(lstrip(col.ordering, '-')) in sb) && return nothing
+    col isa Display && return col.ordering
+    name === nothing || name === :__str__ && return nothing
+    f = findfield(modelmeta(ma.model), name)
+    f === nothing || f.kind in (:m2m, :gfk, :grel) ? nothing : string(attname(f))
+end
+
+"The change list's column headers: the label, and for sortable columns the link that sorts by it (or flips it)."
+function column_headers(req::Request, ma::ModelAdmin, cols, spec)
+    out = Any[]
+    for (i, c) in enumerate(cols)
+        if column_ordering(ma, c) === nothing
+            push!(out, (label = header_label(ma, c), url = nothing, sorted = nothing, priority = 0))
+            continue
+        end
+        k = findfirst(x -> x[1] == i, spec)
+        # clicking a column sorts by it first; clicking the first sorted column flips it
+        new = k === nothing ? vcat([(i, false)], spec) : k == 1 ? vcat([(i, !spec[1][2])], spec[2:end]) : vcat([spec[k]], deleteat!(copy(spec), k))
+        push!(out, (label = header_label(ma, c), url = query_with(req, "o" => spec_string(new)),
+                    sorted = k === nothing ? nothing : spec[k][2] ? "desc" : "asc", priority = k === nothing ? 0 : k))
+    end
+    out
+end
+
+"`?o=2.-1` (Django's format): the list_display columns to sort by, 1-based, `-` for descending."
+function sort_spec(req::Request, ma::ModelAdmin, cols)
+    raw = get(req.GET, "o", "")
+    spec = Tuple{Int,Bool}[]
+    for part in split(raw, '.'; keepempty = false)
+        desc = startswith(part, "-")
+        i = tryparse(Int, lstrip(part, '-'))
+        (i === nothing || !(1 <= i <= length(cols)) || column_ordering(ma, cols[i]) === nothing) && continue
+        any(x -> x[1] == i, spec) || push!(spec, (i, desc))
+    end
+    spec
+end
+function spec_ordering(ma::ModelAdmin, cols, spec)
+    out = String[]
+    for (i, desc) in spec
+        o = column_ordering(ma, cols[i])
+        d = startswith(o, "-")
+        push!(out, (desc != d ? "-" : "") * lstrip(o, '-'))
+    end
+    out
+end
+spec_string(spec) = join([(d ? "-" : "") * string(i) for (i, d) in spec], ".")
 
 format_value(::Nothing) = "-"
 format_value(v::Bool) = SafeString(v ? "<span class=\"yes\" title=\"True\">✔</span>" : "<span class=\"no\" title=\"False\">✘</span>")
@@ -459,9 +578,12 @@ Base.@nospecializeinfer function delete_selected(ma::ModelAdmin, req::Request, @
     end
     try
         Juango.atomic() do
-            for o in objs
-                log_action!(req.user, o, DELETION)
-                delete!(o)
+            foreach(o -> log_action!(req.user, o, DELETION), objs)
+            dq = option(ma, :delete_queryset)
+            if dq === nothing
+                foreach(delete!, objs)
+            else
+                dq(req, filter(objects(ma.model), Q(pk__in = [o.pk for o in objs])))
             end
         end
         n = length(objs)
@@ -543,13 +665,18 @@ function changelist(req::Request; model)
     qs, drill = date_drilldown(req, ma, qs)
     # As Django's ChangeList: the admin's ordering, else the model's Meta.ordering given explicitly (a queryset with
     # an aggregate annotate leaves Meta.ordering out), then the primary key, so pages are in a total order
+    cols = list_display(ma, req)
     ords = Any[o for o in ordering(ma, req)]
     isempty(ords) && append!(ords, meta.ordering)
+    spec = sort_spec(req, ma, cols)                    # clicked column headers come first
+    if !isempty(spec)
+        chosen = spec_ordering(ma, cols, spec)
+        ords = vcat(Any[chosen...], Any[o for o in ords if !(o isa AbstractString && lstrip(o, '-') in lstrip.(chosen, '-'))])
+    end
     if !Juango.is_composite(ma.model) && !any(o -> o isa AbstractString && lstrip(o, '-') in ("id", "pk"), ords)
         push!(ords, "-id")
     end
     qs = order_by(qs, ords...)
-    cols = list_display(ma, req)
     # Load the objects behind foreign-key columns in the same query (no query per row): list_select_related
     sr = ma.list_select_related
     fks = sr === false ? Symbol[] : sr === true ? Symbol[f.name for f in meta.fields if f.kind === :fk] :
@@ -584,16 +711,18 @@ function changelist(req::Request; model)
         end
     end
     forms = fs === nothing ? nothing : Juango.build_forms!(fs)
+    links = option(ma, :list_display_links)
+    linked(i, c) = links === nothing ? i == 1 : any(l -> l == c || (c isa Symbol && string(l) == string(c)), links)
     rows = Any[]
     for (k, o) in enumerate(objs)
         cells = Any[]
-        for c in cols
+        for (i, c) in enumerate(cols)
             if fs !== nothing && c isa Symbol && c in ma.list_editable
                 bf = forms[k][c]
                 errs = get(forms[k].errors, c, String[])
-                push!(cells, SafeString((isempty(errs) ? "" : Juango.errors_html(errs)) * Juango.widget_html(bf)))
+                push!(cells, (value = SafeString((isempty(errs) ? "" : Juango.errors_html(errs)) * Juango.widget_html(bf)), link = false))
             else
-                push!(cells, cell_value(ma, o, c))
+                push!(cells, (value = cell_value(ma, o, c), link = linked(i, c)))
             end
         end
         hidden = fs === nothing ? "" : Juango.widget_html(forms[k][:id])
@@ -604,7 +733,8 @@ function changelist(req::Request; model)
     ctx = base_context(req, interpolate(can(req, ma, :change) ? gettext("Select %(model)s to change") : gettext("Select %(model)s to view"),
                                         Dict("model" => meta.verbose_name)))
     merge!(ctx, Dict{String,Any}(
-        "opts" => opts(ma), "headers" => [header_label(ma, c) for c in cols], "rows" => rows,
+        "opts" => opts(ma), "headers" => column_headers(req, ma, cols, spec), "rows" => rows,
+        "search_help_text" => option(ma, :search_help_text),
         "page_obj" => pg, "paginator" => p, "q" => q, "has_search" => !isempty(sfields),
         "filters" => filter_specs(req, ma, filters), "result_count" => p.count,
         "show_full_count" => ma.show_full_result_count, "total" => ma.show_full_result_count ? count(admin_queryset(ma, req)) : nothing,
@@ -689,8 +819,25 @@ change_message(form, inlines) = begin
     isempty(parts) ? "No fields changed." : join(parts, " ")
 end
 
-function configure_widgets!(ma::ModelAdmin, form)
-    for f in form.fields
+function configure_widgets!(ma::ModelAdmin, form, req = nothing)
+    overrides = option(ma, :formfield_overrides, Dict{Symbol,Any}())
+    radios = option(ma, :radio_fields, Symbol[])
+    for (i, f) in enumerate(form.fields)
+        # formfield_for_*: the admin's hook may replace the field (keeping its name)
+        hook = f.kind === :fk ? option(ma, :formfield_for_foreignkey) : f.kind === :m2m ? option(ma, :formfield_for_manytomany) :
+               f.choices !== nothing ? option(ma, :formfield_for_choice_field) : nothing
+        if hook !== nothing && req !== nothing
+            g = hook(req, f)
+            if g !== nothing && g !== f
+                g = deepcopy(g)
+                g.name = f.name
+                form.fields[i] = f = g
+            end
+        end
+        for (k, v) in get(overrides, f.kind, Dict{Symbol,Any}())
+            setproperty!(f, Symbol(k), v)
+        end
+        f.name in radios && (f.widget = :radio)
         f.name in ma.raw_id_fields && (f.widget = :raw_id)
         f.name in ma.autocomplete_fields && (f.widget = :autocomplete)
     end
@@ -710,9 +857,11 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
     data = req.method == "POST" ? req.POST : nothing
     custom_add = adding && ma.add_form !== nothing
     locked = adding || !Juango.is_composite(T) ? Symbol[] : Symbol[f.name for f in Juango.pk_fields(T)]   # a key can't change
+    gf = option(ma, :get_form)
     form = configure_widgets!(ma, custom_add ? ma.add_form(data, req.FILES) :
+                                  gf !== nothing ? gf(req, obj, data, req.FILES) :
                                   Juango.ModelForm(T; data = data, files = req.FILES, instance = obj,
-                                                   fields = filter(!in(locked), admin_fields(ma, req, obj))))
+                                                   fields = filter(!in(locked), admin_fields(ma, req, obj))), req)
     pfs = custom_add ? Symbol[] : ma.password_fields
     inlines = save_as_new || custom_add ? Any[] : inline_formsets(ma, req, obj, data)
     if req.method == "POST" && is_valid(form) && all(x -> is_valid(x[2]), inlines)
@@ -726,15 +875,21 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
                     setproperty!(o, pf, "!" * Juango.random_string(40))
                 end
             end
-            save!(o)
-            Juango.save_m2m!(form)
-            for (ia, fs) in inlines
-                fs.parent = o
-                save!(fs)
+            sm = option(ma, :save_model)
+            sm === nothing ? save!(o) : sm(req, o, form, !adding)          # save_model(req, obj, form, change)
+            foreach(x -> x[2].parent = o, inlines)
+            sr = option(ma, :save_related)
+            if sr === nothing
+                Juango.save_m2m!(form)
+                foreach(x -> save!(x[2]), inlines)
+            else
+                sr(req, form, [x[2] for x in inlines], !adding)
             end
             o
         end
         log_action!(req.user, o, adding ? ADDITION : CHANGE, adding ? "Added." : change_message(form, inlines))
+        resp_hook = option(ma, adding ? :response_add : :response_change)
+        resp_hook === nothing || return Juango.to_response(resp_hook(req, o))
         verb = adding ? "added" : "changed"
         if haskey(req.POST, "_continue") || save_as_new || custom_add
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may edit it again below.")
@@ -763,7 +918,7 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         "inlines" => editable ? [inline_context(ia, fs) for (ia, fs) in inlines] : Any[],
         "prepopulated" => Juango.JSON.json(prepop), "save_as" => ma.save_as && !adding && can(req, ma, :add),
         "password_fields" => [Dict("name" => string(pf), "label" => uppercasefirst(string(pf))) for pf in pfs],
-        "view_on_site" => adding ? nothing : get_absolute_url(obj),
+        "view_on_site" => adding ? nothing : get_absolute_url(obj), "save_on_top" => option(ma, :save_on_top, false),
         "history_url" => adding ? nothing : reverse_url("admin:history"; model = ma.slug, id = Juango.pk_string(obj))))
     render(req, "admin/change_form.html", ctx)
 end
@@ -788,8 +943,11 @@ function delete_view(req::Request; model, id)
         try
             Juango.atomic() do
                 log_action!(req.user, obj, DELETION)
-                delete!(obj)
+                dm = option(ma, :delete_model)
+                dm === nothing ? delete!(obj) : dm(req, obj)
             end
+            rd = option(ma, :response_delete)
+            rd === nothing || return Juango.to_response(rd(req, name))
             message!(req, :success, interpolate(gettext("The %(model)s “%(object)s” was deleted successfully."),
                                                 Dict("model" => meta.verbose_name, "object" => name)))
             return Juango.HttpResponseRedirect(reverse_url("admin:changelist"; model = ma.slug))

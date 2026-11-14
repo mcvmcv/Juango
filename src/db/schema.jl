@@ -143,6 +143,16 @@ function Index(cols...; name = nothing, unique = false, method = :btree, conditi
           String[string(c) for c in include], String[string(c) for c in opclasses])
 end
 GinIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :gin, kw...)
+"PostgreSQL GiST index (ranges, geometry, trigram `gist_trgm_ops`, exclusion constraints); other databases skip it."
+GistIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :gist, kw...)
+"PostgreSQL BRIN index: tiny, for huge tables whose rows are stored in the column's order (timestamps of appended rows)."
+BrinIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :brin, kw...)
+"PostgreSQL SP-GiST index (space-partitioned: points, ranges, text prefixes)."
+SpGistIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :spgist, kw...)
+"PostgreSQL hash index: equality lookups only."
+HashIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :hash, kw...)
+"PostgreSQL bloom index (needs `CreateExtension(\"bloom\")` in a migration): equality on any combination of many columns."
+BloomIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :bloom, kw...)
 index_key(i::Index) = (i.columns, i.name, i.unique, i.method, i.expressions,
                        i.condition === nothing ? nothing : q_code(i.condition), i.include, i.opclasses)
 Base.:(==)(a::Index, b::Index) = index_key(a) == index_key(b)
@@ -225,7 +235,7 @@ Base.@nospecializeinfer function table_state(@nospecialize(T::Type))
     idx = Index[]
     for ix in get(m.extra, :indexes, Index[])
         cols = [col(c) for c in ix.columns]
-        push!(idx, Index(cols, something(ix.name, constraint_name(m.table, cols..., ix.method === :gin ? "gin" : "idx")),
+        push!(idx, Index(cols, something(ix.name, constraint_name(m.table, cols..., ix.method === :btree ? "idx" : string(ix.method))),
                          ix.unique, ix.method, Tuple{String,String}[(f, col(x)) for (f, x) in ix.expressions],
                          ix.condition === nothing ? nothing : condition_to_columns(T, ix.condition),
                          String[col(c) for c in ix.include], ix.opclasses))

@@ -57,6 +57,7 @@ mutable struct Field
     unique_for::Any                     # nothing, or (:date / :month / :year, date field name): unique_for_date = :pub_date
     template_name::Union{Nothing,String}   # forms: the template `as_field_group` renders the field with
     related_query_name::Union{Nothing,Symbol}   # the reverse side's name in lookups (default: related_name, else the model's name)
+    error_messages::Union{Nothing,Dict{String,String}}   # code => message, overriding the built-in ones ("required", "invalid", ...)
     att::Symbol         # attname for the name in `attfor` (see `attname`)
     col::String         # string(att): the column name
     attfor::Symbol      # the name `att` and `col` were worked out for
@@ -230,8 +231,21 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                db_index = false, required = nothing, label = nothing, through = nothing, one_to_one = false,
                db_default = nothing, generated = nothing, symmetrical = false, db_comment = nothing,
                max_digits = nothing, decimal_places = nothing, unique_for_date = nothing, unique_for_month = nothing,
-               unique_for_year = nothing, template_name = nothing, related_query_name = nothing)
+               unique_for_year = nothing, template_name = nothing, related_query_name = nothing, error_messages = nothing,
+               min_value = nothing, max_value = nothing, step_size = nothing, min_length = nothing,
+               input_formats = nothing, localize::Bool = false)
     required === nothing || (blank = !required)
+    # form fields: the date formats to accept, and numbers typed in the language's format ("1.234,5")
+    if input_formats !== nothing || localize
+        related === nothing || throw(ArgumentError("input_formats and localize are for date, time and number form fields"))
+        related = (input_formats = input_formats === nothing ? nothing : collect(input_formats), localize = localize)
+    end
+    # as Django's form fields: these limits are validators (with codes error_messages can override)
+    validators = collect(Any, validators)
+    min_length === nothing || pushfirst!(validators, MinLengthValidator(min_length))
+    step_size === nothing || pushfirst!(validators, StepValueValidator(step_size; offset = min_value))
+    max_value === nothing || pushfirst!(validators, MaxValueValidator(max_value))
+    min_value === nothing || pushfirst!(validators, MinValueValidator(min_value))
     label === nothing || (verbose_name = string(label))
     if auto_now || auto_now_add
         editable = false
@@ -248,6 +262,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           unique_for_year !== nothing ? (:year, Symbol(unique_for_year)) : nothing,
           template_name === nothing ? nothing : string(template_name),
           related_query_name === nothing ? nothing : Symbol(related_query_name),
+          error_messages === nothing ? nothing : Dict{String,String}(string(k) => string(v) for (k, v) in error_messages),
           field_att(kind, :_), string(field_att(kind, :_)), :_)
 end
 

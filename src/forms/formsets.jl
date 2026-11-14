@@ -70,6 +70,7 @@ function build_forms!(fs::FormSet)
         init = i < length(fs.initial) ? fs.initial[i+1] : Dict{Symbol,Any}()
         inst = instance_for(fs, i)
         f = fs.make_form(fs.data, "$(fs.prefix)-$i", init, inst)
+        f isa Form && (f.use_required_attribute = false)     # as Django: an extra form left empty mustn't block submitting
         add_formset_fields!(fs, f, i)
         push!(fs.forms, f)
     end
@@ -218,45 +219,68 @@ function formset_factory(F; extra = 1, can_delete = false, can_order = false, mi
 end
 
 """
-    modelformset_factory(Model; fields=nothing, exclude=[], extra=1, can_delete=false, ...)
+    modelformset_factory(Model; fields=nothing, exclude=[], extra=1, can_delete=false, form=nothing, ...)
 
 Returns `(data=nothing; queryset=objects(Model), prefix="form") -> FormSet` of `ModelForm`s,
 one per object plus `extra` blank ones. `save!(formset)` saves changed and new objects and
 deletes those marked for deletion.
+
+Each row is `ModelForm(Model; fields, exclude, widgets, labels, help_texts, field_classes,
+extra_fields, formfield_callback, error_messages)`, or, with `form`, what that function builds
+(Django's `form=`): `form(; data, instance, prefix, initial)` returning a ModelForm of the model,
+for rows with their own fields, `clean` or initial values worked out from the instance:
+
+    row(; data, instance, prefix, initial) = (f = ModelForm(Setting; data, instance, prefix, initial, fields = [:name, :value]);
+                                              set_field!(f, :value, CharField(); after = :name); f)
+    SettingsFormSet = modelformset_factory(Setting; form = row, extra = 0)
 """
 function modelformset_factory(T::Type; fields = nothing, exclude = Symbol[], extra = 1, can_delete = false,
                               can_order = false, min_num = 0, max_num = 1000, validate_min = false,
                               validate_max = false, clean = nothing, widgets = Dict{Symbol,Symbol}(),
-                              labels = Dict{Symbol,String}())
+                              labels = Dict{Symbol,String}(), form = nothing, help_texts = Dict{Symbol,String}(),
+                              field_classes = Dict{Symbol,Any}(), extra_fields = Pair{Symbol,Any}[],
+                              formfield_callback = nothing, error_messages = Dict{Symbol,Any}())
+    make = row_form(T, form; fields, exclude, widgets, labels, help_texts, field_classes, extra_fields, formfield_callback, error_messages)
     (data = nothing; queryset = objects(T), prefix = "form", initial = []) -> new_formset(
-        (d, p, init, inst) -> ModelForm(T; data = d, instance = inst, fields = fields, exclude = exclude, prefix = p,
-                                        initial = init, widgets = widgets, labels = labels);
+        make;
         prefix = prefix, data = data, initial = collect(initial), instances = collect(queryset), extra = extra,
         min_num = min_num, max_num = max_num, validate_min = validate_min, validate_max = validate_max,
         can_delete = can_delete, can_order = can_order, clean = clean, model = T)
 end
 
+"How a model formset makes its rows: the `form` function, else a ModelForm with these options."
+function row_form(T, form; fields, exclude, widgets, labels, help_texts, field_classes, extra_fields, formfield_callback, error_messages)
+    form === nothing || return (d, p, init, inst) -> form(; data = d, instance = inst, prefix = p, initial = init)
+    (d, p, init, inst) -> ModelForm(T; data = d, instance = inst, fields = fields, exclude = exclude, prefix = p, initial = init,
+                                    widgets = widgets, labels = labels, help_texts = help_texts, field_classes = field_classes,
+                                    extra_fields = extra_fields, formfield_callback = formfield_callback, error_messages = error_messages)
+end
+
 """
-    inlineformset_factory(Parent, Child; fk=nothing, fields=nothing, extra=3, can_delete=true, ...)
+    inlineformset_factory(Parent, Child; fk=nothing, fields=nothing, extra=3, can_delete=true, form=nothing, ...)
 
 A model formset of `Child` objects belonging to one `Parent` (through the FK `fk`, found
 automatically when there is only one). Returns `(data=nothing; instance=parent, prefix=...) -> FormSet`.
-The FK isn't a form field; `save!` sets it to the parent.
+The FK isn't a form field; `save!` sets it to the parent. `form` and the ModelForm options are as
+for `modelformset_factory`.
 """
 function inlineformset_factory(P::Type, T::Type; fk = nothing, fields = nothing, exclude = Symbol[], extra = 3,
                                can_delete = true, can_order = false, min_num = 0, max_num = 1000,
                                validate_min = false, validate_max = false, clean = nothing,
-                               widgets = Dict{Symbol,Symbol}(), labels = Dict{Symbol,String}())
+                               widgets = Dict{Symbol,Symbol}(), labels = Dict{Symbol,String}(), form = nothing,
+                               help_texts = Dict{Symbol,String}(), field_classes = Dict{Symbol,Any}(),
+                               extra_fields = Pair{Symbol,Any}[], formfield_callback = nothing, error_messages = Dict{Symbol,Any}())
     fks = [f for f in all_fields(T) if f.kind === :fk && P in lineage(related_model(f)) && (fk === nothing || f.name === Symbol(fk))]
     length(fks) == 1 || throw(ArgumentError("$T needs exactly one foreign key to $P (pass fk=:name), found $(length(fks))"))
     fkf = only(fks)
     excl = vcat(Symbol.(collect(exclude)), [fkf.name])
     flds = fields === nothing ? nothing : [Symbol(f) for f in fields if Symbol(f) !== fkf.name]
+    make = row_form(T, form; fields = flds, exclude = excl, widgets, labels, help_texts, field_classes, extra_fields,
+                    formfield_callback, error_messages)
     function (data = nothing; instance = nothing, prefix = string(reverse_name(fkf)), queryset = nothing)
         qs = instance === nothing || instance.id === nothing ? none(T) :
              something(queryset, filter(objects(T), Q(attname(fkf) => instance.id)))
-        new_formset((d, p, init, inst) -> ModelForm(T; data = d, instance = inst, fields = flds, exclude = excl,
-                                                     prefix = p, initial = init, widgets = widgets, labels = labels);
+        new_formset(make;
                     prefix = prefix, data = data, initial = [], instances = collect(qs), extra = extra, min_num = min_num,
                     max_num = max_num, validate_min = validate_min, validate_max = validate_max, can_delete = can_delete,
                     can_order = can_order, clean = clean, model = T, fk = fkf, parent = instance)

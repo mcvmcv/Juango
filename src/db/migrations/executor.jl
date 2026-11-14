@@ -70,10 +70,12 @@ function apply!(g::Graph, k; backwards = false, fake = false, fake_initial = tru
         log(label * " FAKED (tables already exist)")
         return
     end
-    atomic() do
+    run = () -> begin
         fake || foreach(run_action, migration_actions(g, k; backwards = backwards))
         backwards ? record_unapplied_all!(m) : record_applied_all!(m)
     end
+    # CREATE INDEX CONCURRENTLY & co. can't run in a transaction (Django's Migration.atomic = False)
+    any(op -> needs_no_transaction(op, Juango.backend()), m.operations) ? run() : atomic(run)
     log(label * (fake ? " FAKED" : " OK"))
 end
 
@@ -147,7 +149,7 @@ only synchronises tables for every model. `database` picks one of `DATABASES` (d
 migrate(; database = nothing, kw...) = Juango.with_db(() -> migrate_here(; kw...), database)
 
 function migrate_here(; app = nothing, target = nothing, fake = false, fake_initial = true, sync = false, prune = false,
-                      verbose = true)
+                      verbose = true, plan_only::Bool = false)
     log(msg) = verbose && println(msg)
     prune && return prune_migrations(app; log = log)
     db = Juango.current_alias()
@@ -167,6 +169,18 @@ function migrate_here(; app = nothing, target = nothing, fake = false, fake_init
         end
     end
     plan = migration_plan(g, applied; app = app, target = target)
+    if plan_only                                       # migrate --plan: what would run, and nothing else
+        println("Planned operations:")
+        isempty(plan) && println("  No planned migration operations.")
+        for (k, back) in plan
+            println("$(k[1]).$(k[2])", back ? " (unapply)" : "")
+            ops = g.nodes[k].operations
+            for op in (back ? reverse(ops) : ops)
+                println("    ", back ? "Undo " : "", describe(op))
+            end
+        end
+        return plan
+    end
     unmigrated = [T for T in all_models() if Juango.model_in_use(T) && !(modelmeta(T).app in migrated_apps()) && allowed(T)]
     log("Operations to perform:")
     isempty(g.nodes) || log("  Apply all migrations: " * join(sort(unique(first.(collect(keys(g.nodes))))), ", "))

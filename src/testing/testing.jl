@@ -25,7 +25,15 @@ function rollback_after(f)
     result = Ref{Any}(nothing)
     try
         atomic() do
-            result[] = f()
+            # durable atomic blocks inside are allowed (as in Django's TestCase)
+            tls = task_local_storage()
+            old = get(tls, :juango_test_atomic_depth, nothing)
+            tls[:juango_test_atomic_depth] = commit_holder().depth
+            try
+                result[] = f()
+            finally
+                old === nothing ? delete!(tls, :juango_test_atomic_depth) : (tls[:juango_test_atomic_depth] = old)
+            end
             throw(RollbackTest())
         end
     catch e
@@ -125,7 +133,10 @@ function override_settings(f; kw...)
         f()
     finally
         foreach(k -> delete!(SETTINGS, k), missing_)
-        configure!(; saved...)
+        apply_settings!(saved, false)
+        if any_receivers(setting_changed)
+            foreach(k -> send(setting_changed, :settings; setting = k, value = nothing, enter = false), missing_)
+        end
     end
 end
 
@@ -175,14 +186,12 @@ end
     assert_contains(resp, text; count = nothing, status = 200, html = false)
 
 The response has `status` and contains `text` (exactly `count` times, if given). With
-`html = true` the comparison ignores whitespace between tags.
+`html = true` both are compared as HTML (see `assert_html_equal`).
 """
 function assert_contains(r::HttpResponse, needle::AbstractString; count = nothing, status = 200, html = false)
     r.status == status || fail("response status was $(r.status), expected $status")
     hay = response_text(r)
-    norm(s) = html ? replace(strip(s), r">\s+<" => "><", r"\s+" => " ") : s
-    hay, needle = norm(hay), norm(needle)
-    n = length(findall(needle, hay; overlap = false))
+    n = html ? count_html(parse_html(needle), parse_html(hay)) : length(findall(needle, hay; overlap = false))
     if count === nothing
         n > 0 || fail("couldn't find $(repr(needle)) in the response")
     else
@@ -195,10 +204,8 @@ end
 function assert_not_contains(r::HttpResponse, needle::AbstractString; status = 200, html = false)
     r.status == status || fail("response status was $(r.status), expected $status")
     hay = response_text(r)
-    if html
-        hay, needle = replace(hay, r">\s+<" => "><"), replace(needle, r">\s+<" => "><")
-    end
-    occursin(needle, hay) && fail("found $(repr(needle)) in the response")
+    found = html ? count_html(parse_html(needle), parse_html(hay)) > 0 : occursin(needle, hay)
+    found && fail("found $(repr(needle)) in the response")
     true
 end
 
@@ -266,6 +273,262 @@ end
 function assert_num_queries(f, n::Integer)
     _, got = count_queries(f)
     got == n || fail("$got queries were run, expected $n")
+    true
+end
+
+# --- HTML compared as Django's assertHTMLEqual ----------------------------------------------------
+#
+# Both sides are parsed into a tree: whitespace between and around tags is ignored and runs of it
+# inside text count as one space, attributes compare in any order (and `class` in any token order),
+# `<br>` equals `<br/>`, character references are decoded, and comments are left out.
+
+const VOID_ELEMENTS = Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"])
+
+struct HtmlElement
+    tag::String
+    attrs::Vector{Pair{String,String}}      # sorted; a boolean attribute has the value ""
+    children::Vector{Any}                   # HtmlElement and String
+end
+
+const HTML_ENTITIES = Dict("amp" => "&", "lt" => "<", "gt" => ">", "quot" => "\"", "apos" => "'", "nbsp" => "\u00a0", "#39" => "'")
+decode_entities(s::AbstractString) = replace(s, r"&(#x[0-9a-fA-F]+|#[0-9]+|[A-Za-z]+);" => function (m)
+    e = m[2:end-1]
+    startswith(e, "#x") && return string(Char(parse(Int, e[3:end]; base = 16)))
+    startswith(e, "#") && return string(Char(parse(Int, e[2:end])))
+    get(HTML_ENTITIES, e, m)
+end)
+
+"Parse HTML into a list of nodes (HtmlElement and text), normalised for comparison."
+function parse_html(s::AbstractString)
+    root = HtmlElement("", Pair{String,String}[], Any[])
+    stack = HtmlElement[root]
+    i = firstindex(s)
+    rx_tag = r"\G<(/?)([A-Za-z][A-Za-z0-9:-]*)((?:\s+[^\s\"'>/=]+(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?)*)\s*(/?)>"s
+    rx_attr = r"([^\s\"'>/=]+)(?:\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+)))?"
+    text = IOBuffer()
+    flush_text!() = (t = String(take!(text)); isempty(t) || push!(stack[end].children, decode_entities(t)))
+    while i <= lastindex(s)
+        if s[i] == '<'
+            if startswith(SubString(s, i), "<!--")
+                j = findnext("-->", s, i)
+                i = j === nothing ? lastindex(s) + 1 : last(j) + 1
+                continue
+            elseif startswith(SubString(s, i), "<!")                # doctype
+                j = findnext('>', s, i)
+                i = j === nothing ? lastindex(s) + 1 : j + 1
+                continue
+            end
+            m = match(rx_tag, s, i)
+            if m !== nothing
+                flush_text!()
+                tag = lowercase(m[2])
+                if m[1] == "/"
+                    k = findlast(e -> e.tag == tag, stack)
+                    k === nothing || k == 1 || resize!(stack, k - 1)
+                else
+                    attrs = Pair{String,String}[]
+                    for a in eachmatch(rx_attr, m[3])
+                        name = lowercase(a[1])
+                        v = decode_entities(something(a[2], a[3], a[4], ""))
+                        name == "class" && (v = join(sort(split(v)), " "))
+                        push!(attrs, name => v)
+                    end
+                    el = HtmlElement(tag, sort!(attrs; by = first), Any[])
+                    push!(stack[end].children, el)
+                    (m[4] == "/" || tag in VOID_ELEMENTS) || push!(stack, el)
+                end
+                i += ncodeunits(m.match)
+                continue
+            end
+        end
+        write(text, s[i])
+        i = nextind(s, i)
+    end
+    flush_text!()
+    normalize_html!(root)
+    root.children
+end
+
+"Whitespace as in rendered HTML: runs of it count as one space, and none around tags."
+function normalize_html!(el::HtmlElement)
+    out = Any[]
+    for c in el.children
+        if c isa String
+            t = replace(c, r"\s+" => " ")
+            isempty(strip(t)) && continue
+            if !isempty(out) && out[end] isa String
+                out[end] *= t
+            else
+                push!(out, t)
+            end
+        else
+            normalize_html!(c)
+            push!(out, c)
+        end
+    end
+    for k in eachindex(out)
+        out[k] isa String && (out[k] = strip(out[k]))
+    end
+    empty!(el.children)
+    append!(el.children, out)
+    el
+end
+
+html_canonical(io::IO, t::AbstractString) = print(io, t)
+function html_canonical(io::IO, el::HtmlElement)
+    print(io, "<", el.tag)
+    for (k, v) in el.attrs
+        print(io, " ", k, "=", repr(v))
+    end
+    print(io, ">")
+    foreach(c -> html_canonical(io, c), el.children)
+    el.tag in VOID_ELEMENTS || print(io, "</", el.tag, ">")
+end
+html_canonical(nodes::Vector) = sprint(io -> foreach(n -> html_canonical(io, n), nodes))
+
+"""
+    assert_html_equal(a, b)    assert_html_not_equal(a, b)
+
+The two HTML strings are (aren't) the same document, as Django's `assertHTMLEqual`: whitespace
+between tags, attribute order and class order don't matter, and `<br>` equals `<br/>`.
+"""
+function assert_html_equal(a::AbstractString, b::AbstractString)
+    ca, cb = html_canonical(parse_html(a)), html_canonical(parse_html(b))
+    ca == cb || fail("the HTML differs:\n  $ca\n  $cb")
+    true
+end
+function assert_html_not_equal(a::AbstractString, b::AbstractString)
+    html_canonical(parse_html(a)) == html_canonical(parse_html(b)) && fail("the HTML is the same: $(html_canonical(parse_html(a)))")
+    true
+end
+
+"How many times the nodes of `needle` appear, in a row, among the children of some element of `hay`."
+function count_html(needle::Vector, hay::Vector)
+    want = [html_canonical(Any[n]) for n in needle]
+    isempty(want) && return 0
+    n = 0
+    walk(nodes) = begin
+        keys_ = [html_canonical(Any[c]) for c in nodes]
+        for k in 1:length(keys_)-length(want)+1
+            keys_[k:k+length(want)-1] == want && (n += 1)
+        end
+        # a text needle also matches inside a longer text (as Django, which looks for it in text nodes)
+        if length(want) == 1 && needle[1] isa String
+            for c in nodes
+                c isa String && c != needle[1] && (n += length(findall(needle[1], c)))
+            end
+        end
+        foreach(c -> c isa HtmlElement && walk(c.children), nodes)
+    end
+    walk(hay)
+    n
+end
+
+"""
+    assert_in_html(needle, hay; count = nothing)
+
+`needle` (HTML) appears in `hay` (HTML or a response), compared as `assert_html_equal` does
+(exactly `count` times when given), as Django's `assertInHTML`.
+"""
+function assert_in_html(needle::AbstractString, hay; count = nothing)
+    h = hay isa HttpResponse ? response_text(hay) : String(hay)
+    n = count_html(parse_html(needle), parse_html(h))
+    if count === nothing
+        n > 0 || fail("couldn't find $(repr(needle)) in the HTML")
+    else
+        n == count || fail("found $(repr(needle)) $n time(s) in the HTML, expected $count")
+    end
+    true
+end
+
+"""
+    assert_json_equal(raw, expected)    assert_json_not_equal(raw, expected)
+
+`raw` (a JSON string, or a response) decodes to `expected`, itself a JSON string or a value:
+object key order and number formatting don't matter.
+"""
+function assert_json_equal(raw, expected)
+    a, b = json_value(raw), json_value(expected)
+    isequal(a, b) || fail("the JSON differs:\n  $(JSON.json(a))\n  $(JSON.json(b))")
+    true
+end
+function assert_json_not_equal(raw, expected)
+    isequal(json_value(raw), json_value(expected)) && fail("the JSON is the same: $(JSON.json(json_value(raw)))")
+    true
+end
+json_value(r::HttpResponse) = json_value(response_text(r))
+json_value(s::AbstractString) = plainjson(JSON.parse(s))
+json_value(x) = plainjson(JSON.parse(JSON.json(x)))
+
+"""
+    assert_queryset_equal(qs, values; transform = identity, ordered = true)
+
+`[transform(x) for x in qs]` equals `values`; with `ordered = false`, in any order. As Django's
+`assertQuerySetEqual`. An unordered queryset compared with `ordered = true` is an error, since
+its order isn't defined.
+"""
+function assert_queryset_equal(qs, values; transform = identity, ordered::Bool = true)
+    if ordered && qs isa QuerySet && isempty(qs.order) && isempty(modelmeta(model_of(qs)).ordering)
+        fail("the queryset has no ordering: give it order_by(...) or pass ordered = false")
+    end
+    got = Any[transform(x) for x in qs]
+    want = collect(Any, values)
+    ok = ordered ? isequal(got, want) : (length(got) == length(want) && isequal(countmap_any(got), countmap_any(want)))
+    ok || fail("the queryset gave $(repr(got)), expected $(repr(want))$(ordered ? "" : " (in any order)")")
+    true
+end
+countmap_any(xs) = (d = Dict{Any,Int}(); foreach(x -> (d[x] = get(d, x, 0) + 1), xs); d)
+
+"""
+    assert_formset_error(formset, form_index, field, errors)
+
+The formset (validated) has exactly these errors: on form `form_index` (1-based) for `field`
+(`nothing` for that form's form-wide errors), or with `form_index = nothing`, its non-form errors
+(`assert_formset_error(fs, nothing, errors)` for short).
+"""
+assert_formset_error(fs::FormSet, ::Nothing, errors) = assert_formset_error(fs, nothing, nothing, errors)
+function assert_formset_error(fs::FormSet, form_index, field, errors)
+    is_valid(fs)
+    want = errors isa AbstractString ? [errors] : collect(String, errors)
+    if form_index === nothing
+        fs.non_form_errors == want || fail("the formset's non-form errors were $(repr(fs.non_form_errors)), expected $(repr(want))")
+        return true
+    end
+    forms = build_forms!(fs)
+    1 <= form_index <= length(forms) || fail("the formset has $(length(forms)) forms, not $form_index")
+    got = get(forms[form_index].errors, field === nothing ? :__all__ : Symbol(field), String[])
+    got == want || fail("form $form_index's $(field === nothing ? "form-wide" : "field '$field'") errors were $(repr(got)), expected $(repr(want))")
+    true
+end
+
+"""
+    assert_field_output(field, valid, invalid; empty_value = nothing)
+
+As Django's `assertFieldOutput`: a form field cleans each input of `valid` (input => cleaned value)
+to that value, gives each input of `invalid` (input => error messages) those errors, and cleans
+an empty input to `empty_value` when it isn't required.
+"""
+function assert_field_output(field, valid::AbstractDict, invalid::AbstractDict; empty_value = nothing)
+    check(input) = begin
+        F = Form([:f => field]; data = Dict("f" => input))
+        is_valid(F), F
+    end
+    for (input, want) in valid
+        ok, F = check(input)
+        ok || fail("$(repr(input)) didn't clean: $(repr(get(F.errors, :f, String[])))")
+        isequal(F.cleaned_data[:f], want) || fail("$(repr(input)) cleaned to $(repr(F.cleaned_data[:f])), expected $(repr(want))")
+    end
+    for (input, want) in invalid
+        ok, F = check(input)
+        ok && fail("$(repr(input)) cleaned to $(repr(F.cleaned_data[:f])), expected errors")
+        w = want isa AbstractString ? [want] : collect(String, want)
+        got = get(F.errors, :f, String[])
+        got == w || fail("$(repr(input)) gave errors $(repr(got)), expected $(repr(w))")
+    end
+    if field.blank                                 # not required
+        ok, F = check("")
+        ok && isequal(F.cleaned_data[:f], empty_value) || fail("an empty input cleaned to $(ok ? repr(F.cleaned_data[:f]) : "errors"), expected $(repr(empty_value))")
+    end
     true
 end
 

@@ -494,6 +494,45 @@ end
         startproject("mysite"; dir = dir, develop = false)
     end
     @test isfile(joinpath(root, "manage.jl")) && isfile(joinpath(root, "templates", "home.html"))
+    @test occursin("@eval using Revise", read(joinpath(root, "manage.jl"), String))                    # (#142)
+    @test occursin("Juango.project_include(joinpath(BASE_DIR, \"views.jl\"))", read(joinpath(root, "project.jl"), String))
+end
+
+# runserver's reloading (#142), with stand-ins for Revise.jl
+module FakeRevise142
+const revision_queue = Set{Any}()
+const revised = Ref(0)
+revise() = (revised[] += 1; empty!(revision_queue); nothing)
+end
+module BrokenRevise142
+const revision_queue = Set{Any}([1])
+revise() = error("invalid redefinition of constant Main.Post")
+end
+
+@testset "runserver reloads changed code with Revise (#142)" begin
+    R = FakeRevise142
+    hooked = Ref(0)
+    hook = () -> (hooked[] += 1)
+    old_reload = Juango.RELOAD[]
+    try
+        Juango.on_reload!(hook)
+        Juango.RELOAD[] = true
+        @test !Juango.reload_if_changed(R) && R.revised[] == 0            # nothing changed: nothing done
+        push!(R.revision_queue, "views.jl")
+        @test Juango.reload_if_changed(R) && R.revised[] == 1 && hooked[] == 1
+        @test !Juango.reload_if_changed(R)
+        @test_logs (:warn, r"Restart the server") Juango.reload_if_changed(BrokenRevise142)
+        Juango.RELOAD[] = false
+        push!(R.revision_queue, "x")
+        @test !Juango.reload_if_changed(R) && R.revised[] == 1           # off: not even looked at
+        dir = mktempdir()
+        f = joinpath(dir, "p142.jl"); write(f, "const P142 = 42")
+        Juango.project_include(f)                                        # without Revise, a plain include
+        @test Main.P142 == 42
+    finally
+        Juango.RELOAD[] = old_reload
+        filter!(h -> h !== hook, Juango.RELOAD_HOOKS)
+    end
 end
 
 @testset "constraints: CheckConstraint and UniqueConstraint" begin

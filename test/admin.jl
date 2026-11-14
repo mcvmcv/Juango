@@ -296,3 +296,51 @@ end
         configure!(ROOT_URLCONF = old)
     end
 end
+
+@testset "admin: hooks, sorting, display columns, form field hooks (#143)" begin
+    root_user()
+    c = Client(); force_login!(c, get(User; username = "root"))
+    ann = ann_author()
+    bob = first(filter(Author; name = "Bob143")); bob === nothing && (bob = create(Author; name = "Bob143", email = "b@143"))
+    for (t, v) in (("s143 b", 20), ("s143 a", 30), ("s143 c", 10))
+        create(Article; title = t, author = ann, views = v)
+    end
+    saved = Any[]; deleted = Any[]
+    try
+        Admin.register!(Article; list_display = [:title, :views, Admin.display(a -> a.views > 15; description = "Popular", boolean = true),
+                                                 Admin.display(a -> uppercase(a.title); description = "Shout", ordering = "-title"),
+                                                 Admin.display(a -> nothing; description = "Nothing", empty_value = "(none)")],
+                        search_fields = [:title], list_display_links = [:views], empty_value_display = "n/a",
+                        search_help_text = "Search by title", save_on_top = true,
+                        save_model = (req, obj, form, change) -> (obj.body = "saved by $(req.user.username)"; save!(obj); push!(saved, change)),
+                        delete_model = (req, obj) -> (push!(deleted, obj.title); delete!(obj)),
+                        response_add = (req, obj) -> Juango.HttpResponseRedirect("/added/$(obj.id)/"),
+                        formfield_for_foreignkey = (req, f) -> f.name === :author ? ModelChoiceField(filter(Author; name = "Bob143")) : nothing,
+                        radio_fields = [:status])
+        r = get(c, "/admin/article/?q=s143")
+        body = text(r)
+        @test occursin(r"<th><a href=\"\?[^\"]*o=1[^\"]*\">Title</a></th>", body)
+        @test occursin("Search by title", body)
+        @test occursin("title=\"True\">✔", body) && occursin("(none)", body)
+        @test occursin("<td>s143 a</td>", body) && occursin("<th><a href=", body)                      # the link is on views now
+        titles(b) = [m[1] for m in eachmatch(r"<td>(s143 [abc])</td>", b)]
+        @test titles(text(get(c, "/admin/article/?q=s143&o=1"))) == ["s143 a", "s143 b", "s143 c"]
+        @test titles(text(get(c, "/admin/article/?q=s143&o=-2"))) == ["s143 a", "s143 b", "s143 c"]      # views 30, 20, 10
+        @test titles(text(get(c, "/admin/article/?q=s143&o=4"))) == ["s143 c", "s143 b", "s143 a"]       # Shout sorts by -title
+        @test occursin("class=\"sorted asc\"", text(get(c, "/admin/article/?q=s143&o=1")))
+        @test titles(text(get(c, "/admin/article/?q=s143&o=3"))) |> length == 3                         # not sortable: ignored
+        # the change form: radio choices, the narrowed foreign key, save buttons on top too
+        r = get(c, "/admin/article/add/")
+        @test occursin("type=\"radio\" name=\"status\"", text(r)) && count("name=\"_save\"", text(r)) == 2
+        @test occursin(">Bob143</option>", text(r)) && !occursin(">Ann</option>", text(r))
+        r = post(c, "/admin/article/add/", Dict("title" => "s143 new", "author" => string(bob.id), "status" => "p", "views" => "0"))
+        new = get(Article; title = "s143 new")
+        @test r.status == 302 && getheader(r, "Location") == "/added/$(new.id)/" && new.body == "saved by root" && saved == [false]
+        r = post(c, "/admin/article/$(new.id)/delete/", Dict("post" => "yes"))
+        @test deleted == ["s143 new"] && !exists(filter(Article; title = "s143 new"))
+    finally
+        Admin.register!(Article; list_display = [:title, :author, :status, :published, "Len" => a -> length(a.body)],
+                        search_fields = [:title, :body], list_filter = [:published, :status, :author])
+        delete!(filter(Article; title__startswith = "s143"))
+    end
+end

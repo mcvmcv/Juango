@@ -322,3 +322,102 @@ end
         @test_throws Exception Juango.close_connection(b, Juango.open_connection(b))           # dropped
     end
 end
+
+@testset "transactions and connections: durable, set_rollback!, savepoints, execute_wrapper, signals (#147)" begin
+    TME = Juango.TransactionManagementError
+    n(name) = count(filter(Topic; name = name))
+    # durable
+    atomic(() -> create(Topic; name = "t147 durable"); durable = true)
+    @test n("t147 durable") == 1
+    @test_throws TME atomic(() -> atomic(() -> nothing; durable = true))
+    rollback_after() do                                               # a test's transaction doesn't count
+        atomic(() -> create(Topic; name = "t147 in test"); durable = true)
+        @test n("t147 in test") == 1
+        @test_throws TME atomic(() -> atomic(() -> nothing; durable = true))
+    end
+    @test n("t147 in test") == 0
+    # set_rollback!
+    ran = Ref(false)
+    r = atomic() do
+        create(Topic; name = "t147 marked")
+        on_commit(() -> (ran[] = true))
+        @test !get_rollback()
+        set_rollback!(true)
+        @test get_rollback()
+        :returned
+    end
+    @test r === :returned && n("t147 marked") == 0 && !ran[]          # rolled back, no exception, no callback
+    atomic() do
+        create(Topic; name = "t147 outer")
+        atomic() do
+            create(Topic; name = "t147 inner")
+            set_rollback!(true)
+        end
+        set_rollback!(true); set_rollback!(false)                     # unmarked again
+    end
+    @test n("t147 outer") == 1 && n("t147 inner") == 0
+    @test_throws TME set_rollback!(true)
+    @test get_autocommit() && atomic(() -> !get_autocommit())
+    # savepoints
+    calls = String[]
+    atomic() do
+        create(Topic; name = "t147 kept")
+        sid = savepoint()
+        create(Topic; name = "t147 undone")
+        on_commit(() -> push!(calls, "undone"))
+        savepoint_rollback(sid)
+        sid2 = savepoint()
+        create(Topic; name = "t147 kept2")
+        on_commit(() -> push!(calls, "kept2"))
+        savepoint_commit(sid2)
+    end
+    @test n("t147 kept") == 1 && n("t147 undone") == 0 && n("t147 kept2") == 1 && calls == ["kept2"]
+    @test_throws TME savepoint()
+    # execute_wrapper
+    seen = String[]
+    logger(execute, sql, params, ctx) = (push!(seen, sql); @test ctx[:alias] == "default"; execute(sql, params))
+    rows = execute_wrapper(logger) do
+        collect(filter(Topic; name = "t147 kept"))
+    end
+    @test length(rows) == 1 && length(seen) == 1 && occursin("SELECT", seen[1])
+    blocker(execute, sql, params, ctx) = error("no queries here")
+    @test_throws ErrorException execute_wrapper(() -> count(Topic), blocker)
+    order = String[]
+    outer(ex, s, p, c) = (push!(order, "outer"); ex(s, p))
+    inner(ex, s, p, c) = (push!(order, "inner"); ex(s, p))
+    execute_wrapper(() -> execute_wrapper(() -> count(Topic), inner), outer)
+    @test order == ["outer", "inner"]
+    @test count(Topic) > 0                                            # wrappers are gone afterwards
+    # signals
+    got = Any[]
+    receiver(got_request_exception; dispatch_uid = "t147gre") do sender, args
+        push!(got, args.exception isa ErrorException)
+    end
+    receiver(post_init; sender = Topic, dispatch_uid = "t147pi") do sender, args
+        push!(got, args.instance.name)
+    end
+    receiver(setting_changed; dispatch_uid = "t147sc") do sender, args
+        args.setting === :T147_SETTING && push!(got, (args.value, args.enter))
+    end
+    try
+        Topic(; name = "t147 init")
+        first(filter(Topic; name = "t147 kept"))
+        override_settings(() -> nothing; T147_SETTING = 1)
+        @test got == ["t147 init", "t147 kept", (1, true), (nothing, false)]
+        @test_logs (:error,) match_mode = :any get(Client(), "/boom/")
+        @test got[end] === true                                       # got_request_exception
+        if IS_POSTGRES || IS_MYSQL                                    # (closing SQLite's in-memory database would lose it)
+            opened = Any[]
+            receiver(connection_created; dispatch_uid = "t147cc") do sender, args
+                push!(opened, Juango.execute("SELECT 1 AS one")[1][:one])  # runs on the new connection
+            end
+            Juango.close_connection!()
+            count(Topic)
+            @test opened == [1]
+            disconnect!(connection_created; dispatch_uid = "t147cc")
+        end
+    finally
+        disconnect!(got_request_exception; dispatch_uid = "t147gre"); disconnect!(setting_changed; dispatch_uid = "t147sc")
+        disconnect!(post_init; sender = Topic, dispatch_uid = "t147pi")
+    end
+end

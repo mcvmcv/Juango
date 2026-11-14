@@ -11,6 +11,7 @@
     <form method="get" class="toolbar">
       <input type="text" name="q" value="{{ q }}" placeholder="{% translate "Search" %}" autofocus>
       <input type="submit" value="{% translate "Search" %}">
+      {% if search_help_text %}<div class="help muted">{{ search_help_text }}</div>{% endif %}
       {% if q %}<span class="muted">{{ result_count }} result{{ result_count|pluralize }} (<a href="?">{% if show_full_count %}{{ total }} total{% else %}Show all{% endif %}</a>)</span>{% endif %}
     </form>
     {% endif %}
@@ -31,12 +32,12 @@
       {% endif %}
       <div class="module">
       <table>
-        <thead><tr><th style="width:24px"><input type="checkbox" onclick="document.querySelectorAll('.action-select').forEach(c=>c.checked=this.checked)" aria-label="Select all"></th>{% for h in headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+        <thead><tr><th style="width:24px"><input type="checkbox" onclick="document.querySelectorAll('.action-select').forEach(c=>c.checked=this.checked)" aria-label="Select all"></th>{% for h in headers %}<th{% if h.sorted %} class="sorted {{ h.sorted }}"{% endif %}>{% if h.url %}<a href="{{ h.url }}">{{ h.label }}</a>{% if h.sorted %} <span class="sort-mark" title="{{ h.priority }}">{% if h.sorted == "asc" %}▲{% else %}▼{% endif %}</span>{% endif %}{% else %}{{ h.label }}{% endif %}</th>{% endfor %}</tr></thead>
         <tbody>
         {% for row in rows %}
           <tr>
             <td>{% if actions %}<input type="checkbox" class="action-select" name="_selected_action" value="{{ row.id }}" aria-label="Select row">{% endif %}{{ row.hidden }}</td>
-            {% for cell in row.cells %}{% if forloop.first %}<th><a href="{{ row.url }}">{{ cell }}</a></th>{% else %}<td>{{ cell }}</td>{% endif %}{% endfor %}
+            {% for cell in row.cells %}{% if cell.link %}<th><a href="{{ row.url }}">{{ cell.value }}</a></th>{% else %}<td>{{ cell.value }}</td>{% endif %}{% endfor %}
           </tr>
         {% empty %}
           <tr><td colspan="99" class="muted">0 {{ opts.verbose_name_plural }}</td></tr>

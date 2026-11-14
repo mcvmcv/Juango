@@ -1975,3 +1975,330 @@ Juango.tattr(::Exploder140, ::Val{:explode}) = error("exploded in a template")
         rm(tpl_path; force = true)
     end
 end
+
+@testset "HTTP odds: responses, signed cookies, decorators, CSRF settings, app_name (#148)" begin
+    # responses
+    @test HttpResponseGone().status == 410 && HttpResponseServerError().status == 500
+    nm = HttpResponseNotModified()
+    @test nm.status == 304 && getheader(nm, "Content-Type") === nothing && isempty(nm.body)
+
+    # signed cookies
+    resp = set_signed_cookie!(HttpResponse(""), "pref", "dark; théme"; salt = "ui", max_age = 60)
+    raw = split(split(only(resp.cookies), ';')[1], '='; limit = 2)[2]
+    req = Request("GET", "/"; headers = Dict("Cookie" => "pref=$raw"))
+    @test get_signed_cookie(req, "pref"; salt = "ui") == "dark; théme"
+    @test_throws Juango.BadSignature get_signed_cookie(req, "pref")                  # another salt
+    @test get_signed_cookie(req, "pref"; default = "none") == "none"
+    @test_throws KeyError get_signed_cookie(req, "missing")
+    @test get_signed_cookie(req, "missing"; default = nothing) === nothing
+    tampered = Request("GET", "/"; headers = Dict("Cookie" => "pref=" * (raw[1] == 'A' ? "B" : "A") * raw[2:end]))
+    @test get_signed_cookie(tampered, "pref"; salt = "ui", default = "bad") == "bad"
+
+    old_urls, old_mw = settings.ROOT_URLCONF, settings.MIDDLEWARE
+    blog = [path("", req -> HttpResponse(reverse_url("blog:index") * "|" * reverse_url("blog:index"; current_app = "blog")); name = "index")]
+    plain(req) = HttpResponse("<p>ok</p>")
+    js_form = ensure_csrf_cookie(plain)
+    try
+        configure!(ROOT_URLCONF = vcat(old_urls, [
+            path("h148/plain/", plain), path("h148/js/", js_form),
+            path("h148/exempt/", xframe_options_exempt(plain)), path("h148/same/", xframe_options_sameorigin(plain)),
+            path("h148/safe/", require_safe(plain)), path("h148/gz/", gzip_page(req -> HttpResponse("z" ^ 500))),
+            path("h148/noslash/", no_append_slash(req -> HttpResponse("n"))), path("h148/slash/", req -> HttpResponse("s")),   # (it marks the function)
+            path("h148/protected/", csrf_protect(req -> HttpResponse("posted"))),
+            path("h148/secret/", sensitive_post_parameters(req -> error("boom148"), "card")),
+            path("b148/", include_urls(blog; app_name = "blog")),
+            path("n148/", include_urls(blog; app_name = "blog", namespace = "news"))]))
+        c = Client()
+        @test !any(startswith("csrftoken="), get(c, "/h148/plain/").cookies)
+        r = get(c, "/h148/js/")
+        @test any(startswith("csrftoken="), r.cookies)                                  # ensure_csrf_cookie
+        @test getheader(get(c, "/h148/plain/"), "X-Frame-Options") == "DENY"
+        @test getheader(get(c, "/h148/exempt/"), "X-Frame-Options") === nothing
+        @test getheader(get(c, "/h148/same/"), "X-Frame-Options") == "SAMEORIGIN"
+        @test get(c, "/h148/safe/").status == 200 && post(c, "/h148/safe/").status == 405
+        @test getheader(get(c, "/h148/gz/"; headers = Dict("Accept-Encoding" => "gzip")), "Content-Encoding") == "gzip"
+        @test get(c, "/h148/slash").status == 301 && get(c, "/h148/noslash").status == 404     # no_append_slash
+        # application namespaces: each instance reverses to itself; elsewhere "blog:" is the default instance
+        @test text(get(c, "/b148/")) == "/b148/|/b148/" && text(get(c, "/n148/")) == "/n148/|/b148/"
+        @test reverse_url("blog:index") == "/b148/" && reverse_url("news:index") == "/n148/"
+        @test reverse_url("blog:index"; current_app = "news") == "/n148/"
+        @test Juango.resolve("/n148/").app_name == "blog" && Juango.resolve("/n148/").namespace == "news"
+
+        # csrf_protect without the middleware
+        configure!(MIDDLEWARE = filter(m -> m !== Juango.CsrfViewMiddleware, old_mw))
+        strict = Client(; enforce_csrf = true)
+        @test post(strict, "/h148/protected/").status == 403
+        @test post(strict, "/h148/plain/").status == 200                                 # no middleware, no check
+        configure!(MIDDLEWARE = old_mw)
+
+        # CSRF settings: header name, cookie attributes, failure view, the secret in the session
+        configure!(CSRF_HEADER_NAME = "HTTP_X_MY_TOKEN", CSRF_COOKIE_HTTPONLY = true, CSRF_COOKIE_SAMESITE = "Strict",
+                   CSRF_FAILURE_VIEW = (req; reason) -> HttpResponseForbidden("custom: " * reason))
+        strict = Client(; enforce_csrf = true)
+        ck = only(filter(startswith("csrftoken="), get(strict, "/h148/js/").cookies))
+        @test occursin("HttpOnly", ck) && occursin("SameSite=Strict", ck)
+        tok = strict.cookies["csrftoken"]
+        @test post(strict, "/h148/plain/"; headers = Dict("X-My-Token" => tok)).status == 200
+        r = post(strict, "/h148/plain/"; headers = Dict("X-CSRFToken" => tok))           # the default header no longer
+        @test r.status == 403 && startswith(text(r), "custom: CSRF token missing")
+        configure!(CSRF_USE_SESSIONS = true, CSRF_HEADER_NAME = "X-CSRFToken")
+        s = Client(; enforce_csrf = true)
+        r = get(s, "/h148/js/")
+        @test !any(startswith("csrftoken="), r.cookies) && haskey(s.cookies, "sessionid")    # no CSRF cookie: it's in the session
+        sess = Juango.lazy_session(s.cookies["sessionid"])
+        tok = get(sess, "_csrftoken", nothing)
+        @test tok isa String && post(s, "/h148/plain/"; headers = Dict("X-CSRFToken" => tok)).status == 200
+        @test post(s, "/h148/plain/"; headers = Dict("X-CSRFToken" => "x" ^ 32)).status == 403
+
+        # sensitive_post_parameters masks those fields on the error page
+        configure!(CSRF_USE_SESSIONS = false, CSRF_FAILURE_VIEW = nothing)
+        r = @test_logs (:error,) match_mode = :any post(Client(), "/h148/secret/"; data = Dict("card" => "4111-1111", "name" => "Ann"))
+        @test occursin("<th>card</th><td><code>********************", text(r)) && occursin("<th>name</th><td><code>Ann", text(r))
+    finally
+        configure!(ROOT_URLCONF = old_urls, MIDDLEWARE = old_mw, CSRF_HEADER_NAME = "X-CSRFToken", CSRF_COOKIE_HTTPONLY = false,
+                   CSRF_COOKIE_SAMESITE = "Lax", CSRF_FAILURE_VIEW = nothing, CSRF_USE_SESSIONS = false)
+    end
+end
+
+@testset "messages: levels, tags, cookie and fallback storage (#149)" begin
+    old_urls, old_mw = settings.ROOT_URLCONF, settings.MIDDLEWARE
+    tpl = joinpath(TPL, "msg149.html")
+    write(tpl, "{% for m in messages %}[{{ m.tags }}|{{ m.level }}|{{ m }}]{% endfor %}")
+    n_big = Ref(0)
+    function add149(req)
+        Juango.Messages.success!(req, "saved")
+        message!(req, :debug, "hidden")                               # below MESSAGE_LEVEL
+        message!(req, 35, "custom level"; extra_tags = "sticky")
+        message!(req, :error, "bad")
+        for i in 1:n_big[]
+            message!(req, :info, "long message number $i " * "x" ^ 60)
+        end
+        HttpResponse("ok")
+    end
+    peek149(req) = HttpResponse(string(length(peek_messages(req))) * "/" * string(length(peek_messages(req))))
+    try
+        configure!(ROOT_URLCONF = vcat(old_urls, [path("m149/add/", add149), path("m149/", req -> render(req, "msg149.html")),
+                                                  path("m149/peek/", peek149)]),
+                   MESSAGE_TAGS = Dict(35 => "notice", 40 => "danger"))
+        c = Client()
+        get(c, "/m149/add/")
+        @test text(get(c, "/m149/peek/")) == "3/3"                     # peeking doesn't consume
+        @test text(get(c, "/m149/")) == "[success|25|saved][sticky notice|35|custom level][danger|40|bad]"
+        @test text(get(c, "/m149/")) == ""
+        configure!(MESSAGE_LEVEL = 10)
+        get(c, "/m149/add/")
+        @test occursin("[debug|10|hidden]", text(get(c, "/m149/")))
+        configure!(MESSAGE_LEVEL = 20)
+        @test_throws ArgumentError message!(Request("GET", "/"), :loud, "x")
+        @test message!(Request("GET", "/"), :info, "x"; fail_silently = true) === nothing     # no session: dropped
+        @test_throws Juango.ImproperlyConfigured message!(Request("GET", "/"), :info, "x")
+
+        # cookie storage: no session involved
+        configure!(MESSAGE_STORAGE = :cookie, MIDDLEWARE = vcat(old_mw, Any[MessageMiddleware]))
+        @test isempty(Juango.run_checks(tags = [:messages]))
+        c = Client()
+        get(c, "/m149/add/")
+        @test haskey(c.cookies, "messages") && !haskey(c.cookies, "sessionid")
+        @test text(get(c, "/m149/peek/")) == "3/3" && haskey(c.cookies, "messages")
+        @test text(get(c, "/m149/")) == "[success|25|saved][sticky notice|35|custom level][danger|40|bad]"
+        @test !haskey(c.cookies, "messages") && text(get(c, "/m149/")) == ""
+        c.cookies["messages"] = "forged"                               # a bad signature is ignored
+        @test text(get(c, "/m149/")) == ""
+
+        # fallback: what doesn't fit in the cookie goes to the session
+        configure!(MESSAGE_STORAGE = :fallback)
+        n_big[] = 40
+        c = Client()
+        get(c, "/m149/add/")
+        @test haskey(c.cookies, "messages") && haskey(c.cookies, "sessionid")
+        body = text(get(c, "/m149/"))
+        @test count("long message number", body) == 40 && occursin("[success|25|saved]", body)
+        @test occursin("number 40 ", body) && text(get(c, "/m149/")) == ""
+        n_big[] = 0
+
+        configure!(MIDDLEWARE = old_mw)
+        @test only(Juango.run_checks(tags = [:messages])).id == "messages.E001"
+    finally
+        configure!(ROOT_URLCONF = old_urls, MIDDLEWARE = old_mw, MESSAGE_STORAGE = :session, MESSAGE_LEVEL = 20,
+                   MESSAGE_TAGS = Dict{Int,String}())
+        rm(tpl; force = true)
+    end
+end
+
+@testset "testing assertions and test runner options (#150)" begin
+    T = Juango.Testing
+    # HTML compared as Django does
+    @test T.assert_html_equal("<p class=\"b a\" id=x>Hi  <b>there</b></p>", "<p id='x' class='a b'>\n  Hi <b>there</b>\n</p>")
+    @test T.assert_html_equal("<br><input disabled type=text>", "<br/><input type=\"text\" disabled />")
+    @test T.assert_html_equal("<p>&amp; &lt;x&gt;</p>", "<p>&#38; &#x3C;x&gt;</p>") && T.assert_html_not_equal("<p>a</p>", "<p>b</p>")
+    @test_throws AssertionError T.assert_html_equal("<p>a</p>", "<div>a</div>")
+    page = "<ul><li class='x'>one</li><li>two</li><li class=\"x\">one</li></ul><!-- one -->"
+    @test T.assert_in_html("<li class=\"x\">one</li>", page; count = 2) && T.assert_in_html("two", page)
+    @test_throws AssertionError T.assert_in_html("<li>three</li>", page)
+    r = HttpResponse("<div>\n  <a href='/x'  title=t>link</a>\n</div>")
+    @test assert_contains(r, "<a title=\"t\" href=\"/x\">link</a>"; html = true)
+    @test assert_not_contains(r, "<a href=\"/y\">link</a>"; html = true)
+    # JSON
+    @test T.assert_json_equal("{\"a\": 1, \"b\": [1, 2.0]}", Dict("b" => [1, 2], "a" => 1))
+    @test T.assert_json_equal(JsonResponse(Dict("x" => nothing)), "{\"x\": null}") && T.assert_json_not_equal("[1]", "[2]")
+    # querysets
+    au = create(Author; name = "Q150", email = "q150@x")
+    rollback_after() do
+        a1 = create(Article; title = "q150 a", author = au); a2 = create(Article; title = "q150 b", author = au)
+        qs = filter(Article; title__startswith = "q150")
+        @test T.assert_queryset_equal(order_by(qs, "title"), ["q150 a", "q150 b"]; transform = a -> a.title)
+        @test T.assert_queryset_equal(order_by(qs, "-title"), [a2, a1])
+        @test T.assert_queryset_equal(filter(Bulletin; slug = "none"), []; ordered = false)
+        @test_throws AssertionError T.assert_queryset_equal(order_by(qs, "title"), ["q150 b", "q150 a"]; transform = a -> a.title)
+        @test T.assert_queryset_equal(order_by(qs, "title"), ["q150 b", "q150 a"]; transform = a -> a.title, ordered = false)
+    end
+    # form fields
+    @test T.assert_field_output(IntegerField(blank = true), Dict("3" => 3, " 7 " => 7), Dict("x" => ["Enter a whole number."]))
+    @test_throws AssertionError T.assert_field_output(IntegerField(), Dict("x" => 1), Dict())
+    # formsets
+    FS = formset_factory((d; prefix, initial) -> Form([:qty => IntegerField()]; data = d, prefix = prefix, initial = initial);
+                         extra = 0, min_num = 1, validate_min = true)
+    fs = FS(Dict("form-TOTAL_FORMS" => "1", "form-INITIAL_FORMS" => "0", "form-0-qty" => "x"))
+    @test T.assert_formset_error(fs, 1, :qty, ["Enter a whole number."]) && T.assert_formset_error(fs, nothing, String[])
+
+    # the runner: -k, --failfast, --reverse, --shuffle (in-memory SQLite only: it sets up its own test database)
+    if !IS_MYSQL && !occursin("://", TEST_DB_SETTING)
+        dir = mktempdir()
+        mkpath(joinpath(dir, "tests"))
+        write(joinpath(dir, "tests", "test_a.jl"), "push!(Main.RUN150, \"a\")")
+        write(joinpath(dir, "tests", "test_b.jl"), "push!(Main.RUN150, \"b\"); error(\"b150 fails\")")    # (a failing @testset here would count in this one)
+        write(joinpath(dir, "tests", "test_c.jl"), "push!(Main.RUN150, \"c\")")
+        Core.eval(Main, :(const RUN150 = String[]))
+        cd(dir) do
+            redirect_stdio(stdout = devnull, stderr = devnull) do
+                Juango.cmd_test(["-k", "test_a"])
+                @test Main.RUN150 == ["a"]
+                empty!(Main.RUN150)
+                @test_throws ErrorException Juango.cmd_test(String[])              # b fails, c still runs
+                @test Main.RUN150 == ["a", "b", "c"]
+                empty!(Main.RUN150)
+                @test_throws ErrorException Juango.cmd_test(["--failfast", "--reverse"])
+                @test Main.RUN150 == ["c", "b"]
+                empty!(Main.RUN150)
+                Juango.cmd_test(["--shuffle=7", "-k", "test_a", "-k", "test_c"])
+                o1 = copy(Main.RUN150); empty!(Main.RUN150)
+                Juango.cmd_test(["--shuffle=7", "-k", "test_a", "-k", "test_c"])
+                @test sort(o1) == ["a", "c"] && Main.RUN150 == o1                 # the same seed, the same order
+            end
+        end
+    end
+end
+
+struct Finder151 <: Juango.StaticFinder end
+Juango.find_static(::Finder151, path) = path == "virtual.txt" ? [Main.FINDER151_FILE[]] : String[]
+Juango.list_static(::Finder151) = [("virtual.txt", Main.FINDER151_FILE[])]
+const FINDER151_FILE = Ref("")
+
+@testset "smaller gaps, part 2 (#151)" begin
+    # templates: prefixes and fragment keys
+    @test tr("{% get_static_prefix %}|{% get_media_prefix as m %}{{ m }}") == settings.STATIC_URL * "|" * settings.MEDIA_URL
+    write(joinpath(TPL, "frag151.html"), "{% cache 60 \"side\" who %}[{{ n }}]{% endcache %}")
+    try
+        @test render_to_string("frag151.html", Dict("who" => 7, "n" => 1)) == "[1]"
+        @test render_to_string("frag151.html", Dict("who" => 7, "n" => 2)) == "[1]"         # cached
+        Juango.cache_delete(Juango.make_template_fragment_key("side", [7]))
+        @test render_to_string("frag151.html", Dict("who" => 7, "n" => 3)) == "[3]"
+    finally
+        rm(joinpath(TPL, "frag151.html"); force = true)
+    end
+    # static files: a finder of our own
+    FINDER151_FILE[] = tempname(); write(FINDER151_FILE[], "virtual!")
+    override_settings(STATICFILES_FINDERS = Any[Juango.FileSystemFinder(), Juango.AppDirectoriesFinder(), Finder151()]) do
+        @test Juango.findstatic("virtual.txt") == [FINDER151_FILE[]]
+        @test text(get(Client(), settings.STATIC_URL * "virtual.txt")) == "virtual!"
+        @test !isempty(Juango.findstatic("juango/htmx.min.js"))                          # the built-in finders too
+        @test isempty(Juango.findstatic("../../etc/passwd"))
+    end
+    # mail: one connection for many messages, a backend per call
+    old_backend = settings.EMAIL_BACKEND
+    try
+        configure!(EMAIL_BACKEND = :locmem); empty!(outbox)
+        n = send_mass_mail([("s1", "b1", "a@x.io", ["p@x.io"]), ("s2", "b2", nothing, ["q@x.io", "r@x.io"]), ("s3", "b3", nothing, String[])])
+        @test n == 2 && [m.subject for m in outbox] == ["s1", "s2"]
+        conn = get_connection(:dummy)
+        @test send!(EmailMessage("x", "y"; to = ["z@x.io"]); connection = conn) == 1 && length(outbox) == 2   # (dummy: not kept)
+    finally
+        configure!(EMAIL_BACKEND = old_backend)
+    end
+    # auth: the redirect parameter's name, inactive users, the admin's password form
+    old_urls = settings.ROOT_URLCONF
+    try
+        configure!(ROOT_URLCONF = vcat(old_urls, [path("p151/", login_required(req -> HttpResponse("in"); redirect_field_name = "back")),
+                                                   path("q151/", login_required(req -> HttpResponse("in"); redirect_field_name = nothing))]))
+        r = get(Client(), "/p151/?x=1")
+        @test r.status == 302 && occursin("?back=%2Fp151%2F%3Fx%3D1", getheader(r, "Location"))
+        @test !occursin("?", getheader(get(Client(), "/q151/"), "Location"))
+    finally
+        configure!(ROOT_URLCONF = old_urls)
+    end
+    rollback_after() do
+        u = create_user("inactive151", "pw-151-xyz"); u.is_active = false; save!(u)
+        @test authenticate("inactive151", "pw-151-xyz") === nothing
+        override_settings(AUTHENTICATION_BACKENDS = Any[AllowAllUsersModelBackend()]) do
+            v = authenticate("inactive151", "pw-151-xyz")
+            @test v !== nothing && v.username == "inactive151" && !has_perm(v, "project.change_article")
+        end
+        f = AdminPasswordChangeForm(Dict("password1" => "Correct-Horse-151", "password2" => "Correct-Horse-152"))
+        @test !is_valid(f) && haskey(f.errors, :password2)
+        f = AdminPasswordChangeForm(Dict("password1" => "Correct-Horse-151", "password2" => "Correct-Horse-151"))
+        @test is_valid(f) && Juango.check_new_password!(f, u)
+    end
+    # i18n
+    i = get_language_info("pt-BR")
+    @test i.code == "pt-br" && i.name == "Brazilian Portuguese" && !i.bidi && get_language_info("de-at").name_local == "Deutsch"
+    @test get_language_info("he").bidi && (try get_language_info("xx"); false catch e; e isa KeyError end)
+    @test tr("{% get_language_info for \"fr\" as l %}{{ l.name_local }}|{{ l.bidi }}") == "français|false"
+    @test tr("{% get_language_info_list for langs as ls %}{% for l in ls %}{{ l.code }},{% endfor %}", Dict("langs" => [("de", "German"), "nl"])) == "de,nl,"
+    @test tr("{% load i18n %}{{ \"ar\"|language_name_local }}{{ \"ar\"|language_bidi }}") == "العربيّة" * "true"
+    # date archives: weeks and today
+    @test Juango.week_start(2026, 1, "%V") == Date(2025, 12, 29) && Juango.week_start(2026, 1, "%W") == Date(2026, 1, 5)
+    @test Juango.week_start(2026, 1, "%U") == Date(2026, 1, 4) && Juango.week_start(2026, 0, "%U") == Date(2025, 12, 28)
+    rollback_after() do
+        au = create(Author; name = "WK151", email = "wk@x151.io")
+        a = create(Article; title = "wk151", author = au)
+        write(joinpath(TPL, "article_archive_week.html"), "{{ week }}:{% for o in object_list %}{{ o.title }}{% endfor %}")
+        write(joinpath(TPL, "article_archive_day.html"), "{{ day }}:{% for o in object_list %}{{ o.title }}{% endfor %}")
+        old = settings.ROOT_URLCONF
+        try
+            configure!(ROOT_URLCONF = vcat(old, [path("wk/<int:year>/<int:week>/", WeekArchiveView(Article; date_field = :created, week_format = "%V")),
+                                                 path("today151/", TodayArchiveView(Article; date_field = :created, allow_empty = true))]))
+            d = Juango.localdate()
+            y, w = Dates.year(d - Day(dayofweek(d) - 1) + Day(3)), Dates.week(d)
+            @test occursin("wk151", text(get(Client(), "/wk/$y/$w/")))
+            @test text(get(Client(), "/today151/")) == "$d:wk151"
+        finally
+            configure!(ROOT_URLCONF = old)
+            rm(joinpath(TPL, "article_archive_week.html"); force = true); rm(joinpath(TPL, "article_archive_day.html"); force = true)
+        end
+    end
+    # commands: sqlflush, sqlsequencereset, migrate --plan; PostgreSQL index types
+    sql = Juango.flush_sql()
+    @test !isempty(sql) && (IS_POSTGRES ? startswith(sql[1], "TRUNCATE") : any(s -> startswith(s, "DELETE FROM"), sql))
+    seqs = Juango.sequence_reset_sql(["project"])
+    @test IS_POSTGRES ? any(s -> occursin("setval", s) && occursin("\"article\"", s), seqs) : isempty(seqs)
+    out = mktemp() do path, io                                       # (redirect_stdout needs a file, not an IOBuffer)
+        redirect_stdout(io) do
+            Juango.Migrations.migrate(; plan_only = true)
+        end
+        flush(io)
+        read(path, String)
+    end
+    @test occursin("Planned operations:", out)
+    b = Juango.backend()
+    for (I, m) in ((GistIndex, "gist"), (BrinIndex, "brin"), (HashIndex, "hash"), (SpGistIndex, "spgist"))
+        ix = I(:title; name = "i151_$m")
+        s = Juango.index_spec_sql(b, "article", ix)
+        @test IS_POSTGRES ? occursin("USING $m", only(s)) : isempty(s)
+    end
+    op = Juango.Migrations.AddIndexConcurrently("article", GistIndex(:title; name = "c151"))
+    @test Juango.Migrations.needs_no_transaction(op, b) == IS_POSTGRES
+    if IS_POSTGRES
+        sqls = Juango.Migrations.forwards(op, b, nothing, nothing, nothing)
+        @test startswith(only(sqls), "CREATE INDEX CONCURRENTLY") && occursin("c151", Juango.Migrations.op_code(op))
+    end
+end

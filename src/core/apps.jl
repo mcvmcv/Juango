@@ -166,8 +166,59 @@ end
 app_dir(a::App, sub) = a.path === nothing ? nothing : (d = joinpath(a.path, sub); isdir(d) ? d : nothing)
 app_dirs(sub) = get(settings, :APP_DIRS, true) ? String[d for d in (app_dir(a, sub) for a in installed_apps()) if d !== nothing] : String[]
 
-"Static directories: STATIC_DIRS, then each installed app's `static/`, then Juango's own (htmx)."
-static_dirs() = vcat(String[abspath(string(d)) for d in settings.STATIC_DIRS], app_dirs("static"), [joinpath(ASSETS_DIR, "static")])
+# --- static file finders (STATICFILES_FINDERS) ------------------------------------------------------------
+#
+# Where `{% static %}` files are looked up (by runserver, findstatic and collectstatic), as Django's
+# finders: STATICFILES_FINDERS lists them, in order, the first match wins. The default is
+# [FileSystemFinder(), AppDirectoriesFinder()]. A finder of your own subtypes `StaticFinder` and
+# defines `find_static(finder, path) -> Vector{String}` (absolute paths of the matches) and
+# `list_static(finder) -> [(relative path, absolute path), ...]`, or just `finder_dirs(finder)`
+# for files in directories.
+
+abstract type StaticFinder end
+"The files in STATIC_DIRS."
+struct FileSystemFinder <: StaticFinder end
+"The files in each installed app's `static/` folder, then Juango's own (htmx, live.js)."
+struct AppDirectoriesFinder <: StaticFinder end
+finder_dirs(::FileSystemFinder) = String[abspath(string(d)) for d in settings.STATIC_DIRS]
+finder_dirs(::AppDirectoriesFinder) = vcat(app_dirs("static"), [joinpath(ASSETS_DIR, "static")])
+finder_dirs(::StaticFinder) = String[]
+
+"The absolute paths where `finder` has the static file `path` (not outside its directories). (`path` is untyped so a finder of your own can define `find_static(::MyFinder, path)` without ambiguity.)"
+function find_static(f::StaticFinder, path)
+    out = String[]
+    for d in finder_dirs(f)
+        root = normpath(abspath(d))
+        p = normpath(joinpath(root, path))
+        within(root, p) && isfile(p) && push!(out, p)
+    end
+    out
+end
+"Every static file `finder` has, as (path relative to its directory, absolute path)."
+function list_static(f::StaticFinder)
+    out = Tuple{String,String}[]
+    for d in finder_dirs(f), (dir, _, fs) in walkdir(d), name in fs
+        name == ".gitkeep" && continue
+        p = joinpath(dir, name)
+        push!(out, (replace(relpath(p, d), '\\' => '/'), p))
+    end
+    out
+end
+
+"The finders of STATICFILES_FINDERS (default: STATIC_DIRS, then the apps' static folders)."
+static_finders() = something(get(settings, :STATICFILES_FINDERS, nothing), Any[FileSystemFinder(), AppDirectoriesFinder()])
+
+"The first match of a static file across the finders, or nothing."
+function find_static_file(path::AbstractString)
+    for f in static_finders()
+        m = find_static(f, path)
+        isempty(m) || return first(m)
+    end
+    nothing
+end
+
+"Static directories of the directory-based finders: STATIC_DIRS, then each installed app's `static/`, then Juango's own (htmx)."
+static_dirs() = vcat(String[d for f in static_finders() for d in finder_dirs(f)])
 app_locale_dirs() = app_dirs("locale")
 
 "Management commands: Juango's own, plus those of installed apps."

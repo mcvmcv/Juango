@@ -62,6 +62,8 @@ function disconnect!(sig::Signal, receiver = nothing; sender = nothing, dispatch
     end
 end
 
+"Whether anything is connected at all (no allocation: for signals sent very often, such as post_init)."
+any_receivers(sig::Signal) = !isempty(sig.receivers)
 live_receivers(sig::Signal, sender) = lock(() -> [r[2] for r in sig.receivers if r[3] === nothing || r[3] === sender], sig.lock)
 "Whether any receiver would get a signal from `sender` (lets callers skip expensive work)."
 has_receivers(sig::Signal, sender) = !isempty(live_receivers(sig, sender))
@@ -122,3 +124,18 @@ const user_logged_in = Signal("user_logged_in")
 const user_logged_out = Signal("user_logged_out")
 "Authentication failed (sender `:authenticate`; `credentials` without the password)."
 const user_login_failed = Signal("user_login_failed")
+"A database connection was opened (sender: its backend; `connection` (the driver's) and `alias`): run per-connection `SET`s here."
+const connection_created = Signal("connection_created")
+"A view raised an exception that becomes a 500 (sender `:handler`; `request`, `exception`)."
+const got_request_exception = Signal("got_request_exception")
+"""
+A setting changed through `configure!` or `override_settings` (sender `:settings`; `setting`,
+`value`, `enter`: false when `override_settings` puts the old value back).
+"""
+const setting_changed = Signal("setting_changed")
+"Before a model object is made with `Model(; kwargs...)` (sender: the model; `kwargs`)."
+const pre_init = Signal("pre_init")
+"After a model object is made, by `Model(; ...)` or from a database row (sender: the model; `instance`)."
+const post_init = Signal("post_init")
+"A model was defined with `@model` (sender: the model)."
+const class_prepared = Signal("class_prepared")
