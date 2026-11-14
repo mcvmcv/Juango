@@ -436,6 +436,9 @@ function render!(io::IO, n::IncludeNode, ctx::Context)
     n.only && (ctx.stack = [Dict{String,Any}()])
     try
         with_scope(() -> run_nodes(io, t.nodes, ctx), ctx, values)
+    catch e
+        note_template_name!(e, t)
+        rethrow()
     finally
         ctx.stack, ctx.render_ctx = saved_stack, saved_rc
     end

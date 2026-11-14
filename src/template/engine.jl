@@ -472,9 +472,47 @@ function render!(io::IO, n::VarNode, ctx::Context)
     write_value(io, eval_fe(n.fe, ctx), ctx.autoescape)
 end
 function render_nodes(io::IO, nodes::Vector{Node}, ctx::Context)
-    for n in nodes
-        render!(io, n, ctx)
+    i = 0
+    try
+        for n in nodes
+            i += 1
+            render!(io, n, ctx)
+        end
+    catch e
+        note_template_error!(e, nodes[i])
+        rethrow()
     end
+    nothing
+end
+
+# Where a template failed while rendering, for the DEBUG error page (http/debugpage.jl): the
+# innermost node list that sees the exception records the node's line (variables know theirs),
+# and the innermost template that sees it records its name. One `try` per node list, not per node.
+mutable struct TemplateErrorInfo
+    exception::Any
+    line::Int
+    name::String
+    origin::Union{Nothing,String}
+end
+function note_template_error!(@nospecialize(e), @nospecialize(n))
+    tls = task_local_storage()
+    info = get(tls, :juango_template_error, nothing)
+    if !(info isa TemplateErrorInfo) || info.exception !== e
+        info = TemplateErrorInfo(e, 0, "", nothing)
+        tls[:juango_template_error] = info
+    end
+    info.line == 0 && n isa VarNode && (info.line = n.line)
+    nothing
+end
+function note_template_name!(@nospecialize(e), t)
+    tls = task_local_storage()
+    info = get(tls, :juango_template_error, nothing)
+    if !(info isa TemplateErrorInfo) || info.exception !== e
+        info = TemplateErrorInfo(e, 0, "", nothing)
+        tls[:juango_template_error] = info
+    end
+    isempty(info.name) && (info.name = t.name; info.origin = t.origin)
+    nothing
 end
 function render_nodes(nodes::Vector{Node}, ctx::Context)
     io = IOBuffer()
@@ -512,7 +550,12 @@ function render(t::Template, context = Dict{String,Any}(); request = nothing, au
     rec = current_debug_record()
     rec === nothing || record_template!(rec, t.name, "render", ctx.stack)
     io = IOBuffer()
-    run_nodes(io, t.nodes, ctx)
+    try
+        run_nodes(io, t.nodes, ctx)
+    catch e
+        note_template_name!(e, t)
+        rethrow()
+    end
     String(take!(io))
 end
 

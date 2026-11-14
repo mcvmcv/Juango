@@ -852,6 +852,14 @@ Juango.process_template_response(::typeof(MyMiddleware), req, resp) = (resp.cont
 
 - **`ATOMIC_REQUESTS`.** If the view throws, its transaction is rolled back and the error page is shown, as in Django.
 - **Error views.** Without them, the `404.html`, `403.html`, `400.html` and `500.html` templates are used. With `DEBUG`, 404s and 500s show the debug pages instead. An error view that fails itself falls back to the built-in page. `manage.jl check` reports error views with the wrong signature.
+- **The DEBUG 500 page.** As Django's, it shows:
+  - the exception and the exceptions it was raised while handling;
+  - each frame, innermost first, with its argument types and the source around the line: your code open, Juango's dimmed, Base's and packages' folded;
+  - for an error while rendering a template, the template and line, with the source around it;
+  - the request and the settings, with anything that looks secret masked (cookies, passwords in database URLs, settings named like KEY, TOKEN, SECRET or PASS);
+  - a copy-and-paste text version.
+
+  The same text is what `mail_admins` sends for a 500 when DEBUG is off. Julia's backtraces don't keep local variables, so unlike Django's page it has none.
 - **`TemplateResponse`** is rendered after the middleware's `process_template_response` methods run. Until then, `resp.template_name` and `resp.context_data` can still change.
 
 ### Generic views

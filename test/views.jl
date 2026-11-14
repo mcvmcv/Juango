@@ -1902,3 +1902,76 @@ end
         rm(tpl_path; force = true)
     end
 end
+
+struct Exploder140 end
+Juango.tattr(::Exploder140, ::Val{:explode}) = error("exploded in a template")
+
+@testset "DEBUG error page (#140)" begin
+    old_urls = settings.ROOT_URLCONF
+    tpl_path = joinpath(TPL, "dp140.html")
+    write(tpl_path, "<p>one</p>\n<p>two</p>\n<p>{{ thing.explode }}</p>\n<p>four</p>")
+    dp_view(req) = error("dp140 failure <b>")                         # this file's frame must show, with its source
+    function dp_chain(req)
+        try
+            parse(Int, "not a number")
+        catch
+            error("while handling the parse error")
+        end
+    end
+    dp_tpl(req) = render(req, "dp140.html", Dict("thing" => Exploder140()))
+    try
+        configure!(ROOT_URLCONF = vcat(old_urls, [path("dp/view/", dp_view; name = "dp-view"), path("dp/chain/", dp_chain),
+                                                  path("dp/tpl/", dp_tpl)]),
+                   SECRET_KEY = "s3cret-value-not-shown", DATABASE_PASSWORD_FOR_TEST = "pw-not-shown",
+                   EMAIL_HOST = "smtp://user:hunter2@mail.example")
+        c = Client()
+        c.cookies["theme"] = "dark"; c.cookies["csrftoken"] = "zq" ^ 16
+        r = @test_logs (:error,) match_mode = :any get(c, "/dp/view/?q=1")
+        body = text(r)
+        @test r.status == 500 && occursin("<title>ErrorException at /dp/view/</title>", body)
+        @test occursin("dp140 failure &lt;b&gt;", body) && !occursin("dp140 failure <b>", body)     # escaped
+        @test occursin("<code>dp_view(req::Request)</code>", body)        # frames with their signatures
+        @test occursin("<li class=\"user\"><details open>", body)          # your frame open
+        @test occursin("dp_view(req) = error(&quot;dp140 failure &lt;b&gt;&quot;)", body)   # with its source line
+        @test occursin("library frame", body)                              # Base's folded away
+        @test occursin("dp-view", body) && occursin("<th>q</th>", body)    # request: URL name, GET
+        masked = "<td><code>&quot;********************&quot;</code></td>"
+        @test occursin("<th>theme</th><td><code>dark</code>", body)
+        @test occursin("<th>csrftoken</th><td><code>********************</code>", body)          # the CSRF cookie masked
+        @test occursin("<th>SECRET_KEY</th>" * masked, body) && occursin("<th>DATABASE_PASSWORD_FOR_TEST</th>" * masked, body)
+        @test occursin("<th>EMAIL_HOST</th><td><code>&quot;smtp://user:********@mail.example&quot;", body)
+        @test occursin("Copy-and-paste view", body) && occursin("Traceback (innermost first):", body)
+
+        r = @test_logs (:error,) match_mode = :any get(c, "/dp/chain/")
+        @test occursin("While handling the exception above", text(r)) && occursin("ArgumentError", text(r)) &&
+              occursin("while handling the parse error", text(r))
+
+        r = override_settings(TEMPLATE_COMPILE = false) do      # interpreted, as with DEBUG (compiled templates know the template, not the line)
+            @test_logs (:error,) match_mode = :any get(c, "/dp/tpl/")
+        end
+        body = text(r)
+        @test occursin("Error during template rendering", body) && occursin("error at line 3", body)
+        @test occursin("<tr class=\"hl\"><td class=\"ln\">3</td><td><code>&lt;p&gt;{{ thing.explode }}&lt;/p&gt;</code>", body)
+        # the next error, without a template, doesn't reuse that note
+        r = @test_logs (:error,) match_mode = :any get(c, "/dp/view/")
+        @test !occursin("<h2>Error during template rendering</h2>", text(r))
+
+        # DEBUG off: the report goes to ADMINS as text
+        empty!(outbox)
+        old_backend = settings.EMAIL_BACKEND
+        configure!(DEBUG = false, ADMINS = Any[("Ops", "ops@example.com")], EMAIL_BACKEND = :locmem)
+        try
+            @test_logs (:error,) match_mode = :any get(c, "/dp/view/")
+        finally
+            configure!(DEBUG = true, ADMINS = Any[], EMAIL_BACKEND = old_backend)
+        end
+        b = only(outbox).body
+        @test occursin("Traceback (innermost first):", b) && occursin("\n  dp_view(req::Request)\n", b) && occursin("Request URL:", b)
+        @test occursin("\n  SessionMiddleware(req::Request)\n", b) && !occursin("{Juango.var", b)    # closures by name
+    finally
+        configure!(ROOT_URLCONF = old_urls, SECRET_KEY = Juango.default_settings()[:SECRET_KEY],
+                   EMAIL_HOST = Juango.default_settings()[:EMAIL_HOST])
+        delete!(Juango.SETTINGS, :DATABASE_PASSWORD_FOR_TEST)
+        rm(tpl_path; force = true)
+    end
+end

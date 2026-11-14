@@ -107,7 +107,11 @@ struct MailAdminsHandler <: LogHandler end
 function emit(::MailAdminsHandler, r::LogRecord, fmt)
     req = get(r.data, :request, nothing)
     body = (req isa Request ? "$(req.method) $(full_path(req))\n\n" : "") * r.message
-    r.exception === nothing || (body *= "\n\n" * exception_text(r))
+    if r.exception isa Tuple && req isa Request         # a view's exception: the debug page's report, as text
+        body *= "\n\n" * exception_report_text(req, r.exception[1], r.exception[2]; chain = [r.exception])
+    elseif r.exception !== nothing
+        body *= "\n\n" * exception_text(r)
+    end
     mail_admins(level_name(r.level) * ": " * first(split(r.message, '\n')), body; fail_silently = true)
 end
 
