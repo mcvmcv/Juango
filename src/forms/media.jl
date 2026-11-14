@@ -43,18 +43,33 @@ tattr(m::Media, ::Val{:js}) = render_media(Media(Pair{String,String}[], m.js))
 widget_media(::Any) = Media()
 
 """
-    Widget(kind; attrs = Dict(), media = Media())
+    Widget(kind; attrs = Dict(), media = Media(), template_name = nothing, context = nothing, option_attrs = nothing)
 
-A widget value for a field's `widget`: a kind (`:textarea`, `:password`, ...) with extra HTML
-attributes and media.
+A widget value for a field's `widget`: a kind (`:textarea`, `:password`, `:radio`, `:checkboxes` ...)
+with extra HTML attributes and media.
+
+- `option_attrs = (value, label) -> Dict(...)`: attributes for each option of a select, radio or
+  checkbox list (`data-marker="12"`, so a script can show only some of them).
+- `template_name = "widgets/tick_table.html"`: render the widget with a template of your own,
+  wherever the field is rendered (`{{ field }}`, `as_field_group`, `as_p` ...). Its context has
+  `widget` (`name`, `id`, `value`, `required`, `attrs`, and for choice fields `options`, each with
+  `value`, `label`, `selected`, `id`, `index` and `attrs`), `field` (the bound field), and whatever
+  `context = bf -> Dict(...)` adds.
 """
 struct Widget
     kind::Union{Nothing,Symbol}
     attrs::Dict{String,String}
     media::Media
+    template_name::Union{Nothing,String}
+    context::Any                      # nothing, or bf -> Dict of extra template variables
+    option_attrs::Any                 # nothing, or (value, label) -> Dict of attributes
 end
-Widget(kind = nothing; attrs = Dict{String,String}(), media = Media()) =
-    Widget(kind === nothing ? nothing : Symbol(kind), Dict{String,String}(string(k) => string(v) for (k, v) in attrs), media)
+Widget(kind = nothing; attrs = Dict{String,String}(), media = Media(), template_name = nothing, context = nothing, option_attrs = nothing) =
+    Widget(kind === nothing ? nothing : Symbol(kind), Dict{String,String}(string(k) => string(v) for (k, v) in attrs), media,
+           template_name === nothing ? nothing : String(template_name), context, option_attrs)
+"Extra attributes of one option (from the widget's `option_attrs`), as HTML."
+option_attrs_html(w, value, label) = w isa Widget && w.option_attrs !== nothing ?
+    join([" $(escape_html(string(k)))=\"$(escape_html(string(v)))\"" for (k, v) in sort!(collect(w.option_attrs(value, label)); by = first)]) : ""
 widget_media(w::Widget) = w.media
 widget_kind(w) = w isa Widget ? w.kind : w isa MultiWidget ? :multi : w
 widget_attrs(w) = w isa Widget ? join([" $(escape_html(k))=\"$(escape_html(v))\"" for (k, v) in sort!(collect(w.attrs))]) : ""

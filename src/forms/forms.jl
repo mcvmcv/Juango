@@ -153,18 +153,29 @@ Base.@nospecializeinfer form_save_hook(f::Form, ::Val, @nospecialize(obj)) = not
 
 A form generated from a model's fields. `save!(form)` writes the cleaned data
 into the instance (creating one if needed) and saves it.
+
+`extra_fields = [:scope => TypedChoiceField(...)]` adds fields that aren't on the model: placed
+where `fields` lists their names (else at the end), cleaned into `cleaned_data`, and left alone
+by `save!`.
 """
 Base.@nospecializeinfer function ModelForm(@nospecialize(T::Type{<:Model}); data = nothing, files = nothing, @nospecialize(instance = nothing), fields = nothing, exclude = Symbol[],
                    initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
                    labels = Dict{Symbol,String}(), help_texts = Dict{Symbol,String}(),
                    widgets = Dict{Symbol,Symbol}(), field_classes = Dict{Symbol,Any}(),
-                   formfield_callback = nothing)
+                   formfield_callback = nothing, extra_fields = Pair{Symbol,Any}[])
     meta = modelmeta(T)
+    extras = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in extra_fields)
     chosen = fields === nothing ? vcat([f.name for f in all_fields(T) if f.editable], [f.name for f in meta.m2m if f.editable]) :
              Symbol.(collect(fields))
+    # fields that aren't on the model: where `fields` lists them, else at the end
+    append!(chosen, [Symbol(k) for (k, _) in extra_fields if !(Symbol(k) in chosen)])
     fs = Pair{Symbol,Any}[]
     for n in chosen
         n in exclude && continue
+        if haskey(extras, n)
+            push!(fs, n => deepcopy(extras[n]))
+            continue
+        end
         i = findfirst(x -> x.name === n, meta.m2m)
         f = deepcopy(i === nothing ? getfield_meta(T, n) : meta.m2m[i])
         haskey(labels, n) && (f.verbose_name = labels[n])
@@ -180,6 +191,7 @@ Base.@nospecializeinfer function ModelForm(@nospecialize(T::Type{<:Model}); data
     init = Dict{Symbol,Any}()
     if instance !== nothing
         for (n, f) in fs
+            haskey(extras, n) && continue                                       # not the model's
             init[n] = f.kind === :fk ? getproperty(instance, attname(f)) :
                       f.kind === :m2m ? (instance.id === nothing ? Any[] : [o.id for o in getproperty(instance, n)]) :
                       getproperty(instance, n)
@@ -554,8 +566,11 @@ Save a ModelForm's many-to-many fields. `save!(form)` does this itself; call it 
 function save_m2m!(f::Form)
     obj = f.instance
     (obj === nothing || obj.id === nothing) && error("save the instance before its many-to-many fields")
+    # by the model's many-to-many fields, whatever form field stands for each (field_classes may
+    # put a ModelMultipleChoiceField there, to narrow the queryset or change the widget)
+    m2m = f.model === nothing ? Set{Symbol}() : Set(g.name for g in modelmeta(f.model).m2m)
     for fld in f.fields
-        (fld.kind === :m2m && haskey(f.cleaned_data, fld.name)) || continue
+        ((fld.kind === :m2m || fld.name in m2m) && haskey(f.cleaned_data, fld.name)) || continue
         set!(getproperty(obj, fld.name), f.cleaned_data[fld.name])
     end
     obj
@@ -608,6 +623,7 @@ input_type(fld::Field) = widget_kind(fld.widget) === :password ? "password" : wi
 function widget_html(bf::BoundField)
     f, fld = bf.form, bf.field
     fld.kind === :multi && return multi_widget_html(bf)
+    fld.widget isa Widget && fld.widget.template_name !== nothing && return widget_template_html(bf)
     widget_kind(fld.widget) in (:radio, :checkboxes) && return choice_list_html(bf)
     name, id = escape_html(html_name(f, fld)), escape_html(html_id(f, fld))
     val = display_value(bf)
@@ -663,7 +679,8 @@ function widget_html(bf::BoundField)
             !multiple && sp.empty_label !== nothing && print(io, "<option value=\"\">", escape_html(sp.empty_label), "</option>")
         end
         for (k, lbl) in opts
-            print(io, "<option value=\"", escape_html(string(k)), "\"", string(k) in chosen ? " selected" : "", ">", escape_html(string(lbl)), "</option>")
+            print(io, "<option value=\"", escape_html(string(k)), "\"", string(k) in chosen ? " selected" : "",
+                  option_attrs_html(fld.widget, k, lbl), ">", escape_html(string(lbl)), "</option>")
         end
         print(io, "</select>")
         return String(take!(io))
@@ -677,7 +694,7 @@ function widget_html(bf::BoundField)
             glabel === nothing || print(io, "<optgroup label=\"", escape_html(string(glabel)), "\">")
             for (k, lbl) in opts
                 sel = val !== nothing && string(val) == string(k) ? " selected" : ""
-                print(io, "<option value=\"", escape_html(string(k)), "\"", sel, ">", escape_html(string(lbl)), "</option>")
+                print(io, "<option value=\"", escape_html(string(k)), "\"", sel, option_attrs_html(fld.widget, k, lbl), ">", escape_html(string(lbl)), "</option>")
             end
             glabel === nothing || print(io, "</optgroup>")
         end
@@ -782,12 +799,14 @@ function subwidget_tag(w::BoundWidget)
     fld = w.bf.field
     wt = widget_type(fld)
     if wt in ("select", "selectmultiple")
-        return "<option value=\"" * escape_html(w.value) * "\"" * (w.selected ? " selected" : "") * ">" * escape_html(w.label) * "</option>"
+        return "<option value=\"" * escape_html(w.value) * "\"" * (w.selected ? " selected" : "") *
+               option_attrs_html(fld.widget, w.value, w.label) * ">" * escape_html(w.label) * "</option>"
     end
     t = (wt == "radioselect" || !is_multiple_choice(fld)) ? "radio" : "checkbox"
     req = t == "radio" && !fld.blank ? " required" : ""
     "<input type=\"$t\" name=\"" * escape_html(html_name(w.bf.form, fld)) * "\" value=\"" * escape_html(w.value) *
-        "\" id=\"" * escape_html(subwidget_id(w)) * "\"" * req * widget_attrs(fld.widget) * (w.selected ? " checked" : "") * ">"
+        "\" id=\"" * escape_html(subwidget_id(w)) * "\"" * req * widget_attrs(fld.widget) *
+        option_attrs_html(fld.widget, w.value, w.label) * (w.selected ? " checked" : "") * ">"
 end
 subwidget_html(w::BoundWidget) = "<label for=\"" * escape_html(subwidget_id(w)) * "\">" * subwidget_tag(w) * " " * escape_html(w.label) * "</label>"
 function tattr(w::BoundWidget, ::Val{S}) where {S}
@@ -813,6 +832,22 @@ function Base.getproperty(w::BoundWidget, s::Symbol)
     r
 end
 Base.show(io::IO, w::BoundWidget) = print(io, subwidget_html(w))
+
+"A widget with a `template_name`: rendered with the field's name, value, attributes and options."
+function widget_template_html(bf::BoundField)
+    f, fld, w = bf.form, bf.field, bf.field.widget
+    is_choice = fld.kind in (:m2m, :fk, :modelchoice, :modelmultichoice, :multichoice, :filepath) || fld.choices !== nothing
+    opts = is_choice ? [Dict{String,Any}("value" => o.value, "label" => o.label, "selected" => o.selected, "index" => o.index,
+                                         "id" => subwidget_id(o),
+                                         "attrs" => w.option_attrs === nothing ? Dict{String,Any}() : Dict{String,Any}(string(k) => v for (k, v) in w.option_attrs(o.value, o.label)))
+                        for o in subwidgets(bf)] : Any[]
+    widget = Dict{String,Any}("name" => html_name(f, fld), "id" => html_id(f, fld), "value" => display_value(bf),
+                              "required" => !fld.blank && fld.kind !== :bool, "attrs" => copy(w.attrs), "options" => opts,
+                              "type" => widget_type(fld))
+    ctx = Dict{String,Any}("widget" => widget, "field" => bf)
+    w.context === nothing || merge!(ctx, to_context_dict(w.context(bf)))
+    render_to_string(w.template_name, ctx)
+end
 
 "A radio or checkbox list (`widget = :radio` or `:checkboxes`), laid out as Django's: a div per option."
 function choice_list_html(bf::BoundField)
@@ -845,7 +880,8 @@ function add_widget_attrs!(f, form::Form)
             k, v = string(k), string(v)
             attrs[k] = k == "class" && haskey(attrs, k) ? attrs[k] * " " * v : v
         end
-        fld.widget = Widget(base.kind; attrs = attrs, media = base.media)
+        fld.widget = Widget(base.kind; attrs = attrs, media = base.media, template_name = base.template_name,
+                            context = base.context, option_attrs = base.option_attrs)
     end
     form
 end

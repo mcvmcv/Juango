@@ -1637,3 +1637,43 @@ end
     configure!(ROOT_URLCONF = old_urls)
     rm(joinpath(TPL, "live_keep.html"); force = true); rm(joinpath(TPL, "live_contact.html"); force = true)
 end
+
+@testset "ModelForm: replaced m2m fields saved, extra fields, template widgets, option attributes; get_page (#129-#131)" begin
+    # #129: a many-to-many replaced through field_classes is still saved
+    t1 = create(Topic; name = "mf-a"); t2 = create(Topic; name = "mf-b"); t3 = create(Topic; name = "mf-c")
+    F = ModelForm(Essay; fields = [:title, :topics], data = QueryDict("title=mf&topics=$(t1.id)&topics=$(t2.id)"),
+                  field_classes = Dict(:topics => ModelMultipleChoiceField(filter(Topic; name__startswith = "mf-"); widget = Widget(:checkboxes))))
+    @test is_valid(F)
+    e = save!(F)
+    @test Set(t.name for t in e.topics) == Set(["mf-a", "mf-b"])
+    F2 = ModelForm(Essay; instance = e, fields = [:title, :topics], data = QueryDict("title=mf2&topics=$(t3.id)"),
+                   field_classes = Dict(:topics => ModelMultipleChoiceField(filter(Topic; name__startswith = "mf-"))))
+    obj = save!(F2; commit = false); save!(obj); save_m2m!(F2)
+    @test [t.name for t in e.topics] == ["mf-c"]
+
+    # #130: extra fields, placed where `fields` lists them, cleaned and not saved
+    F3 = ModelForm(Essay; fields = [:title, :scope, :topics], data = QueryDict("title=x&scope=all"),
+                   extra_fields = [:scope => TypedChoiceField(["all" => "All", "some" => "Some"])])
+    @test [f.name for f in F3.fields] == [:title, :scope, :topics]
+    @test is_valid(F3) && F3.cleaned_data[:scope] == "all" && save!(F3).title == "x"
+    # per-option attributes, and a widget drawn by a template of its own
+    write(joinpath(TPL, "tick_table.html"), "<table data-n=\"{{ n }}\">{% for o in widget.options %}<tr><td><input type=\"checkbox\" name=\"{{ widget.name }}\" value=\"{{ o.value }}\"{% if o.selected %} checked{% endif %} data-m=\"{{ o.attrs.marker }}\"></td><td>{{ o.label }}</td></tr>{% endfor %}</table>")
+    try
+        G = Form([:call => CharField(max_length = 2, choices = ["a" => "A", "b" => "B"], widget = Widget(nothing; option_attrs = (v, l) -> Dict("data-marker" => "m" * v))),
+                  :ticks => MultipleChoiceField(["x" => "Ex", "y" => "Why"]; widget = Widget(:checkboxes; template_name = "tick_table.html",
+                                                                                           context = bf -> Dict("n" => 2), option_attrs = (v, l) -> Dict("marker" => uppercase(v))))];
+                 data = QueryDict("ticks=y"))
+        @test occursin("<option value=\"a\" data-marker=\"ma\">A</option>", tr("{{ f.call }}", Dict("f" => G)))
+        html = tr("{{ f.ticks }}", Dict("f" => G))
+        @test occursin("<table data-n=\"2\">", html) && occursin("value=\"y\" checked data-m=\"Y\"", html) && occursin("<td>Ex</td>", html)
+        @test occursin("<table", as_p(G).s)                                     # used wherever the field is rendered
+    finally
+        rm(joinpath(TPL, "tick_table.html"); force = true)
+    end
+
+    # #131: get_page clamps
+    p = Paginator(collect(1:25), 10)
+    @test get_page(p, "2").number == 2 && get_page(p, "99").number == 3 && get_page(p, "x").number == 1
+    @test get_page(p, 0).number == 1 && get_page(p, "last").number == 3 && get_page(Paginator(Int[], 10), 5).number == 1
+    @test_throws Juango.Http404 page(p, 99)
+end

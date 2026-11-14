@@ -69,7 +69,7 @@ export Form, @form, ModelForm, is_valid, add_widget_attrs!, add_error!, as_p, cl
 # views
 export render, redirect, get_object_or_404, get_list_or_404, TemplateView, RedirectView, ListView,
        DetailView, CreateView, UpdateView, DeleteView, FormView, ArchiveIndexView, YearArchiveView,
-       MonthArchiveView, DayArchiveView, DateDetailView, ViewCall, default_hook, Paginator, page,
+       MonthArchiveView, DayArchiveView, DateDetailView, ViewCall, default_hook, Paginator, page, get_page,
        require_http_methods, require_GET, require_POST, csrf_exempt, non_atomic_requests, get_csrf_token,
        LoginRequiredMixin, PermissionRequiredMixin, UserPassesTestMixin
 # auth and messages

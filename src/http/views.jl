@@ -140,6 +140,17 @@ struct Page
     page_range::Vector{Int}
 end
 
+"""
+    get_page(paginator, n) -> Page
+
+Like `page`, but never raises (Django's `get_page`): a number that isn't one gives the first page,
+and one past the end the last page. For `?page=` values from URLs that go stale.
+"""
+function get_page(p::Paginator, n)
+    num = n isa Integer ? Int(n) : n == "last" ? p.num_pages : tryparse(Int, strip(string(n)))
+    page(p, num === nothing ? 1 : clamp(num, 1, p.num_pages))
+end
+
 "Page `n` (1-based); accepts a string such as `req.GET[\"page\"]`. Raises `Http404` if out of range."
 function page(p::Paginator, n)
     num = n isa Integer ? Int(n) : n == "last" ? p.num_pages : something(tryparse(Int, string(n)), 0)
