@@ -19,6 +19,30 @@ function todatetime(x)
     nothing
 end
 
+"The `join` filter, written into one buffer (Base's join allocates several objects per call)."
+function join_filter(v, a, ae)
+    v === nothing && return ""
+    sep = ae ? conditional_escape(something(a, "")) : str(a)
+    io = IOBuffer()
+    first = true
+    for x in to_iterable(v)
+        first || write(io, sep)
+        first = false
+        write(io, ae ? conditional_escape(x) : str(x))
+    end
+    SafeString(String(take!(io)))
+end
+
+"Write a non-negative integer with leading zeros to `width` digits, without allocating."
+function write_padded(io::IO, n::Integer, width::Int)
+    n = Int(n)
+    d = n == 0 ? 1 : ndigits(n)
+    for _ in d+1:width
+        write(io, UInt8('0'))
+    end
+    write_int(io, n)
+end
+
 "Format a date with Django `date` filter format characters."
 function format_date(d, fmt::AbstractString)
     dt = todatetime(d)
@@ -36,24 +60,24 @@ function format_date(d, fmt::AbstractString)
         h12 = h % 12 == 0 ? 12 : h % 12
         if c == '\\'
             esc = true
-        elseif c == 'd'; print(io, lpad(day(dt), 2, '0'))
+        elseif c == 'd'; write_padded(io, day(dt), 2)
         elseif c == 'j'; print(io, day(dt))
         elseif c == 'D'; print(io, gettext(dayabbr(dt)))
         elseif c == 'l'; print(io, gettext(dayname(dt)))
-        elseif c == 'm'; print(io, lpad(month(dt), 2, '0'))
+        elseif c == 'm'; write_padded(io, month(dt), 2)
         elseif c == 'n'; print(io, month(dt))
         elseif c == 'M'; print(io, pgettext("abbrev. month", monthabbr(dt)))
         elseif c == 'b'; print(io, lowercase(pgettext("abbrev. month", monthabbr(dt))))
         elseif c == 'F'; print(io, gettext(monthname(dt)))
         elseif c == 'N'; print(io, pgettext("alt. month", MONTH_ABBR_AP[month(dt)]))
         elseif c == 'y'; print(io, lpad(year(dt) % 100, 2, '0'))
-        elseif c == 'Y'; print(io, year(dt))
-        elseif c == 'H'; print(io, lpad(h, 2, '0'))
+        elseif c == 'Y'; write_int(io, year(dt))
+        elseif c == 'H'; write_padded(io, h, 2)
         elseif c == 'G'; print(io, h)
-        elseif c == 'h'; print(io, lpad(h12, 2, '0'))
+        elseif c == 'h'; write_padded(io, h12, 2)
         elseif c == 'g'; print(io, h12)
-        elseif c == 'i'; print(io, lpad(minute(dt), 2, '0'))
-        elseif c == 's'; print(io, lpad(second(dt), 2, '0'))
+        elseif c == 'i'; write_padded(io, minute(dt), 2)
+        elseif c == 's'; write_padded(io, second(dt), 2)
         elseif c == 'A'; print(io, h < 12 ? "AM" : "PM")
         elseif c == 'a'; print(io, h < 12 ? "a.m." : "p.m.")
         elseif c == 'U'; print(io, round(Int, datetime2unix(z === nothing ? dt : DateTime(TimeZones.astimezone(z, UTC_TZ)))))
@@ -114,9 +138,7 @@ let F = register_filter!
     F("striptags", (v, _) -> replace(str(v), r"<[^>]*>" => ""))
     F("truncatechars", (v, a) -> (s = str(v); n = tonum(a); length(s) <= n ? s : first(s, max(n - 1, 0)) * "…"); is_safe = true)
     F("truncatewords", (v, a) -> (w = split(str(v)); n = tonum(a); length(w) <= n ? join(w, " ") : join(w[1:n], " ") * " …"); is_safe = true)
-    F("join", (v, a, ae) -> v === nothing ? "" : SafeString(join([ae ? conditional_escape(x) : str(x) for x in to_iterable(v)],
-                                            ae ? conditional_escape(something(a, "")) : str(a)));
-      needs_autoescape = true)
+    F("join", join_filter; needs_autoescape = true)
     F("first", (v, _) -> v === nothing ? "" : (it = to_iterable(v); isempty(it) ? nothing : first(it)))
     F("last", (v, _) -> v === nothing ? "" : (it = to_iterable(v); isempty(it) ? nothing : last(it)))
     F("random", (v, _) -> v === nothing ? "" : (it = to_iterable(v); isempty(it) ? nothing : rand(it)))

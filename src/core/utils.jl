@@ -69,11 +69,21 @@ itself as HTML (and therefore must not be escaped), or `nothing` otherwise.
 __html__(x) = nothing
 __html__(x::SafeString) = x.s
 
+"Write an Int's digits without allocating."
+function write_int(io::IO, n::Int)
+    n == typemin(Int) && return (print(io, n); nothing)
+    n < 0 && (write(io, UInt8('-')); n = -n)
+    n >= 10 && write_int(io, div(n, 10))
+    write(io, UInt8('0') + UInt8(rem(n, 10)))
+    nothing
+end
+
 "Escape `x` unless it is already safe. Returns a `String`."
 conditional_escape(x) = (h = __html__(x); h === nothing ? escape_html(display_string(x)) : h)
 
 "Write `x` to `io` as template output: escaped unless it is safe (or `autoescape` is off)."
 function write_value(io::IO, x, autoescape::Bool)
+    x isa Int && return write_int(io, x)                      # (print makes a String first)
     x isa Union{Integer,AbstractFloat} && !(x isa Bool) && return (print(io, x); nothing)
     autoescape || return (write(io, display_string(x)); nothing)
     h = __html__(x)

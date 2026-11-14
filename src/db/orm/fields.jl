@@ -314,7 +314,8 @@ is_auto_pk(k) = k in AUTO_PK_KINDS
 "The pk kind for `AutoField()`, `:AutoField`, `\"BigAutoField\"` (also dotted, as Django writes it)."
 auto_pk_kind(x::AutoPK) = x.kind
 function auto_pk_kind(x::Union{Symbol,AbstractString})
-    n = last(split(string(x), '.'))
+    s = string(x)
+    n = (i = findlast('.', s)) === nothing ? s : s[i+1:end]
     n == "AutoField" ? :intauto : n == "BigAutoField" ? :auto : n == "SmallAutoField" ? :smallauto :
         throw(ImproperlyConfigured("DEFAULT_AUTO_FIELD must be AutoField, BigAutoField or SmallAutoField, not $(repr(x))"))
 end

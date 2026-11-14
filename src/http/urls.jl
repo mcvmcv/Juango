@@ -290,14 +290,15 @@ function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLC
     end
     entries = get(idx, name, nothing)
     entries === nothing && throw(NoReverseMatch("'$name' is not a valid view name"))
-    kw = Dict{Symbol,Any}(kwargs)
+    kw = kwargs                                   # (Base.Pairs: haskey, getindex and length, no Dict to build)
     for e in Iterators.reverse(entries)
         if !isempty(args)
             length(args) == length(e.params) || continue
         else
             (length(kw) == length(e.params) && all(p -> haskey(kw, p[1]), e.params)) || continue
         end
-        io = IOBuffer()
+        io = IOBuffer(sizehint = 64)
+        write(io, '/')
         ok = true
         for (i, (pn, conv)) in enumerate(e.params)
             c = CONVERTERS[conv]
@@ -312,7 +313,6 @@ function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLC
             lang = something(supported_language(get_language()), default_language())
             url = replace(url, LANG_ALWAYS => lang * "/", LANG_OPTIONAL => lang == default_language() ? "" : lang * "/")
         end
-        url = "/" * url
         query === nothing || (url *= "?" * urlencode(query))
         return url
     end

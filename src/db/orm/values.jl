@@ -41,7 +41,9 @@ CompositePrimaryKey(fields::Union{Symbol,AbstractString}...) = CompositePrimaryK
 Primary key kind of a model's table: an integer identity (`:auto` 64-bit, `:intauto` 32-bit,
 `:smallauto` 16-bit), `:uuid` (`Meta(pk = :uuid)`) or `:composite`.
 """
-Base.@nospecializeinfer function pk_kind(@nospecialize(T::Type))
+# Asked for every row loaded (pk_value, is_composite), so worked out once per model (with the relations).
+Base.@nospecializeinfer pk_kind(@nospecialize(T::Type)) = cached_relations(compute_pk_kind, :pk_kind, T)::Symbol
+Base.@nospecializeinfer function compute_pk_kind(@nospecialize(T::Type))
     A = concrete_model(T)
     while (P = table_parent(A)) !== nothing
         A = P
@@ -134,9 +136,12 @@ end
 
 Base.@nospecializeinfer function from_row(@nospecialize(T::Type{<:Model}), row::Dict{Symbol,Any}, plan::Vector{Tuple{Field,Symbol,Symbol}} = row_plan(T))
     composite = is_composite(T)
-    data = Dict{Symbol,Any}()
-    sizehint!(data, length(plan) + 1)
-    data[:id] = composite ? nothing : pk_value(T, row[:id])
+    # When every column is under its field's own name (no parent tables), the row's Dict becomes the
+    # object's data, converted in place, rather than being copied into a new one. Other columns in
+    # it (select_related's prefixed ones, annotations) stay, unused by the object.
+    inplace = all(p -> p[2] === p[3], plan)
+    data = inplace ? row : sizehint!(Dict{Symbol,Any}(), length(plan) + 1)
+    data[:id] = composite ? nothing : pk_value(T, get(row, :id, nothing))
     for (f, key, att) in plan
         v = get(row, key, NOTFOUND)
         v === NOTFOUND && continue               # deferred (only/defer, raw): loaded on first access

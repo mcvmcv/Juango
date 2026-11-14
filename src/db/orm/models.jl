@@ -23,18 +23,19 @@ const MODEL_LIST = Any[]
 # found by scanning every registered model. They change only when models are registered or
 # the settings change (INSTALLED_APPS, AUTH_USER_MODEL), so the results are cached. The
 # cached vectors are shared: callers must not modify them.
-const RELATION_CACHE = Dict{Tuple{Symbol,Any},Any}()
+const RELATION_CACHE = Dict{Symbol,IdDict{Any,Any}}()       # kind => model => value (no tuple key to build per lookup)
 const RELATION_LOCK = ReentrantLock()
 invalidate_relations!() = (lock(() -> empty!(RELATION_CACHE), RELATION_LOCK); nothing)
 push!(SETTINGS_CHANGED_HOOKS, invalidate_relations!)
 # (No closures over `T`: they'd capture its exact type, and compile again for every model.)
 Base.@nospecializeinfer function cached_relations(@nospecialize(f), kind::Symbol, @nospecialize(T))
-    key = (kind, T)
     lock(RELATION_LOCK)
     try
-        v = get(RELATION_CACHE, key, NOTFOUND)
+        byT = get(RELATION_CACHE, kind, nothing)
+        byT === nothing && (byT = RELATION_CACHE[kind] = IdDict{Any,Any}())
+        v = get(byT, T, NOTFOUND)
         v === NOTFOUND || return v
-        return RELATION_CACHE[key] = f(T)
+        return byT[T] = f(T)
     finally
         unlock(RELATION_LOCK)
     end

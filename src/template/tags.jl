@@ -274,19 +274,29 @@ function run_for(io::IO, n::ForNode, ctx::Context, body, empty)
     loop = ForLoop(0, 0, 0, 0, false, false, len, parent === UNDEF ? nothing : parent)
     with_scope(ctx) do
         ctx["forloop"] = loop
-        for (i, item) in enumerate(items)
-            loop.counter, loop.counter0, loop.revcounter, loop.revcounter0 = i, i - 1, len - i + 1, len - i
-            loop.first, loop.last = i == 1, i == len
-            if length(n.loopvars) == 1
-                ctx[n.loopvars[1]] = item
-            else
-                vals = item isa Pair ? (item.first, item.second) : item
-                for (j, v) in enumerate(n.loopvars)
-                    ctx[v] = j <= length(vals) ? vals[j] : nothing
-                end
+        for_items(io, n, ctx, body, items, loop, len)
+    end
+end
+# A function barrier: the loop is compiled for the items' type (usually Vector{Any}), not iterated
+# through dynamic dispatch, which boxed every step.
+function for_items(io::IO, n::ForNode, ctx::Context, body::F, items::V, loop::ForLoop, len::Int) where {F,V}
+    scope = ctx.stack[end]
+    single = length(n.loopvars) == 1
+    var = n.loopvars[1]
+    i = 0
+    for item in items
+        i += 1
+        loop.counter, loop.counter0, loop.revcounter, loop.revcounter0 = i, i - 1, len - i + 1, len - i
+        loop.first, loop.last = i == 1, i == len
+        if single
+            scope[var] = item
+        else
+            vals = item isa Pair ? (item.first, item.second) : item
+            for (j, v) in enumerate(n.loopvars)
+                scope[v] = j <= length(vals) ? vals[j] : nothing
             end
-            body(io, ctx)
         end
+        body(io, ctx)
     end
 end
 

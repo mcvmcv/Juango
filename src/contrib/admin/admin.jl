@@ -591,8 +591,9 @@ function changelist(req::Request; model)
             end
         end
         hidden = fs === nothing ? "" : Juango.widget_html(forms[k][:id])
-        push!(rows, Dict{String,Any}("id" => Juango.pk_string(o), "cells" => cells, "hidden" => SafeString(hidden),
-                                     "url" => reverse_url("admin:change"; model = ma.slug, id = Juango.pk_string(o))))
+        pk = Juango.pk_string(o)
+        # a NamedTuple, not a Dict: the template reads row.id, row.cells ..., and this is per row
+        push!(rows, (id = pk, cells = cells, hidden = SafeString(hidden), url = reverse_url("admin:change"; model = ma.slug, id = pk)))
     end
     ctx = base_context(req, interpolate(can(req, ma, :change) ? gettext("Select %(model)s to change") : gettext("Select %(model)s to view"),
                                         Dict("model" => meta.verbose_name)))
