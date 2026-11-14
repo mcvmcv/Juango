@@ -541,8 +541,14 @@ function changelist(req::Request; model)
         qs = apply(qs, v)
     end
     qs, drill = date_drilldown(req, ma, qs)
-    ords = ordering(ma, req)
-    isempty(ords) || (qs = order_by(qs, ords...))
+    # As Django's ChangeList: the admin's ordering, else the model's Meta.ordering given explicitly (a queryset with
+    # an aggregate annotate leaves Meta.ordering out), then the primary key, so pages are in a total order
+    ords = Any[o for o in ordering(ma, req)]
+    isempty(ords) && append!(ords, meta.ordering)
+    if !Juango.is_composite(ma.model) && !any(o -> o isa AbstractString && lstrip(o, '-') in ("id", "pk"), ords)
+        push!(ords, "-id")
+    end
+    qs = order_by(qs, ords...)
     cols = list_display(ma, req)
     # Load the objects behind foreign-key columns in the same query (no query per row): list_select_related
     sr = ma.list_select_related

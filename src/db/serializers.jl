@@ -101,6 +101,20 @@ Base.show(io::IO, d::DeserializedObject) = print(io, "<DeserializedObject: ", ty
 
 resolve_ref(R::Type, v) = v isa AbstractVector && has_natural_key(R) ? get_by_natural_key(R, v...).id : v
 
+"One field's value from its serialized (JSON) form: the inverse of `serial_value`."
+function deserial_value(f::Field, v)
+    v === nothing && return nothing
+    f.kind === :fk && return pk_value(related_model(f), v)
+    if f.kind in RANGE_KINDS && v isa AbstractDict
+        conv(x) = x === nothing ? nothing : f.kind === :intrange ? Int(x) : f.kind === :daterange ? Date(x) :
+                  something(parse_aware_datetime(x), todatetime(x))
+        return ValueRange(conv(get(v, "lower", nothing)), conv(get(v, "upper", nothing)); bounds = get(v, "bounds", "[)"))
+    end
+    f.kind === :binary && v isa AbstractString && return base64decode(v)
+    f.kind === :array && v isa AbstractVector && return collect(v)
+    from_db(f, v)
+end
+
 function deserialize_one(d::AbstractDict)
     T = get_model(String(d["model"]))
     fs = get(d, "fields", Dict{String,Any}())
@@ -110,20 +124,8 @@ function deserialize_one(d::AbstractDict)
         f.generated === nothing || continue
         haskey(fs, string(f.name)) || continue
         v = fs[string(f.name)]
-        if f.kind === :fk
-            data[attname(f)] = v === nothing ? nothing : pk_value(related_model(f), resolve_ref(related_model(f), v))
-        elseif v === nothing
-            data[attname(f)] = nothing
-        elseif f.kind in RANGE_KINDS && v isa AbstractDict
-            conv(x) = x === nothing ? nothing : f.kind === :intrange ? Int(x) : f.kind === :daterange ? Date(x) : todatetime(x)
-            data[attname(f)] = ValueRange(conv(get(v, "lower", nothing)), conv(get(v, "upper", nothing)); bounds = get(v, "bounds", "[)"))
-        elseif f.kind === :binary && v isa AbstractString
-            data[attname(f)] = base64decode(v)
-        elseif f.kind === :array && v isa AbstractVector
-            data[attname(f)] = collect(v)
-        else
-            data[attname(f)] = from_db(f, v)
-        end
+        data[attname(f)] = f.kind === :fk && v !== nothing ? pk_value(related_model(f), resolve_ref(related_model(f), v)) :
+                           deserial_value(f, v)
     end
     for f in modelmeta(concrete_model(T)).m2m
         haskey(fs, string(f.name)) || continue

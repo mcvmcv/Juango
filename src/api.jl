@@ -105,7 +105,8 @@ export cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, ge
 export send_mail, mail_admins, mail_managers, EmailMessage, EmailMultiAlternatives, send!, attach!, attach_file,
        attach_alternative!
 # apps, contrib apps, tasks
-export App, get_model, Admin, Sitemap, sitemap_urls, Feed, FlatPage, Site, get_current_site,
+export App, get_model, concrete_fields, many_to_many, attname, column, is_relation, is_primary_key, related_model,
+       value_from_object, value_to_json, value_from_json, Admin, Sitemap, sitemap_urls, Feed, FlatPage, Site, get_current_site,
        @background, enqueue, get_result, TaskResult
 # server and commands
 export runserver, execute_from_command_line

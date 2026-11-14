@@ -190,14 +190,25 @@ Base.@nospecializeinfer exclude(@nospecialize(T::Type{<:Model}), qargs::Q...; kw
 
 Order the results. Prefix with `-` for descending, `\"?\"` for random order.
 """
-Base.@nospecializeinfer order_by(@nospecialize(qs::QuerySet), fields...) = chain(qs; order = Any[order_item(f) for f in fields])
+Base.@nospecializeinfer order_by(@nospecialize(qs::QuerySet), fields...) =
+    chain(qs; order = isempty(fields) ? Any[NO_ORDER] : Any[order_item(f) for f in fields])
 Base.@nospecializeinfer order_by(@nospecialize(T::Type{<:Model}), fields...) = order_by(objects(T), fields...)
 order_by(fields::Union{AbstractString,Symbol}...) = qs -> order_by(qs, fields...)
 
-"ORDER BY clause plus extra SELECT columns (needed with DISTINCT when ordering by joined columns)."
-function order_clause(c::SQLCompiler, order::Vector)
+"`order_by()` with no fields: no ordering at all, not even the model's `Meta(ordering = ...)` (as Django)."
+struct NoOrder end
+const NO_ORDER = NoOrder()
+"Whether the queryset's ordering was cleared with `order_by()`."
+Base.@nospecializeinfer order_cleared(@nospecialize(qs::QuerySet)) = length(qs.order) == 1 && qs.order[1] isa NoOrder
+
+"""
+ORDER BY clause plus extra SELECT columns (needed with DISTINCT when ordering by joined columns).
+With no ordering given, the model's `Meta(ordering = ...)` applies when `meta_ordering` is true.
+"""
+function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true)
     T = c.T
-    isempty(order) && (order = modelmeta(T).ordering)
+    length(order) == 1 && order[1] isa NoOrder && return "", String[], Any[]
+    isempty(order) && meta_ordering && (order = modelmeta(T).ordering)
     isempty(order) && return "", String[], Any[]
     parts, extra, ps = String[], String[], Any[]
     for o in order
@@ -413,7 +424,10 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     if grouped && columns !== nothing && !idonly && qs.values_fields === nothing
         group = [pk_select(c.base, T)]
     end
-    o, extra, ops_order = ordered ? order_clause(c, qs.order) : ("", String[], Any[])
+    # As Django ≥ 3.1, a query that groups (an aggregate annotate) ignores the model's Meta.ordering: its columns
+    # would join ORDER BY, which PostgreSQL refuses for values() groups (and they'd change the groups). An explicit
+    # order_by still applies.
+    o, extra, ops_order = ordered ? order_clause(c, qs.order; meta_ordering = !grouped) : ("", String[], Any[])
     (columns === nothing && !idonly && !grouped) && append!(sel, extra)
     # objects are made distinct after a multi-valued join; values() rows aren't (as in Django, equal rows
     # are all returned, and PostgreSQL would refuse ORDER BY on columns not selected)
@@ -491,6 +505,7 @@ Base.@nospecializeinfer function build_combined(@nospecialize(qs::QuerySet); col
     order = String[]
     if ordered
         for o in qs.order
+            o isa NoOrder && continue
             o isa OrderBy && throw(ArgumentError("order_by expressions aren't supported on union/intersection/difference; order by field names"))
             name = lstrip(o, '-')
             f = name in ("id", "pk") ? nothing : findfield(modelmeta(T), Symbol(name))
@@ -715,7 +730,9 @@ Base.@nospecializeinfer function Base.getindex(@nospecialize(qs::QuerySet), i::I
     v[1]
 end
 
-Base.@nospecializeinfer default_order(@nospecialize(qs::QuerySet)) = isempty(qs.order) ? (isempty(modelmeta(model_of(qs)).ordering) ? ["id"] : modelmeta(model_of(qs)).ordering) : qs.order
+Base.@nospecializeinfer default_order(@nospecialize(qs::QuerySet)) =
+    order_cleared(qs) ? Any["id"] :
+    isempty(qs.order) ? (isempty(modelmeta(model_of(qs)).ordering) ? Any["id"] : modelmeta(model_of(qs)).ordering) : qs.order
 
 "First object (by the queryset's ordering, or by id), or `nothing`."
 Base.@nospecializeinfer function Base.first(@nospecialize(qs::QuerySet))
@@ -850,7 +867,7 @@ function distinct_dates(qs::QuerySet, field, kind, order, kinds, what)
     kind in kinds || throw(ArgumentError("$what: kind must be one of $(join(kinds, ", ")), not :$kind"))
     order in (:asc, :desc) || throw(ArgumentError("$what: order must be :asc or :desc"))
     vals = DateTime[]
-    for v in values_list(chain(qs; order = String[]), field; flat = true)
+    for v in values_list(order_by(qs), field; flat = true)
         v === nothing && continue
         v isa TimeZones.ZonedDateTime && (v = DateTime(localtime(v), TimeZones.Local))
         push!(vals, truncate_datetime(v, kind))

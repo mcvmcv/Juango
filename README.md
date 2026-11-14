@@ -92,6 +92,7 @@ filter(Post; author__name="Ann", title__icontains="hel") |> order_by("-created")
 filter(Post, Q(status="p") | Q(published=true))
 filter(Post, Q(container__isnull=true) ⊻ Q(material__isnull=true))   # xor: an odd number true (also in CheckConstraints)
 order_by(Post, Desc(:published_at; nulls_last = true), "title")   # expressions too; NULLs placed alike on every database
+order_by(objects(Post))          # no ordering at all, not even Meta.ordering (also left out of aggregate annotate queries)
 values_list(Event, :data__run; flat = true)                        # a key inside a JSON field (also values, order_by)
 exclude(Post; status="d")[1:10]  # slicing → LIMIT/OFFSET
 get(Post; slug="hello")          # throws DoesNotExist / MultipleObjectsReturned
@@ -1788,6 +1789,27 @@ The `assert_*` functions return `true` or throw an `AssertionError` that says wh
 ### Static files
 
 `collectstatic` copies `STATIC_DIRS` and each app's `static/` into `STATIC_ROOT`. With `STATICFILES_STORAGE = :manifest` it also writes copies with a content hash in the name (`css/site.55e7cbb9ba48.css`) and a `staticfiles.json` manifest. It rewrites `url(...)` and `@import` references inside CSS to the hashed names. Then, with `DEBUG` off, `{% static "css/site.css" %}` gives the hashed URL, so a web server can tell browsers to cache static files forever. A name missing from the manifest raises an error.
+
+### Model introspection
+
+Generic code that works on any model, such as an audit log, an undo, a CSV export or a "copy
+this row" helper, can ask a model about its fields. This is Django's `Model._meta` and field
+methods:
+
+```julia
+for f in concrete_fields(Material)           # columns, multi-table parents' first; no m2m, no automatic id
+    f.name, attname(f), column(f), f.kind    # :plate, :plate_id, "plate_id", :fk
+    is_relation(f) && related_model(f)       # Plate
+    v = value_from_object(f, obj)            # the stored value: a foreign key's id, a Decimal, a datetime...
+    x = value_to_json(f, v)                  # what dumpdata writes: "19.90", "2026-11-14T18:21:17.605Z"
+    @assert value_from_json(f, x) == v       # and back, ready for update! or setproperty!
+end
+many_to_many(Material)                       # m2m fields; through(Material, :tags) is the join model
+model_label(Material), get_model("lab.Material")
+```
+
+The automatic primary key is `obj.pk`, not a field. A `CompositePrimaryKey`'s fields are
+concrete fields, with `is_primary_key(Material, f)` true.
 
 ### Fixtures and serialization
 
