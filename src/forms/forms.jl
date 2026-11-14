@@ -1068,7 +1068,7 @@ function tattr(bf::BoundField, ::Val{S}) where {S}
     S === :label_tag && return SafeString(label_tag(bf))
     S === :errors_html && return SafeString(errors_html(get(bf.form.errors, bf.field.name, String[])))
     S === :errors && return get(bf.form.errors, bf.field.name, String[])
-    S === :name && return html_name(bf.form, bf.field)
+    S === :name && return string(bf.field.name)        # the field's own name (Django's); html_name is the prefixed one
     S === :id_for_label && return html_id(bf.form, bf.field)
     S === :value && return display_value(bf)
     S === :help_text && return bf.field.help_text

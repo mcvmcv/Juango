@@ -477,3 +477,16 @@ end
     delete_field!(g, :a)
     @test [x.name for x in g.fields] == [:b, :c, :d]
 end
+
+@testset "BoundField.name is the field's own name; formset.forms builds on use (#157, #158)" begin
+    f = Form([:title => CharField()]; prefix = "p")
+    @test f[:title].name == "title" && f[:title].html_name == "p-title"
+    FS = formset_factory((d; prefix, initial) -> Form([:qty => IntegerField()]; data = d, prefix = prefix, initial = initial);
+                         extra = 2, can_delete = true)
+    fs = FS()
+    @test length(fs.forms) == 2 && all(x -> x isa Juango.Form, fs.forms)      # built on first use, in Julia too
+    @test fs.forms === fs.forms                                                  # (once)
+    html = tr("{% for form in fs %}{% for field in form %}{% if field.name != 'DELETE' %}[{{ field.name }}]{% endif %}{% endfor %}{% endfor %}",
+              Dict("fs" => fs))
+    @test html == "[qty][qty]"                                                   # the idiom works: DELETE left out
+end

@@ -64,7 +64,8 @@ function total_form_count(fs::FormSet)
 end
 
 function build_forms!(fs::FormSet)
-    isempty(fs.forms) || return fs.forms
+    built = getfield(fs, :forms)
+    isempty(built) || return built
     n = total_form_count(fs)
     for i in 0:n-1
         init = i < length(fs.initial) ? fs.initial[i+1] : Dict{Symbol,Any}()
@@ -72,9 +73,9 @@ function build_forms!(fs::FormSet)
         f = fs.make_form(fs.data, "$(fs.prefix)-$i", init, inst)
         f isa Form && (f.use_required_attribute = false)     # as Django: an extra form left empty mustn't block submitting
         add_formset_fields!(fs, f, i)
-        push!(fs.forms, f)
+        push!(built, f)
     end
-    fs.forms
+    built
 end
 
 function instance_for(fs::FormSet, i)
@@ -179,6 +180,9 @@ errors(fs::FormSet) = [f.errors for f in build_forms!(fs)]
 as_p(fs::FormSet) = SafeString(management_form(fs).s * join([as_p(f).s for f in fs], "\n"))
 as_table(fs::FormSet) = SafeString(management_form(fs).s * join([as_table(f).s for f in fs], "\n"))
 __html__(fs::FormSet) = as_p(fs).s
+
+"`fs.forms` builds the forms on first use, as Django's formset.forms does (the field holds them once built)."
+Base.getproperty(fs::FormSet, s::Symbol) = s === :forms ? build_forms!(fs) : getfield(fs, s)
 
 function tattr(fs::FormSet, ::Val{S}) where {S}
     S === :management_form && return management_form(fs)
