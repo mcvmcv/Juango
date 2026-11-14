@@ -1,12 +1,12 @@
 # The test suite, split by area into files that each run on their own (`julia --project=test
 # test/orm.jl`). Here the files run in a few groups, one process per group: a process compiles
-# Juango's code paths once for all its files. JUANGO_TEST_JOBS groups (default 2) run at once;
+# Juango's code paths once for all its files. JUANGO_TEST_JOBS groups (default 3) run at once;
 # each process peaks at about 1-1.5 GB. See CLAUDE.md before raising it.
 using Test
 
-# Longest first, so the two job slots finish at about the same time.
+# Longest first, so the job slots finish at about the same time.
 const GROUPS = [["orm", "db", "migrations"], ["views", "admin"], ["services"], ["templates", "forms"]]
-const JOBS = parse(Int, get(ENV, "JUANGO_TEST_JOBS", "2"))
+const JOBS = parse(Int, get(ENV, "JUANGO_TEST_JOBS", "3"))
 # browser tests of live.js (they need chromium and node): JUANGO_BROWSER_TESTS=1
 get(ENV, "JUANGO_BROWSER_TESTS", "") == "1" && push!(GROUPS[2], "browser")
 

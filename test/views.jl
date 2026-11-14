@@ -1874,3 +1874,31 @@ end
         rm(joinpath(TPL, "dt_page.html"); force = true); rm(joinpath(TPL, "dt_part.html"); force = true)
     end
 end
+
+@testset "messages keep their safeness (#152)" begin
+    old_urls = settings.ROOT_URLCONF
+    tpl_path = joinpath(TPL, "msg152.html")
+    write(tpl_path, "<ul>{% for m in messages %}<li class=\"{{ m.tags }}\">{{ m }}</li>{% endfor %}</ul>")
+    function add152(req)
+        message!(req, :success, format_html("Recorded: <a href=\"{}\">{}</a>.", "/events/12/", "Extract <12>"))
+        message!(req, :info, "plain <b>text</b>")
+        message!(req, :warning, mark_safe("<button>Undo</button>"))
+        HttpResponse("ok")
+    end
+    try
+        configure!(ROOT_URLCONF = vcat(old_urls, [path("m152/add/", add152), path("m152/", req -> render(req, "msg152.html"))]))
+        for engine in (:db, :signed_cookies)
+            configure!(SESSION_ENGINE = engine)
+            c = Client()
+            get(c, "/m152/add/")
+            body = text(get(c, "/m152/"))
+            @test occursin("<li class=\"success\">Recorded: <a href=\"/events/12/\">Extract &lt;12&gt;</a>.</li>", body)
+            @test occursin("<li class=\"info\">plain &lt;b&gt;text&lt;/b&gt;</li>", body)        # plain text is still escaped
+            @test occursin("<li class=\"warning\"><button>Undo</button></li>", body)
+        end
+        @test Juango.Message(:info, mark_safe("<i>x</i>")).safe && !Juango.Message(:info, "<i>x</i>").safe
+    finally
+        configure!(ROOT_URLCONF = old_urls, SESSION_ENGINE = Juango.default_settings()[:SESSION_ENGINE])
+        rm(tpl_path; force = true)
+    end
+end
