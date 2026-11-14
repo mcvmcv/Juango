@@ -229,9 +229,9 @@ end
         cache_set("a", Dict("x" => [1, 2]))
         v = cache_get("a"); push!(v["x"], 3)
         @test cache_get("a") == Dict("x" => [1, 2])                      # stored values are copies
-        cache_set("short", 1; timeout = 0.3); cache_set("never", 1; timeout = 0)
+        cache_set("short", 1; timeout = 1.5); cache_set("never", 1; timeout = 0)     # (1.5 s: a loaded machine is slow)
         @test cache_has("short") && !cache_has("never")
-        sleep(0.4)
+        sleep(1.6)
         @test !cache_has("short")
         @test cache_add("k", 1) && !cache_add("k", 2) && cache_get("k") == 1
         @test cache_delete("k") && !cache_delete("k")
