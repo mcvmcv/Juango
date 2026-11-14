@@ -29,6 +29,12 @@
     {% endif %}
     {% endfor %}
     {% if forloop.last %}
+    {% if password_change %}
+    <div class="form-row">
+      <label>Password:</label>
+      <div>{{ password_change.summary }}<div class="help">Raw passwords are not stored, so there is no way to see this user’s password. <a href="{{ password_change.url }}">Change the password</a>.</div></div>
+    </div>
+    {% endif %}
     {% if editable %}{% for pf in password_fields %}
     <div class="form-row">
       <label for="id_{{ pf.name }}">{{ pf.label }}:</label>
@@ -89,6 +95,50 @@
   });
   // autocomplete_fields: a search box that refills the select from the admin's JSON endpoint
   var root = document.body.dataset.adminRoot;
+  // filter_horizontal / filter_vertical: a many-to-many select becomes "available" and "chosen" lists
+  document.querySelectorAll("select[data-filter-box]").forEach(function (sel) {
+    var name = sel.dataset.filterLabel || "";
+    var wrap = document.createElement("div");
+    wrap.className = "filter-box " + sel.dataset.filterBox;
+    var left = document.createElement("div"), mid = document.createElement("div"), right = document.createElement("div");
+    left.className = "filter-col"; mid.className = "filter-buttons"; right.className = "filter-col";
+    var search = document.createElement("input");
+    search.type = "search"; search.placeholder = "Filter"; search.setAttribute("aria-label", "Filter available " + name);
+    var avail = document.createElement("select");
+    avail.multiple = true; avail.size = 10; avail.setAttribute("aria-label", "Available " + name);
+    Array.prototype.slice.call(sel.options).forEach(function (o) { if (!o.selected) avail.appendChild(o); });
+    sel.size = 10; sel.setAttribute("aria-label", "Chosen " + name);
+    function move(from, to, all) {
+      Array.prototype.slice.call(from.options).forEach(function (o) {
+        if ((all || o.selected) && o.style.display !== "none") { o.selected = false; to.appendChild(o); }
+      });
+    }
+    function button(text, f) {
+      var b = document.createElement("button"); b.type = "button"; b.className = "button secondary"; b.textContent = text;
+      b.addEventListener("click", f); return b;
+    }
+    search.addEventListener("input", function () {
+      var q = search.value.toLowerCase();
+      Array.prototype.slice.call(avail.options).forEach(function (o) {
+        o.style.display = o.text.toLowerCase().indexOf(q) >= 0 ? "" : "none";
+      });
+    });
+    avail.addEventListener("dblclick", function () { move(avail, sel); });
+    sel.addEventListener("dblclick", function () { move(sel, avail); });
+    sel.parentNode.insertBefore(wrap, sel);
+    var la = document.createElement("strong"); la.textContent = "Available " + name;
+    var lc = document.createElement("strong"); lc.textContent = "Chosen " + name;
+    left.appendChild(la); left.appendChild(search); left.appendChild(avail);
+    mid.appendChild(button("Choose ›", function () { move(avail, sel); }));
+    mid.appendChild(button("‹ Remove", function () { move(sel, avail); }));
+    mid.appendChild(button("Choose all", function () { move(avail, sel, true); }));
+    mid.appendChild(button("Remove all", function () { move(sel, avail, true); }));
+    right.appendChild(lc); right.appendChild(sel);
+    wrap.appendChild(left); wrap.appendChild(mid); wrap.appendChild(right);
+    if (sel.form) sel.form.addEventListener("submit", function () {      // everything chosen is submitted
+      Array.prototype.slice.call(sel.options).forEach(function (o) { o.selected = true; });
+    });
+  });
   document.querySelectorAll("select[data-autocomplete]").forEach(function (sel) {
     var box = document.createElement("input");
     box.type = "search"; box.placeholder = "Search…"; box.style.marginRight = "6px";
@@ -110,4 +160,9 @@
   });
 })();
 </script>
+<style>
+.filter-box{display:flex;gap:12px;align-items:center}.filter-box.vertical{flex-direction:column;align-items:stretch}
+.filter-col{display:flex;flex-direction:column;gap:4px;min-width:14em}.filter-col select{min-height:12em}
+.filter-buttons{display:flex;flex-direction:column;gap:4px}.filter-box.vertical .filter-buttons{flex-direction:row}
+</style>
 {% endblock %}

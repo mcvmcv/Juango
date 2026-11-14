@@ -130,6 +130,7 @@ function column_type(::DatabaseBackend, kind::Symbol, max_length)
     kind === :intrange && return "INT8RANGE"
     kind === :daterange && return "DATERANGE"
     kind === :datetimerange && return "TSRANGE"
+    kind === :decimalrange && return "NUMRANGE"
     kind === :decimal && return "NUMERIC"
     kind === :time && return "TIME"
     kind === :binary && return "BYTEA"
@@ -227,7 +228,7 @@ end
 
 
 "Whether the database supports an index method (`:btree`, `:gin`)."
-supports_index_method(::DatabaseBackend, m::Symbol) = m in (:btree, :gin)
+supports_index_method(::DatabaseBackend, m::Symbol) = m in (:btree, :gin, :gist, :brin, :spgist, :hash, :bloom)
 
 "Wrap a subquery used as `x IN (subquery)` (MySQL needs a derived table)."
 in_subquery(::DatabaseBackend, sql) = sql

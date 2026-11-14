@@ -344,3 +344,63 @@ end
         delete!(filter(Article; title__startswith = "s143"))
     end
 end
+
+@testset "admin: get_* hooks, show all, preserved filters, the password page (#143)" begin
+    root = root_user()
+    c = Client(); force_login!(c, root)
+    ann = ann_author()
+    for i in 1:3
+        create(Article; title = "pf143 $i", author = ann, slug = "pf143-$i")
+    end
+    try
+        Admin.register!(Article; list_display = [:title], search_fields = [:title], list_per_page = 2, list_max_show_all = 5,
+                        get_exclude = (req, obj) -> obj === nothing ? [:body] : Symbol[],
+                        get_fieldsets = (req, obj) -> obj === nothing ? [] : ["Main" => [:title, :author], "More" => [:status, :views]],
+                        get_prepopulated_fields = (req, obj) -> Dict(:slug => [:title]))
+        r = get(c, "/admin/article/?q=pf143")
+        body = text(r)
+        @test occursin("Show all", body) && occursin("/change/?_changelist_filters=q%3Dpf143", body)
+        @test count("<td>pf143", text(get(c, "/admin/article/?q=pf143&all="))) + count(">pf143", text(get(c, "/admin/article/?q=pf143&all="))) >= 3
+        @test !occursin("name=\"body\"", text(get(c, "/admin/article/add/"))) && occursin("\"target\":\"id_slug\"", text(get(c, "/admin/article/add/")))
+        a = get(Article; title = "pf143 1")
+        r = get(c, "/admin/article/$(a.id)/change/")
+        @test occursin("<h2>Main</h2>", text(r)) && occursin("<h2>More</h2>", text(r)) && occursin("name=\"body\"", text(r)) == false
+        # saving goes back to the filtered list
+        r = post(c, "/admin/article/$(a.id)/change/?_changelist_filters=q%3Dpf143",
+                 Dict("title" => "pf143 1b", "author" => string(ann.id), "status" => "p", "views" => "0", "_save" => "1"))
+        @test r.status == 302 && getheader(r, "Location") == "/admin/article/?q=pf143"
+        r = post(c, "/admin/article/$(a.id)/change/?_changelist_filters=q%3Dpf143",
+                 Dict("title" => "pf143 1c", "author" => string(ann.id), "status" => "p", "views" => "0", "_continue" => "1"))
+        @test endswith(getheader(r, "Location"), "/change/?_changelist_filters=q%3Dpf143")
+        # facets: counts per filter choice, with the search applied
+        Admin.register!(Article; list_display = [:title], search_fields = [:title], list_filter = [:status])
+        @test occursin("Show counts", text(get(c, "/admin/article/?q=pf143")))
+        body = text(get(c, "/admin/article/?q=pf143&_facets=1"))
+        @test occursin("All (3)", body) && occursin("Hide counts", body)
+        Admin.register!(Article; list_display = [:title], list_filter = [:status], show_facets = :never)
+        @test !occursin("Show counts", text(get(c, "/admin/article/")))
+    finally
+        Admin.register!(Article; list_display = [:title, :author, :status, :published, "Len" => a -> length(a.body)],
+                        search_fields = [:title, :body], list_filter = [:published, :status, :author])
+        delete!(filter(Article; title__startswith = "pf143"))
+    end
+    # filter_horizontal: the many-to-many select is marked for the two-list widget
+    Admin.register!(Essay; filter_horizontal = [:topics])
+    try
+        r = get(c, "/admin/essay/add/")
+        @test occursin("data-filter-box=\"horizontal\"", text(r)) && occursin("select[data-filter-box]", text(r))
+    finally
+        Admin.unregister!(Essay)
+    end
+    # the user admin: a summary and its own password page
+    u = first(filter(User; username = "pw143")); u === nothing && (u = create_user("pw143", "Old-pass-143"))
+    r = get(c, "/admin/user/$(u.id)/change/")
+    @test occursin("Change the password", text(r)) && !occursin("type=\"password\" name=\"password\"", text(r))
+    r = get(c, "/admin/user/$(u.id)/password/")
+    @test r.status == 200 && occursin("name=\"password1\"", text(r))
+    r = post(c, "/admin/user/$(u.id)/password/", Dict("password1" => "New-pass-143x", "password2" => "different"))
+    @test r.status == 200 && occursin("didn’t match", text(r))
+    r = post(c, "/admin/user/$(u.id)/password/", Dict("password1" => "New-pass-143x", "password2" => "New-pass-143x"))
+    @test r.status == 302 && authenticate("pw143", "New-pass-143x") !== nothing
+    @test get(c, "/admin/article/1/password/").status == 404                      # only where password_change_page is on
+end

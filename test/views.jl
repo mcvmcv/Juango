@@ -2266,7 +2266,8 @@ const FINDER151_FILE = Ref("")
         old = settings.ROOT_URLCONF
         try
             configure!(ROOT_URLCONF = vcat(old, [path("wk/<int:year>/<int:week>/", WeekArchiveView(Article; date_field = :created, week_format = "%V")),
-                                                 path("today151/", TodayArchiveView(Article; date_field = :created, allow_empty = true))]))
+                                                 path("today151/", TodayArchiveView(Article; date_field = :created, allow_empty = true,
+                                                                                    queryset = filter(Article; title = "wk151")))]))
             d = Juango.localdate()
             y, w = Dates.year(d - Day(dayofweek(d) - 1) + Day(3)), Dates.week(d)
             @test occursin("wk151", text(get(Client(), "/wk/$y/$w/")))

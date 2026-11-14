@@ -498,6 +498,27 @@ end
     @test occursin("Juango.project_include(joinpath(BASE_DIR, \"views.jl\"))", read(joinpath(root, "project.jl"), String))
 end
 
+@testset "db_collation (#146)" begin
+    b = Juango.backend()
+    name = IS_POSTGRES ? "C" : IS_MYSQL ? "utf8mb4_bin" : "NOCASE"
+    c = Juango.Column("code", :string; max_length = 20, collation = name)
+    sql = Juango.column_sql(b, c)
+    @test occursin(IS_POSTGRES ? "COLLATE \"C\"" : "COLLATE $name", sql)
+    @test occursin("collation = \"$name\"", Juango.Migrations.column_code(c))
+    @test Juango.column_state(Juango.Field(:char; max_length = 20, db_collation = name) |> f -> (f.name = :code; f)).collation == name
+    @test_throws ArgumentError Juango.Column("x", :string; collation = "bad name; DROP")
+    # the column really has it: create a table, compare
+    t = Juango.qname("coll146")
+    Juango.execute("CREATE TABLE $t (" * Juango.column_sql(b, Juango.Column("id", :int)) * ", " * sql * ")")
+    try
+        Juango.execute("INSERT INTO $t (" * Juango.qname("id") * ", " * Juango.qname("code") * ") VALUES (1, 'abc')")
+        n = Juango.execute("SELECT COUNT(*) AS n FROM $t WHERE " * Juango.qname("code") * " = 'ABC'")[1][:n]
+        @test n == (IS_POSTGRES || IS_MYSQL ? 0 : 1)              # NOCASE on SQLite; C and utf8mb4_bin are case-sensitive
+    finally
+        Juango.execute("DROP TABLE $t")
+    end
+end
+
 # runserver's reloading (#142), with stand-ins for Revise.jl
 module FakeRevise142
 const revision_queue = Set{Any}()

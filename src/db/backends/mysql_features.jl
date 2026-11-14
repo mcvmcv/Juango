@@ -65,6 +65,7 @@ array_index_sql(::MySQLBackend, col, i::Int) = mysql_jtext(col), Any["\$[$i]"]
 
 function range_lookup_sql(b::MySQLBackend, op::String, col, kind, v)
     bound(k) = kind === :intrange ? "CAST(NULLIF($(mysql_jtext(col, "'\$.$k'")), 'null') AS SIGNED)" :
+               kind === :decimalrange ? "CAST(NULLIF($(mysql_jtext(col, "'\$.$k'")), 'null') AS DECIMAL(65,30))" :
                                     "NULLIF($(mysql_jtext(col, "'\$.$k'")), 'null')"
     lo, hi = bound("lower"), bound("upper")
     s(x) = json_scalar(x)
@@ -102,8 +103,8 @@ function alter_column_sql(b::MySQLBackend, old::Table, new::Table, name, deferre
     c0, c1 = getcolumn(old, name), getcolumn(new, name)
     t = quote_name(b, new.name)
     stmts = ["ALTER TABLE $t DROP FOREIGN KEY $(quote_name(b, fk))" for fk in foreign_key_names(b, new.name, name)
-             if c0.references != c1.references || column_type_for(b, c0) != column_type_for(b, c1)]
-    reindex = (c0.unique, c0.index) != (c1.unique, c1.index) || column_type_for(b, c0) != column_type_for(b, c1)
+             if c0.references != c1.references || full_column_type(b, c0) != full_column_type(b, c1)]
+    reindex = (c0.unique, c0.index) != (c1.unique, c1.index) || full_column_type(b, c0) != full_column_type(b, c1)
     reindex && append!(stmts, drop_index_sql(b, old.name, c0))
     if c0.null && !c1.null && (bf = backfill_value(c1)) !== nothing
         push!(stmts, "UPDATE $t SET $(quote_name(b, name)) = $(lit(b, bf)) WHERE $(quote_name(b, name)) IS NULL")

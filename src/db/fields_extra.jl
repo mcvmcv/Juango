@@ -13,7 +13,7 @@
 #         email   = CICharField(max_length = 200)          # case-insensitive comparisons
 #     end
 
-const RANGE_KINDS = (:intrange, :daterange, :datetimerange)
+const RANGE_KINDS = (:intrange, :daterange, :datetimerange, :decimalrange)
 
 "A JSON value (`Dict`, `Vector`, numbers, strings, `nothing`): `jsonb` on PostgreSQL, text on SQLite."
 JSONField(; kw...) = Field(:json; kw...)
@@ -52,6 +52,11 @@ IntegerRangeField(; kw...) = Field(:intrange; kw...)
 DateRangeField(; kw...) = Field(:daterange; kw...)
 "DateTime range: `tsrange` on PostgreSQL."
 DateTimeRangeField(; kw...) = Field(:datetimerange; kw...)
+"""
+Decimal range (`ValueRange(Decimal("1.5"), Decimal("9.75"))`): `numrange` on PostgreSQL, exact.
+SQLite and MySQL keep ranges as JSON, where the bounds are numbers (about 15 significant digits).
+"""
+DecimalRangeField(; kw...) = Field(:decimalrange; kw...)
 
 """
     ValueRange(lower, upper; bounds="[)")
@@ -104,6 +109,7 @@ pg_array_literal(v) = "{" * join([pg_elem(x) for x in v], ",") * "}"
 
 json_scalar(x::DateTime) = Dates.format(x, "yyyy-mm-ddTHH:MM:SS.sss")
 json_scalar(x::Union{Date,UUID}) = string(x)
+json_scalar(x::Decimal) = Float64(x)          # a JSON number, so the bounds compare as numbers
 json_scalar(x) = x
 
 "Array value as the backend stores it: PostgreSQL array literal, or JSON text."
@@ -246,6 +252,7 @@ function convert_elem(kind::Symbol, x)
     (x === nothing || x === missing) && return nothing
     (kind in INT_KINDS || kind === :fk) && return x isa Integer ? Int(x) : parse(Int, string(x))
     kind === :float && return x isa Real ? Float64(x) : parse(Float64, string(x))
+    kind === :decimal && return x isa Decimal ? x : to_decimal(x isa AbstractFloat ? round(x; sigdigits = 15) : x)
     kind === :bool && return x isa Bool ? x : x isa Integer ? x != 0 : string(x) in ("t", "true")
     kind === :date && return x isa Date ? x : Date(string(x)[1:10])
     kind === :datetime && return x isa DateTime ? x : something(todatetime(string(x)), string(x))
@@ -260,7 +267,7 @@ function decode_array(f::Field, v)
     Any[convert_elem(kind, x) for x in items]
 end
 
-range_elem_kind(k) = k === :intrange ? :bigint : k === :daterange ? :date : :datetime
+range_elem_kind(k) = k === :intrange ? :bigint : k === :daterange ? :date : k === :decimalrange ? :decimal : :datetime
 
 function decode_range(f::Field, v)
     ek = range_elem_kind(f.kind)
@@ -270,9 +277,10 @@ function decode_range(f::Field, v)
     end
     s = string(v)
     s == "empty" && return ValueRange{Any}(nothing, nothing, "()")
-    parts = parse_pg_array("{" * s[2:end-1] * "}")
-    conv(x) = (x === nothing || x == "") ? nothing : convert_elem(ek, x)
-    ValueRange(conv(parts[1]), conv(parts[2]); bounds = string(s[1], s[end]))
+    # "[1,10)", "[20,)" or "(,5]": an empty side is unbounded (a PostgreSQL array parse would drop it)
+    lo, hi = split(s[nextind(s, 1):prevind(s, lastindex(s))], ','; limit = 2)
+    conv(x) = (x = strip(x, '"'); isempty(x) ? nothing : convert_elem(ek, replace(x, "\\\"" => "\"")))
+    ValueRange(conv(lo), conv(hi); bounds = string(s[1], s[end]))
 end
 
 function from_db_extra(f::Field, v)
@@ -317,7 +325,8 @@ array_op_sql(b::DatabaseBackend, op, col, f::Field, v) = "$col $op CAST(? AS $(a
 array_len_sql(::DatabaseBackend, col) = "COALESCE(array_length($col, 1), 0)"
 array_index_sql(::DatabaseBackend, col, i::Int) = "$col[$(i + 1)]", Any[]
 
-range_type(::DatabaseBackend, kind) = kind === :intrange ? "INT8RANGE" : kind === :daterange ? "DATERANGE" : "TSRANGE"
+range_type(::DatabaseBackend, kind) = kind === :intrange ? "INT8RANGE" : kind === :daterange ? "DATERANGE" :
+                                       kind === :decimalrange ? "NUMRANGE" : "TSRANGE"
 range_elem_type(b::DatabaseBackend, kind) = column_type(b, range_elem_kind(kind), nothing)
 function range_lookup_sql(b::DatabaseBackend, op::String, col, kind, v)
     if v isa ValueRange

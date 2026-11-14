@@ -72,15 +72,19 @@ struct Column
     comment::Union{Nothing,String}   # db_comment
     max_digits::Union{Nothing,Int}   # decimals: NUMERIC(max_digits, decimal_places)
     decimal_places::Union{Nothing,Int}
+    collation::Union{Nothing,String} # db_collation
 end
 Column(name, kind::Symbol; null = false, default = nothing, unique = false, index = false,
        max_length = nothing, references = nothing, of = nothing, generated = nothing, comment = nothing,
-       max_digits = nothing, decimal_places = nothing) =
+       max_digits = nothing, decimal_places = nothing, collation = nothing) =
     Column(string(name), kind, null, default, unique, index && !unique, max_length,
            references === nothing ? nothing : string(references), of === nothing ? nothing : Symbol(of),
            generated === nothing || generated isa GeneratedSpec ? generated : GeneratedSpec(generated...),
            comment === nothing ? nothing : string(comment), max_digits === nothing ? nothing : Int(max_digits),
-           decimal_places === nothing ? nothing : Int(decimal_places))
+           decimal_places === nothing ? nothing : Int(decimal_places), collation === nothing ? nothing : check_collation(collation))
+
+"A collation name (`\"C\"`, `\"en-x-icu\"`, `\"utf8mb4_bin\"`, `\"NOCASE\"`), checked: it goes into SQL as it is."
+check_collation(c) = (s = string(c); occursin(r"^[A-Za-z0-9_.@-]+$", s) || throw(ArgumentError("invalid collation name '$s'")); s)
 
 Base.:(==)(a::Column, b::Column) = all(isequal(getfield(a, f), getfield(b, f)) for f in fieldnames(Column))
 Base.hash(c::Column, h::UInt) = hash(c.name, hash(c.kind, h))
@@ -90,7 +94,8 @@ same_definition(a::Column, b::Column) = all(isequal(getfield(a, f), getfield(b, 
 function with_column(c::Column; name = c.name, kw...)
     attrs = merge((null = c.null, default = c.default, unique = c.unique, index = c.index,
                    max_length = c.max_length, references = c.references, of = c.of, generated = c.generated,
-                   comment = c.comment, max_digits = c.max_digits, decimal_places = c.decimal_places), NamedTuple(kw))
+                   comment = c.comment, max_digits = c.max_digits, decimal_places = c.decimal_places,
+                   collation = c.collation), NamedTuple(kw))
     Column(name, c.kind; attrs...)
 end
 
@@ -208,7 +213,7 @@ function column_state(f::Field)
     f.db_default === nothing || (d = db_default_value(f.db_default))
     gen = f.generated === nothing ? nothing : GeneratedSpec(expr_to_columns(f.model, f.generated[1]), f.generated[2])
     gen === nothing || (d = nothing)
-    d !== nothing && f.kind in (:json, :hstore, :array, :intrange, :daterange, :datetimerange, :uuid) && (d = nothing)  # set by Julia, not the DB
+    d !== nothing && f.kind in (:json, :hstore, :array, :intrange, :daterange, :datetimerange, :decimalrange, :uuid) && (d = nothing)  # set by Julia, not the DB
     ref = f.kind !== :fk ? nothing : f.related === :__user_model__ ? "__user_model__" : modelmeta(related_model(f)).table
     f.kind === :fk && is_composite(related_model(f)) &&
         throw(ArgumentError("$(nameof(f.model)).$(f.name): foreign keys to $(nameof(related_model(f))) has a composite primary key; point at it with ForeignObject(...; from_fields = ...)"))
@@ -216,7 +221,8 @@ function column_state(f::Field)
     Column(column(f), schema_kind(f.kind); null = f.null, default = d, unique = f.unique,
            index = f.db_index, max_length = schema_kind(f.kind) in (:string, :citext, :binary) || (f.kind === :array && f.related === :string) ? f.max_length : nothing,
            references = ref, of = of, generated = gen, comment = f.db_comment,
-           max_digits = f.kind === :decimal ? f.max_digits : nothing, decimal_places = f.kind === :decimal ? f.decimal_places : nothing)
+           max_digits = f.kind === :decimal ? f.max_digits : nothing, decimal_places = f.kind === :decimal ? f.decimal_places : nothing,
+           collation = f.db_collation)
 end
 
 "The column default for a field's `db_default`: a value, or SQL for `Now()`."
@@ -273,6 +279,10 @@ function backfill_value(c::Column)
     c.kind === :datetime ? DateTime(1970) : c.kind === :date ? Date(1970) : nothing
 end
 
+"The column's type with its collation (for definitions and ALTER COLUMN; casts use `column_type_for`)."
+full_column_type(b::DatabaseBackend, c::Column) =
+    column_type_for(b, c) * (c.collation === nothing ? "" : " COLLATE " * (b isa PostgresBackend ? quote_name(b, c.collation) : c.collation))
+
 "The SQL type of a snapshot column."
 function column_type_for(b::DatabaseBackend, c::Column)
     c.kind === :decimal && return decimal_column_type(b, c.max_digits, c.decimal_places)
@@ -283,7 +293,7 @@ function column_type_for(b::DatabaseBackend, c::Column)
 end
 
 function column_sql(b::DatabaseBackend, c::Column; adding = false, inline_fk = inline_foreign_keys(b))
-    s = quote_name(b, c.name) * " " * column_type_for(b, c)
+    s = quote_name(b, c.name) * " " * full_column_type(b, c)
     if c.generated !== nothing
         c.generated.persisted || !(b isa PostgresBackend) ||
             throw(ArgumentError("PostgreSQL only has stored generated columns: use db_persist = true for '$(c.name)'"))
@@ -397,7 +407,7 @@ function alter_pk_sql(b::DatabaseBackend, st, table)
         x.parent == table && push!(stmts, alter_column_type_sql(b, x.name, "id", column_type(b, auto_pk_int(t.pk), nothing)))
         for c in x.columns
             c.kind === :fk && c.references !== nothing && ref_table(c.references) == table &&
-                push!(stmts, alter_column_type_sql(b, x.name, c.name, column_type_for(b, c)))
+                push!(stmts, alter_column_type_sql(b, x.name, c.name, full_column_type(b, c)))
         end
     end
     stmts
@@ -495,7 +505,7 @@ function alter_column_sql(b::DatabaseBackend, old::Table, new::Table, name, defe
         end
     end
     (c0.unique, c0.index) != (c1.unique, c1.index) && append!(stmts, drop_index_sql(b, old.name, c0))
-    ty0, ty1 = column_type_for(b, c0), column_type_for(b, c1)
+    ty0, ty1 = full_column_type(b, c0), full_column_type(b, c1)
     ty0 != ty1 && push!(stmts, alter_column_type_sql(b, new.name, name, ty1))
     p0, p1 = is_positive_kind(c0.kind), is_positive_kind(c1.kind)
     if positive_check(b) && p0 != p1           # the CHECK (col >= 0) of positive integer fields

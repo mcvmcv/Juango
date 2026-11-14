@@ -51,11 +51,13 @@
       {% if prev_url %}<a href="{{ prev_url }}">‹ {% translate "previous" %}</a> · {% endif %}
       Page {{ page_obj.number }} of {{ paginator.num_pages }} — {{ result_count }} {% if result_count == 1 %}{{ opts.verbose_name }}{% else %}{{ opts.verbose_name_plural }}{% endif %}
       {% if next_url %} · <a href="{{ next_url }}">{% translate "next" %} ›</a>{% endif %}
+      {% if show_all_url %} · <a href="{{ show_all_url }}" class="showall">{% translate "Show all" %}</a>{% endif %}
     </p>
   </div>
   {% if filters %}
   <div id="changelist-filter">
     <strong>{% translate "Filter" %}</strong>
+    {% if facets_toggle %}<p class="facets"><a href="{{ facets_toggle.url }}">{{ facets_toggle.label }}</a></p>{% endif %}
     {% for spec in filters %}
       <h3>By {{ spec.title|lower }}</h3>
       <ul>{% for c in spec.choices %}<li{% if c.selected %} class="selected"{% endif %}><a href="{{ c.url }}">{{ c.label }}</a></li>{% endfor %}</ul>

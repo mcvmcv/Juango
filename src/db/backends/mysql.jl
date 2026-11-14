@@ -62,7 +62,7 @@ function column_type(::MySQLBackend, kind::Symbol, max_length)
     kind === :float && return "DOUBLE"
     kind === :datetime && return "DATETIME(6)"
     kind === :date && return "DATE"
-    kind in (:json, :hstore, :array, :intrange, :daterange, :datetimerange) && return "JSON"
+    kind in (:json, :hstore, :array, :intrange, :daterange, :datetimerange, :decimalrange) && return "JSON"
     kind === :uuid && return "CHAR(36)"
     kind === :citext && return "VARCHAR($(something(max_length, 255)))"
     kind === :decimal && return "DECIMAL(65, 30)"

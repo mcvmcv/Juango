@@ -15,6 +15,7 @@ function column_code(c::Column)
     c.generated === nothing || push!(kw, "generated = (" * Juango.expr_code(c.generated.expression) * ", $(c.generated.persisted))")
     c.comment === nothing || push!(kw, "comment = " * jl(c.comment))
     c.max_digits === nothing || push!(kw, "max_digits = $(c.max_digits), decimal_places = $(c.decimal_places)")
+    c.collation === nothing || push!(kw, "collation = " * jl(c.collation))
     "Column($(jl(c.name)), :$(c.kind)" * (isempty(kw) ? ")" : "; " * join(kw, ", ") * ")")
 end
 

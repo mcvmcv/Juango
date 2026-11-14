@@ -361,7 +361,7 @@ end
 
 # --- XML writer ---
 
-const XML_JSON_KINDS = (:json, :array, :hstore, :intrange, :daterange, :datetimerange)
+const XML_JSON_KINDS = (:json, :array, :hstore, :intrange, :daterange, :datetimerange, :decimalrange)
 
 "Django's field type names, for the XML `type` attribute."
 xml_type(f::Field) = get(XML_TYPE_NAMES, f.kind, titlecase(string(f.kind)) * "Field")
@@ -371,7 +371,7 @@ const XML_TYPE_NAMES = Dict(:char => "CharField", :text => "TextField", :int => 
                             :uuid => "UUIDField", :file => "FileField", :image => "ImageField", :array => "ArrayField",
                             :hstore => "HStoreField", :citext => "CICharField", :geometry => "GeometryField",
                             :intrange => "BigIntegerRangeField", :daterange => "DateRangeField",
-                            :datetimerange => "DateTimeRangeField", :decimal => "DecimalField", :time => "TimeField",
+                            :datetimerange => "DateTimeRangeField", :decimalrange => "DecimalRangeField", :decimal => "DecimalField", :time => "TimeField",
                             :duration => "DurationField", :bigint => "BigIntegerField", :smallint => "SmallIntegerField",
                             :posint => "PositiveIntegerField", :posbigint => "PositiveBigIntegerField",
                             :possmallint => "PositiveSmallIntegerField", :binary => "BinaryField",

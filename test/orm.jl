@@ -1378,6 +1378,22 @@ end
     end
 end
 
+@testset "DecimalRangeField (#146)" begin
+    rollback_after() do
+        D = Juango.Decimal
+        g = create(Gadget; title = "dr146", nick = "dr", amounts = ValueRange(D("1.50"), D("9.75")))
+        h = create(Gadget; title = "dr146b", nick = "drb", amounts = ValueRange(D("20"), nothing))
+        @test get(Gadget; id = g.id).amounts == ValueRange(D("1.50"), D("9.75"))
+        gs = filter(Gadget; title__startswith = "dr146")
+        @test [x.title for x in filter(gs; amounts__contains = D("2.25"))] == ["dr146"]
+        @test [x.title for x in filter(gs; amounts__contains = D("100"))] == ["dr146b"]
+        @test [x.title for x in order_by(filter(gs; amounts__overlap = ValueRange(D("5"), D("25"))), "title")] == ["dr146", "dr146b"]
+        @test [x.title for x in filter(gs; amounts__contained_by = ValueRange(D("0"), D("10")))] == ["dr146"]
+        d = only(deserialize(:json, serialize(:json, [g]))).object
+        @test d.amounts == ValueRange(D("1.50"), D("9.75"))
+    end
+end
+
 @testset "DecimalField" begin
     @test_throws ArgumentError DecimalField(max_digits = 3, decimal_places = 4)
     @test_throws UndefKeywordError DecimalField(max_digits = 3)

@@ -228,6 +228,17 @@ Change list options:
   header is clicked (`?o=2.-1`); `sortable_by = [...]` limits which.
 * `empty_value_display = "-"`, `search_help_text`, `save_on_top = true` (save buttons above the
   form too).
+* `list_max_show_all = 200`: a "Show all" link when the whole list is no longer than that.
+* `filter_horizontal = [:tags]` / `filter_vertical`: a many-to-many field as two lists, available
+  and chosen, with a filter box (Django's widget); a plain multiple select without JavaScript.
+* `show_facets = :allow` (a "Show counts" link), `:always` or `:never`: each filter choice with the
+  number of rows it would leave (Django 5's facets; one count query per choice).
+* `preserve_filters = true`: after saving or deleting, back to the change list with the filters,
+  search and sorting it had.
+* `get_fieldsets`, `get_inlines`, `get_exclude`, `get_prepopulated_fields = (req, obj) -> ...`:
+  those options per request and object.
+* `password_change_page = true` (the user admin's): the password isn't an input on the change
+  page but a summary with a link to its own page (`AdminPasswordChangeForm`).
 """
 function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol[], list_filter = Symbol[],
                    ordering = String[], fields = nothing, exclude = Symbol[], list_per_page = 25,
@@ -243,7 +254,10 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    response_add = nothing, response_change = nothing, response_delete = nothing, get_form = nothing,
                    formfield_for_foreignkey = nothing, formfield_for_manytomany = nothing, formfield_for_choice_field = nothing,
                    formfield_overrides = Dict{Symbol,Any}(), radio_fields = Symbol[], list_display_links = nothing,
-                   sortable_by = nothing, empty_value_display = "-", search_help_text = nothing, save_on_top = false)
+                   sortable_by = nothing, empty_value_display = "-", search_help_text = nothing, save_on_top = false,
+                   get_fieldsets = nothing, get_inlines = nothing, get_exclude = nothing, get_prepopulated_fields = nothing,
+                   list_max_show_all = 200, preserve_filters = true, password_change_page = false, show_facets = :allow,
+                   filter_horizontal = Symbol[], filter_vertical = Symbol[])
     modelmeta(T)  # validates T is a model
     slug = model_name(T)
     acts = AdminAction[to_action(a) for a in actions]
@@ -274,7 +288,14 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                                                  :list_display_links => list_display_links === nothing ? nothing : collect(Any, list_display_links),
                                                  :sortable_by => sortable_by === nothing ? nothing : Symbol.(collect(sortable_by)),
                                                  :empty_value_display => string(empty_value_display), :search_help_text => search_help_text,
-                                                 :save_on_top => save_on_top))
+                                                 :save_on_top => save_on_top, :get_fieldsets => get_fieldsets,
+                                                 :get_inlines => get_inlines, :get_exclude => get_exclude,
+                                                 :get_prepopulated_fields => get_prepopulated_fields,
+                                                 :list_max_show_all => list_max_show_all, :preserve_filters => preserve_filters,
+                                                 :password_change_page => password_change_page,
+                                                 :show_facets => Symbol(show_facets),
+                                                 :filter_horizontal => Symbol.(collect(filter_horizontal)),
+                                                 :filter_vertical => Symbol.(collect(filter_vertical))))
     filter!(!=(slug), site.order)
     push!(site.order, slug)
     T
@@ -308,7 +329,7 @@ function register_user_model!(T = Juango.get_user_model(); kw...)
     T !== User && is_registered(User) && unregister!(User)
     register!(T; list_display = [:username, :email, :first_name, :last_name, :is_staff],
               search_fields = [:username, :first_name, :last_name, :email],
-              list_filter = [:is_staff, :is_superuser, :is_active], password_fields = [:password],
+              list_filter = [:is_staff, :is_superuser, :is_active], password_fields = [:password], password_change_page = true,
               add_form = (data, files) -> Juango.UserCreationForm(data), kw...)
 end
 
@@ -413,7 +434,7 @@ function column_ordering(ma::ModelAdmin, col)
     name = col isa Symbol ? col : col isa Display ? nothing : col isa AbstractString ? Symbol(col) : nothing
     sb !== nothing && !(name in sb) && !(col isa Display && col.ordering !== nothing && Symbol(lstrip(col.ordering, '-')) in sb) && return nothing
     col isa Display && return col.ordering
-    name === nothing || name === :__str__ && return nothing
+    (name === nothing || name === :__str__) && return nothing
     f = findfield(modelmeta(ma.model), name)
     f === nothing || f.kind in (:m2m, :gfk, :grel) ? nothing : string(attname(f))
 end
@@ -523,11 +544,25 @@ function list_filters(req::Request, ma::ModelAdmin)
     out
 end
 
-function filter_specs(req::Request, ma::ModelAdmin, filters = list_filters(req, ma))
+"""
+The filter sidebar. With `base` (the searched queryset) and facets on, each choice shows how many
+rows it would leave, counting the search and the other filters (Django 5's facets).
+"""
+function filter_specs(req::Request, ma::ModelAdmin, filters = list_filters(req, ma); base = nothing, facets::Bool = false)
     specs = Any[]
-    for (title, key, opts_, _) in filters
+    for (title, key, opts_, apply) in filters
         cur = get(req.GET, key, nothing)
-        choices = [Dict{String,Any}("label" => l, "url" => query_with(req, key => v),
+        others = nothing
+        if facets && base !== nothing                 # the queryset with every other filter applied
+            others = base
+            for (_, k2, _, ap2) in filters
+                k2 == key && continue
+                v2 = get(req.GET, k2, nothing)
+                (v2 === nothing || isempty(v2)) || (others = ap2(others, v2))
+            end
+        end
+        choices = [Dict{String,Any}("label" => others === nothing ? l : string(l, " (", count(v === nothing ? others : apply(others, v)), ")"),
+                                    "url" => query_with(req, key => v),
                                     "selected" => (v === nothing ? cur === nothing : cur == v))
                    for (l, v) in vcat(Tuple{String,Any}[("All", nothing)], opts_)]
         push!(specs, Dict{String,Any}("title" => title, "choices" => choices))
@@ -656,6 +691,7 @@ function changelist(req::Request; model)
     if !isempty(q) && !isempty(sfields)
         qs = filter(qs, reduce(|, [Q(Symbol(f, "__icontains") => q) for f in sfields]))
     end
+    searched = qs
     filters = list_filters(req, ma)
     for (_, key, _, apply) in filters
         v = get(req.GET, key, nothing)
@@ -684,6 +720,11 @@ function changelist(req::Request; model)
           Symbol[c for c in cols if c isa Symbol && (f = findfield(meta, c)) !== nothing && f.kind === :fk && f.name === c]
     isempty(fks) || (qs = Juango.select_related(qs, fks...))
     p = Paginator(qs, ma.list_per_page)
+    max_all = option(ma, :list_max_show_all, 200)
+    show_all = haskey(req.GET, "all") && p.count <= max_all              # "Show all": one page
+    show_all && (p = Paginator(qs, max(p.count, 1)))
+    # preserve_filters: the change page remembers this list's filters, search and sorting
+    back_q = option(ma, :preserve_filters, true) && !isempty(req.query_string) ? "?_changelist_filters=" * Juango.urlquote(req.query_string) : ""
     pg = try
         page(p, get(req.GET, "page", "1"))
     catch
@@ -728,22 +769,28 @@ function changelist(req::Request; model)
         hidden = fs === nothing ? "" : Juango.widget_html(forms[k][:id])
         pk = Juango.pk_string(o)
         # a NamedTuple, not a Dict: the template reads row.id, row.cells ..., and this is per row
-        push!(rows, (id = pk, cells = cells, hidden = SafeString(hidden), url = reverse_url("admin:change"; model = ma.slug, id = pk)))
+        push!(rows, (id = pk, cells = cells, hidden = SafeString(hidden), url = reverse_url("admin:change"; model = ma.slug, id = pk) * back_q))
     end
+    sf = option(ma, :show_facets, :allow)
+    facets_on = sf === :always || (sf === :allow && haskey(req.GET, "_facets"))
     ctx = base_context(req, interpolate(can(req, ma, :change) ? gettext("Select %(model)s to change") : gettext("Select %(model)s to view"),
                                         Dict("model" => meta.verbose_name)))
     merge!(ctx, Dict{String,Any}(
         "opts" => opts(ma), "headers" => column_headers(req, ma, cols, spec), "rows" => rows,
         "search_help_text" => option(ma, :search_help_text),
         "page_obj" => pg, "paginator" => p, "q" => q, "has_search" => !isempty(sfields),
-        "filters" => filter_specs(req, ma, filters), "result_count" => p.count,
+        "filters" => filter_specs(req, ma, filters; base = searched, facets = facets_on), "result_count" => p.count,
+        "facets_toggle" => option(ma, :show_facets, :allow) === :allow && !isempty(filters) ?
+            (facets_on ? (label = gettext("Hide counts"), url = query_with(req, "_facets" => nothing)) :
+                         (label = gettext("Show counts"), url = query_with(req, "_facets" => "1"))) : nothing,
         "show_full_count" => ma.show_full_result_count, "total" => ma.show_full_result_count ? count(admin_queryset(ma, req)) : nothing,
         "can_add" => can(req, ma, :add), "can_delete" => can(req, ma, :delete),
         "actions" => [Dict("name" => a.name, "description" => a.description) for a in ma.actions if can(req, ma, a.permission)],
         "list_editable" => fs !== nothing, "management_form" => fs === nothing ? "" : management_form(fs),
         "date_hierarchy" => drill,
         "prev_url" => pg.has_previous ? query_with(req, "page" => pg.previous_page_number) : nothing,
-        "next_url" => pg.has_next ? query_with(req, "page" => pg.next_page_number) : nothing))
+        "next_url" => pg.has_next ? query_with(req, "page" => pg.next_page_number) : nothing,
+        "show_all_url" => !show_all && p.num_pages > 1 && p.count <= max_all ? query_with(req, "all" => "") : nothing))
     render(req, "admin/change_list.html", ctx)
 end
 
@@ -752,10 +799,13 @@ end
 Base.@nospecializeinfer function admin_fields(ma::ModelAdmin, req = nothing, @nospecialize(obj = nothing))
     fs = ma.get_fields !== nothing ? Symbol.(collect(ma.get_fields(req, obj))) : ma.fields !== nothing ? ma.fields :
          [f.name for f in vcat(Juango.all_fields(ma.model), modelmeta(ma.model).m2m)
-          if f.editable && !(f.name in ma.exclude) && !(f.name in ma.password_fields)]
+          if f.editable && !(f.name in admin_exclude(ma, req, obj)) && !(f.name in ma.password_fields)]
     ro = req === nothing ? ma.readonly_fields : readonly_fields(ma, req, obj)
     [f for f in fs if !(f in ro)]
 end
+
+Base.@nospecializeinfer admin_exclude(ma::ModelAdmin, req, @nospecialize(obj)) =
+    (h = option(ma, :get_exclude); h === nothing || req === nothing ? ma.exclude : Symbol.(collect(h(req, obj))))
 
 Base.@nospecializeinfer function readonly_value(@nospecialize(obj), f::Field)
     obj === nothing && return "-"
@@ -770,20 +820,22 @@ Base.@nospecializeinfer readonly_row(ma, @nospecialize(obj), name) = (f = findfi
                      "value" => f === nothing ? format_value(obj === nothing ? nothing : getproperty(obj, name)) : readonly_value(obj, f)))
 
 "The change form as groups of rows (fieldsets), each row a bound field or a read-only value."
-Base.@nospecializeinfer function form_groups(ma::ModelAdmin, form, @nospecialize(obj), editable; locked = Symbol[], readonly = ma.readonly_fields)
+Base.@nospecializeinfer function form_groups(ma::ModelAdmin, form, @nospecialize(obj), editable; locked = Symbol[], readonly = ma.readonly_fields,
+                                             fieldsets = ma.fieldsets)
     row(name) = if editable && any(f -> f.name === name, form.fields)
         Dict{String,Any}("readonly" => false, "field" => form[name])
     else
         readonly_row(ma, obj, name)
     end
-    layout = isempty(ma.fieldsets) ?
-        ["" => vcat(locked, [f.name for f in form.fields], readonly)] : ma.fieldsets
+    layout = isempty(fieldsets) ?
+        ["" => vcat(locked, [f.name for f in form.fields], readonly)] : fieldsets
     [Dict{String,Any}("name" => name, "rows" => [row(n) for n in names]) for (name, names) in layout]
 end
 
 Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecialize(obj), data)
     out = Any[]
-    for ia in ma.inlines
+    h = option(ma, :get_inlines)
+    for ia in (h === nothing ? ma.inlines : collect(InlineAdmin, h(req, obj)))
         M = ia.model
         (can_model(req, M, :view) || can_model(req, M, :change) || can_model(req, M, :add)) || continue
         FS = inlineformset_factory(ma.model, M; fk = ia.fk, fields = ia.fields,
@@ -838,6 +890,10 @@ function configure_widgets!(ma::ModelAdmin, form, req = nothing)
             setproperty!(f, Symbol(k), v)
         end
         f.name in radios && (f.widget = :radio)
+        for (opt, dir) in ((:filter_horizontal, "horizontal"), (:filter_vertical, "vertical"))
+            f.kind === :m2m && f.name in option(ma, opt, Symbol[]) &&
+                (f.widget = Juango.Widget(; attrs = Dict("data-filter-box" => dir, "data-filter-label" => string(label(f)))))
+        end
         f.name in ma.raw_id_fields && (f.widget = :raw_id)
         f.name in ma.autocomplete_fields && (f.widget = :autocomplete)
     end
@@ -862,7 +918,7 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
                                   gf !== nothing ? gf(req, obj, data, req.FILES) :
                                   Juango.ModelForm(T; data = data, files = req.FILES, instance = obj,
                                                    fields = filter(!in(locked), admin_fields(ma, req, obj))), req)
-    pfs = custom_add ? Symbol[] : ma.password_fields
+    pfs = custom_add || (!adding && option(ma, :password_change_page, false)) ? Symbol[] : ma.password_fields
     inlines = save_as_new || custom_add ? Any[] : inline_formsets(ma, req, obj, data)
     if req.method == "POST" && is_valid(form) && all(x -> is_valid(x[2]), inlines)
         o = Juango.atomic() do
@@ -893,7 +949,7 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         verb = adding ? "added" : "changed"
         if haskey(req.POST, "_continue") || save_as_new || custom_add
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may edit it again below.")
-            return Juango.HttpResponseRedirect(reverse_url("admin:change"; model = ma.slug, id = Juango.pk_string(o)))
+            return Juango.HttpResponseRedirect(reverse_url("admin:change"; model = ma.slug, id = Juango.pk_string(o)) * keep_filters(req))
         elseif haskey(req.POST, "_addanother")
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may add another $(meta.verbose_name) below.")
             return Juango.HttpResponseRedirect(reverse_url("admin:add"; model = ma.slug))
@@ -901,7 +957,7 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         message!(req, :success, interpolate(adding ? gettext("The %(model)s “%(object)s” was added successfully.") :
                                                      gettext("The %(model)s “%(object)s” was changed successfully."),
                                             Dict("model" => meta.verbose_name, "object" => o)))
-        return Juango.HttpResponseRedirect(reverse_url("admin:changelist"; model = ma.slug))
+        return Juango.HttpResponseRedirect(changelist_url(ma, req))
     end
     auto_readonly = adding ? Any[] :
         [Dict{String,Any}("label" => label(f), "value" => format_value(getproperty(obj, attname(f))))
@@ -909,18 +965,50 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
     ctx = base_context(req, interpolate(adding ? gettext("Add %(model)s") : editable ? gettext("Change %(model)s") : gettext("View %(model)s"),
                                         Dict("model" => meta.verbose_name)))
     prepop = adding ? [Dict("target" => "id_" * string(k), "sources" => ["id_" * string(s) for s in v])
-                       for (k, v) in ma.prepopulated_fields] : Any[]
+                       for (k, v) in (h = option(ma, :get_prepopulated_fields); h === nothing ? ma.prepopulated_fields : h(req, obj))] : Any[]
     merge!(ctx, Dict{String,Any}(
         "editable" => editable, "can_delete" => !adding && can(req, ma, :delete, obj), "can_add" => can(req, ma, :add),
         "opts" => opts(ma), "form" => form, "object" => obj, "adding" => adding, "readonly" => auto_readonly,
         "groups" => custom_add ? [Dict{String,Any}("name" => "", "rows" => [Dict{String,Any}("readonly" => false, "field" => form[f.name]) for f in form.fields])] :
-                    form_groups(ma, form, obj, editable; locked = locked, readonly = ro),
+                    form_groups(ma, form, obj, editable; locked = locked, readonly = ro,
+                                fieldsets = (h = option(ma, :get_fieldsets); h === nothing ? ma.fieldsets :
+                                             Pair{String,Vector{Symbol}}[string(k) => Symbol.(collect(v)) for (k, v) in h(req, obj)])),
         "inlines" => editable ? [inline_context(ia, fs) for (ia, fs) in inlines] : Any[],
         "prepopulated" => Juango.JSON.json(prepop), "save_as" => ma.save_as && !adding && can(req, ma, :add),
         "password_fields" => [Dict("name" => string(pf), "label" => uppercasefirst(string(pf))) for pf in pfs],
         "view_on_site" => adding ? nothing : get_absolute_url(obj), "save_on_top" => option(ma, :save_on_top, false),
+        "password_change" => adding || !option(ma, :password_change_page, false) ? nothing :
+            Dict("summary" => Juango.password_summary(obj), "url" => reverse_url("admin:password_change"; model = ma.slug, id = Juango.pk_string(obj))),
         "history_url" => adding ? nothing : reverse_url("admin:history"; model = ma.slug, id = Juango.pk_string(obj))))
     render(req, "admin/change_form.html", ctx)
+end
+
+"The change list to go back to: with the filters it had (`_changelist_filters`, preserve_filters)."
+function changelist_url(ma::ModelAdmin, req::Request)
+    f = get(req.GET, "_changelist_filters", "")
+    reverse_url("admin:changelist"; model = ma.slug) * (option(ma, :preserve_filters, true) && !isempty(f) ? "?" * f : "")
+end
+"`?_changelist_filters=...` to carry on to the next admin page."
+keep_filters(req::Request) = (f = get(req.GET, "_changelist_filters", ""); isempty(f) ? "" : "?_changelist_filters=" * Juango.urlquote(f))
+
+"The user admin's \"Change password\" page (`password_change_page = true`): `AdminPasswordChangeForm`."
+function password_change_view(req::Request; model, id)
+    ma = get_admin(model)
+    option(ma, :password_change_page, false) || throw(Http404("No password page for $(ma.slug)"))
+    obj = admin_object(ma, req, id)
+    require_perm(req, ma, :change; obj = obj)
+    form = Juango.AdminPasswordChangeForm(req.method == "POST" ? req.POST : nothing)
+    if req.method == "POST" && is_valid(form) && Juango.check_new_password!(form, obj)
+        Juango.set_password!(obj, form.cleaned_data[:password1])
+        save!(obj)
+        log_action!(req.user, obj, CHANGE, "Changed password.")
+        obj.id == req.user.id && Juango.update_session_auth_hash!(req, obj)       # changing your own: stay logged in
+        message!(req, :success, gettext("Password changed successfully."))
+        return Juango.HttpResponseRedirect(reverse_url("admin:change"; model = ma.slug, id = Juango.pk_string(obj)))
+    end
+    ctx = base_context(req, interpolate(gettext("Change password: %(username)s"), Dict("username" => string(obj))))
+    merge!(ctx, Dict{String,Any}("opts" => opts(ma), "form" => form, "object" => obj))
+    render(req, "admin/change_password.html", ctx)
 end
 
 add_view(req::Request; model) = change_form(req, get_admin(model), nothing)
@@ -950,7 +1038,7 @@ function delete_view(req::Request; model, id)
             rd === nothing || return Juango.to_response(rd(req, name))
             message!(req, :success, interpolate(gettext("The %(model)s “%(object)s” was deleted successfully."),
                                                 Dict("model" => meta.verbose_name, "object" => name)))
-            return Juango.HttpResponseRedirect(reverse_url("admin:changelist"; model = ma.slug))
+            return Juango.HttpResponseRedirect(changelist_url(ma, req))
         catch e
             e isa Union{ProtectedError,RestrictedError} || rethrow()
             message!(req, :error, e.msg)
@@ -1042,6 +1130,7 @@ function urls(st::AdminSite = site)
         path("<slug:model>/<str:id>/change/", s(change_view); name = "change"),
         path("<slug:model>/<str:id>/delete/", s(delete_view); name = "delete"),
         path("<slug:model>/<str:id>/history/", s(history_view); name = "history"),
+        path("<slug:model>/<str:id>/password/", s(password_change_view); name = "password_change"),
     ]); namespace = st.name)
 end
 

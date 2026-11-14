@@ -201,6 +201,7 @@ end
     nick = CICharField(max_length = 30, blank = true)
     ages = IntegerRangeField(null = true, blank = true)
     window = DateTimeRangeField(null = true, blank = true)
+    amounts = DecimalRangeField(null = true, blank = true)
     title = CharField(max_length = 50, blank = true)
     body = TextField(blank = true)
     Meta(indexes = [GinIndex(:data)])

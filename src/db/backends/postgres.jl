@@ -48,7 +48,7 @@ for (L, pre, post) in ((:icontains, "%", "%"), (:istartswith, "", "%"), (:iendsw
 end
 
 alter_column_type_sql(b::PostgresBackend, table, col, ty) =
-    "ALTER TABLE $(quote_name(b, table)) ALTER COLUMN $(quote_name(b, col)) TYPE $ty USING $(quote_name(b, col))::$ty"
+    "ALTER TABLE $(quote_name(b, table)) ALTER COLUMN $(quote_name(b, col)) TYPE $ty USING $(quote_name(b, col))::$(replace(ty, r" COLLATE .*$" => ""))"
 
 foreign_key_names(::PostgresBackend, table, col) =
     [String(r[:conname]) for r in execute("""

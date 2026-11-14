@@ -107,6 +107,7 @@ function deserial_value(f::Field, v)
     f.kind === :fk && return pk_value(related_model(f), v)
     if f.kind in RANGE_KINDS && v isa AbstractDict
         conv(x) = x === nothing ? nothing : f.kind === :intrange ? Int(x) : f.kind === :daterange ? Date(x) :
+                  f.kind === :decimalrange ? to_decimal(x) :
                   something(parse_aware_datetime(x), todatetime(x))
         return ValueRange(conv(get(v, "lower", nothing)), conv(get(v, "upper", nothing)); bounds = get(v, "bounds", "[)"))
     end

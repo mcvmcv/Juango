@@ -470,6 +470,8 @@ objects(Post) |> published |> order_by("-created")
 - **`base_objects`** is the unfiltered table. Foreign-key access, cascading deletes and uniqueness checks always use it, like Django's base manager.
 - **Admin:** `Admin.register!(Post; queryset = req -> ...)` sets what the admin lists and edits.
 
+`CharField(db_collation = "C")` (or `TextField`) gives the column a collation, for a case- or accent-insensitive column, or byte order: `"C"` or an ICU collation such as `"und-x-icu"` on PostgreSQL, `"utf8mb4_bin"` on MySQL, `"NOCASE"` on SQLite. Changing it is a migration (`AlterField`).
+
 `Meta(default_related_name = "%(class)s_items")` names the reverse side of a model's relations that don't set `related_name` (and their query name), as Django's.
 
 #### Model inheritance
@@ -589,7 +591,7 @@ using Juango.Postgres                                    # CICharField, GinIndex
     tags   = ArrayField(CharField(max_length = 20); default = Vector{String})
     token  = UUIDField(default = uuid4)
     email  = CICharField(max_length = 200)              # case-insensitive (citext / NOCASE)
-    ages   = IntegerRangeField(null = true)             # also DateRangeField, DateTimeRangeField
+    ages   = IntegerRangeField(null = true)             # also DateRangeField, DateTimeRangeField, DecimalRangeField
     Meta(indexes = [GinIndex(:data), Index(:email; name = "event_email", unique = true)])   # also GistIndex, BrinIndex,
 end                                                                                       # SpGistIndex, HashIndex, BloomIndex
 
