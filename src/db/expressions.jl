@@ -657,9 +657,48 @@ Base.@nospecializeinfer function expr_value(@nospecialize(T), e, v)
     end
     v isa Decimal ? Float64(v) : v
 end
+"Whether an aggregate's argument goes through a relation (`Count(:book)`, `Sum(\"book__pages\")`)."
+Base.@nospecializeinfer function aggregates_relation(@nospecialize(T::Type), v)
+    a = v isa Aggregate ? v.arg : nothing
+    a isa F || return false
+    s = first(split(a.name, "__"))
+    s in ("id", "pk") && return false
+    f = findfield(modelmeta(T), Symbol(s))
+    f === nothing || (f.kind === :fk && occursin("__", a.name))
+end
+
+"""
+Aggregates over relations, after filter() calls on them: computed over the filters' joins (as in
+Django), so `aggregate(filter(Author; book__shelf = 1); n = Count(:book))` counts the books on
+that shelf. Only for a plain filtered queryset (no slicing, distinct, annotations or combining).
+"""
+Base.@nospecializeinfer function aggregate_joined(@nospecialize(qs::QuerySet), kw)
+    T = model_of(qs)
+    c = SQLCompiler(T)
+    wsql, wps = where_clause(c, qs)                # each filter() call's joins, as in the query itself
+    c.reuse_upto = length(qs.where)
+    sel, ps = String[], Any[]
+    for (k, v) in kw
+        sql, p = compile_expr(c, ref(v))
+        push!(sel, "$sql AS $(qname(string(k)))")
+        append!(ps, p)
+    end
+    row = execute("SELECT $(join(sel, ", ")) FROM $(qname(c.table))$(join(c.joins))$wsql", vcat(ps, c.join_params, wps))[1]
+    Dict{Symbol,Any}(k => expr_value(T, ref(v), row[k]) for (k, v) in kw)
+end
+
 Base.@nospecializeinfer function aggregate_here(@nospecialize(qs::QuerySet); kw...)
     T = model_of(qs)
     isempty(kw) && throw(ArgumentError("aggregate needs at least one name = Aggregate(...)"))
+    plain = !isempty(qs.where) && qs.limit === nothing && qs.offset == 0 && qs.distinct_fields === nothing &&
+            qs.combinator === nothing && isempty(qs.annotations) && qs.values_fields === nothing && !qs.isnone
+    rel = plain ? [k for (k, v) in kw if aggregates_relation(T, ref(v))] : Symbol[]
+    if !isempty(rel)
+        out = aggregate_joined(qs, [k => v for (k, v) in kw if k in rel])
+        rest = [k => v for (k, v) in kw if !(k in rel)]
+        isempty(rest) || merge!(out, aggregate_here(qs; rest...))
+        return out
+    end
     c = SQLCompiler(T)
     for (k, v) in qs.annotations
         is_filtered_relation(v) && (c.annotations[k] = v)

@@ -66,7 +66,11 @@ function each_chunk(f, sb::StreamBody)
     nothing
 end
 
-"Read a streaming response to the end into `resp.body` (the test client and `text` do this)."
+"""
+Read a streaming response to the end into `resp.body`. `text(r)` and the test assertions do it; the
+test client does it at once for streams of a known length (`FileResponse`), and leaves others (a
+server-sent event stream may never end) for `text(r)` or `consume_stream!(r)` to read.
+"""
 function consume_stream!(r::HttpResponse)
     r.stream === nothing && return r
     buf = IOBuffer()

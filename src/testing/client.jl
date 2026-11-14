@@ -85,6 +85,9 @@ function request(c::Client, method::AbstractString, target::AbstractString; data
     req.meta[:test_client] = true
     c.enforce_csrf || (req.meta[:dont_enforce_csrf] = true)
     resp = handle_request(req)
+    # a stream of known length (FileResponse) is read now, so resp.body has it; endless ones
+    # (server-sent events) stay streams until text(r) or consume_stream!(r)
+    is_streaming(resp) && getheader(resp, "Content-Length") !== nothing && consume_stream!(resp)
     store_cookies!(c, resp)
     if follow
         chain = Tuple{String,Int}[]

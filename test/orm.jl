@@ -1864,3 +1864,16 @@ end
     @test only(collect(annotate(filter(Topic; name = "jt", essays__title = "keep"); n = Count(:essays)))).n == 2
     @test only(collect(annotate(filter(Topic; name = "jt"); n = Count(:essays)))).n == 3
 end
+
+@testset "aggregate after filter on a relation reuses its join (#135)" begin
+    au = create(Author; name = "Agg Join A"); au2 = create(Author; name = "Agg Join B")
+    for (t, p, v) in (("aj1", true, 10), ("aj2", true, 20), ("aj3", false, 40))
+        create(Article; title = t, author = au, published = p, views = v)
+    end
+    create(Article; title = "aj4", author = au2, published = false, views = 5)
+    qs = filter(Author; name__startswith = "Agg Join", articles__published = true)
+    r = aggregate(qs; n = Count(:articles), s = Sum("articles__views"), authors = Count(:id))
+    @test r[:n] == 2 && r[:s] == 30 && r[:authors] == 1        # relation aggregates over the filtered rows; the model's own as before
+    @test aggregate(filter(Author; name__startswith = "Agg Join"); n = Count(:articles))[:n] == 4
+    @test aggregate(qs[1:1]; n = Count(:articles))[:n] == 3       # a sliced queryset: over the objects (as before)
+end

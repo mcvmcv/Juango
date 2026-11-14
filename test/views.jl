@@ -385,6 +385,7 @@ end
         @test text(r) == "data: hi\n\nevent: tick\nid: 7\ndata: {\"n\":1}\n\n: keepalive\n\n"
         @test sse_event("a\nb"; retry = 3000) == "retry: 3000\ndata: a\ndata: b\n\n"
         r = get(c, "/file/")
+        @test !Juango.is_streaming(r) && String(copy(r.body)) == read(fpath, String)     # read at once: its length is known (#134)
         @test text(r) == read(fpath, String) && getheader(r, "Content-Length") == string(filesize(fpath))
         @test getheader(r, "Content-Type") == "text/csv; charset=utf-8"
         @test getheader(r, "Content-Disposition") == "attachment; filename*=UTF-8''report%20%C3%BC.csv"
