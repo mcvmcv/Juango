@@ -966,6 +966,39 @@ end
 - **From model fields:** `FilterSet(Post; fields = [:status, :author], data = req.GET)`, or with lookups, `fields = Dict(:views => ["gte", "lte"])` (named `views__gte` ...).
 - **Results:** `fs.qs` is the filtered queryset, to chain, paginate or count; `fs.form` is the bound form. An empty value leaves its filter out, and so does an invalid one, whose field shows the error, so a stale or mistyped URL still lists results. A date range on a datetime field includes the whole of the last day.
 
+### Tables
+
+`using Juango.Tables` gives django-tables2's tables. They take a model, a queryset or a list of
+rows, and have sortable headers, pagination, footers and CSV/XLSX export:
+
+```julia
+using Juango.Tables
+
+function article_list(req)
+    table = Table(filter(Article; published = true), req;
+                  columns = [:title => LinkColumn(),                                # to get_absolute_url
+                             :author => Column(accessor = "author__name", order_by = "author__name"),
+                             :views => Column(footer = t -> sum(a.views for a in t.data)),
+                             :published => BooleanColumn(),
+                             :created => DateTimeColumn(format = "Y-m-d H:i"),
+                             :edit => TemplateColumn("<a href=\"{% url 'edit' record.id %}\">Edit</a>")],
+                  order_by = "-created", per_page = 25)
+    r = export_response(table)                     # ?_export=csv or ?_export=xlsx: the whole table
+    r === nothing || return r
+    render(req, "articles.html", Dict("table" => table))    # {% render_table table %}
+end
+```
+
+- **Sorting:** clicking a header sorts by it (`?sort=views`, again for `-views`), keeping the page's other parameters. Querysets sort in the database, other rows in Julia.
+- **Columns:** `columns = nothing` takes the model's fields. `exclude` and `sequence = [:title, :..., :edit]` change the set and order.
+- **Column options:** `label`, `accessor` (a path such as `"author__name"`), `order_by`/`orderable`, `linkify`, `default` for empty values, `render = (value, record) -> html`, `value = (value, record) -> export value`, `footer`, and `attrs = Dict("th" => ..., "td" => ...)`.
+- **Column types:** `BooleanColumn`, `DateColumn`/`DateTimeColumn`, `TemplateColumn`, `LinkColumn`, `CheckBoxColumn`, `ManyToManyColumn`, `EmailColumn` and `URLColumn`.
+- **Several tables on a page:** `prefix = "t1-"` keeps their parameters apart. `template_name` renders a table with your own template (context `table`).
+
+`XlsxResponse(rows; filename = "report.xlsx")` and `write_xlsx(path, rows)` write a spreadsheet
+of values, without another package. Numbers, booleans, dates and datetimes become real Excel
+values, and the first row is a bold header.
+
 ### Debug toolbar
 
 `DebugToolbarMiddleware` shows each page's SQL, templates and timings in a panel in the

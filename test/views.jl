@@ -2305,3 +2305,66 @@ const FINDER151_FILE = Ref("")
         @test startswith(only(sqls), "CREATE INDEX CONCURRENTLY") && occursin("c151", Juango.Migrations.op_code(op))
     end
 end
+
+@testset "tables (django-tables2) and XLSX" begin
+    T = Juango.Tables
+    rollback_after() do
+        au = create(Author; name = "TB Ann", email = "tb@x.io"); bo = create(Author; name = "TB Bob", email = "tbb@x.io")
+        for (t, a, v, p) in (("tb c", au, 30, true), ("tb a", bo, 10, false), ("tb b", au, 20, true))
+            create(Article; title = t, author = a, views = v, published = p)
+        end
+        qs = filter(Article; title__startswith = "tb ")
+        req(q = "") = Request("GET", "/list/" * (isempty(q) ? "" : "?" * q))
+        mk(r; kw...) = T.Table(qs, r; columns = [:title => T.Column(linkify = a -> "/a/$(a.id)/"),
+                                                  :author => T.Column(accessor = "author__name", order_by = "author__name"),
+                                                  :views => T.Column(footer = t -> sum(a.views for a in qs)),
+                                                  :published => T.BooleanColumn(yesno = ("yes", "no")),
+                                                  :tag => T.TemplateColumn("<b>{{ record.title|upper }}</b>"),
+                                                  :pick => T.CheckBoxColumn()],
+                                       order_by = "title", per_page = 2, kw...)
+        t = mk(req())
+        html = T.render_table(t).s
+        @test occursin("<table class=\"table\">", html) && occursin("<th class=\"orderable\"><a href=\"?sort=views\">Views</a></th>", html)
+        @test occursin("<a href=\"/a/", html) && occursin(">tb a</a>", html) && occursin("<td>TB Bob</td>", html)
+        @test occursin("<b>TB A</b>", html) && occursin("<td>no</td>", html) && occursin("name=\"pick\" value=\"", html)
+        @test !occursin("tb c", html) && occursin("Page 1 of 2", html) && occursin("<td>60</td>", html)    # page 1 of 2; footer
+        # sorting from the request keeps the other parameters; clicking again flips it
+        t2 = mk(req("sort=-views&q=x"))
+        h2 = T.render_table(t2).s
+        @test [a.title for a in t2.page.object_list] == ["tb c", "tb b"]
+        @test occursin("th class=\"orderable desc\"", h2) && occursin("sort=views", h2) && occursin("q=x", h2)
+        @test [a.title for a in mk(req("sort=author")).page.object_list] == ["tb c", "tb b"]          # Ann's, by author name
+        @test [a.title for a in mk(req("page=2")).page.object_list] == ["tb c"]
+        @test [a.title for a in mk(req("sort=tag")).page.object_list] == ["tb a", "tb b"]              # not orderable: ignored
+        # in a template
+        @test tr("{% render_table t %}", Dict("t" => t)) == html
+        # a list of rows, sorted in Julia; columns from a model by default
+        rows = [(name = "x", n = 3), (name = "y", n = nothing), (name = "z", n = 1)]
+        lt = T.Table(rows, req("sort=n"); columns = [:name, :n => T.Column(default = "none")], per_page = nothing)
+        @test [r.name for r in lt.page.object_list] == ["y", "z", "x"] && occursin("<td>none</td>", T.render_table(lt).s)
+        mt = T.Table(Author, req(); exclude = [:email])
+        @test [c.first for c in mt.columns] == [:name] && mt.columns[1].second.label == "Name"
+        # exports: the whole table, in its sort
+        @test T.export_response(t) === nothing
+        r = T.export_response(mk(req("sort=-views&_export=csv")))
+        @test getheader(r, "Content-Type") == "text/csv; charset=utf-8" && occursin("attachment", getheader(r, "Content-Disposition"))
+        @test split(text(r), '\n')[1:4] == ["Title,Author,Views,Published,Tag", "tb c,TB Ann,30,true,TB C", "tb b,TB Ann,20,true,TB B", "tb a,TB Bob,10,false,TB A"]
+        x = T.export_response(mk(req("_export=xlsx")))
+        @test getheader(x, "Content-Type") == Juango.MIME_TYPES[".xlsx"] && x.body[1:4] == UInt8[0x50, 0x4b, 0x03, 0x04]
+        @test T.export_url(t, :csv) == "?_export=csv"
+    end
+    # the XLSX writer itself
+    b = Juango.xlsx_bytes([["Name", "Born", "Score", "Ok", "Note"], ["Ann <&>", Date(2000, 1, 2), 3.5, true, nothing]])
+    s = String(copy(b))
+    @test occursin("<t xml:space=\"preserve\">Ann &lt;&amp;&gt;</t>", s) && occursin("<c r=\"B2\" s=\"1\"><v>36527</v></c>", s)
+    @test occursin("<c r=\"C2\"><v>3.5</v></c>", s) && occursin("<c r=\"D2\" t=\"b\"><v>1</v></c>", s) && !occursin("r=\"E2\"", s)
+    @test occursin("<c r=\"A1\" t=\"inlineStr\" s=\"3\">", s)                   # the header is bold
+    @test Juango.crc32(Vector{UInt8}("123456789")) == 0xCBF43926                # the standard check value
+    @test Juango.column_letters(1) == "A" && Juango.column_letters(27) == "AA" && Juango.column_letters(703) == "AAA"
+    r = XlsxResponse([["a"], [1]]; filename = "x.xlsx")
+    @test occursin("x.xlsx", getheader(r, "Content-Disposition"))
+    f = tempname() * ".xlsx"; write_xlsx(f, [["a", "b"], [1, 2]])
+    if Sys.which("unzip") !== nothing                                            # a real zip tool can read it
+        @test success(pipeline(`unzip -tq $f`; stdout = devnull, stderr = devnull))
+    end
+end
