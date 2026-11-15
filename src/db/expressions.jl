@@ -568,8 +568,21 @@ function compile_expr(c::SQLCompiler, e::Case)
     String(take!(io)), vcat(ps, dps)
 end
 
+"""
+A queryset as a subquery (`__in`, `Subquery`, `Exists`). As Django, its ordering is dropped
+unless it's sliced (then the order decides which rows are in it) or uses DISTINCT ON: the
+model's Meta.ordering would otherwise add columns under DISTINCT (#186). A `values`/`values_list`
+query selects only its named columns, even when it has other annotations (they still filter).
+"""
 function subquery_sql(c::SQLCompiler, qs::QuerySet; columns = nothing, idonly = false)
+    unsliced = qs.limit === nothing && qs.offset == 0
+    keep_order = !unsliced || (qs.distinct_fields !== nothing && !isempty(qs.distinct_fields))
+    keep_order || (qs = chain(qs; order = Any[NO_ORDER]))
     sql, ps, _, _ = build_select(qs; columns = columns, outer = c, idonly = idonly)
+    if columns === nothing && !idonly && qs.values_fields !== nothing &&
+       any(p -> !is_filtered_relation(p.second) && !(string(p.first) in qs.values_fields), qs.annotations)
+        sql = "SELECT " * join([qname(f) for f in qs.values_fields], ", ") * " FROM ($sql) AS juango_sub"
+    end
     sql, ps
 end
 

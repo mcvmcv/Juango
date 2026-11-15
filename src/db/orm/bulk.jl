@@ -256,8 +256,12 @@ Base.@nospecializeinfer function combine(op, @nospecialize(qs::QuerySet), others
     T = model_of(qs)
     isempty(others) && return qs
     parts = QuerySet[]
+    values_parts = qs.values_fields !== nothing
     for q in (qs, others...)
-        model_of(q) === T || throw(ArgumentError("$op: all querysets must be of $(nameof(T))"))
+        # rows as objects need one model; values/values_list rows only the same number of columns (as Django)
+        (q.values_fields !== nothing) == values_parts ||
+            throw(ArgumentError("$op: combine querysets of objects with each other, and values/values_list querysets with each other"))
+        values_parts || model_of(q) === T || throw(ArgumentError("$op: all querysets must be of $(nameof(T)) (values/values_list querysets of other models can be combined)"))
         (q.limit === nothing && q.offset == 0) || throw(ArgumentError("$op: slice the combined queryset, not its parts"))
         isempty(q.related) || throw(ArgumentError("$op: select_related isn't supported in combined querysets"))
         if q.combinator !== nothing && q.combinator[1] === op && q.combinator[3] == keep_all
@@ -267,7 +271,12 @@ Base.@nospecializeinfer function combine(op, @nospecialize(qs::QuerySet), others
         end
     end
     vf = first(parts).values_fields
-    all(p -> p.values_fields == vf, parts) || throw(ArgumentError("$op: the querysets must select the same fields"))
+    if vf === nothing
+        all(p -> p.values_fields === nothing, parts) || throw(ArgumentError("$op: the querysets must select the same fields"))
+    else
+        all(p -> p.values_fields !== nothing && length(p.values_fields) == length(vf), parts) ||
+            throw(ArgumentError("$op: the querysets must select the same number of columns ($(length(vf)))"))
+    end
     vm = first(parts).values_mode
     QuerySet{T}(Q[], String[], nothing, 0, false, Vector{Symbol}[], copy(qs.prefetch), nothing, nothing,
                 Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all), qs.db, Dict{Symbol,Int}(), vm)

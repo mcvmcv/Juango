@@ -197,7 +197,7 @@ end
 union(filter(Post; featured = true), filter(Post; views__gt = 1000))     # intersection, difference too
 ```
 
-`bulk_create` and `bulk_update` don't call `save!` or send signals. Unlike Django, `update!`, `bulk_update` and upserts (`update_conflicts`) stamp `auto_now` fields such as `updated_at`, so "last changed" stays true after bulk writes; pass `touch_auto_now = false` for Django's behaviour. An upsert given two objects with the same `unique_fields` writes the last one (PostgreSQL would refuse the batch). Combined querysets can be ordered, sliced and counted but not filtered further.
+`bulk_create` and `bulk_update` don't call `save!` or send signals. Unlike Django, `update!`, `bulk_update` and upserts (`update_conflicts`) stamp `auto_now` fields such as `updated_at`, so "last changed" stays true after bulk writes; pass `touch_auto_now = false` for Django's behaviour. An upsert given two objects with the same `unique_fields` writes the last one (PostgreSQL would refuse the batch). Combined querysets can be ordered, sliced and counted but not filtered further. Querysets of objects combine with querysets of the same model; `values`/`values_list` querysets combine across models when they select the same number of columns (`union(values_list(filter(Result; ...), :assay_id; flat = true), values_list(report.markers, :id; flat = true))`), and the rows take their names from the first. A queryset used as a subquery (`__in`, `Subquery`, `Exists`) drops its ordering unless it's sliced, as in Django, and a `values_list` subquery selects only its named columns.
 
 #### Validation and neighbours
 

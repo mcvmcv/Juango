@@ -501,6 +501,10 @@ Base.@nospecializeinfer function build_combined(@nospecialize(qs::QuerySet); col
     sqls, ps = String[], Any[]
     for p in parts
         sql, pp = select_sql(p; ordered = false)
+        # a values part selects only its named columns (its other annotations would change the column count)
+        if p.values_fields !== nothing && any(a -> !is_filtered_relation(a.second) && !(string(a.first) in p.values_fields), p.annotations)
+            sql = "SELECT " * join([qname(f) for f in p.values_fields], ", ") * " FROM ($sql) AS juango_part"
+        end
         push!(sqls, sql); append!(ps, pp)
     end
     word = op === :union ? "UNION" : op === :intersection ? "INTERSECT" : "EXCEPT"

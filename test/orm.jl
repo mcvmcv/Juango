@@ -2253,3 +2253,29 @@ vararg_get(qs) = get(qs, Q(title__startswith = "va"), Q(views = 99), Q(slug = "n
     @test !(:slug in vararg_only(qs)) && :body in vararg_only(qs)
     @test_throws Juango.DoesNotExist vararg_get(qs)                                                        # slug = "nope" applies
 end
+
+@testset "values subqueries select one column; union of values across models (#186, #187)" begin
+    a1, a2 = create(Author; name = "SQ One"), create(Author; name = "SQ Two")
+    create(Article; title = "sq x", author = a1, views = 5); create(Article; title = "sq y", author = a1, views = 9)
+    create(Article; title = "sq z", author = a2, views = 1)
+    arts = filter(Article; title__startswith = "sq ")
+    # #186: a distinct, ordered values_list as a subquery: its ordering (and the columns DISTINCT needs for it) goes
+    sub = values_list(distinct(order_by(arts, "-views")), :author_id; flat = true)
+    @test Set(a.name for a in filter(Author; id__in = sub)) == Set(["SQ One", "SQ Two"])
+    # an annotated values_list selects only its named column inside the subquery; the annotation still filters
+    busy = values_list(filter(annotate(filter(Author; name__startswith = "SQ "); n = Count(:articles)), n__gte = 2), :id; flat = true)
+    @test [a.name for a in filter(Author; id__in = busy)] == ["SQ One"]
+    # sliced: the order decides which rows are in it, so it stays
+    top = values_list(order_by(arts, "-views")[1:1], :author_id; flat = true)
+    @test [a.name for a in filter(Author; id__in = collect(top))] == ["SQ One"]
+    # #187: union of values_list querysets of different models, with the same number of columns
+    u = union(values_list(arts, :author_id; flat = true), values_list(filter(Author; name = "SQ Two"), :id; flat = true))
+    @test sort(collect(u)) == sort([a1.id, a2.id])                     # UNION: each id once
+    ua = union(values_list(arts, :author_id; flat = true), values_list(filter(Author; name__startswith = "SQ "), :id; flat = true); all = true)
+    @test length(collect(ua)) == 5
+    t = union(values_list(arts, :author_id, :title), values_list(filter(Author; name = "SQ Two"), :id, :name))
+    @test (a2.id, "SQ Two") in collect(t)                              # names from the first queryset's columns
+    @test_throws ArgumentError union(values_list(arts, :author_id; flat = true), values_list(objects(Author), :id, :name))
+    @test_throws ArgumentError union(arts, filter(Author; name = "SQ Two"))                   # objects: one model
+    @test_throws ArgumentError union(arts, values_list(arts, :id; flat = true))
+end
