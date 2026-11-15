@@ -539,3 +539,85 @@ end
     @test_throws Juango.TemplateSyntaxError Template("""{% render_field form.title class %}""")
     @test_throws Juango.TemplateSyntaxError r("""{% render_field "not a field" class="a" %}""")
 end
+
+# nested forms (#188): the report-sheet case, three levels over a JSON-style document
+nt_sheet(d; prefix = "", initial = Dict()) = Form([:title => CharField(max_length = 30)]; data = d, prefix = prefix, initial = initial)
+nt_plate(d; prefix = "", initial = Dict()) = Form([:name => CharField(max_length = 20)]; data = d, prefix = prefix, initial = initial)
+nt_block(d; prefix = "", initial = Dict()) = Form([:label => CharField(max_length = 20), :wells => IntegerField(blank = true, null = true)];
+                                              data = d, prefix = prefix, initial = initial)
+@testset "nested forms over a document, and over models (#188)" begin
+    doc = Dict("title" => "Sheet", "kind" => "plate map",                       # "kind": no form edits it, it's kept
+               "plates" => [Dict("name" => "P1", "colour" => "red", "blocks" => [Dict("label" => "A", "wells" => 8), Dict("label" => "B", "wells" => 4)]),
+                            Dict("name" => "P2", "blocks" => [Dict("label" => "C", "wells" => 2)])])
+    spec = (; plates = nested_formset(nt_plate; extra = 1, can_delete = true, can_order = true,
+                                      children = (; blocks = nested_formset(nt_block; extra = 1, can_delete = true))))
+    t = nested_form(nt_sheet; initial = doc, children = spec)
+    @test t.plates isa Juango.NestedFormSet && length(t.plates) == 3 && length(t[:plates][1].blocks) == 3       # initial rows + 1 extra
+    @test t.plates.formset.prefix == "plates" && t[:plates][1].form.prefix == "plates-0" && t[:plates][1].blocks.formset.prefix == "plates-0-blocks"
+    @test t[:plates][1].form.initial[:name] == "P1" && t[:plates][2][:blocks][1].form.initial[:label] == "C"
+    html = as_p(t).s
+    @test occursin("name=\"plates-0-blocks-1-label\"", html) && occursin("value=\"B\"", html) && occursin("plates-1-blocks-TOTAL_FORMS", html)
+    @test !has_changed(t) && !is_valid(t)                                       # unbound
+    # a submission: title edited; P1's block B relabelled and A deleted; P2 deleted; a new plate P3 (from the extra row) with a block;
+    # the new plate moved first
+    data = Dict("title" => "Sheet 2",
+                "plates-TOTAL_FORMS" => "3", "plates-INITIAL_FORMS" => "2",
+                "plates-0-name" => "P1", "plates-0-ORDER" => "2",
+                "plates-0-blocks-TOTAL_FORMS" => "3", "plates-0-blocks-INITIAL_FORMS" => "2",
+                "plates-0-blocks-0-label" => "A", "plates-0-blocks-0-wells" => "8", "plates-0-blocks-0-DELETE" => "on",
+                "plates-0-blocks-1-label" => "B2", "plates-0-blocks-1-wells" => "4", "plates-0-blocks-2-label" => "",
+                "plates-1-name" => "P2", "plates-1-ORDER" => "3", "plates-1-DELETE" => "on",
+                "plates-1-blocks-TOTAL_FORMS" => "2", "plates-1-blocks-INITIAL_FORMS" => "1", "plates-1-blocks-0-label" => "C", "plates-1-blocks-0-wells" => "2",
+                "plates-2-name" => "P3", "plates-2-ORDER" => "1",
+                "plates-2-blocks-TOTAL_FORMS" => "1", "plates-2-blocks-INITIAL_FORMS" => "0", "plates-2-blocks-0-label" => "D", "plates-2-blocks-0-wells" => "")
+    t = nested_form(nt_sheet; data = data, initial = doc, children = spec)
+    @test is_valid(t) && has_changed(t)
+    c = cleaned_data(t)
+    @test c["title"] == "Sheet 2" && c["kind"] == "plate map"
+    @test [p["name"] for p in c["plates"]] == ["P3", "P1"]                       # P2 deleted, P3 first by ORDER
+    @test c["plates"][2]["colour"] == "red"                                     # a key no form edits survives on its row
+    @test [b["label"] for b in c["plates"][2]["blocks"]] == ["B2"] && c["plates"][2]["blocks"][1]["wells"] == 4
+    @test c["plates"][1]["blocks"] == [Dict("label" => "D", "wells" => nothing)]
+    @test !haskey(c["plates"][1], "ORDER") && !haskey(c["plates"][1], "DELETE")
+    # the same values submitted back: nothing changed
+    same = Dict("title" => "Sheet", "plates-TOTAL_FORMS" => "2", "plates-INITIAL_FORMS" => "2",
+                "plates-0-name" => "P1", "plates-0-ORDER" => "1", "plates-0-blocks-TOTAL_FORMS" => "2", "plates-0-blocks-INITIAL_FORMS" => "2",
+                "plates-0-blocks-0-label" => "A", "plates-0-blocks-0-wells" => "8", "plates-0-blocks-1-label" => "B", "plates-0-blocks-1-wells" => "4",
+                "plates-1-name" => "P2", "plates-1-ORDER" => "2", "plates-1-blocks-TOTAL_FORMS" => "1", "plates-1-blocks-INITIAL_FORMS" => "1",
+                "plates-1-blocks-0-label" => "C", "plates-1-blocks-0-wells" => "2")
+    t2 = nested_form(nt_sheet; data = same, initial = doc, children = spec)
+    @test !has_changed(t2) && is_valid(t2)
+    @test has_changed(nested_form(nt_sheet; data = merge(same, Dict("plates-1-blocks-0-label" => "CC")), initial = doc, children = spec))   # three levels down
+    @test has_changed(nested_form(nt_sheet; data = merge(same, Dict("plates-0-ORDER" => "2", "plates-1-ORDER" => "1")), initial = doc, children = spec))  # moved
+    # an error three levels down fails the whole tree, and is on that row's form
+    bad = merge(same, Dict("plates-1-blocks-0-label" => "", "plates-1-blocks-0-wells" => "x"))
+    tb = nested_form(nt_sheet; data = bad, initial = doc, children = spec)
+    @test !is_valid(tb) && haskey(tb[:plates][2][:blocks][1].form.errors, :label) && haskey(tb[:plates][2][:blocks][1].form.errors, :wells)
+    # an extra plate left blank but with a block filled in counts, so its own required name is checked
+    ex = merge(same, Dict("plates-TOTAL_FORMS" => "3", "plates-2-name" => "", "plates-2-blocks-TOTAL_FORMS" => "1", "plates-2-blocks-INITIAL_FORMS" => "0",
+                          "plates-2-blocks-0-label" => "E"))
+    te = nested_form(nt_sheet; data = ex, initial = doc, children = spec)
+    @test !is_valid(te) && haskey(te[:plates][3].form.errors, :name)
+    # from a template
+    out = render(Template("{{ tree.title.value }}|{% for p in tree.plates %}{{ p.name.value }}:{% for b in p.blocks %}{{ b.label.value }}{% endfor %};{% endfor %}"),
+                 Dict{String,Any}("tree" => nested_form(nt_sheet; initial = doc, children = spec)))
+    @test out == "Sheet|P1:AB;P2:C;:;"
+    @test occursin("plates-__prefix__-blocks-0-label", as_p(empty_form(t.plates)).s)
+    # over models: an author and their articles in one form, saved in one transaction
+    data = Dict("name" => "NF Author", "email" => "",
+                "articles-TOTAL_FORMS" => "2", "articles-INITIAL_FORMS" => "0",
+                "articles-0-title" => "NF one", "articles-0-views" => "3", "articles-1-title" => "", "articles-1-views" => "0")   # (the extra row as rendered)
+    mt = nested_model_form(Author; data = data, fields = [:name, :email], nested = [:articles => (fields = [:title, :views], extra = 1, can_delete = true)])
+    @test is_valid(mt)
+    au = save!(mt)
+    @test au.name == "NF Author" && [a.title for a in filter(Article; author = au)] == ["NF one"]
+    edit = Dict("name" => "NF Author", "email" => "", "articles-TOTAL_FORMS" => "2", "articles-INITIAL_FORMS" => "1",
+                "articles-0-id" => string(get(Article; title = "NF one").id), "articles-0-title" => "NF one!", "articles-0-views" => "3",
+                "articles-1-title" => "NF two", "articles-1-views" => "1")
+    mt2 = nested_model_form(Author; data = edit, instance = au, fields = [:name, :email], nested = [:articles => (fields = [:title, :views], extra = 1, can_delete = true)])
+    @test is_valid(mt2) && has_changed(mt2)
+    save!(mt2)
+    @test sort([a.title for a in filter(Article; author = au)]) == ["NF one!", "NF two"]
+    @test_throws ArgumentError nested_model_form(Author; nested = [:nosuch])
+    @test_throws ErrorException save!(nested_form(nt_sheet; data = Dict("title" => "x"), initial = Dict()))       # not over a model
+end

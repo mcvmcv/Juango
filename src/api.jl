@@ -70,7 +70,7 @@ export F, Value, Count, Sum, Avg, Min, Max, Lower, Upper, Length, Coalesce, Conc
 export migrate, makemigrations
 # forms
 export Form, @form, ModelForm, is_valid, add_widget_attrs!, add_error!, as_p, cleaned_data, save_m2m!, has_changed,
-       changed_fields, FormSet, formset_factory, modelformset_factory, inlineformset_factory,
+       changed_fields, FormSet, formset_factory, nested_form, nested_formset, nested_model_form, NestedForm, modelformset_factory, inlineformset_factory,
        Widget, MultiWidget, MultiValueField, SplitDateTimeField, Media, ModelChoiceField,
        ModelMultipleChoiceField, TypedChoiceField, TypedMultipleChoiceField, MultipleChoiceField, MultipleFileField, RegexField,
        ComboField, as_field_group, as_div, as_table, NullBooleanField, SelectDateWidget, SplitHiddenDateTimeWidget,

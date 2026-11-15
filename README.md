@@ -1448,6 +1448,30 @@ fs = CommentFormSet(req.POST; instance = post)   # the foreign key to the post i
 - **`formset.empty_form`** renders a form with `__prefix__` in place of the index, for adding rows with JavaScript.
 - **`add_error!(formset, msg)`** adds a formset-wide error from a `clean` function.
 
+#### Nested forms
+
+A form with child formsets, to any depth, so a record and its children (or a JSON document of lists in lists) edit as one form. Prefixes are built from the path (`plates-0-blocks-2-label`); every level can delete and order its rows; `has_changed(tree)` says whether anything below changed; and `cleaned_data(tree)` gives back a document of the same shape, in its order, keeping keys no form edits. Rails' nested attributes are the model; Django leaves you to nest formsets by hand.
+
+```julia
+spec = (; plates = nested_formset(PlateForm; extra = 1, can_delete = true, can_order = true,
+                                  children = (; blocks = nested_formset(BlockForm; extra = 1, can_delete = true))))
+tree = nested_form(SheetForm; data = req.method == "POST" ? req.POST : nothing, initial = format.specification, children = spec)
+if is_valid(tree)                          # every level, every error
+    format.specification = cleaned_data(tree)
+    save!(format)
+end
+```
+
+```
+{{ tree.form.as_p }}{{ tree.plates.management_form }}
+{% for plate in tree.plates %}
+  {{ plate.form.as_p }}{{ plate.blocks.management_form }}
+  {% for block in plate.blocks %}{{ block.form.as_p }}{% endfor %}
+{% endfor %}
+```
+
+`{{ tree.as_p }}` renders all of it, and `empty_form(tree.plates)` gives a row with `__prefix__` for adding rows in the page. A row's form is made with `F(data; prefix, initial)`, so it can be worked out from the row's initial values. Over models, `nested_model_form(Order; fields = [...], nested = [:items => (fields = [:product, :qty], extra = 1, can_delete = true)])` edits an object and its children (an inline formset per relation, one level), and `save!(tree)` saves everything in one transaction.
+
 ### File uploads
 
 ```julia

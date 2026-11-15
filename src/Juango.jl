@@ -97,6 +97,7 @@ include("db/deploytasks.jl")
 include("forms/forms.jl")
 include("forms/tweaks.jl")
 include("forms/formsets.jl")
+include("forms/nested.jl")
 include("forms/media.jl")
 
 # sessions, auth and the apps they need
