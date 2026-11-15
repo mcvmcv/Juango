@@ -94,3 +94,31 @@ The value of field `f` from its JSON form (`value_to_json`, `dumpdata`, or a str
 assigned to the field (`setproperty!(obj, attname(f), v)`) or passed to `update!`.
 """
 value_from_json(f::Field, x) = deserial_value(f, x)
+
+"""
+    lookup_value(obj, "author__profile__city"; default = nothing)
+
+Follow a lookup path on an object, as Django does in queries but on an instance: the parts
+are attributes or relations (`__` or `.` between them), and dicts and named tuples are
+followed by key. Where the chain reaches `nothing` (an empty relation) the result is
+`default`. A property that throws is logged as a warning and gives `default`, so one bad row
+doesn't break a page or an export.
+"""
+function lookup_value(@nospecialize(obj), path::AbstractString; default = nothing)
+    v = obj
+    for part in split(path, r"__|\.")
+        v === nothing && return default
+        k = Symbol(part)
+        v = try
+            v isa AbstractDict ? get(v, string(part), get(v, k, nothing)) :
+            v isa NamedTuple ? get(v, k, nothing) :
+            v isa Model || hasproperty(v, k) ? getproperty(v, k) : nothing
+        catch e
+            @warn "lookup_value: $(typeof(obj)) $(repr(path)) failed at '$part'" exception = e
+            return default
+        end
+    end
+    v === nothing ? default : v
+end
+lookup_value(@nospecialize(obj), path::Symbol; kw...) = lookup_value(obj, string(path); kw...)
+

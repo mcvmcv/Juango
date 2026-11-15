@@ -19,7 +19,7 @@
 module Tables
 
 # (explicit imports: this file loads before Juango's export list)
-import ..Juango: csv_field, render!, __html__, Node, Parser, Token, FilterExpr, Context, parse_filter_expr, split_contents,
+import ..Juango: csv_field, lookup_value, render!, __html__, Node, Parser, Token, FilterExpr, Context, parse_filter_expr, split_contents,
                  register_tag!, eval_fe, display_string, truthy, format_date, localtime, model_of, resolve_path,
                  SQLCompiler, modelmeta, label, Field, urlencode, MIME_TYPES, xlsx_bytes, Template, Model, QuerySet,
                  SafeString, HttpResponse, setheader!, content_disposition, get_template, render, objects, order_by,
@@ -214,18 +214,7 @@ function paginate!(t::Table)
 end
 
 "The value at `path` (`author__name` or `author.name`) of a row: a model object, a Dict, a NamedTuple."
-function row_value(@nospecialize(r), path::AbstractString)
-    v = r
-    for part in split(path, r"__|\.")
-        v === nothing && return nothing
-        k = Symbol(part)
-        v = v isa AbstractDict ? get(v, string(part), get(v, k, nothing)) :
-            v isa NamedTuple ? get(v, k, nothing) :
-            v isa Model ? (try getproperty(v, k) catch e; e isa Union{ErrorException,KeyError,ArgumentError} || rethrow(); nothing end) :
-            hasproperty(v, k) ? getproperty(v, k) : nothing
-    end
-    v
-end
+row_value(@nospecialize(r), path::AbstractString) = lookup_value(r, path)      # (Juango.lookup_value)
 
 cell_raw(t::Table, @nospecialize(r), name::Symbol, c::Column) = row_value(r, accessor(name, c))
 isempty_value(c::Column, v) = any(e -> isequal(v, e), c.empty_values) || (v isa AbstractVector && isempty(v))

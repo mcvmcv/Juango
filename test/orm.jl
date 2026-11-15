@@ -2083,6 +2083,11 @@ end
     bio, n2 = count_queries(() -> p.user.profile.bio)
     @test bio == "hello" && n2 == 0
 
+    # #180: lookup paths on instances
+    lv = first(order_by(exa, "title"))
+    @test lookup_value(lv, "author__name") == "Ex A" && lookup_value(lv, :author__name) == "Ex A" && lookup_value(lv, "author.name") == "Ex A"
+    @test lookup_value(Dict("a" => (b = 1,)), "a__b") == 1 && lookup_value(Dict("a" => nothing), "a__b"; default = "-") == "-"
+    @test (@test_logs (:warn, r"lookup_value") lookup_value(lv, "author__nosuch"; default = 0)) == 0
     # #173: JSON can't hold NaN or infinity: refused with the place named
     @test_throws ArgumentError create(Gadget; data = Dict("runs" => [1.0, NaN]))
     @test Juango.json_nonfinite_path(Dict("runs" => [1.0, NaN])) == "runs[1]" && Juango.json_nonfinite_path(Inf) == "value"

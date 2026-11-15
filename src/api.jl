@@ -119,7 +119,7 @@ export send_mail, mail_admins, mail_managers, EmailMessage, EmailMultiAlternativ
        XlsxResponse, write_xlsx, csv_field,
        attach_alternative!
 # apps, contrib apps, tasks
-export App, get_model, concrete_fields, many_to_many, attname, column, is_relation, is_primary_key, related_model,
+export App, get_model, lookup_value, concrete_fields, many_to_many, attname, column, is_relation, is_primary_key, related_model,
        value_from_object, value_to_json, value_from_json, Admin, Sitemap, sitemap_urls, Feed, FlatPage, Site, get_current_site,
        @background, enqueue, get_result, TaskResult
 # server and commands

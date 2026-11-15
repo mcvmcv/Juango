@@ -387,6 +387,8 @@ values_list(objects(Post), :title, :author__name)               # tuples; flat=t
 filter(Plate; id__in = values_list(filter(Event; kind = "load"), :plate_id; flat = true))   # one query: a subquery
 ```
 
+`lookup_value(post, "author__profile__city")` follows the same kind of path on an object: `nothing` (or `default`) where a relation is empty, and a property that throws is logged rather than raised.
+
 `values` and `values_list` return lazy QuerySets, as in Django: they chain (`order_by`, `distinct`, slices, `count`, `exists`), `first` and `last` give `nothing` when there are no rows, and nothing runs until they're iterated, compared with a vector or `collect`ed. Collect one when you need a snapshot that later writes can't change.
 
 - **Aggregates:** `Count`, `Sum`, `Avg`, `Min`, `Max`, with `distinct=` and `filter=`.
