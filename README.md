@@ -395,7 +395,7 @@ filter(Plate; id__in = values_list(filter(Event; kind = "load"), :plate_id; flat
 
 With DEBUG on, paginating an unordered queryset, or slicing one from a later row, logs a warning once: without `order_by` or `Meta(ordering)` the database may return rows in any order, so pages overlap or skip rows (`first` and `last` already order by the primary key).
 
-`values` and `values_list` return lazy QuerySets, as in Django: they chain (`order_by`, `distinct`, slices, `count`, `exists`), `first` and `last` give `nothing` when there are no rows, and nothing runs until they're iterated, compared with a vector or `collect`ed. Collect one when you need a snapshot that later writes can't change.
+`values` and `values_list` return lazy QuerySets, as in Django: they chain (`order_by`, `distinct`, slices, `count`, `exists`), `first` and `last` give `nothing` when there are no rows, and nothing runs until they're iterated, compared with a vector or `collect`ed. Collect one when you need a snapshot that later writes can't change. A few vector idioms need `collect` too: `[qs1; qs2]` is a vector of two querysets, not their rows (using it as a query value is an error naming this), `filter(pred, qs)` is the ORM's `filter`, and `findfirst` needs a vector.
 
 - **Aggregates:** `Count`, `Sum`, `Avg`, `Min`, `Max`, with `distinct=` and `filter=`.
 - **Functions:** `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Cast(x, :float)`, `Now()`, and `ExtractYear`/`ExtractMonth`/`ExtractDay`.

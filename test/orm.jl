@@ -502,6 +502,9 @@ end
     @test values_list(order_by(exa, "title"), :title, :author__name)[3] == ("ex-3", "Ex B")
     @test values_list(order_by(annotate(exau; n = Count(:articles)), "name"), :n; flat = true) == [2, 1, 0]
     # #160: values_list is a lazy QuerySet
+    # a queryset (or a vector of them) as a query value is an error, not its string bound as a parameter
+    e = try collect(filter(Article; id__in = [values_list(exa, :id; flat = true); values_list(exa, :id; flat = true)])); nothing catch err; err end
+    @test e isa ArgumentError && occursin("QuerySet{Article} was used as a query value", e.msg)
     # #185: every field, however many are passed literally (a precompiled caller lost the last one)
     r4 = first(values_list(order_by(exa, "title"), :id, :title, :views, :author_id))
     @test length(r4) == 4 && r4[2] == "ex-1"

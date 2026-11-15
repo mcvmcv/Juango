@@ -705,6 +705,11 @@ Base.@nospecializeinfer Base.collect(@nospecialize(qs::QuerySet)) = fetch(qs)
 # a queryset equals a vector of the same rows (`values_list(qs, :id; flat = true) == [1, 2]`)
 Base.@nospecializeinfer Base.:(==)(@nospecialize(qs::QuerySet), v::AbstractVector) = fetch(qs) == v
 Base.@nospecializeinfer Base.:(==)(v::AbstractVector, @nospecialize(qs::QuerySet)) = v == fetch(qs)
+# A queryset reaching the driver as a parameter would be bound as its string ("<QuerySet{...}>"):
+# a vector of querysets (`[qs1; qs2]`) given to `__in`, for example. Say so instead.
+adapt_param(::DatabaseBackend, @nospecialize(qs::QuerySet)) =
+    throw(ArgumentError("a QuerySet{$(nameof(model_of(qs)))} was used as a query value: give it on its own to `__in` " *
+                        "(a subquery), combine querysets with union(...) or Q(...) | Q(...), or collect(...) it first"))
 # values() and values_list querysets as JSON: their rows
 Base.@nospecializeinfer JsonResponse(@nospecialize(qs::QuerySet); kw...) = JsonResponse(fetch(qs); kw...)
 Base.@nospecializeinfer Base.sort(@nospecialize(qs::QuerySet); kw...) = sort(fetch(qs); kw...)

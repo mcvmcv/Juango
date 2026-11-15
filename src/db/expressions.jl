@@ -661,6 +661,11 @@ Like Django's, the result is a lazy QuerySet: nothing runs until it's iterated, 
 compared, so it chains (`order_by`, `distinct`, slicing, `count`, `exists`), `first` and `last`
 give `nothing` when there are no rows, and `filter(Plate; id__in = values_list(qs, :plate_id; flat = true))`
 is one query with a subquery. `collect` it for a `Vector`.
+
+Since it isn't a `Vector`, some vector code needs `collect` first: `[qs1; qs2]` makes a vector of
+two querysets (not their rows; using it as a query value is an error), `filter(pred, qs)` is the
+ORM's `filter`, and `findfirst`/indexing by position need `keys`. `union(qs1, qs2)` or
+`Q(...) | Q(...)` combine querysets in the database.
 """
 # A plain method that gathers the fields, and a despecialized one with fixed arguments: a
 # @nospecializeinfer method with both a vararg and keywords lost its last field in some
