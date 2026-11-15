@@ -520,7 +520,7 @@ end
     sub = values_list(filter(exa; title__in = ["ex-1", "ex-2"]), :author_id; flat = true)
     nsub, nq = Juango.count_queries(() -> count(filter(exau; id__in = sub)))
     @test nq == 1 && nsub == length(unique(collect(sub)))
-    @test values(values_list(order_by(exa, "title"), :title))[1] == Dict(:title => "ex-1")      # values() turns rows back into Dicts
+    @test values(values_list(order_by(exa, "title"), :title), :title)[1] == Dict(:title => "ex-1")      # values() turns rows back into Dicts
     @test JSON.parse(String(JsonResponse(values_list(order_by(exa, "title"), :title; flat = true)).body)) == ["ex-1", "ex-2", "ex-3"]
     @test first(values(exa, :id))[:id] isa Integer
 

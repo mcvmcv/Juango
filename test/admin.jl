@@ -415,7 +415,7 @@ end
 end
 
 @testset "admin: models under their app, grouped index, Django's URL names (#159)" begin
-    quiet(() -> Juango.sync_models!([AdminDup.Article]))
+    redirect_stdout(() -> Juango.sync_models!([AdminDup.Article]), devnull)
     Admin.register!(AdminDup.Article; list_display = [:title])
     try
         c = Client()

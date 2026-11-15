@@ -1242,7 +1242,7 @@ end
     end
     @test Juango.edit_distance("DEBG", "DEBUG") == 1
     @test Juango.edit_distance("", "abc") == 3 && Juango.edit_distance("kitten", "sitting") == 3
-    override_settings(DEBG = false, ALLOWED_HOST = ["x"], DEBUG = "false",
+    override_settings(DEBG = false, ALLOWED_HOST = ["x"], USE_THOUSAND_SEPARATOR = "no",
                       ALLOWED_HOSTS = "example.com", SECURE_HSTS_SECONDS = "3600", MY_THING = 1) do
         msgs = Juango.run_checks(tags = [:settings])
         byid(id) = [m for m in msgs if m.id == id]
@@ -1250,7 +1250,7 @@ end
         @test any(m -> m.msg == "Unknown setting DEBG: did you mean DEBUG?", w)
         @test any(m -> m.msg == "Unknown setting ALLOWED_HOST: did you mean ALLOWED_HOSTS?", w)
         @test any(m -> startswith(m.msg, "Unknown setting MY_THING.") && occursin("declare_settings!(:MY_THING)", m.hint), w)
-        @test any(m -> occursin("DEBUG must be true or false", m.msg), byid("settings.E001"))
+        @test any(m -> occursin("USE_THOUSAND_SEPARATOR must be true or false", m.msg), byid("settings.E001"))
         @test any(m -> occursin("ALLOWED_HOSTS must be a list", m.msg), byid("settings.E002"))
         @test any(m -> occursin("SECURE_HSTS_SECONDS must be a number", m.msg), byid("settings.E003"))
         override_settings(EXTRA_SETTINGS = ["MY_*"]) do
