@@ -295,14 +295,14 @@ function condition_value(T, q::Q, value)
             v = c.second
             v isa Model && (v = v.id)
             v isa F && (v = value(v.name))
-            lookup_value(x, lookup, v)
+            check_lookup_value(x, lookup, v)
         end
         acc = q.connector === :OR ? (acc | r) : q.connector === :XOR ? xor(acc, r) : (acc & r)
     end
     q.negated ? !acc : acc
 end
 
-function lookup_value(x, lookup, v)
+function check_lookup_value(x, lookup, v)
     lookup == "isnull" && return (x === nothing) == v
     lookup == "exact" && v === nothing && return x === nothing
     (x === nothing || v === nothing) && return missing
