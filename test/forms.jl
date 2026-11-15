@@ -160,6 +160,22 @@ end
         @test get(Attachment; id = nophoto.id).photo === nothing
 
         # forms
+        # #175: several files in one field
+        mf(files; fld = MultipleFileField(max_files = 2)) = Form([:docs => fld]; data = Dict{String,Any}(), files = Dict("docs" => files))
+        m = mf([UploadedFile("a.txt", "A"), UploadedFile("b.txt", "B")])
+        @test is_valid(m) && [u.name for u in m.cleaned_data[:docs]] == ["a.txt", "b.txt"]
+        m = mf(UploadedFile[])
+        @test !is_valid(m) && m.errors[:docs] == ["This field is required."]                 # nothing chosen: missing
+        m = mf([UploadedFile("a.txt", "A"), UploadedFile("b.txt", "B"), UploadedFile("c.txt", "C")])
+        @test !is_valid(m) && occursin("at most 2 files", only(m.errors[:docs]))
+        m = mf([UploadedFile("a.txt", ""), UploadedFile("b.txt", "B")])
+        @test !is_valid(m) && only(m.errors[:docs]) == "a.txt: The submitted file is empty."
+        @test is_valid(mf(UploadedFile[]; fld = MultipleFileField(blank = true)))
+        @test is_valid(Form([:docs => MultipleFileField()]; data = Dict{String,Any}(), files = Juango.FileDict(Dict("docs" => [UploadedFile("x.txt", "X")]))))
+        m = mf([UploadedFile("fake.png", "text")]; fld = MultipleFileField(images = true))
+        @test !is_valid(m) && startswith(only(m.errors[:docs]), "fake.png: Upload a valid image")
+        blank_form = Form([:docs => MultipleFileField()])
+        @test occursin(" multiple", as_p(blank_form).s) && occursin("type=\"file\"", as_p(blank_form).s) && blank_form.is_multipart
         f = ModelForm(Attachment; data = Dict("title" => "via form"), files = Dict("file" => UploadedFile("doc.pdf", "%PDF")))
         @test is_valid(f) && Juango.has_changed(f)
         saved = save!(f)

@@ -280,6 +280,22 @@ function ImageField(; upload_to = "", storage = nothing, width_field = nothing, 
 end
 
 const FILE_KINDS = (:file, :image)
+
+"""
+    MultipleFileField(; max_files = nothing, images = false, blank = false, kw...)
+
+A form field for several files at once (`<input type="file" multiple>`), which Django leaves
+you to write. Its cleaned value is a `Vector{UploadedFile}`; each file is checked as a
+`FileField`'s is (not empty, name length, `validators`, and with `images = true`, a valid
+image). When required, choosing nothing is an error (browsers send an empty list, which
+Django's required check misses). `max_files` limits how many. For forms only: save the
+files yourself (`save_file`), say to a related model, one row per file.
+"""
+MultipleFileField(; max_files = nothing, images::Bool = false, max_length = 100, kw...) =
+    (f = Field(images ? :image : :file; max_length = max_length, kw...);
+     f.related = ("", nothing, nothing, nothing, (multiple = true, max_files = max_files)); f)
+"Whether a file field takes several files (`MultipleFileField`)."
+is_multiple_file(fld) = fld.related isa Tuple && length(fld.related) >= 5 && fld.related[5] isa NamedTuple && get(fld.related[5], :multiple, false)
 "A field's storage: its `storage` option (a Storage, or the name of one in `STORAGES`), else the default."
 function field_storage(f::Field)
     s = f.related[2]

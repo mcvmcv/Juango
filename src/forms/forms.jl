@@ -512,6 +512,12 @@ has_changed(f::Form) = f.data !== nothing && !isempty(changed_fields(f))
 "The file uploaded for a field, or `nothing`."
 function file_upload(f::Form, fld::Field)
     f.files === nothing && return nothing
+    if is_multiple_file(fld)
+        raw = f.files isa FileDict ? getlist(f.files, html_name(f, fld)) : get(f.files, html_name(f, fld), nothing)
+        raw isa UploadedFile && (raw = [raw])
+        ups = UploadedFile[u for u in something(raw, UploadedFile[]) if u isa UploadedFile && !isempty(u.name)]
+        return isempty(ups) ? nothing : ups
+    end
     v = get(f.files, html_name(f, fld), nothing)
     v isa AbstractVector && (v = isempty(v) ? nothing : first(v))
     v isa UploadedFile ? v : nothing
@@ -520,6 +526,7 @@ file_cleared(f::Form, fld::Field) = f.data !== nothing && haskey(f.data, html_na
 
 "A file field's value: the upload, `nothing` when cleared, else the current file."
 function clean_file_field(f::Form, fld::Field)
+    is_multiple_file(fld) && return clean_multiple_files(f, fld)
     up = file_upload(f, fld)
     current = initial_for(f, fld)
     v = up !== nothing ? up : file_cleared(f, fld) ? nothing : current
@@ -537,6 +544,28 @@ function clean_file_field(f::Form, fld::Field)
         append!(errs, validator_errors(fld, up))
     end
     v, errs
+end
+function clean_multiple_files(f::Form, fld::Field)
+    ups = something(file_upload(f, fld), UploadedFile[])
+    errs = String[]
+    if isempty(ups)
+        fld.blank || push!(errs, field_message(fld, "required", gettext("This field is required.")))
+        return ups, errs
+    end
+    mx = fld.related[5].max_files
+    mx !== nothing && length(ups) > mx &&
+        push!(errs, interpolate(ngettext("Upload at most %(max)d file (you chose %(n)d).", "Upload at most %(max)d files (you chose %(n)d).", mx),
+                                Dict("max" => mx, "n" => length(ups))))
+    for up in ups
+        pre = up.name * ": "
+        up.size == 0 && push!(errs, pre * field_message(fld, "empty", gettext("The submitted file is empty.")))
+        fld.max_length !== nothing && length(up.name) > fld.max_length &&
+            push!(errs, pre * interpolate(gettext("Ensure this filename has at most %(max)d characters (it has %(len)d)."), Dict("max" => fld.max_length, "len" => length(up.name))))
+        fld.kind === :image && image_size(up.data) === nothing &&
+            push!(errs, pre * field_message(fld, "invalid_image", gettext("Upload a valid image. The file you uploaded was either not an image or a corrupted image.")))
+        append!(errs, [pre * e for e in validator_errors(fld, up)])
+    end
+    ups, errs
 end
 
 "Names of the fields whose submitted value differs from the initial value."
@@ -709,7 +738,8 @@ function widget_html(bf::BoundField)
             print(io, "<br>Change: ")
         end
         r = (!fld.blank && !(cur isa FieldFile) && f.use_required_attribute) ? " required" : ""
-        print(io, "<input type=\"file\" name=\"$name\" id=\"$id\"$r", fld.kind === :image ? " accept=\"image/*\"" : "", ">")
+        print(io, "<input type=\"file\" name=\"$name\" id=\"$id\"$r", is_multiple_file(fld) ? " multiple" : "",
+              fld.kind === :image ? " accept=\"image/*\"" : "", ">")
         return String(take!(io))
     elseif fld.kind === :geometry
         return geometry_widget(name, id, fld, f.data !== nothing ? val : get(f.initial, fld.name, nothing))

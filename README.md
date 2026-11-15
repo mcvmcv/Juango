@@ -1402,6 +1402,7 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
   A backend is a `Storage` value, a type or function called with the `OPTIONS`, or `:filesystem`/`:memory`. A storage implements `save_file`, `read`, `exists`, `size`, `delete_file` and `url`, and optionally `path` and `listdir`, so other backends (a cloud bucket, say) plug in the same way. `DEFAULT_FILE_STORAGE` still works when `STORAGES` has no `"default"`.
 - **Safe file names.** Names are sanitised, can't escape `MEDIA_ROOT`, and never overwrite: an existing name gets a random suffix.
 - **Images.** `ImageField` accepts PNG, GIF, JPEG and WebP. Juango reads the size itself, so no image library is needed.
+- **Several files in one field.** `MultipleFileField(max_files = 10)` (a form field; `images = true` checks each is an image) renders `<input type="file" multiple>` and cleans to a `Vector{UploadedFile}`, each checked like a `FileField`'s upload. When required, choosing nothing is an error. Save each one yourself, say as a row of a related model.
 - **Forms and admin.** Forms show the current file with a "Clear" checkbox when the field is optional, and the admin handles uploads.
 - **Testing.** The test client uploads when the data contains an `UploadedFile`: `post(c, url, Dict("file" => UploadedFile("a.txt", "hi")))`.
 - **Serving.** With `DEBUG`, the development server serves `MEDIA_URL`. In production, serve `MEDIA_ROOT` from your web server.
