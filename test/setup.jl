@@ -422,7 +422,8 @@ function tr(src, ctx = Dict())
     old = Juango.COMPILE_TEMPLATES[]          # not configure!: that would reset caches between the renders
     Juango.COMPILE_TEMPLATES[] = :interpret
     interp = try render(t, ctx) finally Juango.COMPILE_TEMPLATES[] = old end
-    out == interp || occursin("lorem", src) || error("compiled and interpreted renders differ for $(repr(src)):\n  compiled:    $(repr(out))\n  interpreted: $(repr(interp))")
+    # (lorem is random; output relative to "now" can change between the two renders on a busy machine)
+    out == interp || occursin(r"lorem|naturaltime|timesince|timeuntil|\{% *now", src) || error("compiled and interpreted renders differ for $(repr(src)):\n  compiled:    $(repr(out))\n  interpreted: $(repr(interp))")
     out
 end
 
