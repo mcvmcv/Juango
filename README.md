@@ -2009,7 +2009,7 @@ end
 configure!(SILENCED_SYSTEM_CHECKS = ["billing.W001", "security.W004"])
 ```
 
-Juango's own checks use Django's ids where Django has the same check (`security.W004` for HSTS, `security.W009` for `SECRET_KEY`, and so on).
+Juango's own checks use Django's ids where Django has the same check (`security.W004` for HSTS, `security.W009` for `SECRET_KEY`, and so on). Some go further than Django's: unknown and mistyped settings (`settings.W001`, `settings.E001`–`E004`), and text fields with `null = true` that aren't unique (`fields.W800`), which then have two kinds of blank, NULL and `""`.
 
 ## Deployment
 

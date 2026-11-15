@@ -1228,6 +1228,18 @@ end
 end
 
 @testset "misspelled and mistyped settings (#163)" begin
+    # #184: a nullable text field (two kinds of blank) gets a warning; unique ones don't
+    ef = Juango.findfield(Juango.modelmeta(Author), :email)
+    ef.null = true
+    try
+        w = [m for m in Juango.run_checks(tags = [:models]) if m.id == "fields.W800"]
+        @test any(m -> startswith(m.msg, "Author.email: a text field with null = true"), w)
+        @test !any(m -> occursin("LogEntry", m.msg), w)                       # Juango's own models are left out
+        ef.unique = true
+        @test !any(m -> m.id == "fields.W800" && occursin("Author.email", m.msg), Juango.run_checks(tags = [:models]))
+    finally
+        ef.null = false; ef.unique = false
+    end
     @test Juango.edit_distance("DEBG", "DEBUG") == 1
     @test Juango.edit_distance("", "abc") == 3 && Juango.edit_distance("kitten", "sitting") == 3
     override_settings(DEBG = false, ALLOWED_HOST = ["x"], DEBUG = "false",

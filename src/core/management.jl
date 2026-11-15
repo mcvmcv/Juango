@@ -132,6 +132,23 @@ register_check!(tags = [:models]) do
     end
     msgs
 end
+# Two kinds of blank: a nullable text field holds both NULL and "" (Django has no such check;
+# linters do). Unique fields are left out (there NULL is how several rows stay empty), and so are
+# Juango's own models.
+const TEXT_FIELD_KINDS = (:char, :text, :email, :slug, :url, :citext)
+register_check!(tags = [:models]) do
+    msgs = CheckMessage[]
+    for T in MODEL_LIST
+        pm = parentmodule(T)
+        (pm === Juango || parentmodule(pm) === Juango) && continue
+        for f in modelmeta(T).fields
+            f.kind in TEXT_FIELD_KINDS && f.null && !f.unique || continue
+            push!(msgs, CheckMessage(:warning, "$(nameof(T)).$(f.name): a text field with null = true has two empty values, NULL and \"\"."; id = "fields.W800",
+                                     hint = "Leave out null = true (blank = true stores \"\"), unless the field is unique."))
+        end
+    end
+    msgs
+end
 register_check!(deploy_checks; tags = [:security], deploy = true)
 
 "Print check messages as `manage.jl check` does (with how many were silenced); returns them."
