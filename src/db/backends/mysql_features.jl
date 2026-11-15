@@ -122,3 +122,10 @@ function drop_column_sql(b::MySQLBackend, old::Table, new::Table, name)
          ["ALTER TABLE $t DROP COLUMN $(quote_name(b, name))"])
 end
 
+# --- advisory locks: GET_LOCK, held by the connection until RELEASE_LOCK ---
+function advisory_acquire(::MySQLBackend, name::String, timeout)
+    got = execute("SELECT GET_LOCK(?, ?) AS ok", Any[advisory_name(name), timeout === nothing ? 31_536_000 : Int(ceil(timeout))])[1][:ok]
+    got == 1 || throw(DatabaseError("advisory_lock: timed out waiting for '$name'", "lock"))
+end
+advisory_release(::MySQLBackend, name::String) = execute("SELECT RELEASE_LOCK(?) AS ok", Any[advisory_name(name)])
+

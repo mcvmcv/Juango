@@ -123,6 +123,7 @@ In tests inside `rollback_after`, `capture_on_commit_callbacks(f; execute = true
 
 More of Django's `transaction` module:
 - **`atomic(f; durable = true)`** refuses to run inside another atomic block, so when it returns the work is committed. Blocks opened by `rollback_after` in tests don't count.
+- **`advisory_lock("plates", year) do ... end`** runs a block in a transaction while holding a named lock, so two requests can't both read the last label number and make the same next one (PostgreSQL `pg_advisory_xact_lock`, MySQL `GET_LOCK`, a lock in the process on SQLite). `timeout = 5` gives up with an error instead of waiting.
 - **`set_rollback!(true)`** rolls the innermost block back when it ends, without an exception. `get_rollback()` reads the flag.
 - **`savepoint()`** returns an id for `savepoint_commit` and `savepoint_rollback`; a rollback also drops the `on_commit` callbacks registered since.
 - **`execute_wrapper(wrapper) do ... end`** calls `wrapper(execute, sql, params, context)` around each statement the block runs: for blocking queries, timing them, adding comments or retrying.

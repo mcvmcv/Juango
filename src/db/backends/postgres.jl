@@ -72,3 +72,17 @@ register_backend!("postgresql", PostgresBackend)
 register_backend!("postgres", PostgresBackend)
 
 supports_insert_returning(::PostgresBackend) = true
+
+# advisory locks: held until the transaction ends (advisory_lock runs inside atomic)
+function advisory_acquire(::PostgresBackend, name::String, timeout)
+    timeout === nothing || execute("SET LOCAL lock_timeout = '$(round(Int, 1000 * timeout))ms'", Any[])
+    try
+        execute("SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock(CAST(? AS BIGINT))) AS juango_lock", Any[advisory_key(name)])
+    catch e
+        e isa DatabaseError && e.sqlstate == "55P03" && throw(DatabaseError("advisory_lock: timed out waiting for '$name'", "lock"))
+        rethrow()
+    end
+    timeout === nothing || execute("SET LOCAL lock_timeout = 0", Any[])
+end
+advisory_release(::PostgresBackend, name::String) = nothing
+

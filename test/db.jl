@@ -421,3 +421,33 @@ end
         disconnect!(post_init; sender = Topic, dispatch_uid = "t147pi")
     end
 end
+
+@testset "advisory_lock (#178)" begin
+    order = String[]
+    hold, release = Channel(1), Channel(1)
+    t1 = @async advisory_lock("plates", 2026) do
+        push!(order, "a in"); put!(hold, true); take!(release); push!(order, "a out")
+    end
+    take!(hold)
+    t2 = @async advisory_lock(() -> push!(order, "b"), "plates", 2026)
+    if Juango.supports_pooling(Juango.backend())          # (SQLite has one connection: transactions take turns anyway)
+        t3 = @async advisory_lock(() -> push!(order, "other"), "other", 1)
+        wait(t3)
+    end
+    sleep(0.3)
+    @test !("b" in order)                                  # b waits for a; another key doesn't
+    put!(release, true); wait(t1); wait(t2)
+    @test filter(!=("other"), order) == ["a in", "a out", "b"]
+    # a timeout gives up with an error
+    hold2, release2 = Channel(1), Channel(1)
+    t4 = @async advisory_lock("plates", 2027) do
+        put!(hold2, true); take!(release2)
+    end
+    take!(hold2)
+    err = try advisory_lock(() -> nothing, "plates", 2027; timeout = 0.3); nothing catch e; e end
+    @test err isa Juango.DatabaseError && occursin("timed out", err.msg)
+    put!(release2, true); wait(t4)
+    @test advisory_lock(() -> 42, "plates", 2027) == 42
+    @test Juango.advisory_name("plates:2026") == "juango:plates:2026" && length(Juango.advisory_name(repeat("x", 100))) <= 64
+    @test Juango.advisory_key("plates:2026") == Juango.advisory_key("plates:2026") != Juango.advisory_key("plates:2027")
+end

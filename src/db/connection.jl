@@ -787,6 +787,58 @@ execute_changes(sql::AbstractString, params = Any[]) = run_driver(driver_rowcoun
 execute_insert(sql::AbstractString, params = Any[]) = run_driver(driver_insert_id, sql, params)
 
 """
+    advisory_lock(f, key...; timeout = nothing, db = nothing)
+
+Run `f()` in a transaction while holding a lock named by `key` (`advisory_lock("plates", 2026) do
+... end`), so two requests can't run that part at once: for example both reading the last label
+number and making the same next one. Other work isn't blocked.
+- PostgreSQL: `pg_advisory_xact_lock`, released when the transaction ends.
+- MySQL/MariaDB: `GET_LOCK` / `RELEASE_LOCK`.
+- SQLite: a lock inside this process (SQLite apps run in one), around the transaction.
+
+`timeout` (seconds) gives up with a `DatabaseError` instead of waiting forever.
+"""
+function advisory_lock(f, key...; timeout = nothing, db = nothing)
+    name = join(string.(key), ":")
+    atomic(; db = db) do
+        b = backend()
+        advisory_acquire(b, name, timeout)
+        try
+            f()
+        finally
+            advisory_release(b, name)
+        end
+    end
+end
+"A lock name databases accept (MySQL: at most 64 characters): readable when short, hashed when long."
+advisory_name(name::String) = ncodeunits(name) <= 48 && all(c -> isascii(c) && (isletter(c) || isdigit(c) || c in ":_-."), name) ?
+    "juango:" * name : "juango:" * string(advisory_key(name); base = 16)
+"A stable 64-bit key for a lock name (FNV-1a), the same in every process."
+function advisory_key(name::String)
+    h = 0xcbf29ce484222325
+    for b in codeunits(name)
+        h = (h ⊻ b) * 0x100000001b3
+    end
+    reinterpret(Int64, h)
+end
+# SQLite (and any backend without its own): a lock per name in this process
+const PROCESS_LOCKS = Dict{String,ReentrantLock}()
+const PROCESS_LOCKS_GUARD = ReentrantLock()
+function advisory_acquire(::DatabaseBackend, name::String, timeout)
+    l = lock(() -> get!(ReentrantLock, PROCESS_LOCKS, name), PROCESS_LOCKS_GUARD)
+    if timeout === nothing
+        lock(l)
+    else
+        deadline = time() + timeout
+        while !trylock(l)
+            time() > deadline && throw(DatabaseError("advisory_lock: timed out waiting for '$name'", "lock"))
+            sleep(0.01)
+        end
+    end
+end
+advisory_release(::DatabaseBackend, name::String) = unlock(PROCESS_LOCKS[name])
+
+"""
     atomic(f)
 
 Run `f()` inside a transaction (nested calls use savepoints) on the current database, or on
