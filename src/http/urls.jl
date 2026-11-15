@@ -322,6 +322,13 @@ so `reverse_url("admin:index")` and `{% url 'admin:index' %}` find that site's p
 const CURRENT_APP = Base.ScopedValues.ScopedValue{Union{Nothing,Pair{String,String}}}(nothing)
 
 """
+Functions that may translate a view name `reverse_url` doesn't know: `(name, args, kwargs) ->
+(name, args, kwargs)` or `nothing`. The admin uses one for Django's per-model names
+(`admin:blog_post_change`), so they work for models registered at any time.
+"""
+const REVERSE_FALLBACKS = Function[]
+
+"""
     reverse_url(name, args...; urlconf=settings.ROOT_URLCONF, query=nothing, kwargs...)
 
 Build the URL for the named pattern. Use `"namespace:name"` for included patterns.
@@ -329,13 +336,6 @@ Build the URL for the named pattern. Use `"namespace:name"` for included pattern
     reverse_url("article"; id=3)        # "/articles/3/"
     reverse_url("blog:post", 3)         # positional arguments also work
 """
-"""
-Functions that may translate a view name `reverse_url` doesn't know: `(name, args, kwargs) ->
-(name, args, kwargs)` or `nothing`. The admin uses one for Django's per-model names
-(`admin:blog_post_change`), so they work for models registered at any time.
-"""
-const REVERSE_FALLBACKS = Function[]
-
 function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLCONF, query = nothing, current_app = nothing, kwargs...)
     idx, apps = lock(REVERSE_LOCK) do
         get!(() -> build_reverse_index!(Dict{String,Vector{ReverseEntry}}(), urlconf, "", nothing), REVERSE_CACHE, urlconf),

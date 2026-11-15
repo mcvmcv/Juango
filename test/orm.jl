@@ -1072,7 +1072,7 @@ end
                 update_fields = [:email], unique_fields = [:name])
     @test get(Author; name = "Bulk Author").email == "last@x.io" && get(Author; name = "Bulk Dup").email == "d1@x.io"
     # #183: bulk writes stamp auto_now fields (updated) unless touch_auto_now = false
-    stamped = create(Article; title = "auto now bulk", author = get(Author; name = "Bulk Author"))
+    stamped = create(Article; title = "auto now bulk", author = create(Author; name = "Auto Now Author"))
     t0 = get(Article; id = stamped.id).updated
     sleep(0.01)
     update!(filter(Article; id = stamped.id); views = 7)
