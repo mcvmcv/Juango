@@ -39,7 +39,34 @@ function migration_actions(g::Graph, k; backwards = false)
         end
     end
     append!(actions, deferred)
-    actions
+    b isa Juango.PostgresBackend ? settle_deferred_triggers(actions) : actions
+end
+
+"""
+PostgreSQL refuses `ALTER TABLE` on a table with pending trigger events ("cannot ALTER TABLE
+... because it has pending trigger events"): rows written earlier in the same transaction
+queue checks of its deferred foreign keys. That happens only when there is data, so it passes
+tests on empty tables and fails in production: a backfill or RunPython step, then a column
+change. After a data write, the next `ALTER TABLE` gets `SET CONSTRAINTS ALL IMMEDIATE` (run the
+checks now) before it and `SET CONSTRAINTS ALL DEFERRED` after.
+"""
+function settle_deferred_triggers(actions)
+    out = Any[]
+    dirty = false
+    for a in actions
+        if a isa AbstractString
+            if dirty && occursin(r"^\s*ALTER\s+TABLE\b"i, a)
+                append!(out, ["SET CONSTRAINTS ALL IMMEDIATE", a, "SET CONSTRAINTS ALL DEFERRED"])
+                dirty = false
+                continue
+            end
+            occursin(r"^\s*(UPDATE|INSERT|DELETE)\b"i, a) && (dirty = true)
+        else
+            dirty = true                       # RunPython and other functions can write rows
+        end
+        push!(out, a)
+    end
+    out
 end
 
 "An initial migration whose tables and columns all exist already (database created before migrations)."

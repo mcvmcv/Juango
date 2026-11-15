@@ -242,6 +242,32 @@ end
         @test_throws IntegrityError create(MigTag; label = "x")
         @test get(MigPostV2; headline = "Hello").author.name == "Ann"
 
+        # #170: after a data write, PostgreSQL gets SET CONSTRAINTS ALL IMMEDIATE before the next ALTER TABLE
+        acts = Juango.Migrations.settle_deferred_triggers(Any["ALTER TABLE a ADD x int", "UPDATE a SET x = 1", "ALTER TABLE a ALTER x SET NOT NULL",
+                                                             "ALTER TABLE a ADD y int", () -> nothing, "alter table b drop z"])
+        @test acts[1:2] == ["ALTER TABLE a ADD x int", "UPDATE a SET x = 1"] &&
+              acts[3:5] == ["SET CONSTRAINTS ALL IMMEDIATE", "ALTER TABLE a ALTER x SET NOT NULL", "SET CONSTRAINTS ALL DEFERRED"] &&
+              acts[6] == "ALTER TABLE a ADD y int" && acts[8:10] == ["SET CONSTRAINTS ALL IMMEDIATE", "alter table b drop z", "SET CONSTRAINTS ALL DEFERRED"]
+        if IS_POSTGRES          # what goes wrong without it, and that it fixes it
+            Juango.execute("CREATE TABLE pw_parent (id int PRIMARY KEY)", Any[])
+            Juango.execute("CREATE TABLE pw_child (id int, parent_id int REFERENCES pw_parent (id) DEFERRABLE INITIALLY DEFERRED, note text)", Any[])
+            try
+                @test_throws Juango.DatabaseError atomic() do
+                    Juango.execute("INSERT INTO pw_parent VALUES (1)", Any[]); Juango.execute("INSERT INTO pw_child VALUES (1, 1, NULL)", Any[])
+                    Juango.execute("ALTER TABLE pw_child ALTER COLUMN note SET DEFAULT 'x'", Any[])
+                end
+                atomic() do
+                    Juango.execute("INSERT INTO pw_parent VALUES (2)", Any[])
+                    for a in Juango.Migrations.settle_deferred_triggers(Any["INSERT INTO pw_child VALUES (2, 2, NULL)", "ALTER TABLE pw_child ALTER COLUMN note SET DEFAULT 'x'"])
+                        Juango.execute(a, Any[])
+                    end
+                end
+                @test Juango.execute("SELECT count(*) AS n FROM pw_child", Any[])[1][:n] == 1
+            finally
+                Juango.execute("DROP TABLE pw_child", Any[]); Juango.execute("DROP TABLE pw_parent", Any[])
+            end
+        end
+
         # --- backwards and forwards ---------------------------------------------------------
         create(MigPostV2; headline = "No body", body = nothing, author = a)   # NULL, then body becomes NOT NULL again
         _, out = capture(() -> migrate(app = "migtest", target = "0001"))
