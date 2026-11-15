@@ -336,3 +336,36 @@ end
         @test count(m -> startswith(m.id, "templates.E10"), Juango.run_checks(tags = [:templates])) == 5
     end
 end
+
+@testset "components with parameters and slots (#166)" begin
+    mkpath(joinpath(TPL, "components"))
+    write(joinpath(TPL, "components", "card.html"),
+          """{% props title size="md" %}<div class="card-{{ size }}"><h3>{{ title }}</h3>{% slot %}(empty){% endslot %}{% if slots.footer %}<footer>{% slot "footer" %}{% endslot %}</footer>{% endif %}{{ secret }}</div>""")
+    write(joinpath(TPL, "components", "loose.html"), """[{{ a }}{{ b }}]""")
+    write(joinpath(TPL, "components", "badge.html"), """<b>{{ text|upper }}</b>""")
+    r(src, ctx = Dict{String,Any}()) = render(Template(src), ctx)
+    page = """{% component "card" title=t %}Hi {{ who }}{% fill "footer" %}by {{ who }}{% endfill %}{% endcomponent %}"""
+    @test r(page, Dict{String,Any}("t" => "Hello", "who" => "Ann", "secret" => "S")) ==
+          """<div class="card-md"><h3>Hello</h3>Hi Ann<footer>by Ann</footer></div>"""      # slots see the page; the component doesn't
+    @test r("""{% component "card" title="x" size="lg" %}{% endcomponent %}""") == """<div class="card-lg"><h3>x</h3>(empty)</div>"""
+    @test r("""{% component "badge" text="new" / %}!""") == "<b>NEW</b>!"                  # self-closing; no props: any parameters
+    @test r("""{% component "loose" a=1 b=2 / %}""") == "[12]"
+    e = try r("""{% component "card" titel="x" / %}"""); nothing catch err; err end
+    @test e isa Juango.TemplateSyntaxError && occursin("no parameter 'titel'; did you mean 'title'?", e.msg)
+    e = try r("""{% component "card" / %}"""); nothing catch err; err end
+    @test occursin("needs the parameter 'title'", e.msg)
+    e = try r("""{% component "crad" title="x" / %}"""); nothing catch err; err end
+    @test occursin("no component 'crad'", e.msg) && occursin("did you mean 'card'?", e.msg)
+    @test_throws Juango.TemplateSyntaxError Template("""{% component "card" %}{% fill "a" %}1{% endfill %}{% fill "a" %}2{% endfill %}{% endcomponent %}""")
+    # declared in Julia, with code computing extra context
+    component!("greeting"; template = "components/badge.html", params = [:name, :loud => false],
+               context = (p, req) -> Dict("text" => (p["loud"] ? "hello, " : "hi, ") * p["name"]))
+    @test r("""{% component "greeting" name="bo" loud=true / %}""") == "<b>HELLO, BO</b>"
+    @test r("""{% component "greeting" name="bo" / %}""") == "<b>HI, BO</b>"
+    @test occursin("no parameter 'nme'", (try r("""{% component "greeting" nme="x" / %}""") catch err; err end).msg)
+    # the template check knows components
+    d = mktempdir()
+    write(joinpath(d, "uses.html"), """{% component "nosuchcomp" / %}{% component "card" title="ok" / %}""")
+    @test [(i, m) for (i, _, m) in Juango.template_issues(dirs = [d])] |> only |> first == "templates.E104"
+    delete!(Juango.COMPONENTS, "greeting")
+end

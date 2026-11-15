@@ -1116,6 +1116,23 @@ Partials are named fragments. Use them in place, or render one alone with `rende
 {% for item in items %}{% partial row %}{% endfor %}
 ```
 
+**Components** are reusable pieces with parameters and slots (django-components and django-cotton's idea), better than `{% include %}` with arguments: a template `components/card.html`, its parameters declared with `{% props %}` (unknown or missing ones are errors naming them), slots filled by the page:
+
+```
+{# templates/components/card.html #}
+{% props title size="md" %}
+<div class="card card-{{ size }}"><h3>{{ title }}</h3>{% slot %}{% endslot %}
+  {% if slots.footer %}<footer>{% slot "footer" %}{% endslot %}</footer>{% endif %}</div>
+
+{% component "card" title=post.title %}
+  {{ post.summary }}
+  {% fill "footer" %}<a href="{{ post.get_absolute_url }}">Read more</a>{% endfill %}
+{% endcomponent %}
+{% component "badge" text="new" / %}
+```
+
+A component sees only its parameters, its slots and `request`, `user`, `csrf_token` and `perms`; the contents of a `{% fill %}` render with the page's variables. `component!("chart"; params = [:series, :height => 300], context = (p, req) -> Dict("svg" => draw(p["series"])))` declares one with Julia code computing extra context. Component templates are ordinary templates, so `{% partialdef %}` and htmx partials work inside them.
+
 There are over 60 filters. Among them:
 
 - dates and times: `date time timesince timeuntil`

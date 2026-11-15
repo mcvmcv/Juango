@@ -35,7 +35,8 @@ end
 
 Problems in the project's templates, as (id, template, message): `templates.E101` syntax errors
 (unknown tags and filters among them, with a suggestion), `templates.E102` `{% url %}` names that
-don't exist, `templates.E103` `{% extends %}` / `{% include %}` targets that don't exist.
+don't exist, `templates.E103` `{% extends %}` / `{% include %}` targets that don't exist,
+`templates.E104` components that don't exist.
 """
 function template_issues(; dirs = nothing)
     out = Tuple{String,String,String}[]
@@ -69,6 +70,14 @@ function template_issues(; dirs = nothing)
                     catch e
                         e isa NoReverseMatch && occursin("is not a valid view name", e.msg) &&
                             push!(out, ("templates.E102", name, "{% url '$u' %}: no URL pattern is named '$u'"))
+                    end
+                elseif n isa ComponentNode
+                    c = literal_name(n.name)
+                    c === nothing && return
+                    try
+                        component_def(c)
+                    catch e
+                        e isa TemplateSyntaxError && push!(out, ("templates.E104", name, "{% component \"$c\" %}: " * e.msg))
                     end
                 elseif n isa ExtendsNode || n isa IncludeNode
                     target = literal_name(n isa ExtendsNode ? n.parent : n.template)
