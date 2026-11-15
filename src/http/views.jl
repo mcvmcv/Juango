@@ -134,6 +134,7 @@ struct Paginator
     Paginator(@nospecialize(items), per_page::Int, count::Int, num_pages::Int) = new(items, per_page, count, num_pages)
 end
 Base.@nospecializeinfer function Paginator(@nospecialize(items), per_page::Integer)
+    items isa QuerySet && warn_unordered(items, "Paginating")          # (Django's UnorderedObjectListWarning)
     n = items isa QuerySet ? count(items) : length(items)
     Paginator(items, per_page, n, max(1, cld(n, per_page)))
 end

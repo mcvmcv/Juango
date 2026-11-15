@@ -390,6 +390,8 @@ filter(Plate; id__in = values_list(filter(Event; kind = "load"), :plate_id; flat
 
 `lookup_value(post, "author__profile__city")` follows the same kind of path on an object: `nothing` (or `default`) where a relation is empty, and a property that throws is logged rather than raised.
 
+With DEBUG on, paginating an unordered queryset, or slicing one from a later row, logs a warning once: without `order_by` or `Meta(ordering)` the database may return rows in any order, so pages overlap or skip rows (`first` and `last` already order by the primary key).
+
 `values` and `values_list` return lazy QuerySets, as in Django: they chain (`order_by`, `distinct`, slices, `count`, `exists`), `first` and `last` give `nothing` when there are no rows, and nothing runs until they're iterated, compared with a vector or `collect`ed. Collect one when you need a snapshot that later writes can't change.
 
 - **Aggregates:** `Count`, `Sum`, `Avg`, `Min`, `Max`, with `distinct=` and `filter=`.

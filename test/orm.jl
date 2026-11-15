@@ -2095,6 +2095,16 @@ end
     bio, n2 = count_queries(() -> p.user.profile.bio)
     @test bio == "hello" && n2 == 0
 
+    # #171: paginating or offset-slicing an unordered queryset warns in DEBUG (once per model and use)
+    empty!(Juango.WARNED_UNORDERED)
+    uq = filter(Author; name__startswith = "Ex")
+    @test !Juango.is_ordered(uq) && Juango.is_ordered(order_by(uq, "name")) && !Juango.is_ordered(order_by(order_by(uq, "name")))
+    @test_logs (:warn, r"Paginating an unordered Author queryset") Paginator(uq, 2)
+    @test_logs Paginator(uq, 2)                                                          # once
+    @test_logs Paginator(order_by(uq, "name"), 2)
+    @test_logs (:warn, r"Slicing \(from row 2\) an unordered Author") collect(uq[2:3])
+    @test_logs collect(uq[1:2])
+    @test_logs collect(order_by(uq, "name")[5:6])
     # #180: lookup paths on instances
     lv = first(order_by(exa, "title"))
     @test lookup_value(lv, "author__name") == "Ex A" && lookup_value(lv, :author__name) == "Ex A" && lookup_value(lv, "author.name") == "Ex A"

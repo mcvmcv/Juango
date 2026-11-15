@@ -737,8 +737,23 @@ end
 Base.@nospecializeinfer Base.isempty(@nospecialize(qs::QuerySet)) = !exists(qs)
 Base.@nospecializeinfer truthy(@nospecialize(qs::QuerySet)) = exists(qs)
 
+"Whether the queryset has an ordering, its own or the model's `Meta(ordering)` (Django's `qs.ordered`)."
+Base.@nospecializeinfer is_ordered(@nospecialize(qs::QuerySet)) =
+    !order_cleared(qs) && (!isempty(qs.order) || !isempty(modelmeta(model_of(qs)).ordering))
+const WARNED_UNORDERED = Set{Tuple{Any,String}}()
+"In DEBUG, warn (once per model and use) that the rows of an unordered queryset come in any order, so pages can overlap or skip rows."
+Base.@nospecializeinfer function warn_unordered(@nospecialize(qs::QuerySet), what::String)
+    get(SETTINGS, :DEBUG, false) === true || return
+    (qs.cache === nothing && qs.combinator === nothing && !is_ordered(qs)) || return
+    key = (model_of(qs), what)
+    key in WARNED_UNORDERED && return
+    push!(WARNED_UNORDERED, key)
+    @warn "$what an unordered $(nameof(model_of(qs))) queryset: the database may return its rows in any order, so pages can overlap or miss rows. Add order_by(...) or Meta(ordering = ...)."
+end
+
 Base.@nospecializeinfer function Base.getindex(@nospecialize(qs::QuerySet), r::AbstractUnitRange{<:Integer})
     first(r) >= 1 || throw(ArgumentError("queryset slices are 1-based"))
+    first(r) > 1 && warn_unordered(qs, "Slicing (from row $(first(r)))")
     n = length(r)
     qs.limit !== nothing && (n = max(0, min(n, qs.limit - (first(r) - 1))))
     chain(qs; offset = qs.offset + first(r) - 1, limit = n)
