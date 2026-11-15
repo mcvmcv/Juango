@@ -242,6 +242,32 @@ end
         @test_throws IntegrityError create(MigTag; label = "x")
         @test get(MigPostV2; headline = "Hello").author.name == "Ann"
 
+        # #165: the migration linter
+        let M = Juango.Migrations, C = Juango.Column
+            st = Juango.SchemaState("lt" => Juango.Table("lt", "lint", "Lt", [C("id", :int), C("note", :string; null = true, max_length = 20), C("n", :int)]))
+            mig(ops...; kw...) = (m = M.Migration(; operations = collect(ops), kw...); m.app = "lint"; m.name = "0002_x"; m)
+            ids(m; b = Juango.backend()) = [w.id for w in M.lint_migration(m, st; backend = b)]
+            @test ids(mig(M.AddField("lt", C("req", :string; max_length = 5)))) == ["migrations.W001"]
+            @test isempty(ids(mig(M.AddField("lt", C("opt", :string; null = true, max_length = 5)))))
+            @test isempty(ids(mig(M.AddField("lt", C("dflt", :int; default = 0)))))
+            @test ids(mig(M.RemoveField("lt", "note"))) == ["migrations.W002"] && ids(mig(M.DeleteModel("lt"))) == ["migrations.W002"]
+            @test ids(mig(M.RenameField("lt", "note", "memo"))) == ["migrations.W003"]
+            @test "migrations.W004" in ids(mig(M.AlterField("lt", C("n", :string; max_length = 9))))
+            @test "migrations.W006" in ids(mig(M.AlterField("lt", C("note", :string; max_length = 20))))
+            pgb = Juango.PostgresBackend("postgresql://x@localhost/y")
+            @test ids(mig(M.AddIndex("lt", Juango.Index("n"; name = "lt_n"))); b = pgb) == ["migrations.W005"]
+            @test isempty(ids(mig(M.AddIndexConcurrently("lt", Juango.Index("n"; name = "lt_n"))); b = pgb))
+            @test "migrations.W005" in ids(mig(M.AlterField("lt", C("n", :int; index = true))); b = pgb)
+            # a table made in the same migration, an initial migration, and allow-unsafe are fine
+            @test isempty(ids(mig(M.CreateModel("nt"; model = "Nt", columns = [C("id", :int)]), M.AddField("nt", C("x", :int)))))
+            @test isempty(ids(mig(M.RemoveField("lt", "note"); initial = true)))
+            f = tempname() * ".jl"; write(f, "# juango: allow-unsafe\n")
+            m = mig(M.RemoveField("lt", "note")); m.path = f
+            @test isempty(M.lint_migration(m, st))
+            w = only(M.lint_migration(mig(M.RenameField("lt", "note", "memo")), st))
+            @test occursin("lt.note", w.msg) && occursin("db_column", w.hint) && occursin("Migration safety", w.hint)
+        end
+
         # #170: after a data write, PostgreSQL gets SET CONSTRAINTS ALL IMMEDIATE before the next ALTER TABLE
         acts = Juango.Migrations.settle_deferred_triggers(Any["ALTER TABLE a ADD x int", "UPDATE a SET x = 1", "ALTER TABLE a ALTER x SET NOT NULL",
                                                              "ALTER TABLE a ADD y int", () -> nothing, "alter table b drop z"])

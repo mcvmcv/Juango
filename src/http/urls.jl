@@ -329,6 +329,13 @@ Build the URL for the named pattern. Use `"namespace:name"` for included pattern
     reverse_url("article"; id=3)        # "/articles/3/"
     reverse_url("blog:post", 3)         # positional arguments also work
 """
+"""
+Functions that may translate a view name `reverse_url` doesn't know: `(name, args, kwargs) ->
+(name, args, kwargs)` or `nothing`. The admin uses one for Django's per-model names
+(`admin:blog_post_change`), so they work for models registered at any time.
+"""
+const REVERSE_FALLBACKS = Function[]
+
 function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLCONF, query = nothing, current_app = nothing, kwargs...)
     idx, apps = lock(REVERSE_LOCK) do
         get!(() -> build_reverse_index!(Dict{String,Vector{ReverseEntry}}(), urlconf, "", nothing), REVERSE_CACHE, urlconf),
@@ -346,7 +353,13 @@ function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLC
         haskey(idx, alias) && (name = alias)
     end
     entries = get(idx, name, nothing)
-    entries === nothing && throw(NoReverseMatch("'$name' is not a valid view name"))
+    if entries === nothing
+        for fb in REVERSE_FALLBACKS
+            r = fb(name, args, kwargs)
+            r === nothing || return reverse_url(r[1], r[2]...; urlconf = urlconf, query = query, current_app = current_app, r[3]...)
+        end
+        throw(NoReverseMatch("'$name' is not a valid view name"))
+    end
     kw = kwargs                                   # (Base.Pairs: haskey, getindex and length, no Dict to build)
     for e in Iterators.reverse(entries)
         if !isempty(args)

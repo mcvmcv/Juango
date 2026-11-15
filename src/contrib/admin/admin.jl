@@ -1158,18 +1158,7 @@ function urls(st::AdminSite = site)
     s(v) = site_view(st, v)
     wrap(p) = Juango.wrap_view(p, s)
     custom = Any[path(ma.app * "/" * ma.slug * "/", include_urls([wrap(p) for p in ma.extra_urls])) for ma in values(st.registry) if !isempty(ma.extra_urls)]
-    # Django's names for each registered model: admin:<app>_<model>_changelist, _add, _change, _delete, _history
-    named = Any[]
-    for ma in values(st.registry)
-        a, m, base = ma.app, ma.slug, ma.app * "/" * ma.slug * "/"
-        n = a * "_" * m
-        append!(named, Any[
-            path(base, s((req; kw...) -> changelist(req; app = a, model = m)); name = n * "_changelist"),
-            path(base * "add/", s((req; kw...) -> add_view(req; app = a, model = m)); name = n * "_add"),
-            path(base * "<str:object_id>/change/", s((req; object_id) -> change_view(req; app = a, model = m, id = object_id)); name = n * "_change"),
-            path(base * "<str:object_id>/delete/", s((req; object_id) -> delete_view(req; app = a, model = m, id = object_id)); name = n * "_delete"),
-            path(base * "<str:object_id>/history/", s((req; object_id) -> history_view(req; app = a, model = m, id = object_id)); name = n * "_history")])
-    end
+    SITES[st.name] = st             # (Django's per-model URL names resolve through django_url_name)
     include_urls(vcat(Any[
         path("", s(index); name = "index"),
         path("login/", site_view(st, admin_login; public = true); name = "login"),
@@ -1183,7 +1172,35 @@ function urls(st::AdminSite = site)
         path("<slug:app>/<slug:model>/<str:id>/delete/", s(delete_view); name = "delete"),
         path("<slug:app>/<slug:model>/<str:id>/history/", s(history_view); name = "history"),
         path("<slug:app>/<slug:model>/<str:id>/password/", s(password_change_view); name = "password_change"),
-    ], named); namespace = st.name)
+    ]); namespace = st.name)
 end
+
+
+"Admin sites by name, once their URLs are built."
+const SITES = Dict{String,AdminSite}()
+
+"""
+Django's per-model URL names (`admin:<app>_<model>_changelist`, `_add`, `_change`, `_delete`,
+`_history`) as the generic ones with `app`, `model` and `id` (from `object_id` or the first
+argument): a reverse fallback, so they work for models registered after the URLs were built.
+"""
+function django_url_name(name, args, kw)
+    i = findlast(':', name)
+    i === nothing && return nothing
+    st = get(SITES, name[1:prevind(name, i)], nothing)
+    st === nothing && return nothing
+    m = match(r"^(.+)_(changelist|add|change|delete|history)$", name[nextind(name, i):end])
+    m === nothing && return nothing
+    for ma in values(st.registry)
+        ma.app * "_" * ma.slug == m[1] || continue
+        target = name[1:i] * m[2]
+        m[2] in ("changelist", "add") && return (target, (), (app = ma.app, model = ma.slug))
+        id = !isempty(args) ? args[1] : haskey(kw, :object_id) ? kw[:object_id] : haskey(kw, :id) ? kw[:id] : nothing
+        id === nothing && return nothing
+        return (target, (), (app = ma.app, model = ma.slug, id = string(id)))
+    end
+    nothing
+end
+push!(Juango.REVERSE_FALLBACKS, django_url_name)
 
 end # module Admin

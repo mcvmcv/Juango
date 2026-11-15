@@ -35,6 +35,7 @@ include("loader.jl")
 include("executor.jl")
 include("autodetector.jl")
 include("writer.jl")
+include("lint.jl")
 
 end # module Migrations
 

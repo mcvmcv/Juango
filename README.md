@@ -745,6 +745,22 @@ Migration(
 
 **No migration files yet?** An app without migration files is synchronised: missing tables and columns are created and nothing is altered, which is how Juango worked before migrations existed. `migrate --sync` does that for every app. When you switch an existing database over, run `makemigrations`, then `migrate`. Initial migrations whose tables and columns already exist are marked as applied ("FAKED") instead of run, as Django's `--fake-initial` does. Juango does this by default; pass `--no-fake-initial` (`fake_initial = false`) to run them anyway. `migrate --fake` records migrations without running them, as in Django.
 
+#### Migration safety
+
+Some migrations are fine on a laptop and break a running site: the code of the previous release keeps serving requests while they run. `makemigrations` warns when it writes one, and `manage.jl check --tag migrations` reports the unapplied ones (`MIGRATION_LINT = :error` makes that fail CI; `false` turns it off). The safe sequences:
+
+| Warning | Problem | Safe way |
+|---|---|---|
+| `migrations.W001` | A NOT NULL column without a database default: inserts by the old code fail. | Add it with `null = true` (or `db_default`), deploy, backfill, then make it NOT NULL. |
+| `migrations.W002` | Removing a column or table the old code still uses. | Deploy the code without the field or model first (`SeparateDatabaseAndState` drops it from the state), then drop it in a later migration. |
+| `migrations.W003` | Renaming a column or table. | Keep the database name (`db_column`, `Meta(table = ...)`), or add the new column, write both, backfill, switch, drop the old one. |
+| `migrations.W004` | Changing a column's type rewrites the table under a lock. | A new column of the new type, backfilled, then switch over. |
+| `migrations.W005` | An index (or unique constraint) built without CONCURRENTLY blocks writes on PostgreSQL. | `AddIndexConcurrently`, in a migration of its own. |
+| `migrations.W006` | SET NOT NULL scans the table under a lock. | On PostgreSQL: `CHECK (col IS NOT NULL) NOT VALID`, `VALIDATE CONSTRAINT`, then `SET NOT NULL`. |
+| `migrations.W007` | An AlterField may rebuild the table on MySQL/MariaDB. | Check it's INSTANT/INPLACE on your server, or run it at a quiet time. |
+
+Changes to tables created in the same migration, and initial migrations, are fine. A migration file containing `# juango: allow-unsafe` is accepted as it is (a small table, a maintenance window).
+
 ### Database backends
 
 The ORM talks to the database through a `DatabaseBackend`. Each backend supplies the driver calls, its SQL dialect (quoting, column types, lookups, `LIMIT`, inserts that return ids) and the introspection that `migrate()` needs. SQL is written by hand, with no query builder in between.

@@ -155,7 +155,8 @@ function default_settings()
         :SITE_NAME => "Juango",
         :NPLUSONE => :warn,                            # N+1 queries: :warn (in DEBUG), :raise (tests), false
         :NPLUSONE_THRESHOLD => 5,
-        :AUTO_PREFETCH => false,                       # load a foreign key for a whole fetched queryset on first read                      # lazy loads of one relation in one request before it's reported
+        :AUTO_PREFETCH => false,
+        :MIGRATION_LINT => :warn,                      # unsafe migrations: :warn, :error (fail `check`), false                       # load a foreign key for a whole fetched queryset on first read                      # lazy loads of one relation in one request before it's reported
         :ADMIN_FK_SELECT_LIMIT => 1000,                # admin: a foreign key to a bigger table gets a search (or id) box
     )
 end

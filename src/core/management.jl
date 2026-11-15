@@ -149,6 +149,17 @@ register_check!(tags = [:models]) do
     end
     msgs
 end
+# migrations not applied yet that are unsafe for a running site (Migrations.lint_migration)
+register_check!(tags = [:migrations]) do
+    mode = get(SETTINGS, :MIGRATION_LINT, :warn)
+    mode === false && return CheckMessage[]
+    ws = try
+        Migrations.lint_unapplied()
+    catch e
+        return CheckMessage[]                     # no database to compare with: nothing to say
+    end
+    [CheckMessage(mode === :error ? :error : :warning, "$(w.migration), operation $(w.op): $(w.msg)"; id = w.id, hint = w.hint) for w in ws]
+end
 register_check!(deploy_checks; tags = [:security], deploy = true)
 
 "Print check messages as `manage.jl check` does (with how many were silenced); returns them."

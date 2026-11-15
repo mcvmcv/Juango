@@ -175,7 +175,7 @@ end
         m = mf([UploadedFile("fake.png", "text")]; fld = MultipleFileField(images = true))
         @test !is_valid(m) && startswith(only(m.errors[:docs]), "fake.png: Upload a valid image")
         blank_form = Form([:docs => MultipleFileField()])
-        @test occursin(" multiple", as_p(blank_form).s) && occursin("type=\"file\"", as_p(blank_form).s) && blank_form.is_multipart
+        @test occursin(" multiple", as_p(blank_form).s) && occursin("type=\"file\"", as_p(blank_form).s) && Juango.tattr(blank_form, Val(:is_multipart))
         f = ModelForm(Attachment; data = Dict("title" => "via form"), files = Dict("file" => UploadedFile("doc.pdf", "%PDF")))
         @test is_valid(f) && Juango.has_changed(f)
         saved = save!(f)

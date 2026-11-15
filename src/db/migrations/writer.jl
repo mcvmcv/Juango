@@ -217,6 +217,13 @@ function makemigrations(; app = "project", name = nothing, empty = false, merge 
         end
     end
     m = Migration(; dependencies = sort(collect(deps)), operations = ops, initial = initial)
+    if !initial && get(Juango.SETTINGS, :MIGRATION_LINT, :warn) !== false      # operations unsafe for a running site
+        before = replay(g, reduce(union, (ancestors(g, l) for l in leaves); init = Set{Tuple{String,String}}()))
+        m.app = app
+        for w in lint_migration(m, before)
+            log("  Warning ($(w.id)), operation $(w.op): $(w.msg)\n    $(w.hint)")
+        end
+    end
     [write_file(app, next_number(g, app), something(name, suggest_name(ops, initial)), m;
                 dry_run = dry_run || check, log = log)]
 end
