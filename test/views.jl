@@ -2593,6 +2593,8 @@ api_search161(req, q::String, limit::Union{Int,Nothing} = nothing, tags::Vector{
         @test occursin("swagger-ui", text(get(c, "/api/docs")))
     end
     # paginate_api
+    @test Juango.to_api_json(Dict(:d => Juango.Decimal("1.50"), :x => 1.5, :n => nothing, :t => (1, "a"))) ==
+          Dict("d" => "1.50", "x" => 1.5, "n" => nothing, "t" => Any[1, "a"])
     pg = paginate_api(collect(1:10), Request("GET", "/x?limit=3&offset=8"))
     @test pg == Dict("count" => 10, "items" => [9, 10])
 end

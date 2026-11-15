@@ -244,7 +244,8 @@ function encode_model(@nospecialize(o::Model), schema)
     d
 end
 to_api_json(x::Union{Nothing,Missing,AbstractString,Number,AbstractChar}, schema = nothing) = x
-to_api_json(x::Union{Date,DateTime,UUID,Decimal,Symbol}, schema = nothing) = string(x)
+to_api_json(x::Union{Date,DateTime,UUID,Symbol}, schema = nothing) = string(x)
+to_api_json(x::Decimal, schema = nothing) = string(x)          # (a Real, but exact: as a string)
 to_api_json(x::Enum, schema = nothing) = string(x)
 to_api_json(x::AbstractFloat, schema = nothing) = isfinite(x) ? x : nothing
 to_api_json(x::AbstractDict, schema = nothing) = Dict{String,Any}(string(k) => to_api_json(v, schema isa ModelSchema ? schema : nothing) for (k, v) in x)
