@@ -506,3 +506,36 @@ end
               Dict("fs" => fs))
     @test html == "[qty][qty]"                                                   # the idiom works: DELETE left out
 end
+
+@testset "field attributes from the template: render_field, add_class, attr (#112)" begin
+    f = Form([:title => CharField(max_length = 20), :body => TextField(blank = true, widget = Widget(:textarea; attrs = Dict("class" => "own"))),
+              :colour => CharField(max_length = 1, choices = ["r" => "Red", "g" => "Green"]), :ok => BooleanField(blank = true)])
+    r(src, form = f) = render(Template(src), Dict{String,Any}("form" => form))
+    t = r("""{% render_field form.title class="input" placeholder="Title" %}""")
+    @test occursin("class=\"input\"", t) && occursin("placeholder=\"Title\"", t) && occursin("name=\"title\"", t) && occursin("maxlength", t)
+    b = r("""{% render_field form.body class+="wide" rows="3" %}""")
+    @test occursin("<textarea", b) && occursin("class=\"own wide\"", b) && occursin("rows=\"3\"", b)   # += appends to the widget's own
+    @test occursin("class=\"input\"", r("""{% render_field form.body class="input" %}""")) && !occursin("own", r("""{% render_field form.body class="input" %}"""))
+    @test occursin("<select", r("""{% render_field form.colour class="sel" %}""")) && occursin("class=\"sel\"", r("""{% render_field form.colour class="sel" %}"""))
+    @test occursin("type=\"checkbox\"", r("""{% render_field form.ok class="tick" %}""")) && occursin("class=\"tick\"", r("""{% render_field form.ok class="tick" %}"""))
+    @test occursin("autofocus", r("""{% render_field form.title autofocus="" %}""")) && !occursin("autofocus=", r("""{% render_field form.title autofocus="" %}"""))
+    @test count("id=\"id_title\"", r("""{% render_field form.title id="other" name="x" %}""")) == 1                # id/name stay the widget's
+    v = r("""{% with cls="from-var" %}{% render_field form.title class=cls %}{% endwith %}""")
+    @test occursin("class=\"from-var\"", v)
+    # the filters, chained
+    c = r("""{{ form.title|add_class:"a"|add_class:"b"|attr:"placeholder:Name"|set_data:"role:main" }}""")
+    @test occursin("class=\"a b\"", c) && occursin("placeholder=\"Name\"", c) && occursin("data-role=\"main\"", c) && !occursin("&lt;", c)
+    @test occursin("class=\"own x\"", r("""{{ form.body|append_attr:"class:x" }}"""))
+    @test r("""{{ form.title|field_type }} {{ form.body|widget_type }}""") == "char textarea"
+    # error and required classes
+    bad = Form([:title => CharField(max_length = 20)]; data = Dict("title" => ""))
+    is_valid(bad)
+    @test occursin("class=\"is-invalid\"", r("""{{ form.title|add_error_class:"is-invalid" }}""", bad))
+    @test !occursin("is-invalid", r("""{{ form.title|add_error_class:"is-invalid" }}"""))
+    @test occursin("class=\"req\"", r("""{{ form.title|add_required_class:"req" }}""")) && !occursin("req", r("""{{ form.body|add_required_class:"req" }}"""))
+    # a tweaked field still gives its label and errors; other values pass through the filters untouched
+    @test r("""{{ form.title|add_class:"a"|attr:"x:1" }}{% with t=form.title|add_class:"a" %}{{ t.label }}{% endwith %}""") |> s -> occursin("Title", s)
+    @test r("""{{ "text"|add_class:"a" }}""") == "text"
+    @test_throws Juango.TemplateSyntaxError Template("""{% render_field form.title class %}""")
+    @test_throws Juango.TemplateSyntaxError r("""{% render_field "not a field" class="a" %}""")
+end

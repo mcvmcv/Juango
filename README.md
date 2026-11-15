@@ -1363,6 +1363,19 @@ form = EventForm(; media = Media(css = Dict("all" => ["css/forms.css"])))
 - A `MultiValueField` reads inputs `name_0`, `name_1`, ..., cleans each with its field, and `compress`es them. An `ArgumentError` thrown by `compress` becomes the field's error.
 - `FORM_RENDERER = TemplateFormRenderer()` renders `{{ form }}` with `juango/forms/div.html` (or your `form_template`). `render_form(form; template)` renders one form with another template.
 
+#### Styling fields in the template
+
+Classes, placeholders and other attributes belong in the template, not the form class (django-widget-tweaks' idea, built in):
+
+```
+{% render_field form.title class="input" placeholder="Title" %}
+{% render_field form.body class+="wide" rows="4" %}        {# += adds to the widget's own class #}
+{{ form.email|add_class:"input"|attr:"autocomplete:email" }}
+{{ form.email|add_error_class:"is-invalid" }}              {# only when the field has errors #}
+```
+
+They work on every widget: inputs, selects, textareas, checkboxes, radio lists and template widgets. The filters are `add_class`, `attr` (`"name:value"`, or `"name"` for an attribute without a value), `set_attr`, `append_attr`, `set_data` (`data-` attributes), `add_error_class`, `add_error_attr`, `add_required_class`, `field_type` and `widget_type`. A field's `name`, `id` and `type` stay its own.
+
 #### Dates and numbers as people type them
 
 Date, datetime and time fields accept the active language's formats, as Django's locale formats:

@@ -929,7 +929,7 @@ function widget_template_html(bf::BoundField)
                                          "attrs" => w.option_attrs === nothing ? Dict{String,Any}() : Dict{String,Any}(string(k) => v for (k, v) in w.option_attrs(o.value, o.label)))
                         for o in subwidgets(bf)] : Any[]
     widget = Dict{String,Any}("name" => html_name(f, fld), "id" => html_id(f, fld), "value" => display_value(bf),
-                              "required" => !fld.blank && fld.kind !== :bool, "attrs" => copy(w.attrs), "options" => opts,
+                              "required" => !fld.blank && fld.kind !== :bool, "attrs" => merged_widget_attrs(w), "options" => opts,
                               "type" => widget_type(fld))
     ctx = Dict{String,Any}("widget" => widget, "field" => bf)
     w.context === nothing || merge!(ctx, to_context_dict(w.context(bf)))

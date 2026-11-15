@@ -72,7 +72,30 @@ option_attrs_html(w, value, label) = w isa Widget && w.option_attrs !== nothing 
     join([" $(escape_html(string(k)))=\"$(escape_html(string(v)))\"" for (k, v) in sort!(collect(w.option_attrs(value, label)); by = first)]) : ""
 widget_media(w::Widget) = w.media
 widget_kind(w) = w isa Widget ? w.kind : w isa MultiWidget ? :multi : w isa SelectDateWidget ? :selectdate : w
-widget_attrs(w) = w isa Widget ? join([" $(escape_html(k))=\"$(escape_html(v))\"" for (k, v) in sort!(collect(w.attrs))]) : ""
+"""
+Attributes a template adds to the widgets it renders (`{% render_field %}`, `add_class`, `attr`, ...),
+as `name => value` pairs; a name starting with `+` appends to the value (`+class`).
+"""
+const TEMPLATE_WIDGET_ATTRS = Base.ScopedValues.ScopedValue{Vector{Pair{String,String}}}(Pair{String,String}[])
+"Attributes the widget itself renders, never set from a template (they'd be duplicated)."
+const FIXED_WIDGET_ATTRS = ("name", "id", "type")
+"A widget's attributes with the template's additions."
+function merged_widget_attrs(w)
+    d = Dict{String,String}()
+    w isa Widget && for (k, v) in w.attrs
+        d[string(k)] = string(v)
+    end
+    for (k, v) in TEMPLATE_WIDGET_ATTRS[]
+        append = startswith(k, "+")
+        k = append ? k[2:end] : k
+        k in FIXED_WIDGET_ATTRS && continue
+        d[k] = append && !isempty(get(d, k, "")) ? d[k] * " " * v : v
+    end
+    d
+end
+widget_attrs(w) = join([isempty(v) && k in BOOLEAN_HTML_ATTRS ? " $(escape_html(k))" : " $(escape_html(k))=\"$(escape_html(v))\""
+                        for (k, v) in sort!(collect(merged_widget_attrs(w)))])
+const BOOLEAN_HTML_ATTRS = ("autofocus", "disabled", "readonly", "required", "multiple", "hidden", "novalidate", "checked", "selected")
 
 "The media of a form: its own, then each field's widget's."
 function form_media(f::Form)

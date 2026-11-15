@@ -95,6 +95,7 @@ include("db/deploytasks.jl")
 
 # forms
 include("forms/forms.jl")
+include("forms/tweaks.jl")
 include("forms/formsets.jl")
 include("forms/media.jl")
 
