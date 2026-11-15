@@ -2520,3 +2520,79 @@ end
         @test Juango.count_queries(() -> foreach(a -> a.author.name, nps()))[2] == 2
     end
 end
+
+# typed APIs (#161)
+@enum ApiColour red green
+struct ApiWellIn; row::String; col::Int; end
+struct ApiSampleIn; name::String; volume_ul::Float64; colour::ApiColour; wells::Vector{ApiWellIn}; note::Union{String,Nothing}; end
+struct ApiSampleOut; id::Int; name::String; volume::Float64; on::Date; end
+api_search161(req, q::String, limit::Union{Int,Nothing} = nothing, tags::Vector{String} = String[]) = (q = q, limit = limit, tags = tags)
+
+@testset "typed APIs with OpenAPI (#161)" begin
+    api = API(title = "Lab API", version = "2")
+    Base.get(api, "/samples/{id}"; response = ApiSampleOut, summary = "One sample") do req, id::Int
+        id == 404 && throw(Http404("no"))
+        ApiSampleOut(id, "s$id", 1.5, Date(2026, 1, 2))
+    end
+    post(api, "/samples"; status = 201, response = ApiSampleOut) do req, body::ApiSampleIn
+        ApiSampleOut(7, body.name * "/" * string(body.colour) * "/" * string(length(body.wells)), body.volume_ul, Date(2026, 1, 1))
+    end
+    Base.get(api_search161, api, "/search")
+    Base.get(api, "/authors"; response = ModelSchema(Author; fields = [:id, :name], many = true)) do req
+        order_by(filter(Author; name__startswith = "API "), "name")
+    end
+    route!(api, "DELETE", "/samples/{id}"; status = 204) do req, id::Int
+        nothing
+    end
+    secret = API(auth = api_key_auth(k -> k == "s3cret" ? "robot" : nothing))
+    Base.get(secret, "/whoami") do req
+        Dict("who" => req.meta[:api_auth])
+    end
+    add_router!(api, "/admin", secret)
+    @test_throws ArgumentError Base.get((req, x::Int) -> x, API(), "/a/{id}")         # a path name with no argument
+    create(Author; name = "API B"); create(Author; name = "API A")
+    override_settings(ROOT_URLCONF = [path("api/", api_urls(api))]) do
+        c = Client()
+        r = get(c, "/api/samples/3")
+        @test r.status == 200 && JSON.parse(text(r)) == Dict("id" => 3, "name" => "s3", "volume" => 1.5, "on" => "2026-01-02")
+        @test get(c, "/api/samples/404").status == 404
+        r = get(c, "/api/samples/abc")
+        @test r.status == 422 && JSON.parse(text(r))["detail"] == [Dict("loc" => ["path", "id"], "msg" => "expected an integer")]
+        good = Dict("name" => "n", "volume_ul" => 2, "colour" => "green", "wells" => [Dict("row" => "A", "col" => 1)])
+        r = post(c, "/api/samples"; json = good)
+        @test r.status == 201 && JSON.parse(text(r))["name"] == "n/green/1" && JSON.parse(text(r))["volume"] == 2.0
+        bad = Dict("name" => 5, "volume_ul" => "lots", "colour" => "blue", "wells" => [Dict("row" => "A"), 3], "extra" => 1)
+        r = post(c, "/api/samples"; json = bad)
+        d = JSON.parse(text(r))["detail"]
+        locs = Set(Tuple(x["loc"]) for x in d)
+        @test r.status == 422 && (("body", "name") in locs) && (("body", "volume_ul") in locs) && (("body", "colour") in locs) &&
+              (("body", "wells", 0, "col") in locs) && (("body", "wells", 1) in locs) && (("body", "extra") in locs)
+        @test any(x -> x["msg"] == "expected one of red, green", d)
+        @test post(c, "/api/samples").status == 422                                        # no body
+        r = get(c, "/api/search?q=pcr&limit=5&tags=a&tags=b")
+        @test JSON.parse(text(r)) == Dict("q" => "pcr", "limit" => 5, "tags" => ["a", "b"])
+        @test JSON.parse(text(get(c, "/api/search?q=x")))["limit"] === nothing
+        @test get(c, "/api/search").status == 422 && get(c, "/api/search?q=x&limit=many").status == 422
+        @test JSON.parse(text(get(c, "/api/authors"))) == [Dict("id" => get(Author; name = "API A").id, "name" => "API A"),
+                                                           Dict("id" => get(Author; name = "API B").id, "name" => "API B")]
+        @test request(c, "DELETE", "/api/samples/3").status == 204 && request(c, "PUT", "/api/samples/3").status == 405
+        @test get(c, "/api/admin/whoami").status == 401
+        @test JSON.parse(text(get(c, "/api/admin/whoami"; headers = Dict("X-API-Key" => "s3cret")))) == Dict("who" => "robot")
+        # the OpenAPI document and the docs page
+        doc = JSON.parse(text(get(c, "/api/openapi.json")))
+        @test doc["openapi"] == "3.1.0" && doc["info"]["title"] == "Lab API"
+        op = doc["paths"]["/api/samples/{id}"]["get"]
+        @test op["summary"] == "One sample" && op["parameters"][1]["in"] == "path" && op["parameters"][1]["schema"]["type"] == "integer"
+        @test op["responses"]["200"]["content"]["application/json"]["schema"]["\$ref"] == "#/components/schemas/ApiSampleOut"
+        sin = doc["components"]["schemas"]["ApiSampleIn"]
+        @test sin["properties"]["colour"]["enum"] == ["red", "green"] && !("note" in sin["required"]) && "wells" in sin["required"]
+        @test sin["properties"]["wells"]["items"]["\$ref"] == "#/components/schemas/ApiWellIn"
+        sp = doc["paths"]["/api/search"]["get"]["parameters"]
+        @test [(p["name"], p["required"]) for p in sp] == [("q", true), ("limit", false), ("tags", false)]
+        @test haskey(doc["paths"]["/api/admin/whoami"]["get"]["responses"], "401")
+        @test occursin("swagger-ui", text(get(c, "/api/docs")))
+    end
+    # paginate_api
+    pg = paginate_api(collect(1:10), Request("GET", "/x?limit=3&offset=8"))
+    @test pg == Dict("count" => 10, "items" => [9, 10])
+end

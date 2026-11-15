@@ -1030,6 +1030,35 @@ CSV exports (here and the admin's `export_csv`) prefix text starting with `=`, `
 of values, without another package. Numbers, booleans, dates and datetimes become real Excel
 values, and the first row is a bold header.
 
+### Typed JSON APIs (django-ninja style)
+
+Django's answer for APIs is Django REST framework; Juango builds in django-ninja's idea instead: a handler's argument types validate the input and produce OpenAPI docs.
+
+```julia
+api = API(title = "Lab API", version = "1")
+struct SampleIn; name::String; volume_ul::Float64; plate_id::Int; end
+struct SampleOut; id::Int; name::String; well::String; end
+
+get(api, "/samples/{id}"; response = SampleOut) do req, id::Int
+    s = get_object_or_404(Sample; id); SampleOut(s.id, s.name, s.well)
+end
+post(api, "/samples"; status = 201, response = SampleOut) do req, body::SampleIn
+    s = create(Sample; name = body.name, volume_ul = body.volume_ul, plate_id = body.plate_id)
+    SampleOut(s.id, s.name, s.well)
+end
+search(req, q::String, limit::Union{Int,Nothing} = nothing) = paginate_api(filter(Sample; name__icontains = q), req)
+get(search, api, "/samples/search"; response = ModelSchema(Sample; fields = [:id, :name], many = true))
+route!(api, "DELETE", "/samples/{id}"; status = 204) do req, id::Int ... end
+
+urlpatterns = [path("api/", api_urls(api))]        # and api/openapi.json, api/docs (Swagger UI)
+```
+
+- **Parameters** come from the handler's arguments after `req`: a name in the path (`{id}`) is a path parameter; a struct (or a vector of them) is the JSON body, decoded with nested structs, vectors, dicts, enums (by name), dates, UUIDs and Decimals; anything else is a query parameter (`Vector{T}` for a repeated one). `Union{T,Nothing}` or a default makes one optional.
+- **Bad input** is a 422 listing every problem with where it is, as ninja and FastAPI answer: `{"detail": [{"loc": ["body", "wells", 0, "col"], "msg": "field required"}, ...]}`. Unknown fields are reported too.
+- **Replies** are encoded from structs, named tuples, dicts, vectors, models and querysets (through `ModelSchema(Model; fields)`); an `HttpResponse` goes out as it is. `paginate_api(items, req)` pages a list with `?limit=&offset=`.
+- **Auth:** `API(; auth = api_key_auth(key -> user))`, `bearer_auth(token -> user)` or `session_auth` (with `csrf = true`: routes are otherwise CSRF-exempt), per API or per route (`auth = false` for a public one); the result is in `req.meta[:api_auth]`, and nothing or `false` is a 401. `add_router!(api, "/plates", plates_api)` nests one API in another.
+- **OpenAPI 3.1** is served at `openapi.json` (`openapi_schema(api)`), with schemas from the struct types and `ModelSchema`s, and Swagger UI at `docs`.
+
 ### Debug toolbar
 
 `DebugToolbarMiddleware` shows each page's SQL, templates and timings in a panel in the

@@ -76,7 +76,8 @@ export Form, @form, ModelForm, is_valid, add_widget_attrs!, add_error!, as_p, cl
        ComboField, as_field_group, as_div, as_table, NullBooleanField, SelectDateWidget, SplitHiddenDateTimeWidget,
        order_fields!, non_field_errors, errors_json_data, errors_as_json, legend_tag, set_field!, delete_field!
 # views
-export render, redirect, query_param, component!, get_object_or_404, get_list_or_404, TemplateView, RedirectView, ListView,
+export render, redirect, query_param, component!, API, route!, add_router!, api_urls, ModelSchema, openapi_schema,
+       paginate_api, api_key_auth, bearer_auth, session_auth, get_object_or_404, get_list_or_404, TemplateView, RedirectView, ListView,
        DetailView, CreateView, UpdateView, DeleteView, FormView, ArchiveIndexView, YearArchiveView,
        MonthArchiveView, DayArchiveView, DateDetailView, WeekArchiveView, TodayArchiveView, ViewCall, default_hook, Paginator, page, get_page,
        require_http_methods, require_GET, require_POST, require_safe, csrf_exempt, non_atomic_requests, get_csrf_token,
