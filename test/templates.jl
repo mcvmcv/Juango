@@ -359,7 +359,7 @@ end
     @test_throws Juango.TemplateSyntaxError Template("""{% component "card" %}{% fill "a" %}1{% endfill %}{% fill "a" %}2{% endfill %}{% endcomponent %}""")
     # declared in Julia, with code computing extra context
     component!("greeting"; template = "components/badge.html", params = [:name, :loud => false],
-               context = (p, req) -> Dict("text" => (p["loud"] ? "hello, " : "hi, ") * p["name"]))
+               context = (p, req) -> Dict("text" => (p["loud"] ? "hello, " : "hi, ") * string(p["name"])))      # (template literals are SafeStrings)
     @test r("""{% component "greeting" name="bo" loud=true / %}""") == "<b>HELLO, BO</b>"
     @test r("""{% component "greeting" name="bo" / %}""") == "<b>HI, BO</b>"
     @test occursin("no parameter 'nme'", (try r("""{% component "greeting" nme="x" / %}""") catch err; err end).msg)

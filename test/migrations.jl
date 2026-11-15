@@ -1232,6 +1232,7 @@ end
     override_settings(DATABASES = Dict("swaptest" => f)) do
         Juango.with_db("swaptest") do
             migrate(sync = true, verbose = false)
+            redirect_stdout(() -> Juango.sync_models!([SwapMember]), devnull)       # the new model's tables (step 1)
             u = create_user("swapper", "pw-swap-12345"; email = "s@x.io")
             g = create(Group; name = "swappers")
             add!(get(User; id = u.id).groups, g)
