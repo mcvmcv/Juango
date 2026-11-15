@@ -22,7 +22,7 @@ A Django-style web framework in Julia. Roadmap: GitHub issues on mcvmcv/Juango.
   compiled once in the workload instead of again for each of a project's models on its first
   request. Keep new ORM, admin and form code that way, and avoid closures that capture a model
   type (Julia captures its exact type). **But never on a method with a positional vararg** (`fields...`, `qargs::Q...`):
-  Julia 1.13 miscompiles that: called from compiled code with literal arguments, the method iterates
+  Julia 1.12.7 and later miscompile that: called from compiled code with literal arguments, the method iterates
   only the first two (#185). Use `@nospecialize` alone there. Loading MySQL.jl invalidates part of the workload, so
   the tests load it only for MySQL; the PostgreSQL driver is Juango's own (`libpq.jl`).
 - `JUANGO_TEST_DATABASE` picks the database: unset for in-memory SQLite, or a
