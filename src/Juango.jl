@@ -99,6 +99,7 @@ include("forms/tweaks.jl")
 include("forms/formsets.jl")
 include("forms/nested.jl")
 include("forms/media.jl")
+include("forms/layout.jl")
 
 # sessions, auth and the apps they need
 include("contrib/sessions.jl")

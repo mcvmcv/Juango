@@ -208,6 +208,21 @@ function empty_form(s::NestedFormSet)
                Dict{String,Any}())
 end
 
+"""
+    nested_row(spec::NestedSetSpec, prefix, index) -> NestedForm
+
+A new, empty row of a child formset at `index` (0-based, as in the prefixes), for adding rows
+with htmx: `nested_row(spec.plates, "plates", 3)` renders as `plates-3-...`, with its own child
+formsets' extra rows. The page then raises its `plates-TOTAL_FORMS` by one.
+"""
+function nested_row(spec::NestedSetSpec, prefix::AbstractString, index::Integer)
+    s = bind_set(NestedSetSpec(spec.form, merge(spec.options, (; extra = 0)), spec.children), nothing, prefix, nothing)
+    f = s.formset.make_form(nothing, "$(prefix)-$(index)", Dict{Symbol,Any}(), nothing)
+    add_formset_fields!(s.formset, f, typemax(Int))
+    NestedForm(f, Pair{Symbol,Any}[n => bind_set(sp, nothing, child_prefix(f.prefix, n), nothing) for (n, sp) in spec.children],
+               Dict{String,Any}())
+end
+
 "All of a nested form as paragraphs: the form, then each child formset's management form and rows."
 function as_p(n::NestedForm)
     io = IOBuffer()

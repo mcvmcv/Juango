@@ -603,6 +603,8 @@ nt_block(d; prefix = "", initial = Dict()) = Form([:label => CharField(max_lengt
                  Dict{String,Any}("tree" => nested_form(nt_sheet; initial = doc, children = spec)))
     @test out == "Sheet|P1:AB;P2:C;:;"
     @test occursin("plates-__prefix__-blocks-0-label", as_p(empty_form(t.plates)).s)
+    r3 = as_p(Juango.nested_row(spec.plates, "plates", 3)).s                    # a row added with htmx
+    @test occursin("name=\"plates-3-name\"", r3) && occursin("plates-3-blocks-0-label", r3) && occursin("plates-3-DELETE", r3)
     # over models: an author and their articles in one form, saved in one transaction
     data = Dict("name" => "NF Author", "email" => "",
                 "articles-TOTAL_FORMS" => "2", "articles-INITIAL_FORMS" => "0",
@@ -620,4 +622,49 @@ nt_block(d; prefix = "", initial = Dict()) = Form([:label => CharField(max_lengt
     @test sort([a.title for a in filter(Article; author = au)]) == ["NF one!", "NF two"]
     @test_throws ArgumentError nested_model_form(Author; nested = [:nosuch])
     @test_throws ErrorException save!(nested_form(nt_sheet; data = Dict("title" => "x"), initial = Dict()))       # not over a model
+end
+
+@testset "form template packs and layouts (#112: crispy-forms)" begin
+    L = Juango.Layout
+    mk(data = nothing) = Form([:name => CharField(max_length = 20, help_text = "Your name"), :email => EmailField(blank = true),
+                               :colour => CharField(max_length = 1, choices = ["r" => "Red", "g" => "Green"]),
+                               :ok => BooleanField(blank = true), :token => CharField(max_length = 5, blank = true, widget = :hidden)]; data = data)
+    p = form_html(mk()).s                                                      # the default pack: plain
+    @test occursin("<div class=\"field required\">", p) && occursin("Your name", p) && occursin("type=\"hidden\" name=\"token\"", p)
+    b = form_html(mk(); pack = "bootstrap5").s
+    @test occursin("class=\"form-control\"", b) && occursin("class=\"form-select\"", b) && occursin("class=\"form-check-input\"", b)
+    @test occursin("<div class=\"form-text\" id=\"id_name_helptext\">Your name</div>", b)
+    bad = mk(Dict("name" => "", "email" => "nope", "colour" => "r")); is_valid(bad)
+    be = form_html(bad; pack = "bootstrap5").s
+    @test occursin("form-control is-invalid", be) && occursin("invalid-feedback", be) && occursin("This field is required.", be)
+    t = form_html(mk(); pack = "tailwind").s
+    @test occursin("rounded-md border border-gray-300", t)
+    # the tags
+    r(src, ctx = Dict{String,Any}()) = render(Template(src), merge(Dict{String,Any}("form" => mk()), ctx))
+    @test occursin("form-select", r("""{% form form pack="bootstrap5" %}"""))
+    f1 = r("""{% field form.email pack="bootstrap5" placeholder="you@example.com" class="input" %}""")
+    @test occursin("placeholder=\"you@example.com\"", f1) && occursin("class=\"input form-control\"", f1)   # the template's and the pack's
+    override_settings(FORM_TEMPLATE_PACK = "bootstrap5") do
+        @test occursin("form-control", r("""{% field form.name %}""")) && occursin("form-control", r("""{% form form %}"""))
+    end
+    @test_throws Juango.TemplateSyntaxError Template("""{% form form colour="x" %}""")
+    # layouts
+    lay = L.FormLayout(L.Fieldset("Who", :name, L.FormField(:email; placeholder = "@", add_class = "wide")),
+                       L.Row(L.Column(:colour), :ok), L.RawHTML("<hr>"), L.Submit("Send"))
+    h = form_html(mk(); pack = "bootstrap5", layout = lay).s
+    @test occursin("<fieldset class=\"mb-3\"><legend>Who</legend>", h) && occursin("<div class=\"row\"><div class=\"col\">", h)
+    @test occursin("placeholder=\"@\"", h) && occursin("wide form-control", h) && occursin("<hr>", h)
+    @test occursin("<button type=\"submit\" name=\"submit\" class=\"btn btn-primary\">Send</button>", h)
+    @test occursin("name=\"token\"", h)                                       # hidden fields are always there
+    small = form_html(mk(); layout = L.FormLayout(:name)).s                    # only the fields the layout places
+    @test occursin("name=\"name\"", small) && !occursin("name=\"email\"", small)
+    @test occursin("<legend>Who</legend>", r("""{% form form layout=lay %}""", Dict{String,Any}("lay" => lay)))
+    @test occursin("class=\"col-3\"", form_html(mk(); layout = L.FormLayout(L.Row(L.Column(:name; class = "col-3")))).s)
+    @test_throws ArgumentError form_html(mk(); layout = L.FormLayout(42))
+    # a pack of your own, from the templates directory
+    mkpath(joinpath(TPL, "juango", "forms", "packs", "mine"))
+    write(joinpath(TPL, "juango", "forms", "packs", "mine", "field.html"), """<p class="mine">{{ field.label }}: {% render_field field class+="m" %}</p>""")
+    write(joinpath(TPL, "juango", "forms", "packs", "mine", "form.html"), """<section>{{ body }}</section>""")
+    m = form_html(mk(); pack = "mine").s
+    @test startswith(m, "<section><p class=\"mine\">Name: ") && occursin("class=\"m\"", m)
 end

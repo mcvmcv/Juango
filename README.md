@@ -1376,6 +1376,20 @@ Classes, placeholders and other attributes belong in the template, not the form 
 
 They work on every widget: inputs, selects, textareas, checkboxes, radio lists and template widgets. The filters are `add_class`, `attr` (`"name:value"`, or `"name"` for an attribute without a value), `set_attr`, `append_attr`, `set_data` (`data-` attributes), `add_error_class`, `add_error_attr`, `add_required_class`, `field_type` and `widget_type`. A field's `name`, `id` and `type` stay its own.
 
+#### Form templates and layouts
+
+`{% form form %}` renders a whole form, and `{% field form.email placeholder="you@example.com" %}` one field (label, widget, help text, errors), through a template pack: `"plain"` (the default), `"bootstrap5"` or `"tailwind"`, set with `FORM_TEMPLATE_PACK` or per tag (`{% form form pack="bootstrap5" %}`). A pack is `juango/forms/packs/<name>/field.html` and `form.html`; override either, or add a pack of your own, in your templates directory. Classes from the template combine with the pack's. `form_html(form)` and `field_html(bf)` do the same from Julia.
+
+For more than a column of fields, a layout (django-crispy-forms' idea):
+
+```julia
+using Juango.Layout
+contact = FormLayout(Fieldset("Contact", :name, FormField(:email; placeholder = "you@example.com")),
+                     Row(Column(:city), Column(:postcode; class = "col-3")), RawHTML("<hr>"), Submit("Send"))
+```
+
+`{% form form layout=contact %}` renders the fields the layout places (hidden fields always) in fieldsets, rows and columns, with the pack's classes. The pieces are `FormLayout`, `Fieldset`, `Row`, `Column`, `Div`, `RawHTML`, `Submit` and `FormField(:name; attributes...)` (`add_class = "x"` adds to the pack's class).
+
 #### Dates and numbers as people type them
 
 Date, datetime and time fields accept the active language's formats, as Django's locale formats:
@@ -1470,7 +1484,7 @@ end
 {% endfor %}
 ```
 
-`{{ tree.as_p }}` renders all of it, and `empty_form(tree.plates)` gives a row with `__prefix__` for adding rows in the page. A row's form is made with `F(data; prefix, initial)`, so it can be worked out from the row's initial values. Over models, `nested_model_form(Order; fields = [...], nested = [:items => (fields = [:product, :qty], extra = 1, can_delete = true)])` edits an object and its children (an inline formset per relation, one level), and `save!(tree)` saves everything in one transaction.
+`{{ tree.as_p }}` renders all of it, and `empty_form(tree.plates)` gives a row with `__prefix__` for adding rows in the page, and `nested_row(spec.plates, "plates", n)` renders row `n` for an htmx view that adds one (the page then raises `plates-TOTAL_FORMS`). A row's form is made with `F(data; prefix, initial)`, so it can be worked out from the row's initial values. Over models, `nested_model_form(Order; fields = [...], nested = [:items => (fields = [:product, :qty], extra = 1, can_delete = true)])` edits an object and its children (an inline formset per relation, one level), and `save!(tree)` saves everything in one transaction.
 
 ### File uploads
 

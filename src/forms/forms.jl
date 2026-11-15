@@ -1109,6 +1109,7 @@ function tattr(bf::BoundField, ::Val{S}) where {S}
     S === :field && return bf.field
     S === :widget_type && return widget_type(bf.field)
     S === :auto_id && return html_id(bf.form, bf.field)
+    S === :required && return !bf.field.blank && bf.field.kind !== :bool
     S === :html_name && return html_name(bf.form, bf.field)
     S === :initial && return initial_for(bf.form, bf.field)
     S === :data && return bf.form.data === nothing ? nothing : raw_value(bf.form, bf.field)

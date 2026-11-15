@@ -1,0 +1,1 @@
+{% if errors %}<div class="{{ classes.errors }}">{% for e in errors %}<p>{{ e }}</p>{% endfor %}</div>{% endif %}{{ body }}{% for field in hidden_fields %}{{ field }}{% endfor %}

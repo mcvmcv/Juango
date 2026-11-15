@@ -157,6 +157,7 @@ function default_settings()
         :NPLUSONE_THRESHOLD => 5,
         :AUTO_PREFETCH => false,
         :MIGRATION_LINT => :warn,
+        :FORM_TEMPLATE_PACK => "plain",                # {% form %} / {% field %}: "plain", "bootstrap5", "tailwind" or your own
         :SERVE_STATIC => false,                        # serve STATIC_ROOT with DEBUG off (hashed, cached, pre-compressed)
         :STATIC_COMPRESS => true,                      # collectstatic writes .gz copies of text files
         :STATIC_MAX_AGE => 60,                         # Cache-Control max-age for static files without a hash in the name
