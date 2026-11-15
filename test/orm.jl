@@ -2105,6 +2105,38 @@ end
     @test_logs (:warn, r"Slicing \(from row 2\) an unordered Author") collect(uq[2:3])
     @test_logs collect(uq[1:2])
     @test_logs collect(order_by(uq, "name")[5:6])
+    # #169: post_write sees every write, bulk ones included
+    wlog = Any[]
+    wrec(sender; action, via, ids, fields, instances, kw...) = push!(wlog, (sender, action, via, ids === nothing ? nothing : sort(collect(ids)), fields))
+    connect!(post_write, wrec)
+    try
+        wa = create(Author; name = "PW Author")
+        @test wlog[end] == (Author, :insert, :save, [wa.id], nothing)
+        wa.email = "pw@x.io"; save!(wa; update_fields = [:email])
+        @test wlog[end][2:3] == (:update, :save) && wlog[end][5] == [:email]
+        w1, w2 = create(Article; title = "pw1", author = wa), create(Article; title = "pw2", author = wa)
+        empty!(wlog)
+        update!(filter(Article; author = wa); views = 3)
+        @test only(wlog)[1:4] == (Article, :update, :update, sort([w1.id, w2.id])) && :views in only(wlog)[5] && :updated in only(wlog)[5]
+        empty!(wlog)
+        update!(filter(Article; title = "no such"); views = 1)
+        @test isempty(wlog)                                                        # nothing matched: nothing reported
+        w1.views = 9; bulk_update([w1], [:views])
+        @test wlog[end][2:4] == (:update, :bulk_update, [w1.id])
+        bulk_create([Author(; name = "PW Bulk 1"), Author(; name = "PW Bulk 2")])
+        @test wlog[end][1:3] == (Author, :insert, :bulk_create)
+        empty!(wlog)
+        delete!(wa)                                                                # cascades to its articles
+        @test (Article, :delete, :delete, sort([w1.id, w2.id]), nothing) in wlog && (Author, :delete, :delete, [wa.id], nothing) in wlog
+        es, tp = create(Essay; title = "pw essay"), create(Topic; name = "pw topic")
+        empty!(wlog)
+        add!(es.topics, tp)
+        @test any(e -> e[2] == :m2m && e[3] == :post_add, wlog)
+        delete!(filter(Author; name__startswith = "PW Bulk"))
+        @test wlog[end][2:3] == (:delete, :delete) && length(wlog[end][4]) == 2
+    finally
+        disconnect!(post_write, wrec)
+    end
     # #180: lookup paths on instances
     lv = first(order_by(exa, "title"))
     @test lookup_value(lv, "author__name") == "Ex A" && lookup_value(lv, :author__name) == "Ex A" && lookup_value(lv, "author.name") == "Ex A"

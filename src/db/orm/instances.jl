@@ -156,6 +156,8 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
     end
     refresh_computed!(obj)
     has_receivers(post_save, T) && send(post_save, T; instance = obj, created = created, update_fields = only)
+    has_receivers(post_write, T) && send(post_write, T; action = created ? :insert : :update, via = :save, ids = Any[obj.pk],
+                                         fields = only === nothing ? nothing : collect(only), instances = [obj])
     obj
 end
 

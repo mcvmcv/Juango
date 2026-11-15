@@ -96,6 +96,20 @@ const pre_delete = Signal("pre_delete")
 "After an object is deleted: `instance`."
 const post_delete = Signal("post_delete")
 """
+After every write to a model's table, bulk ones included, which Django's signals miss: the one
+hook an audit log or undo needs. Sender: the model. Keywords:
+- `action`: `:insert`, `:update`, `:delete` or `:m2m`;
+- `via`: what wrote it: `:save`, `:update` (`update!`), `:bulk_create`, `:bulk_update`, `:delete`
+  (objects, querysets and cascades), or for `:m2m` the `m2m_changed` action (`:post_add`, ...);
+- `ids`: the primary keys of the rows written (`nothing` where unknown: bulk inserts on MySQL);
+- `fields`: the fields written (`nothing`: all of them);
+- `instances`: the objects, when the write had them (`save!`, bulk writes), else `nothing`;
+- for `:m2m`, `instance` (the object whose relation changed), `model` and `pk_set`, as `m2m_changed`.
+Deletes are reported after the rows are gone; `update!` finds its rows' ids first (one query, and
+only when someone listens).
+"""
+const post_write = Signal("post_write")
+"""
 A many-to-many relation changed: sender is the join model; `action` is `:pre_add`,
 `:post_add`, `:pre_remove`, `:post_remove`, `:pre_clear` or `:post_clear`; `instance`,
 `model` (the other side), `pk_set`, `reverse`.

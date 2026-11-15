@@ -100,7 +100,7 @@ export FilterSet, Filter, CharFilter, NumberFilter, BooleanFilter, ChoiceFilter,
        ModelMultipleChoiceFilter, DateFilter, DateTimeFilter, DateFromToRangeFilter, NumberRangeFilter, IsNullFilter, OrderingFilter
 # signals
 export Signal, connect!, disconnect!, receiver, send, pre_save, post_save, pre_delete, post_delete,
-       m2m_changed, request_started, request_finished, user_logged_in, user_logged_out,
+       m2m_changed, post_write, request_started, request_finished, user_logged_in, user_logged_out,
        user_login_failed, pre_migrate, post_migrate, connection_created, got_request_exception, setting_changed,
        pre_init, post_init, class_prepared
 # translations and time zones

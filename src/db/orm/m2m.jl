@@ -30,10 +30,15 @@ objid(x) = x
 
 "Send m2m_changed for a many-to-many change (only when someone listens)."
 function m2m_signal(o, action, ids)
-    has_receivers(m2m_changed, o.through) || return
+    m2m = has_receivers(m2m_changed, o.through)
+    w = startswith(string(action), "post_") && has_receivers(post_write, o.through)
+    (m2m || w) || return
     owner = related_model(o.mine)
-    send(m2m_changed, o.through; action = action, instance = get(base_objects(owner); id = o.id),
-         model = related_model(o.other), pk_set = ids === nothing ? nothing : Set(ids), reverse = !o.forward)
+    inst = get(base_objects(owner); id = o.id)
+    pks = ids === nothing ? nothing : Set(ids)
+    m2m && send(m2m_changed, o.through; action = action, instance = inst, model = related_model(o.other), pk_set = pks, reverse = !o.forward)
+    w && send(post_write, o.through; action = :m2m, via = action, ids = nothing, fields = nothing, instances = nothing,
+              instance = inst, model = related_model(o.other), pk_set = pks)
 end
 
 """

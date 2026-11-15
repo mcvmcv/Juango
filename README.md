@@ -1637,11 +1637,12 @@ send(order_placed, Order; order = o)                             # send_robust c
   - `pre_save` and `post_save` (`instance`, `created`)
   - `pre_delete` and `post_delete` (`instance`, also sent for cascaded deletes)
   - `m2m_changed` (`action`, `instance`, `model`, `pk_set`, `reverse`; the sender is the join model, `through(Post, :tags)`)
+  - `post_write`, which Django lacks: after every write, bulk ones included (`save!`, `update!`, `bulk_create`, `bulk_update`, deletes and cascades, many-to-many changes), with `action` (`:insert`, `:update`, `:delete`, `:m2m`), `via`, the rows' `ids`, the `fields` written and the `instances` when the write had them. It's the one hook an audit log or undo needs.
   - `request_started` and `request_finished`
   - `user_logged_in`, `user_logged_out` and `user_login_failed` (without the password)
   - `pre_migrate` and `post_migrate`, once per app around `migrate` (the sender is the app label; `app_label`, `database`, `plan`, and `apps` for historical models). Juango's content types, permissions and default site are created by `post_migrate` receivers for "contenttypes", "auth" and "sites", which run before other apps'.
 - **Filtering.** `sender` limits a receiver to one model (or other sender). `dispatch_uid` identifies a receiver for `disconnect!`.
-- **What doesn't send.** Bulk `update!` doesn't send `pre_save`/`post_save`, as in Django.
+- **What doesn't send.** Bulk `update!` doesn't send `pre_save`/`post_save`, as in Django (it sends `post_write`).
 - **When to use them.** To change a model's own behaviour, overriding `save!` (as the blog example does) is usually clearer. Signals are for code that lives elsewhere, such as caches, search indexes and notifications.
 
 ### Caching

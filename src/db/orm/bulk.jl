@@ -36,7 +36,15 @@ or updated).
   `touch_auto_now = false`.
 """
 bulk_create(objs::AbstractVector{T}; db = nothing, kw...) where {T<:Model} =
-    with_db(() -> (bulk_create_here(objs; kw...); foreach(set_instance_db!, objs); objs), something(db, routed_db(T, true), Some(nothing)))
+    with_db(something(db, routed_db(T, true), Some(nothing))) do
+        bulk_create_here(objs; kw...)
+        foreach(set_instance_db!, objs)
+        if !isempty(objs) && has_receivers(post_write, T)
+            ids = Any[o.pk for o in objs]
+            send(post_write, T; action = :insert, via = :bulk_create, ids = any(isnothing, ids) ? nothing : ids, fields = nothing, instances = collect(objs))
+        end
+        objs
+    end
 function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_conflicts = false,
                      update_conflicts = false, update_fields = nothing, unique_fields = nothing,
                      touch_auto_now::Bool = true) where {T<:Model}
@@ -139,8 +147,15 @@ signals); returns the number of rows changed. `auto_now` fields (`updated_at`) a
 written too, unless `touch_auto_now = false` (Django leaves them alone).
 """
 bulk_update(objs::AbstractVector{T}, fields; db = nothing, kw...) where {T<:Model} =
-    with_db(() -> bulk_update_here(objs, fields; kw...),
-            isempty(objs) ? db : write_db(first(objs), db))
+    with_db(isempty(objs) ? db : write_db(first(objs), db)) do
+        n = bulk_update_here(objs, fields; kw...)
+        isempty(objs) || !has_receivers(post_write, T) ||
+            send(post_write, T; action = :update, via = :bulk_update, ids = Any[o.pk for o in objs],
+                 fields = unique(vcat(Symbol[Symbol(f) for f in fields],
+                                      get(kw, :touch_auto_now, true) ? Symbol[f.name for f in all_fields(T) if f.auto_now] : Symbol[])),
+                 instances = collect(objs))
+        n
+    end
 function bulk_update_here(objs::AbstractVector{T}, fields; batch_size = nothing, touch_auto_now::Bool = true) where {T<:Model}
     isempty(objs) && return 0
     names = Symbol[Symbol(f) for f in fields]
@@ -307,7 +322,14 @@ unless the call sets them itself or passes `touch_auto_now = false` (Django leav
 """
 function update!(qs::QuerySet; touch_auto_now::Bool = true, kw...)
     vals = touch_auto_now && !isempty(kw) ? with_auto_now(model_of(qs), kw) : kw
-    in_db(() -> update_here!(qs; vals...), qs, true)
+    in_db(qs, true) do
+        T = model_of(qs)
+        has_receivers(post_write, T) || return update_here!(qs; vals...)
+        ids = row_keys(qs)                     # before: the update may change what the filter matches
+        n = update_here!(qs; vals...)
+        isempty(ids) || send(post_write, T; action = :update, via = :update, ids = ids, fields = Symbol[p.first for p in vals], instances = nothing)
+        n
+    end
 end
 "`kw` plus now for each `auto_now` field it doesn't set."
 Base.@nospecializeinfer function with_auto_now(@nospecialize(T::Type), kw)
@@ -494,6 +516,7 @@ Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector
                              join(fill("?", length(chunk)), ",") * ")", collect(chunk))
     end
     foreach(o -> send(post_delete, T; instance = o), doomed)
+    n > 0 && has_receivers(post_write, T) && send(post_write, T; action = :delete, via = :delete, ids = collect(Any, ids), fields = nothing, instances = nothing)
     P = table_parent(T)
     P === nothing || delete_ids!(P, ids)     # the parent rows these rows extend
     n
@@ -513,6 +536,7 @@ Base.@nospecializeinfer function delete_composite!(@nospecialize(T::Type), keys:
         n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE $cond", collect(Any, k))
     end
     foreach(o -> send(post_delete, T; instance = o), doomed)
+    n > 0 && has_receivers(post_write, T) && send(post_write, T; action = :delete, via = :delete, ids = collect(Any, keys), fields = nothing, instances = nothing)
     n
 end
 
