@@ -1259,7 +1259,7 @@ end
     end
     override_settings(DATABASE = 42, DATABASES = Dict("other" => "nosuch://x")) do
         e = [m.msg for m in Juango.run_checks(tags = [:settings]) if m.id == "settings.E004"]
-        @test any(occursin("DATABASE: must be a path"), e) && any(occursin("no database backend for 'nosuch://'"), e)
+        @test any(m -> occursin("DATABASE: must be a path", m), e) && any(m -> occursin("no database backend for 'nosuch://'", m), e)
     end
     # declared settings: known, with defaults
     @test_throws KeyError settings.ZZ_PAGE_SIZE
