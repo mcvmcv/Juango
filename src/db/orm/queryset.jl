@@ -110,7 +110,7 @@ const QS_FIELDS = fieldnames(QuerySet)
 Fetch the objects behind forward foreign keys in the same query (with JOINs), so
 `post.author` needs no extra query. Paths follow FKs with `__`.
 """
-Base.@nospecializeinfer function select_related(@nospecialize(qs::QuerySet), paths...)
+function select_related(@nospecialize(qs::QuerySet), paths...)
     T = model_of(qs)
     rel = copy(qs.related)
     for p in paths
@@ -131,7 +131,7 @@ Base.@nospecializeinfer function select_related(@nospecialize(qs::QuerySet), pat
     end
     chain(qs; related = rel)
 end
-Base.@nospecializeinfer select_related(@nospecialize(T::Type{<:Model}), paths...) = select_related(objects(T), paths...)
+select_related(@nospecialize(T::Type{<:Model}), paths...) = select_related(objects(T), paths...)
 select_related(paths::Union{AbstractString,Symbol}...) = qs -> select_related(qs, paths...)
 
 """
@@ -142,9 +142,9 @@ After fetching, load related objects with one extra query per lookup: reverse re
 (`:comments__author`). Prefetched reverse relations answer `count`, iteration, `first`
 and `exists` from memory; further filtering queries the database again.
 """
-Base.@nospecializeinfer prefetch_related(@nospecialize(qs::QuerySet), lookups...) =
+prefetch_related(@nospecialize(qs::QuerySet), lookups...) =
     chain(qs; prefetch = vcat(qs.prefetch, Prefetch[l isa Prefetch ? l : Prefetch(l) for l in lookups]))
-Base.@nospecializeinfer prefetch_related(@nospecialize(T::Type{<:Model}), lookups...) = prefetch_related(objects(T), lookups...)
+prefetch_related(@nospecialize(T::Type{<:Model}), lookups...) = prefetch_related(objects(T), lookups...)
 prefetch_related(lookups::Union{AbstractString,Symbol,Prefetch}...) = qs -> prefetch_related(qs, lookups...)
 
 Base.@nospecializeinfer function assert_uncombined(@nospecialize(qs::QuerySet), what)
@@ -163,7 +163,7 @@ Keep rows matching all lookups (`field`, `field__lookup`, `fk__field__lookup`).
 Lookups: exact iexact contains icontains startswith istartswith endswith
 iendswith gt gte lt lte in isnull range year month day ne.
 """
-Base.@nospecializeinfer function Base.filter(@nospecialize(qs::QuerySet), qargs::Union{Q,Expression}...; kw...)
+function Base.filter(@nospecialize(qs::QuerySet), qargs::Union{Q,Expression}...; kw...)
     assert_unsliced(qs, "filter")
     assert_uncombined(qs, "filter")
     (isempty(qargs) && isempty(kw)) && return chain(qs)
@@ -171,11 +171,11 @@ Base.@nospecializeinfer function Base.filter(@nospecialize(qs::QuerySet), qargs:
     push!(w, Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], false))
     chain(qs; where = w)
 end
-Base.@nospecializeinfer Base.filter(@nospecialize(T::Type{<:Model}), qargs::Union{Q,Expression}...; kw...) = filter(objects(T), qargs...; kw...)
+Base.filter(@nospecialize(T::Type{<:Model}), qargs::Union{Q,Expression}...; kw...) = filter(objects(T), qargs...; kw...)
 Base.filter(qargs::Union{Q,Expression}...; kw...) = qs -> filter(qs, qargs...; kw...)
 
 "Exclude rows matching the lookups."
-Base.@nospecializeinfer function exclude(@nospecialize(qs::QuerySet), qargs::Union{Q,Expression}...; kw...)
+function exclude(@nospecialize(qs::QuerySet), qargs::Union{Q,Expression}...; kw...)
     assert_unsliced(qs, "exclude")
     assert_uncombined(qs, "exclude")
     (isempty(qargs) && isempty(kw)) && return chain(qs)
@@ -183,7 +183,7 @@ Base.@nospecializeinfer function exclude(@nospecialize(qs::QuerySet), qargs::Uni
     push!(w, Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], true))
     chain(qs; where = w)
 end
-Base.@nospecializeinfer exclude(@nospecialize(T::Type{<:Model}), qargs::Q...; kw...) = exclude(objects(T), qargs...; kw...)
+exclude(@nospecialize(T::Type{<:Model}), qargs::Q...; kw...) = exclude(objects(T), qargs...; kw...)
 
 """
     order_by(qs, "field", "-other", ...)
@@ -191,9 +191,9 @@ Base.@nospecializeinfer exclude(@nospecialize(T::Type{<:Model}), qargs::Q...; kw
 
 Order the results. Prefix with `-` for descending, `\"?\"` for random order.
 """
-Base.@nospecializeinfer order_by(@nospecialize(qs::QuerySet), fields...) =
+order_by(@nospecialize(qs::QuerySet), fields...) =
     chain(qs; order = isempty(fields) ? Any[NO_ORDER] : Any[order_item(f) for f in fields])
-Base.@nospecializeinfer order_by(@nospecialize(T::Type{<:Model}), fields...) = order_by(objects(T), fields...)
+order_by(@nospecialize(T::Type{<:Model}), fields...) = order_by(objects(T), fields...)
 order_by(fields::Union{AbstractString,Symbol}...) = qs -> order_by(qs, fields...)
 
 "`order_by()` with no fields: no ordering at all, not even the model's `Meta(ordering = ...)` (as Django)."
@@ -826,27 +826,27 @@ end
 Leave these fields out of the query; reading one later loads the object's deferred fields
 with one more query. `defer(qs, nothing)` clears the list.
 """
-Base.@nospecializeinfer function defer(@nospecialize(qs::QuerySet), fields...)
+function defer(@nospecialize(qs::QuerySet), fields...)
     T = model_of(qs)
     fields == (nothing,) && return chain(qs; deferred = Symbol[])
     names = Symbol[Symbol(f) for f in fields]
     check_deferrable(T, names)
     chain(qs; deferred = unique(vcat(qs.deferred, names)))
 end
-Base.@nospecializeinfer defer(@nospecialize(T::Type{<:Model}), fields...) = defer(objects(T), fields...)
+defer(@nospecialize(T::Type{<:Model}), fields...) = defer(objects(T), fields...)
 
 """
     only(qs, :title, :author)
 
 (Extends `Base.only`.) Load only these fields (and the id); the others are deferred, as with `defer`.
 """
-Base.@nospecializeinfer function Base.only(@nospecialize(qs::QuerySet), field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...)
+function Base.only(@nospecialize(qs::QuerySet), field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...)
     T = model_of(qs)
     keep = Symbol[Symbol(field); Symbol.(collect(fields))]
     check_deferrable(T, keep)
     chain(qs; deferred = Symbol[f.name for f in modelmeta(concrete_model(T)).fields if !(f.name in keep)])
 end
-Base.@nospecializeinfer Base.only(@nospecialize(T::Type{<:Model}), field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...) =
+Base.only(@nospecialize(T::Type{<:Model}), field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...) =
     only(objects(T), field, fields...)
 
 """
@@ -857,7 +857,7 @@ Remove duplicate rows (`SELECT DISTINCT`). With fields, keep the first row of ea
 equal values: order by those fields first.
 """
 distinct(qs::QuerySet, fields::Union{Symbol,AbstractString}...) = chain(qs; distinct_fields = String[string(f) for f in fields])
-Base.@nospecializeinfer distinct(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...) = distinct(objects(T), fields...)
+distinct(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...) = distinct(objects(T), fields...)
 
 Base.@nospecializeinfer function latest_order(@nospecialize(qs::QuerySet), fields, what)
     T = model_of(qs)
@@ -872,21 +872,21 @@ end
 The object with the largest (smallest) value of the fields, which default to the model's
 `Meta(get_latest_by = ...)`. Throws `DoesNotExist` when there are no objects.
 """
-Base.@nospecializeinfer function latest(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
+function latest(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
     T = model_of(qs)
     order = Any[reverse_order(o) for o in latest_order(qs, fields, "latest")]
     o = first(chain(qs; order = order))
     o === nothing && throw(DoesNotExist(T, "latest"))
     o
 end
-Base.@nospecializeinfer function earliest(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
+function earliest(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
     T = model_of(qs)
     o = first(chain(qs; order = latest_order(qs, fields, "earliest")))
     o === nothing && throw(DoesNotExist(T, "earliest"))
     o
 end
-Base.@nospecializeinfer latest(@nospecialize(T::Type{<:Model}), fields...) = latest(objects(T), fields...)
-Base.@nospecializeinfer earliest(@nospecialize(T::Type{<:Model}), fields...) = earliest(objects(T), fields...)
+latest(@nospecialize(T::Type{<:Model}), fields...) = latest(objects(T), fields...)
+earliest(@nospecialize(T::Type{<:Model}), fields...) = earliest(objects(T), fields...)
 
 """
     in_bulk(qs)                          # Dict id => object
@@ -944,7 +944,7 @@ which the objects' date or datetime field falls.
 """
 dates(qs::QuerySet, field, kind = :day; order = :asc) =
     Date.(distinct_dates(qs, field, kind, order, DATE_KINDS, "dates"))
-Base.@nospecializeinfer dates(@nospecialize(T::Type{<:Model}), args...; kw...) = dates(objects(T), args...; kw...)
+dates(@nospecialize(T::Type{<:Model}), args...; kw...) = dates(objects(T), args...; kw...)
 
 """
     datetimes(qs, :created, :hour; order = :asc) -> Vector{DateTime}
@@ -954,7 +954,7 @@ Aware values are converted to the current time zone first.
 """
 datetimes(qs::QuerySet, field, kind = :day; order = :asc) =
     distinct_dates(qs, field, kind, order, DATETIME_KINDS, "datetimes")
-Base.@nospecializeinfer datetimes(@nospecialize(T::Type{<:Model}), args...; kw...) = datetimes(objects(T), args...; kw...)
+datetimes(@nospecialize(T::Type{<:Model}), args...; kw...) = datetimes(objects(T), args...; kw...)
 
 """
     raw(Model, sql, params = [])

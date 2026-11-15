@@ -644,12 +644,12 @@ The results as `Dict{Symbol,Any}` rows instead of objects. Fields may follow rel
 (`:author__name`). With aggregate annotations the rows are grouped by these fields:
 `values(objects(Post), :status) |> annotate(n = Count(:id))`.
 """
-Base.@nospecializeinfer function Base.values(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
+function Base.values(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
     T = model_of(qs)
     fs = isempty(fields) ? vcat(["id"], [column(f) for f in all_fields(T)]) : String[string(f) for f in fields]
     chain(qs; values_fields = fs, values_mode = :dict, group_by_object = any(p -> contains_aggregate(p.second), qs.annotations))
 end
-Base.@nospecializeinfer Base.values(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...) = values(objects(T), fields...)
+Base.values(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...) = values(objects(T), fields...)
 
 """
     values_list(qs, fields...; flat = false, named = false) -> QuerySet
@@ -681,7 +681,7 @@ Base.@nospecializeinfer function values_list_of(@nospecialize(qs::QuerySet), fie
     length(vq.values_fields) == length(fs) || error("values_list: asked for $(length(fs)) fields, got $(length(vq.values_fields))")
     chain(vq; values_mode = flat ? :flat : named ? :named : :tuple)
 end
-Base.@nospecializeinfer values_list(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...; kw...) = values_list(objects(T), fields...; kw...)
+values_list(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...; kw...) = values_list(objects(T), fields...; kw...)
 
 """
     aggregate(qs; name = Aggregate(...), ...) -> Dict{Symbol,Any}

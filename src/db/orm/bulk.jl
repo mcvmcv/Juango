@@ -302,7 +302,7 @@ Base.showerror(io::IO, e::MultipleObjectsReturned) = print(io, nameof(e.model), 
 
 Exactly one matching object. Throws `DoesNotExist` or `MultipleObjectsReturned`.
 """
-Base.@nospecializeinfer function Base.get(@nospecialize(qs::QuerySet), qargs::Q...; kw...)
+function Base.get(@nospecialize(qs::QuerySet), qargs::Q...; kw...)
     T = model_of(qs)
     q = filter(qs, qargs...; kw...)
     v = fetch(chain(q; limit = 2))
@@ -311,7 +311,7 @@ Base.@nospecializeinfer function Base.get(@nospecialize(qs::QuerySet), qargs::Q.
     length(v) > 1 && throw(MultipleObjectsReturned(T, desc))
     v[1]
 end
-Base.@nospecializeinfer Base.get(@nospecialize(T::Type{<:Model}), qargs::Q...; kw...) = get(objects(T), qargs...; kw...)
+Base.get(@nospecialize(T::Type{<:Model}), qargs::Q...; kw...) = get(objects(T), qargs...; kw...)
 
 """
     update!(qs; field=value, ...) -> Int

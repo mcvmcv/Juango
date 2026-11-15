@@ -17,7 +17,7 @@
 "A model's natural key (a tuple identifying an object without its id); define a method for your models."
 natural_key(obj) = nothing
 "The object with this natural key; define a method alongside `natural_key`."
-Base.@nospecializeinfer get_by_natural_key(@nospecialize(T::Type), args...) = throw(ArgumentError("$(nameof(T)) has no get_by_natural_key method"))
+get_by_natural_key(@nospecialize(T::Type), args...) = throw(ArgumentError("$(nameof(T)) has no get_by_natural_key method"))
 Base.@nospecializeinfer has_natural_key(@nospecialize(T::Type)) = hasmethod(natural_key, Tuple{T}) && which(natural_key, Tuple{T}).sig != Tuple{typeof(natural_key),Any}
 
 Base.@nospecializeinfer serial_label(@nospecialize(T::Type)) = lowercase(model_label(T))

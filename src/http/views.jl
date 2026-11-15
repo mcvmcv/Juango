@@ -80,7 +80,7 @@ function redirect(to, args...; permanent = false, kwargs...)
 end
 
 "Get one object or raise `Http404`."
-Base.@nospecializeinfer function get_object_or_404(@nospecialize(qs), qargs::Q...; kw...)
+function get_object_or_404(@nospecialize(qs), qargs::Q...; kw...)
     try
         get(qs, qargs...; kw...)
     catch e
@@ -89,7 +89,7 @@ Base.@nospecializeinfer function get_object_or_404(@nospecialize(qs), qargs::Q..
     end
 end
 "Filter, raising `Http404` if nothing matches."
-Base.@nospecializeinfer function get_list_or_404(@nospecialize(qs), qargs::Q...; kw...)
+function get_list_or_404(@nospecialize(qs), qargs::Q...; kw...)
     v = collect(filter(qs isa Type ? objects(qs) : qs, qargs...; kw...))
     isempty(v) && throw(Http404("No objects match the given query."))
     v

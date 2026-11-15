@@ -2225,3 +2225,31 @@ end
     # objects are still made distinct after a multi-valued join
     @test length(collect(filter(Author; name = "dq multi", articles__published = true))) == 1
 end
+
+# A Julia 1.13 compiler bug: a @nospecializeinfer method with a @nospecialize argument and a positional
+# vararg, called from compiled code with literal arguments, iterated only the first two (#185). Juango's
+# vararg methods no longer use @nospecializeinfer; these calls are inside functions, where it showed.
+vararg_order(qs) = order_by(qs, "-views", "title", "id").order
+vararg_filter(qs) = filter(qs, Q(views__gte = 0), Q(title__startswith = "va"), Q(views = 99))
+vararg_exclude(qs) = exclude(qs, Q(views = -1), Q(views = -2), Q(title__startswith = "va"))
+vararg_values(qs) = values(qs, :id, :title, :views).values_fields
+vararg_values_list(qs) = values_list(qs, :id, :title, :views, :slug).values_fields
+vararg_related(qs) = select_related(qs, :author, :author, :nosuch)
+vararg_defer(qs) = defer(qs, :slug, :body, :rating).deferred
+vararg_only(qs) = only(qs, :title, :views, :slug).deferred
+vararg_get(qs) = get(qs, Q(title__startswith = "va"), Q(views = 99), Q(slug = "nope"))
+@testset "vararg methods take every argument when called from compiled code (#185)" begin
+    au = create(Author; name = "VA Author")
+    create(Article; title = "va one", author = au, views = 1)
+    create(Article; title = "va two", author = au, views = 99, slug = "two")
+    qs = filter(Article; title__startswith = "va")
+    @test length(vararg_order(qs)) == 3
+    @test [a.title for a in vararg_filter(qs)] == ["va two"]                                                # all three conditions
+    @test isempty(collect(vararg_exclude(qs)))                                                             # the third one excludes all
+    @test vararg_values(qs) == ["id", "title", "views"]
+    @test vararg_values_list(qs) == ["id", "title", "views", "slug"]
+    @test_throws Juango.LookupError vararg_related(qs)                                                    # the third path is read
+    @test Set(vararg_defer(qs)) == Set([:slug, :body, :rating])
+    @test !(:slug in vararg_only(qs)) && :body in vararg_only(qs)
+    @test_throws Juango.DoesNotExist vararg_get(qs)                                                        # slug = "nope" applies
+end
