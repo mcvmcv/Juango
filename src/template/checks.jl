@@ -18,7 +18,11 @@ function each_node(f, nodes)
     end
 end
 
-literal_name(e::FilterExpr) = (e.base isa Literal && isempty(e.filters) && e.base.value isa AbstractString) ? String(e.base.value) : nothing
+function literal_name(e::FilterExpr)          # a quoted name (template literals are SafeStrings)
+    (e.base isa Literal && isempty(e.filters)) || return nothing
+    v = e.base.value
+    v isa SafeString ? v.s : v isa AbstractString ? String(v) : nothing
+end
 
 "The closest name to `name` among `names` (2 edits at most), as \"; did you mean 'x'?\", or \"\"."
 function did_you_mean(name, names)

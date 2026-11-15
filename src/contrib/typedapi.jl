@@ -183,10 +183,14 @@ function decode_value(::Type{T}, x, loc, errs) where {T}
         push!(errs, APIError(loc, "expected one of " * join(names, ", "))); return nothing
     elseif T <: AbstractVector
         x isa AbstractVector || (push!(errs, APIError(loc, "expected a list")); return nothing)
-        return eltype(T)[decode_value(eltype(T), v, vcat(loc, [i - 1]), errs) for (i, v) in enumerate(x)]
+        n0 = length(errs)
+        vs = Any[decode_value(eltype(T), v, vcat(loc, [i - 1]), errs) for (i, v) in enumerate(x)]
+        return length(errs) > n0 ? nothing : convert(T, eltype(T)[v for v in vs])
     elseif T <: AbstractDict
         x isa AbstractDict || (push!(errs, APIError(loc, "expected an object")); return nothing)
-        return Dict{String,valtype(T)}(string(k) => decode_value(valtype(T), v, vcat(loc, [string(k)]), errs) for (k, v) in x)
+        n0 = length(errs)
+        vs = Dict{String,Any}(string(k) => decode_value(valtype(T), v, vcat(loc, [string(k)]), errs) for (k, v) in x)
+        return length(errs) > n0 ? nothing : Dict{String,valtype(T)}(vs)
     elseif isstructtype(T)
         x isa AbstractDict || (push!(errs, APIError(loc, "expected an object")); return nothing)
         n0 = length(errs)

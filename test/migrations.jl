@@ -1231,7 +1231,7 @@ end
     f = tempname() * ".sqlite3"
     override_settings(DATABASES = Dict("swaptest" => f)) do
         Juango.with_db("swaptest") do
-            quiet(() -> migrate(sync = true, verbose = false))
+            migrate(sync = true, verbose = false)
             u = create_user("swapper", "pw-swap-12345"; email = "s@x.io")
             g = create(Group; name = "swappers")
             add!(get(User; id = u.id).groups, g)
