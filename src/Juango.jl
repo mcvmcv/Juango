@@ -88,6 +88,7 @@ include("db/backends/sqlite_features.jl")
 include("db/backends/mysql_features.jl")
 include("db/historical.jl")
 include("db/migrations/Migrations.jl")
+include("db/deploytasks.jl")
 
 # forms
 include("forms/forms.jl")

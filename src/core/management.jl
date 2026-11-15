@@ -464,6 +464,12 @@ for (n, h, f) in (
     ("optimizemigration", "Rewrite a migration with fewer operations: optimizemigration <app> <migration> [--check]", cmd_optimizemigration),
     ("makemigrations", "Write migrations for model changes (--name, --empty, --merge, --update, --dry-run, --check, --noinput, --app)", cmd_makemigrations),
     ("showmigrations", "List migrations and whether they are applied", _ -> showmigrations()),
+    ("deploy", "Run the deploy tasks this database hasn't run: deploy [--plan] [--fake]",
+     function (args)
+         _, flags = parse_flags(args)
+         r = run_deploy_tasks(; plan = haskey(flags, "plan"), fake = haskey(flags, "fake"))
+         isempty(r.waiting) || println("$(length(r.waiting)) deploy task(s) waiting; they'll be tried again next time.")
+     end),
     ("sqlmigrate", "Print the SQL for a migration: sqlmigrate [app] <name> [--backwards]", cmd_sqlmigrate),
     ("db_worker", "Run background tasks of the database backend: db_worker [--queue a,b] [--max-tasks N] [--stop-when-empty]",
      function (args)

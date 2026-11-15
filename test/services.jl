@@ -1284,3 +1284,42 @@ end
     delete!(Juango.DECLARED_SETTINGS, :ZZ_PAGE_SIZE); delete!(Juango.DECLARED_SETTINGS, :ZZ_KEY); delete!(Juango.DECLARED_SETTINGS, :ZZAPP_LIMIT)
     delete!(Juango.APP_DEFS, "zzsettings")
 end
+
+@testset "deploy tasks (#177)" begin
+    saved = copy(Juango.DEPLOY_TASKS); empty!(Juango.DEPLOY_TASKS)
+    try
+        runs, ready = String[], Ref(false)
+        deploy_task!(() -> push!(runs, "a"), "0001_a"; app = "dt")
+        deploy_task!("0002_wait"; app = "dt") do
+            ready[] || return deploy_waiting("no file")
+            push!(runs, "w")
+        end
+        deploy_task!(() -> push!(runs, "b"), "0003_b"; app = "dt")
+        @test_throws ArgumentError deploy_task!(() -> nothing, "0001_a"; app = "dt")
+        logs = String[]
+        lg(xs...) = push!(logs, join(string.(xs)))
+        r = run_deploy_tasks(; log = lg)
+        @test runs == ["a", "b"] && r.waiting == ["dt.0002_wait"] && any(l -> occursin("Waiting dt.0002_wait: no file", l), logs)
+        r = run_deploy_tasks(; log = lg)
+        @test runs == ["a", "b"] && r.waiting == ["dt.0002_wait"] && isempty(r.ran)          # done ones never run again
+        ready[] = true
+        r = run_deploy_tasks(; log = lg)
+        @test runs == ["a", "b", "w"] && r.ran == ["dt.0002_wait"]
+        deploy_task!("0004_fails"; app = "dt") do
+            create(Author; name = "DT rolled back"); error("boom")
+        end
+        @test_throws ErrorException run_deploy_tasks(; log = lg)
+        @test !exists(filter(Author; name = "DT rolled back")) && !(("dt", "0004_fails") in Juango.applied_deploy_tasks())
+        filter!(t -> t.name != "0004_fails", Juango.DEPLOY_TASKS)
+        deploy_task!(() -> push!(runs, "x"), "0005_x"; app = "dt")
+        empty!(logs)
+        run_deploy_tasks(; plan = true, log = lg)
+        @test any(l -> occursin("dt.0005_x", l), logs) && !("x" in runs)
+        run_deploy_tasks(; fake = true, log = lg)
+        @test !("x" in runs) && ("dt", "0005_x") in Juango.applied_deploy_tasks()
+        @test occursin("No deploy tasks", sprint(io -> run_deploy_tasks(; log = (xs...) -> print(io, xs...))))
+    finally
+        empty!(Juango.DEPLOY_TASKS); append!(Juango.DEPLOY_TASKS, saved)
+        Juango.execute("DELETE FROM \"juango_deploy_tasks\" WHERE \"app\" = ?", Any["dt"])
+    end
+end
