@@ -2126,8 +2126,9 @@ end
         bulk_create([Author(; name = "PW Bulk 1"), Author(; name = "PW Bulk 2")])
         @test wlog[end][1:3] == (Author, :insert, :bulk_create)
         empty!(wlog)
+        aid, artids = wa.id, sort([w1.id, w2.id])                                 # (delete! clears the object's id)
         delete!(wa)                                                                # cascades to its articles
-        @test (Article, :delete, :delete, sort([w1.id, w2.id]), nothing) in wlog && (Author, :delete, :delete, [wa.id], nothing) in wlog
+        @test (Article, :delete, :delete, artids, nothing) in wlog && (Author, :delete, :delete, [aid], nothing) in wlog
         es, tp = create(Essay; title = "pw essay"), create(Topic; name = "pw topic")
         empty!(wlog)
         add!(es.topics, tp)
