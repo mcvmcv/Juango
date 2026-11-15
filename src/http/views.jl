@@ -679,3 +679,60 @@ LoginRequiredMixin(view; login_url = nothing, redirect_field_name = "next") = lo
 PermissionRequiredMixin(view, perms::AbstractString...; kw...) = permission_required(view, perms...; kw...)
 "`UserPassesTestMixin(view, user -> Bool)`: the same as `user_passes_test` (or the `test_func` option)."
 UserPassesTestMixin(view, test; kw...) = user_passes_test(view, test; kw...)
+
+# --- typed query parameters ------------------------------------------------------------------------------
+
+struct NoQueryDefault end
+const NO_QUERY_DEFAULT = NoQueryDefault()
+
+"""
+    query_param(req, name, T = String; default, choices = nothing) -> T
+
+A query-string parameter (`req.GET`) as a `T`: `String`, `Int` (or another integer type),
+`Float64`, `Decimal`, `Bool` (true/false, 1/0, on/off, yes/no), `Date`, `DateTime` (in the
+formats forms accept) or `Symbol`. `Vector{T}` gives every value of a repeated parameter
+(`?tag=a&tag=b`). A value that doesn't parse, or isn't one of `choices`, is a 400 Bad Request
+naming the parameter, rather than a 500 from `parse`; so is a missing (or empty) one without a
+`default`.
+
+    page = query_param(req, :page, Int; default = 1)
+    sort = query_param(req, :sort, Symbol; default = :name, choices = (:name, :date))
+"""
+function query_param(req::Request, name, ::Type{T} = String; default = NO_QUERY_DEFAULT, choices = nothing) where {T}
+    k = string(name)
+    if T <: AbstractVector
+        vals = [query_value(eltype(T), k, s, choices) for s in getlist(req.GET, k) if !isempty(strip(s))]
+        isempty(vals) && default !== NO_QUERY_DEFAULT && return default
+        return convert(T, vals)
+    end
+    raw = get(req.GET, k, nothing)
+    if raw === nothing || isempty(strip(raw))
+        default === NO_QUERY_DEFAULT && throw(BadRequest("The query parameter '$k' is required."))
+        return default
+    end
+    query_value(T, k, raw, choices)
+end
+function query_value(::Type{T}, k, raw, choices) where {T}
+    s = strip(raw)
+    v = if T === String || T === Any
+        String(s)
+    elseif T === Symbol
+        Symbol(s)
+    elseif T === Bool
+        l = lowercase(s)
+        l in ENV_TRUE ? true : l in ENV_FALSE ? false : nothing
+    elseif T <: Integer || T <: AbstractFloat || T === Decimal
+        tryparse(T, s)
+    elseif T === Date
+        parse_input_datetime(s, :date)
+    elseif T === DateTime
+        parse_input_datetime(s, :datetime)
+    else
+        throw(ArgumentError("query_param: unsupported type $T"))
+    end
+    v === nothing && throw(BadRequest("The query parameter '$k' isn't a valid $(T === Bool ? "true/false value" : lowercase(string(nameof(T)))): $(repr(String(raw)))."))
+    if choices !== nothing && !(v in choices || string(v) in string.(choices))
+        throw(BadRequest("The query parameter '$k' must be one of $(join(string.(choices), ", ")), not $(repr(String(raw)))."))
+    end
+    v
+end

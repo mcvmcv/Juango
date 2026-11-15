@@ -2373,3 +2373,27 @@ end
         @test success(pipeline(`unzip -tq $f`; stdout = devnull, stderr = devnull))
     end
 end
+
+@testset "typed query parameters (#172)" begin
+    rq(q) = Request("GET", "/x/?" * q)
+    @test query_param(rq("page=3"), :page, Int; default = 1) == 3 && query_param(rq(""), :page, Int; default = 1) == 1
+    @test query_param(rq("page="), :page, Int; default = 1) == 1                       # empty is missing
+    @test_throws Juango.BadRequest query_param(rq("page=abc"), :page, Int; default = 1)
+    @test_throws Juango.BadRequest query_param(rq(""), :page, Int)                    # required
+    @test query_param(rq("on=yes"), :on, Bool) === true && query_param(rq("on=0"), :on, Bool) === false
+    @test_throws Juango.BadRequest query_param(rq("on=maybe"), :on, Bool)
+    @test query_param(rq("d=2026-11-15"), :d, Date) == Date(2026, 11, 15)
+    @test_throws Juango.BadRequest query_param(rq("d=15th"), :d, Date)
+    @test query_param(rq("x=1.5"), :x, Float64) == 1.5 && query_param(rq("q=hi"), :q) == "hi"
+    @test query_param(rq("sort=date"), :sort, Symbol; choices = (:name, :date)) === :date
+    e = try query_param(rq("sort=evil"), :sort, Symbol; choices = (:name, :date)); nothing catch err; err end
+    @test e isa Juango.BadRequest && occursin("must be one of name, date", e.msg)
+    @test query_param(rq("t=1&t=2&t=5"), :t, Vector{Int}) == [1, 2, 5] && query_param(rq(""), :t, Vector{Int}; default = Int[]) == Int[]
+    @test_throws Juango.BadRequest query_param(rq("t=1&t=x"), :t, Vector{Int})
+    # through a view: a 400 page, not a 500
+    v(req) = HttpResponse(string(query_param(req, :n, Int)))
+    override_settings(ROOT_URLCONF = [path("qp/", v)]) do
+        c = Client()
+        @test text(get(c, "/qp/?n=4")) == "4" && get(c, "/qp/?n=four").status == 400
+    end
+end

@@ -864,6 +864,8 @@ urlpatterns = [
 configure!(ROOT_URLCONF=urlpatterns, DATABASE="db.sqlite3", TEMPLATE_DIRS=["templates"])
 ```
 
+Query-string parameters can be read typed, so junk in the URL is a 400 Bad Request instead of a 500 from `parse`: `query_param(req, :page, Int; default = 1)`, `query_param(req, :since, Date)` (required: missing is a 400 too), `query_param(req, :sort, Symbol; default = :name, choices = (:name, :date))`, and `Vector{Int}` for a repeated parameter. `Bool`, `Float64`, `Decimal`, `DateTime` and `String` work as well.
+
 Converters: `str int slug path uuid`, plus `register_converter!`.
 
 An app mounted more than once gets an application namespace and an instance namespace per mount,
