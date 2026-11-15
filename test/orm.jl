@@ -502,6 +502,11 @@ end
     @test values_list(order_by(exa, "title"), :title, :author__name)[3] == ("ex-3", "Ex B")
     @test values_list(order_by(annotate(exau; n = Count(:articles)), "name"), :n; flat = true) == [2, 1, 0]
     # #160: values_list is a lazy QuerySet
+    # #185: every field, however many are passed literally (a precompiled caller lost the last one)
+    r4 = first(values_list(order_by(exa, "title"), :id, :title, :views, :author_id))
+    @test length(r4) == 4 && r4[2] == "ex-1"
+    @test length(values_list(exa, :id, :title, :views).values_fields) == 3
+    @test length(first(values_list(order_by(exa, "title"), :id, :title, :views, :author_id, :slug))) == 5
     vl = values_list(order_by(exa, "title"), :title; flat = true)
     @test vl isa QuerySet && collect(vl) == ["ex-1", "ex-2", "ex-3"] && first(vl) == "ex-1" && last(vl) == "ex-3"
     @test first(values_list(filter(exa; title = "nope"), :title; flat = true)) === nothing

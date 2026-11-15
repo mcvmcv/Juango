@@ -662,12 +662,19 @@ compared, so it chains (`order_by`, `distinct`, slicing, `count`, `exists`), `fi
 give `nothing` when there are no rows, and `filter(Plate; id__in = values_list(qs, :plate_id; flat = true))`
 is one query with a subquery. `collect` it for a `Vector`.
 """
-Base.@nospecializeinfer function values_list(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...; flat::Bool = false, named::Bool = false)
+# A plain method that gathers the fields, and a despecialized one with fixed arguments: a
+# @nospecializeinfer method with both a vararg and keywords lost its last field in some
+# precompiled callers (#185).
+values_list(qs::QuerySet, fields::Union{Symbol,AbstractString}...; flat::Bool = false, named::Bool = false) =
+    values_list_of(qs, Any[f for f in fields], flat, named)
+Base.@nospecializeinfer function values_list_of(@nospecialize(qs::QuerySet), fields::Vector{Any}, flat::Bool, named::Bool)
     flat && named && throw(ArgumentError("values_list: pass flat or named, not both"))
     flat && length(fields) != 1 && throw(ArgumentError("flat=true requires exactly one field"))
     T = model_of(qs)
-    fs = isempty(fields) ? vcat([:id], [Symbol(column(f)) for f in all_fields(T)]) : collect(Any, fields)
-    chain(values(qs, fs...); values_mode = flat ? :flat : named ? :named : :tuple)
+    fs = isempty(fields) ? Any[:id; [Symbol(column(f)) for f in all_fields(T)]] : fields
+    vq = values(qs, fs...)
+    length(vq.values_fields) == length(fs) || error("values_list: asked for $(length(fs)) fields, got $(length(vq.values_fields))")
+    chain(vq; values_mode = flat ? :flat : named ? :named : :tuple)
 end
 Base.@nospecializeinfer values_list(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...; kw...) = values_list(objects(T), fields...; kw...)
 
