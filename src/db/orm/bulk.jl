@@ -30,12 +30,16 @@ or updated).
 
 - `ignore_conflicts = true` skips rows that break a unique constraint.
 - `update_conflicts = true` updates `update_fields` of the existing row instead; PostgreSQL
-  and SQLite also need the `unique_fields` that conflict.
+  and SQLite also need the `unique_fields` that conflict. Objects with the same
+  `unique_fields` values are written once (the last one wins), since PostgreSQL refuses an
+  upsert that touches a row twice. `auto_now` fields are updated too, unless
+  `touch_auto_now = false`.
 """
 bulk_create(objs::AbstractVector{T}; db = nothing, kw...) where {T<:Model} =
     with_db(() -> (bulk_create_here(objs; kw...); foreach(set_instance_db!, objs); objs), something(db, routed_db(T, true), Some(nothing)))
 function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_conflicts = false,
-                     update_conflicts = false, update_fields = nothing, unique_fields = nothing) where {T<:Model}
+                     update_conflicts = false, update_fields = nothing, unique_fields = nothing,
+                     touch_auto_now::Bool = true) where {T<:Model}
     isempty(objs) && return objs
     table_parent(concrete_model(T)) === nothing ||
         throw(ArgumentError("bulk_create can't be used with multi-table inheritance ($(nameof(T)))"))
@@ -47,7 +51,9 @@ function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_
     conflict = ""
     if update_conflicts
         update_fields === nothing && throw(ArgumentError("bulk_create(update_conflicts = true) needs update_fields"))
-        ups = [qname(column(f)) for f in fieldsof(update_fields)]
+        ufs = fieldsof(update_fields)
+        touch_auto_now && append!(ufs, [f for f in meta.fields if f.auto_now && !any(g -> g === f, ufs)])
+        ups = [qname(column(f)) for f in ufs]
         if b isa MySQLBackend
             conflict = " ON DUPLICATE KEY UPDATE " * join(["$c = VALUES($c)" for c in ups], ", ")
         else
@@ -60,6 +66,10 @@ function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_
     end
     verb = ignore_conflicts && b isa MySQLBackend ? "INSERT IGNORE INTO" : "INSERT INTO"
     prepare_for_insert!(objs, T)
+    all_objs = objs
+    if update_conflicts && unique_fields !== nothing
+        objs = dedupe_upsert(objs, [Symbol(n) in (:id, :pk) ? :id : attname(fieldsof([n])[1]) for n in unique_fields])
+    end
     fields = [f for f in meta.fields if f.generated === nothing]
     if isempty(fields)                       # nothing to put in VALUES: one row at a time
         foreach(o -> (save_table!(concrete_model(T), (getfield(o, :_data)::Dict{Symbol,Any}), true); refresh_computed!(o)), objs)
@@ -108,22 +118,41 @@ function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_
         with_id && sync_sequence(b, meta.table)
     end
     is_composite(T) && foreach(o -> ((getfield(o, :_data)::Dict{Symbol,Any})[:id] = composite_pk(T, (getfield(o, :_data)::Dict{Symbol,Any}))), objs)
-    objs
+    all_objs
+end
+"The objects of an upsert with one per key (the last of each), in their order."
+function dedupe_upsert(objs, keys_::Vector{Symbol})
+    last_ = Dict{Any,Int}()
+    for (i, o) in enumerate(objs)
+        last_[Tuple(get((getfield(o, :_data)::Dict{Symbol,Any}), k, nothing) for k in keys_)] = i
+    end
+    length(last_) == length(objs) && return objs
+    keep = Set(values(last_))
+    [o for (i, o) in enumerate(objs) if i in keep]
 end
 
 """
     bulk_update(objs, [:title, :views]; batch_size) -> Int
 
 Write these fields of many saved objects with a few UPDATE statements (no `save!`, no
-signals); returns the number of rows changed.
+signals); returns the number of rows changed. `auto_now` fields (`updated_at`) are stamped and
+written too, unless `touch_auto_now = false` (Django leaves them alone).
 """
 bulk_update(objs::AbstractVector{T}, fields; db = nothing, kw...) where {T<:Model} =
     with_db(() -> bulk_update_here(objs, fields; kw...),
             isempty(objs) ? db : write_db(first(objs), db))
-function bulk_update_here(objs::AbstractVector{T}, fields; batch_size = nothing) where {T<:Model}
+function bulk_update_here(objs::AbstractVector{T}, fields; batch_size = nothing, touch_auto_now::Bool = true) where {T<:Model}
     isempty(objs) && return 0
     names = Symbol[Symbol(f) for f in fields]
     isempty(names) && throw(ArgumentError("bulk_update needs at least one field"))
+    if touch_auto_now
+        ts = timezone_now()
+        for f in all_fields(T)
+            f.auto_now && f.generated === nothing || continue
+            f.name in names || attname(f) in names || push!(names, f.name)
+            foreach(o -> ((getfield(o, :_data)::Dict{Symbol,Any})[attname(f)] = auto_now_value(f, ts)), objs)
+        end
+    end
     flds = Field[]
     for n in names
         n in (:id, :pk) && throw(ArgumentError("bulk_update can't change the primary key"))
@@ -273,9 +302,23 @@ Base.@nospecializeinfer Base.get(@nospecialize(T::Type{<:Model}), qargs::Q...; k
     update!(qs; field=value, ...) -> Int
 
 Bulk SQL UPDATE of all matching rows; returns the number of rows changed.
-Does not call `save!` or touch `auto_now` fields.
+Does not call `save!` or send signals. `auto_now` fields (`updated_at`) are set to now too,
+unless the call sets them itself or passes `touch_auto_now = false` (Django leaves them alone).
 """
-update!(qs::QuerySet; kw...) = in_db(() -> update_here!(qs; kw...), qs, true)
+function update!(qs::QuerySet; touch_auto_now::Bool = true, kw...)
+    vals = touch_auto_now && !isempty(kw) ? with_auto_now(model_of(qs), kw) : kw
+    in_db(() -> update_here!(qs; vals...), qs, true)
+end
+"`kw` plus now for each `auto_now` field it doesn't set."
+Base.@nospecializeinfer function with_auto_now(@nospecialize(T::Type), kw)
+    out = Pair{Symbol,Any}[k => v for (k, v) in kw]
+    ts = timezone_now()
+    for f in all_fields(T)
+        f.auto_now && f.generated === nothing || continue
+        any(p -> p.first in (f.name, attname(f)), out) || push!(out, f.name => auto_now_value(f, ts))
+    end
+    out
+end
 Base.@nospecializeinfer function update_here!(@nospecialize(qs::QuerySet); kw...)
     T = model_of(qs)
     qs.isnone && return 0

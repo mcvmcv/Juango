@@ -8,14 +8,18 @@ INSERT (when `obj.id === nothing`) or UPDATE the object. Sets `auto_now` /
 
 `update_fields = [:status, :approved_at]` writes only those columns (Django's
 `save(update_fields=...)`), so concurrent changes to other fields aren't overwritten:
-`auto_now` fields are set only if listed, an empty list saves nothing (and sends no signals),
+`auto_now` fields are written with them (unlike Django; `touch_auto_now = false` leaves them
+out unless listed), an empty list saves nothing (and sends no signals),
 an unknown name is an error, and so is a row that no longer exists. `pre_save` and
 `post_save` receive `update_fields` (a `Set{Symbol}`, or `nothing`).
 """
-Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, update_fields = nothing)
+Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, update_fields = nothing, touch_auto_now::Bool = true)
     T = typeof(obj)
     only = update_fields === nothing ? nothing : update_field_set(T, update_fields)
     only !== nothing && isempty(only) && return obj
+    if only !== nothing && touch_auto_now          # updated_at is stamped with the listed fields
+        foreach(f -> f.auto_now && f.generated === nothing && push!(only, attname(f)), all_fields(T))
+    end
     only !== nothing && (getfield(obj, :_data)::Dict{Symbol,Any})[:id] === nothing &&
         throw(ArgumentError("save!(::$(nameof(T)); update_fields) needs an object that's already saved"))
     alias = write_db(obj, db)

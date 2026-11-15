@@ -1056,6 +1056,30 @@ end
     bulk_create([Author(; name = "Bulk Author", email = "up@x.io")]; update_conflicts = true,
                 update_fields = [:email], unique_fields = [:name])
     @test get(Author; name = "Bulk Author").email == "up@x.io"
+    # #168: two objects with the same key in one upsert: written once, the last wins
+    bulk_create([Author(; name = "Bulk Author", email = "first@x.io"), Author(; name = "Bulk Dup", email = "d1@x.io"),
+                 Author(; name = "Bulk Author", email = "last@x.io")]; update_conflicts = true,
+                update_fields = [:email], unique_fields = [:name])
+    @test get(Author; name = "Bulk Author").email == "last@x.io" && get(Author; name = "Bulk Dup").email == "d1@x.io"
+    # #183: bulk writes stamp auto_now fields (updated) unless touch_auto_now = false
+    stamped = create(Article; title = "auto now bulk", author = get(Author; name = "Bulk Author"))
+    t0 = get(Article; id = stamped.id).updated
+    sleep(0.01)
+    update!(filter(Article; id = stamped.id); views = 7)
+    t1 = get(Article; id = stamped.id).updated
+    @test t1 > t0
+    sleep(0.01)
+    update!(filter(Article; id = stamped.id); views = 8, touch_auto_now = false)
+    @test get(Article; id = stamped.id).updated == t1 && get(Article; id = stamped.id).views == 8
+    fixed = DateTime(2020, 1, 2, 3, 4, 5)
+    update!(filter(Article; id = stamped.id); updated = fixed)                    # set by the call: kept
+    @test get(Article; id = stamped.id).updated == (Juango.settings.USE_TZ ? Juango.make_aware(fixed) : fixed)
+    s2 = get(Article; id = stamped.id); s2.views = 9
+    bulk_update([s2], [:views])
+    t2 = get(Article; id = stamped.id).updated
+    @test t2 > t1 && s2.updated == t2
+    s2.views = 10; bulk_update([s2], [:views]; touch_auto_now = false)
+    @test get(Article; id = stamped.id).updated == t2 && get(Article; id = stamped.id).views == 10
     @test_throws ArgumentError bulk_create([Author(; name = "x")]; update_conflicts = true)
     @test isempty(bulk_create(Author[]))
 
@@ -1898,13 +1922,18 @@ Juango.tattr!(b::EcBlock, ::Val{:well}, v) = (b.position = (findfirst(v[1], EC_R
         try
             other = get(Article; id = a.id)
             other.title = "changed elsewhere"; save!(other)
+            st1 = get(Article; id = a.id).updated
+            sleep(0.01)
             a.views = 5; a.title = "stale title"
             save!(a; update_fields = [:views])
             fresh = get(Article; id = a.id)
             @test fresh.views == 5 && fresh.title == "changed elsewhere"         # the other change survives
-            @test fresh.updated == get(Article; id = a.id).updated && log[end] == Set([:views])
-            save!(a; update_fields = [:views, :updated])                         # auto_now only when listed
-            @test get(Article; id = a.id).updated != stamp
+            @test fresh.updated > st1 && log[end] == Set([:views, :updated])      # #183: auto_now is written with them
+            sleep(0.01)
+            save!(a; update_fields = [:views], touch_auto_now = false)          # Django's behaviour
+            @test get(Article; id = a.id).updated == fresh.updated && log[end] == Set([:views])
+            save!(a; update_fields = [:views, :updated], touch_auto_now = false) # listed: written
+            @test get(Article; id = a.id).updated > fresh.updated
             n = length(log)
             save!(a; update_fields = Symbol[])                                   # nothing, no signals
             @test length(log) == n

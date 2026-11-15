@@ -194,7 +194,7 @@ end
 union(filter(Post; featured = true), filter(Post; views__gt = 1000))     # intersection, difference too
 ```
 
-`bulk_create` and `bulk_update` don't call `save!` or send signals. Combined querysets can be ordered, sliced and counted but not filtered further.
+`bulk_create` and `bulk_update` don't call `save!` or send signals. Unlike Django, `update!`, `bulk_update` and upserts (`update_conflicts`) stamp `auto_now` fields such as `updated_at`, so "last changed" stays true after bulk writes; pass `touch_auto_now = false` for Django's behaviour. An upsert given two objects with the same `unique_fields` writes the last one (PostgreSQL would refuse the batch). Combined querysets can be ordered, sliced and counted but not filtered further.
 
 #### Validation and neighbours
 
@@ -220,7 +220,7 @@ post.get_next_by_created                      # Django's get_next_by_FOO, for no
       b.first > b.last && throw(ValidationError("The first number comes after the last."))
   end
   ```
-- **Partial saves.** `save!(obj; update_fields = [:status, :approved_at])` writes only those columns, so another request's change to a different field isn't overwritten. `auto_now` fields are set only if they're listed, an empty list saves nothing, and `pre_save`/`post_save` get `update_fields` (a `Set`, or `nothing`).
+- **Partial saves.** `save!(obj; update_fields = [:status, :approved_at])` writes only those columns, so another request's change to a different field isn't overwritten. `auto_now` fields are written with them (Django leaves them out; `touch_auto_now = false` does too), an empty list saves nothing, and `pre_save`/`post_save` get `update_fields` (a `Set`, or `nothing`).
 - **`get_next_by` and `get_previous_by`** break ties by primary key, and throw `DoesNotExist` at the end.
 
 #### Choices
