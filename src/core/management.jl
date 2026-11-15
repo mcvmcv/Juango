@@ -114,7 +114,9 @@ register_check!(tags = [:urls]) do
     msgs
 end
 register_check!(tags = [:templates]) do
-    [CheckMessage(:error, "Template directory '$d' does not exist."; id = "templates.E001") for d in settings.TEMPLATE_DIRS if !isdir(d)]
+    msgs = [CheckMessage(:error, "Template directory '$d' does not exist."; id = "templates.E001") for d in settings.TEMPLATE_DIRS if !isdir(d)]
+    append!(msgs, [CheckMessage(:error, "$name: $msg"; id = id) for (id, name, msg) in template_issues()])
+    msgs
 end
 register_check!(tags = [:settings]) do
     [CheckMessage(l, m; id = id, hint = h) for (l, m, id, h) in settings_issues()]

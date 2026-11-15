@@ -314,3 +314,25 @@ end
         configure!(ROOT_URLCONF = old)
     end
 end
+
+@testset "checking templates (#166)" begin
+    d = mktempdir()
+    write(joinpath(d, "ok.html"), "{% load humanize %}{% for x in xs %}{{ x|upper|intcomma }}{% endfor %}{% url 'admin:index' %}")
+    write(joinpath(d, "tag.html"), "{% iff x %}y{% endif %}")
+    write(joinpath(d, "filter.html"), "{{ x|uppr }}")
+    write(joinpath(d, "url.html"), "{% url 'no-such-view' %} {% url view_name_in_a_variable %}")
+    write(joinpath(d, "inc.html"), "{% include 'nope/missing.html' %}{% include template_var %}")
+    write(joinpath(d, "ext.html"), "{% extends 'missing-base.html' %}{% block a %}{% endblock %}")
+    write(joinpath(d, "notes.bin"), "{% iff %}")                                           # not a template
+    issues = Juango.template_issues(dirs = [d])
+    byname = Dict(n => (id, m) for (id, n, m) in issues)
+    @test !haskey(byname, "ok.html") && !haskey(byname, "notes.bin") && length(issues) == 5
+    @test byname["tag.html"][1] == "templates.E101" && occursin("invalid block tag 'iff'", byname["tag.html"][2]) && occursin("did you mean 'if'?", byname["tag.html"][2])
+    @test occursin("invalid filter: 'uppr'", byname["filter.html"][2]) && occursin("did you mean 'upper'?", byname["filter.html"][2])
+    @test byname["url.html"] == ("templates.E102", "{% url 'no-such-view' %}: no URL pattern is named 'no-such-view'")
+    @test byname["inc.html"][1] == "templates.E103" && occursin("nope/missing.html", byname["inc.html"][2])
+    @test byname["ext.html"][1] == "templates.E103" && occursin("missing-base.html", byname["ext.html"][2])
+    override_settings(TEMPLATE_DIRS = [d]) do
+        @test count(m -> startswith(m.id, "templates.E10"), Juango.run_checks(tags = [:templates])) == 5
+    end
+end

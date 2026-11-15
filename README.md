@@ -2042,6 +2042,8 @@ end
 configure!(SILENCED_SYSTEM_CHECKS = ["billing.W001", "security.W004"])
 ```
 
+`check --tag templates` parses every template of the project and its apps and reports syntax errors, unknown tags and filters with the closest known name (`invalid filter: 'uppr'; did you mean 'upper'?`), `{% url %}` names no pattern has, and `{% extends %}` / `{% include %}` of templates that don't exist (`templates.E101`–`E103`), so these turn up before a user finds them.
+
 Juango's own checks use Django's ids where Django has the same check (`security.W004` for HSTS, `security.W009` for `SECRET_KEY`, and so on). Some go further than Django's: unknown and mistyped settings (`settings.W001`, `settings.E001`–`E004`), and text fields with `null = true` that aren't unique (`fields.W800`), which then have two kinds of blank, NULL and `""`.
 
 ## Deployment
