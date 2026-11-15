@@ -22,7 +22,7 @@ export settings, configure!, declare_settings!
 export Request, HttpResponse, JsonResponse, HttpResponseRedirect, HttpResponsePermanentRedirect,
        HttpResponseNotFound, HttpResponseForbidden, HttpResponseBadRequest, HttpResponseNotAllowed,
        HttpResponseGone, HttpResponseNotModified, HttpResponseServerError, set_signed_cookie!, get_signed_cookie,
-       StreamingHttpResponse, FileResponse, content_disposition, TemplateResponse, Http404, PermissionDenied, BadRequest, QueryDict, getlist,
+       StreamingHttpResponse, FileResponse, protected_media, content_disposition, TemplateResponse, Http404, PermissionDenied, BadRequest, QueryDict, getlist,
        set_cookie!, delete_cookie!, getheader, setheader!, json_body
 export EventStreamResponse, sse_event, websocket, ws_send, ws_receive, ws_close, ws_isopen
 # urls

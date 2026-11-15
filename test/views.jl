@@ -2424,3 +2424,29 @@ end
         @test text(get(c, "/qp/?n=4")) == "4" && get(c, "/qp/?n=four").status == 400
     end
 end
+
+@testset "protected media (#176)" begin
+    md = mktempdir()
+    write(joinpath(md, "pic.png"), "PNG"); write(joinpath(md, "page.html"), "<script>alert(1)</script>")
+    mkpath(joinpath(md, "u")); write(joinpath(md, "u", "r.svg"), "<svg/>"); write(joinpath(md, "secret.txt"), "x")
+    mine(req, name) = Juango.is_authenticated(req.user) && !startswith(name, "secret")
+    override_settings(MEDIA_ROOT = md, ROOT_URLCONF = [path("files/<path:name>", protected_media(allow = mine)),
+                                                      path("acc/<path:name>", protected_media(sendfile = :x_accel_redirect))]) do
+        c = Client()
+        r = get(c, "/files/pic.png")
+        @test r.status == 302 && occursin("next=", getheader(r, "Location"))                 # anonymous: log in first
+        force_login!(c, root_user())
+        r = get(c, "/files/pic.png")
+        @test r.status == 200 && getheader(r, "Content-Type") == "image/png" && getheader(r, "X-Content-Type-Options") == "nosniff"
+        @test occursin("sandbox", getheader(r, "Content-Security-Policy")) && !occursin("attachment", getheader(r, "Content-Disposition"))
+        r = get(c, "/files/page.html")                                                         # never served as a page
+        @test r.status == 200 && occursin("attachment", getheader(r, "Content-Disposition")) && getheader(r, "Content-Type") == "application/octet-stream"
+        @test occursin("attachment", getheader(get(c, "/files/u/r.svg"), "Content-Disposition"))   # SVG can hold scripts
+        @test get(c, "/files/secret.txt").status == 403
+        @test get(c, "/files/nosuch.png").status == 404
+        @test get(c, "/files/..%2F..%2Fetc%2Fpasswd").status in (400, 404)
+        r = get(c, "/acc/u/r.svg")                                                             # nginx sends it
+        @test getheader(r, "X-Accel-Redirect") == "/protected/u/r.svg" && occursin("attachment", getheader(r, "Content-Disposition"))
+    end
+    @test_throws ArgumentError protected_media(sendfile = :ftp)
+end

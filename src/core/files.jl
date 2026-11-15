@@ -379,6 +379,54 @@ function image_size(b::AbstractVector{UInt8})
     nothing
 end
 
+# --- serving private uploads in production -------------------------------------------------------------------
+
+"Types a browser shows inline as images and can't run (SVG can hold scripts, so it's an attachment)."
+const SAFE_INLINE_MEDIA = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".ico")
+
+"""
+    protected_media(; allow = (req, name) -> is_authenticated(req.user), storage = FileSystemStorage(),
+                      sendfile = nothing, prefix = "/protected/")
+
+A view serving uploaded files only to users `allow` lets through, for `path("media/<path:name>",
+protected_media())`. Anonymous users are sent to the login page; others refused get 403. The file
+can't run as one of the site's pages: paths can't leave the storage's directory, the response is
+`Content-Security-Policy: sandbox` and `nosniff`, and anything but a plain image (PNG, JPEG, GIF,
+WebP...) is sent as a download. `allow(req, name)` sees the file's name, so it can check who owns it.
+
+`sendfile = :x_accel_redirect` (nginx) or `:x_sendfile` (Apache, lighttpd) hands the sending to the
+web server: the response carries `X-Accel-Redirect: <prefix><name>` (an `internal` nginx location
+serving MEDIA_ROOT) or `X-Sendfile: <path>` and no body.
+"""
+function protected_media(; allow = (req, name) -> is_authenticated(req.user), storage = nothing, sendfile = nothing,
+                         prefix::AbstractString = "/protected/")
+    sendfile in (nothing, :x_accel_redirect, :x_sendfile) || throw(ArgumentError("protected_media: sendfile is nothing, :x_accel_redirect or :x_sendfile"))
+    function serve_protected(req; name, kw...)
+        name = URIs.unescapeuri(string(name))
+        if !allow(req, name)
+            is_authenticated(req.user) || return redirect_to_login(req)
+            throw(PermissionDenied("You can't see this file."))
+        end
+        st = something(storage, FileSystemStorage())
+        p = try path(st, name) catch; throw(Http404("File not found")) end      # (path refuses ../ and absolute names)
+        isfile(p) || throw(Http404("File not found"))
+        ext = lowercase(splitext(p)[2])
+        inline = ext in SAFE_INLINE_MEDIA
+        headers = ["X-Content-Type-Options" => "nosniff", "Content-Security-Policy" => "sandbox; default-src 'none'; img-src 'self'",
+                   "Cache-Control" => "private, max-age=0", "X-Frame-Options" => "SAMEORIGIN"]
+        if sendfile !== nothing
+            r = HttpResponse(""; content_type = inline ? get(MIME_TYPES, ext, "application/octet-stream") : "application/octet-stream")
+            setheader!(r, sendfile === :x_sendfile ? "X-Sendfile" : "X-Accel-Redirect",
+                       sendfile === :x_sendfile ? p : rstrip(prefix, '/') * "/" * join(URIs.escapeuri.(split(name, '/')), "/"))
+            setheader!(r, "Content-Disposition", content_disposition(basename(p); attachment = !inline))
+        else
+            r = FileResponse(p; as_attachment = !inline, content_type = inline ? get(MIME_TYPES, ext, "application/octet-stream") : "application/octet-stream")
+        end
+        foreach(h -> setheader!(r, h.first, h.second), headers)
+        r
+    end
+end
+
 # --- serving media in development ---------------------------------------------------------------------------
 
 "Serve a file from MEDIA_ROOT (development server, DEBUG only)."
