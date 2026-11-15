@@ -2667,6 +2667,27 @@ end
     dr = ModelResource(Author; fields = [:name], import_id_fields = [:name], delete_column = "Delete")
     res = import_data(dr, "name,Delete\nIE Cat,yes\nIE Nobody,x\n"; format = :csv, dry_run = false)
     @test res.totals[:delete] == 1 && res.totals[:skip] == 1 && !exists(filter(Author; name = "IE Cat"))
+    # a field's own conversion (#196): views stored as a 96-well position, written as the well's name
+    wname(p) = string('A' + (p - 1) ÷ 12, (p - 1) % 12 + 1)
+    function windex(s)
+        m = match(r"^([A-H])(\d{1,2})$", uppercase(strip(string(s))))
+        m === nothing && error("not a 96-well name: $s")
+        c = parse(Int, m[2]); 1 <= c <= 12 || return nothing
+        (m[1][1] - 'A') * 12 + c
+    end
+    wr = ModelResource(Article; fields = [:title, :views], import_id_fields = [:title], headers = Dict(:views => "well"),
+                       convert = Dict(:views => (render = wname, clean = windex)))
+    update!(filter(Article; title = "IE one"); views = 14)
+    @test export_rows(wr, filter(Article; title = "IE one"))[2] == Any["IE one", "B2"]
+    res = import_data(wr, "title,well\nIE one,H12\n"; format = :csv, dry_run = false)
+    @test !has_errors(res) && get(Article; title = "IE one").views == 96 && res.rows[1].diff == [("well", 14, 96)]
+    res = import_data(wr, "title,well\nIE blank,\n"; format = :csv)               # blank: as the field handles it, not converted
+    @test !any(occursin("96-well", m) for m in get(res.rows[1].errors, "views", String[]))
+    res = import_data(wr, "title,well\nIE one,Z9\nIE new,A13\n"; format = :csv)
+    @test res.totals[:invalid] == 2 && only(res.rows[1].errors["views"]) == "not a 96-well name: Z9"
+    @test only(res.rows[2].errors["views"]) == "\"A13\" isn't a valid well."
+    @test_throws ArgumentError ModelResource(Article; fields = [:title], convert = Dict(:views => (render = wname,)))
+    @test_throws ArgumentError ModelResource(Article; fields = [:views], convert = Dict(:views => wname))
     # file errors
     @test has_errors(import_data(ar, "email\nx@y.io\n"; format = :csv)) && has_errors(import_data(ar, ""; format = :csv))
     @test_throws ArgumentError ModelResource(Author; fields = [:nosuch])

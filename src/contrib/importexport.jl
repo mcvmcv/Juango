@@ -24,11 +24,13 @@ struct ModelResource
     skip_unchanged::Bool
     delete_column::Union{Nothing,String}
     before_save::Any                     # nothing, or (obj, row::Dict{Symbol,Any}) -> anything
+    convert::Dict{Symbol,Any}            # field => (render = value -> cell, clean = cell -> value)
 end
 
 """
     ModelResource(Model; fields = nothing, exclude = [], import_id_fields = [:id], headers = Dict(),
-                  fk = Dict(), skip_unchanged = true, delete_column = nothing, before_save = nothing)
+                  fk = Dict(), skip_unchanged = true, delete_column = nothing, before_save = nothing,
+                  convert = Dict())
 
 - `fields`: the columns, in order (default: the id and every concrete field and many-to-many).
 - `import_id_fields`: the fields that find a row's existing record; a row matching none is new.
@@ -38,9 +40,16 @@ end
 - `skip_unchanged`: rows that change nothing are reported as skipped and not saved.
 - `delete_column`: a column whose true values (1, yes, true, x) delete the row's record.
 - `before_save(obj, row)`: called on each record before it's validated and saved (set a user, a default).
+- `convert`: a field's own conversion, for a column whose form in the file differs from what's
+  stored (a django-import-export widget's `render` and `clean`): `Dict(:well => (render = p ->
+  well_name(p, 96), clean = s -> well_index(s, 96)))`. `render` (export) gets the stored value
+  (not `nothing`); `clean` (import) gets the cell (not blank: blank cells are handled as the field
+  handles them). Either may be left out. An exception or `nothing` from `clean` makes the row
+  invalid, with the exception's message.
 """
 function ModelResource(T::Type; fields = nothing, exclude = Symbol[], import_id_fields = [:id], headers = Dict(),
-                       fk = Dict(), skip_unchanged::Bool = true, delete_column = nothing, before_save = nothing)
+                       fk = Dict(), skip_unchanged::Bool = true, delete_column = nothing, before_save = nothing,
+                       convert = Dict())
     meta = modelmeta(T)
     default = vcat([:id], Symbol[f.name for f in concrete_fields(T) if f.name !== :id && f.kind !== :m2m], Symbol[f.name for f in meta.m2m])
     names = filter(!in(Symbol.(collect(exclude))), fields === nothing ? default : Symbol.(collect(fields)))
@@ -48,9 +57,15 @@ function ModelResource(T::Type; fields = nothing, exclude = Symbol[], import_id_
         n === :id || findfield(meta, n) !== nothing || any(f -> f.name === n, meta.m2m) ||
             throw(ArgumentError("ModelResource: $(nameof(T)) has no field '$n'"))
     end
+    conv = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in convert)
+    for (k, c) in conv
+        k in names || throw(ArgumentError("ModelResource: convert names '$k', which isn't one of the resource's fields"))
+        c isa NamedTuple && issubset(keys(c), (:render, :clean)) && !isempty(c) ||
+            throw(ArgumentError("ModelResource: convert[:$k] must be (render = f, clean = g), either one or both"))
+    end
     ModelResource(T, names, Symbol.(collect(import_id_fields)), Dict{Symbol,String}(Symbol(k) => string(v) for (k, v) in headers),
                   Dict{Symbol,Symbol}(Symbol(k) => Symbol(v) for (k, v) in fk), skip_unchanged,
-                  delete_column === nothing ? nothing : string(delete_column), before_save)
+                  delete_column === nothing ? nothing : string(delete_column), before_save, conv)
 end
 Base.show(io::IO, r::ModelResource) = print(io, "<ModelResource ", nameof(r.model), ": ", join(r.fields, ", "), ">")
 
@@ -62,6 +77,11 @@ header_of(r::ModelResource, n::Symbol) = get(r.headers, n, string(n))
 
 "A field's value of an object as exported: foreign keys as ids or their `fk` field, many-to-many as a comma-separated list."
 function export_value(r::ModelResource, @nospecialize(obj), n::Symbol, typed::Bool)
+    c = get(r.convert, n, nothing)
+    if c !== nothing && haskey(c, :render)
+        v = n === :id ? obj.pk : (f = resource_field(r, n); f.kind === :m2m ? collect(getproperty(obj, n)) : field_data(obj, attname(f)))
+        return v === nothing ? nothing : c.render(v)
+    end
     n === :id && return obj.pk
     f = resource_field(r, n)
     if f.kind === :m2m
@@ -185,8 +205,21 @@ end
 truthy_cell(v) = v === true || (v isa Real && v == 1) || (v isa AbstractString && lowercase(strip(v)) in ("1", "true", "yes", "y", "x"))
 cell_string(v) = v === nothing ? "" : v isa AbstractFloat && isinteger(v) ? string(Int(v)) : string(v)
 
+blank_cell(v) = v === nothing || (v isa AbstractString && isempty(strip(v)))
+
 "A cell as the field's value: `(value, error)`."
 function import_value(r::ModelResource, f::Field, n::Symbol, v)
+    c = get(r.convert, n, nothing)
+    if c !== nothing && haskey(c, :clean) && !blank_cell(v)
+        val = try
+            c.clean(v)
+        catch e
+            return nothing, e isa ValidationError ? join(reduce(vcat, collect(values(e.errors)); init = String[]), " ") :
+                            e isa ErrorException ? e.msg : sprint(showerror, e)
+        end
+        val === nothing && return nothing, "$(repr(cell_string(v))) isn't a valid $(header_of(r, n))."
+        return val, nothing
+    end
     if f.kind === :m2m
         R, lf = related_model(f), get(r.fk, n, :id)
         keys_ = [strip(s) for s in split(cell_string(v), ',') if !isempty(strip(s))]
