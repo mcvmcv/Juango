@@ -2231,7 +2231,7 @@ end
 # vararg methods no longer use @nospecializeinfer; these calls are inside functions, where it showed.
 vararg_order(qs) = order_by(qs, "-views", "title", "id").order
 vararg_filter(qs) = filter(qs, Q(views__gte = 0), Q(title__startswith = "va"), Q(views = 99))
-vararg_exclude(qs) = exclude(qs, Q(views = -1), Q(views = -2), Q(title__startswith = "va"))
+vararg_exclude(qs) = exclude(qs, Q(title__startswith = "va"), Q(views__gte = 0), Q(views = 99))
 vararg_values(qs) = values(qs, :id, :title, :views).values_fields
 vararg_values_list(qs) = values_list(qs, :id, :title, :views, :slug).values_fields
 vararg_related(qs) = select_related(qs, :author, :author, :nosuch)
@@ -2245,7 +2245,7 @@ vararg_get(qs) = get(qs, Q(title__startswith = "va"), Q(views = 99), Q(slug = "n
     qs = filter(Article; title__startswith = "va")
     @test length(vararg_order(qs)) == 3
     @test [a.title for a in vararg_filter(qs)] == ["va two"]                                                # all three conditions
-    @test isempty(collect(vararg_exclude(qs)))                                                             # the third one excludes all
+    @test [a.title for a in vararg_exclude(qs)] == ["va one"]                                              # the third narrows what's excluded
     @test vararg_values(qs) == ["id", "title", "views"]
     @test vararg_values_list(qs) == ["id", "title", "views", "slug"]
     @test_throws Juango.LookupError vararg_related(qs)                                                    # the third path is read
