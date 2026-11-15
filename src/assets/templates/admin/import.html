@@ -1,0 +1,28 @@
+{% extends "admin/base.html" %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a> › <a href="{% url 'admin:app_list' app=opts.app_label %}">{{ opts.app_name }}</a> › <a href="{% url 'admin:changelist' app=opts.app_label model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › {% translate "Import" %}</div>{% endblock %}
+{% block content %}
+<h1 class="page">{{ title }}</h1>
+{% if token %}
+<div class="module"><p>{% translate "Nothing has been changed yet. This is what importing the file will do:" %}</p>
+<form method="post">{% csrf_token %}<input type="hidden" name="confirm" value="{{ token }}"><button type="submit" class="button">{% translate "Confirm import" %}</button></form></div>
+{% else %}
+<form method="post" enctype="multipart/form-data" class="module">{% csrf_token %}
+  {% if upload_error %}<ul class="errorlist"><li>{{ upload_error }}</li></ul>{% endif %}
+  <p>{% translate "A CSV, XLSX or JSON file with the columns:" %} <code>{{ fields|join:", " }}</code>. {% translate "Rows are matched to existing records by" %} <code>{{ id_fields|join:", " }}</code>.</p>
+  <p><input type="file" name="import_file" accept=".csv,.xlsx,.json" required> <button type="submit" class="button">{% translate "Check the file" %}</button></p>
+</form>
+{% endif %}
+{% if result %}
+<div class="module">
+  {% if result.errors %}<ul class="errorlist">{% for e in result.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+  <p class="import-totals">{{ result.totals.new|default:0 }} new · {{ result.totals.update|default:0 }} updated · {{ result.totals.delete|default:0 }} deleted · {{ result.totals.skip|default:0 }} unchanged · {{ result.totals.invalid|default:0 }} invalid{% if result.ignored_columns %} · {% translate "columns not used:" %} {{ result.ignored_columns|join:", " }}{% endif %}</p>
+  {% if result.totals.invalid %}<p class="errornote">{% translate "Nothing can be imported until the invalid rows are fixed." %}</p>{% endif %}
+  <table class="import-rows"><thead><tr><th>{% translate "Row" %}</th><th></th><th>{{ opts.verbose_name|capfirst }}</th><th>{% translate "Changes and errors" %}</th></tr></thead><tbody>
+  {% for r in rows %}{% if r.kind != "skip" %}<tr class="import-{{ r.kind }}"><td>{{ r.number }}</td><td>{{ r.kind }}</td><td>{{ r.object }}</td><td>
+    {% for d in r.diff %}<div><b>{{ d.field }}</b>: {% if d.old %}<del>{{ d.old }}</del> → {% endif %}<ins>{{ d.new }}</ins></div>{% endfor %}
+    {% for e in r.errors %}<div class="errorlist"><b>{{ e.field }}</b>: {{ e.messages|join:" " }}</div>{% endfor %}
+  </td></tr>{% endif %}{% endfor %}
+  </tbody></table>
+</div>
+{% endif %}
+{% endblock %}

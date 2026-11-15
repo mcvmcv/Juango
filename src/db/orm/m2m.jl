@@ -32,11 +32,14 @@ objid(x) = x
 function m2m_signal(o, action, ids)
     m2m = has_receivers(m2m_changed, o.through)
     w = startswith(string(action), "post_") && has_receivers(post_write, o.through)
-    (m2m || w) || return
+    pw = startswith(string(action), "pre_") && has_receivers(pre_write, o.through)
+    (m2m || w || pw) || return
     owner = related_model(o.mine)
     inst = get(base_objects(owner); id = o.id)
     pks = ids === nothing ? nothing : Set(ids)
     m2m && send(m2m_changed, o.through; action = action, instance = inst, model = related_model(o.other), pk_set = pks, reverse = !o.forward)
+    pw && send(pre_write, o.through; action = :m2m, via = action, ids = nothing, fields = nothing, instances = nothing,
+               instance = inst, model = related_model(o.other), pk_set = pks)
     w && send(post_write, o.through; action = :m2m, via = action, ids = nothing, fields = nothing, instances = nothing,
               instance = inst, model = related_model(o.other), pk_set = pks)
 end

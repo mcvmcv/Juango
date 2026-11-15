@@ -668,3 +668,14 @@ end
     m = form_html(mk(); pack = "mine").s
     @test startswith(m, "<section><p class=\"mine\">Name: ") && occursin("class=\"m\"", m)
 end
+
+@testset "formset row predicates: is_deleted, is_blank_extra, active_forms (#193)" begin
+    RowF(d; prefix = "", initial = Dict()) = Form([:name => CharField(max_length = 10)]; data = d, prefix = prefix, initial = initial)
+    FS = formset_factory(RowF; extra = 1, can_delete = true)
+    fs = FS(Dict("form-TOTAL_FORMS" => "3", "form-INITIAL_FORMS" => "2", "form-0-name" => "a", "form-1-name" => "b",
+                 "form-1-DELETE" => "on", "form-2-name" => ""); initial = [Dict(:name => "a"), Dict(:name => "b")])
+    @test is_valid(fs)
+    f0, f1, f2 = fs.forms
+    @test !is_deleted(fs, f0) && is_deleted(fs, f1) && !is_deleted(fs, f2)
+    @test !is_blank_extra(fs, f0) && is_blank_extra(fs, f2) && active_forms(fs) == [f0]
+end

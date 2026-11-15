@@ -44,6 +44,29 @@ end
 Base.setindex!(q::QueryDict, v, k::AbstractString) = (q.data[k] = [string(v)]; q)
 "All values submitted for key `k`."
 getlist(q::QueryDict, k) = get(q.data, string(k), String[])
+
+"""
+    get(q::QueryDict, key, T) -> T or nothing
+    getlist(q::QueryDict, key, T) -> Vector{T}
+
+A parameter as a `T` (`Int` and other integers, `Float64`, `Decimal`, `Bool`, `Date`, `DateTime`,
+`UUID`, `String`), or `nothing` when it's missing, blank or doesn't parse: `get(req.POST, "id", Int)`.
+`getlist` drops the values that don't parse. (For a 400 on junk instead, see `query_param`.)
+"""
+Base.get(q::QueryDict, k::AbstractString, ::Type{T}) where {T<:Union{Number,Bool,Dates.TimeType,UUID,AbstractString}} =
+    parse_param(T, get(q, string(k), nothing))
+getlist(q::QueryDict, k, ::Type{T}) where {T} = T[v for v in (parse_param(T, s) for s in getlist(q, k)) if v !== nothing]
+parse_param(::Type, ::Nothing) = nothing
+function parse_param(::Type{T}, raw::AbstractString) where {T}
+    s = strip(raw)
+    isempty(s) && return nothing
+    T <: AbstractString && return T(s)
+    T === Bool && return lowercase(s) in ("1", "true", "on", "yes", "y") ? true : lowercase(s) in ("0", "false", "off", "no", "n") ? false : nothing
+    T <: Union{Number,UUID} && return tryparse(T, s)
+    T === Date && return parse_input_datetime(s, :date)
+    T === DateTime && return parse_input_datetime(s, :datetime)
+    nothing
+end
 Base.copy(q::QueryDict) = QueryDict(Dict(k => copy(v) for (k, v) in q.data))
 "Re-encode as a query string."
 urlencode(q::QueryDict) = urlencode(Dict(k => v for (k, v) in q.data))

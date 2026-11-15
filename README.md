@@ -1030,6 +1030,28 @@ CSV exports (here and the admin's `export_csv`) prefix text starting with `=`, `
 of values, without another package. Numbers, booleans, dates and datetimes become real Excel
 values, and the first row is a bold header.
 
+### Importing and exporting rows (django-import-export)
+
+Reference data often lives in spreadsheets that staff maintain. A resource says how a model's rows map to columns:
+
+```julia
+r = ModelResource(Sample; fields = [:code, :name, :plate, :volume], import_id_fields = [:code],
+                  fk = Dict(:plate => :label), headers = Dict(:volume => "Volume (µl)"))
+export_data(r, filter(Sample; plate__project = p); format = :xlsx)     # bytes: :csv, :xlsx or :json
+export_download(r, qs; format = :csv)                                  # an attachment, from a view
+res = import_data(r, read(path); format = :xlsx)                        # a dry run: nothing is kept
+res.totals                                                              # :new, :update, :skip, :delete, :invalid
+has_errors(res) || import_data(r, read(path); format = :xlsx, dry_run = false)
+```
+
+- **Matching:** a row matches its existing record by `import_id_fields` (the id by default; a natural key such as a code is usually better for spreadsheets). Columns match by header, field name or label, ignoring case; others are listed in `res.ignored_columns`.
+- **Values** go through the field's form conversion and the model's validation (`full_clean`). Foreign keys and many-to-many fields are given by id, or by a field of the related model (`fk`), a many-to-many as a comma-separated list. Excel dates are converted.
+- **One transaction:** a dry run, or any invalid row, keeps nothing. Each `res.rows` entry has the row's line, what happened, the changed fields (old and new) and the errors.
+- **Options:** `skip_unchanged` (default true), `delete_column = "Delete"` (true values delete the row's record) and `before_save = (obj, row) -> ...`.
+- **CSV exports** are protected against formula injection (`csv_field`), and imports undo that protection, so an export round-trips. `parse_csv` and `read_xlsx` are there for other uses.
+
+In the admin, `Admin.register!(Sample; import_export = r)` (or `true` for every field) adds Import and Export buttons to the change list. Importing shows a dry run first, row by row, with a button to confirm it; it needs the add and change permissions.
+
 ### Typed JSON APIs (django-ninja style)
 
 Django's answer for APIs is Django REST framework; Juango builds in django-ninja's idea instead: a handler's argument types validate the input and produce OpenAPI docs.

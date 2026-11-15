@@ -139,6 +139,8 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
     end
     created = data[:id] === nothing
     has_receivers(pre_save, T) && send(pre_save, T; instance = obj, created = created, update_fields = only)
+    has_receivers(pre_write, T) && send(pre_write, T; action = created ? :insert : :update, via = :save, ids = Any[data[:id]],
+                                        fields = only === nothing ? nothing : collect(only), instances = [obj])
     store_uploaded_files!(obj, data)
     chain_ = reverse(vcat([concrete_model(T)], ancestors(T)))     # root table first
     fresh = false

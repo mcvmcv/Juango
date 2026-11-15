@@ -162,6 +162,13 @@ end
 "Add an error to the formset as a whole."
 add_error!(fs::FormSet, msg) = (push!(fs.non_form_errors, string(msg)); nothing)
 
+"Whether a formset row is ticked for deletion (Django's `_should_delete_form`, made public)."
+is_deleted(fs::FormSet, f::Form) = marked_delete(fs, f)
+"Whether a formset row is an extra row left blank: it doesn't count and isn't validated or saved."
+function is_blank_extra(fs::FormSet, f::Form)
+    i = findfirst(x -> x === f, build_forms!(fs))
+    i !== nothing && blank_extra(fs, f, i - 1)
+end
 "Forms that will be saved/used: valid, not deleted and not blank extras."
 active_forms(fs::FormSet) = [f for (i, f) in enumerate(build_forms!(fs)) if !marked_delete(fs, f) && !blank_extra(fs, f, i - 1)]
 "Cleaned data of the active forms (in order when `can_order`)."

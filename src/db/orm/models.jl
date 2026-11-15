@@ -655,7 +655,8 @@ end
 Base.@nospecializeinfer Base.propertynames(@nospecialize(m::Model), private::Bool = false) = propertynames_of(typeof(m))
 # `{{ obj.attr }}` asks this for each lookup that isn't a field
 Base.@nospecializeinfer Base.hasproperty(@nospecialize(m::Model), s::Symbol) =
-    s in (cached_relations(property_set, :propertyset, typeof(m))::Set{Symbol}) || extra_value(m, s) !== NOTFOUND
+    s in (cached_relations(property_set, :propertyset, typeof(m))::Set{Symbol}) || extra_value(m, s) !== NOTFOUND ||
+    haskey((getfield(m, :_data)::Dict{Symbol,Any}), s)          # an annotation or extra() value the row has (#190)
 Base.@nospecializeinfer propertynames_of(@nospecialize(T)) = cached_relations(compute_propertynames, :propertynames, T)
 Base.@nospecializeinfer compute_propertynames(@nospecialize(T)) = Tuple(property_list(T))
 Base.@nospecializeinfer property_set(@nospecialize(T)) = Set{Symbol}(property_list(T))

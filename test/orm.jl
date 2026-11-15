@@ -2146,6 +2146,11 @@ end
     finally
         disconnect!(post_write, wrec)
     end
+    # #190: hasproperty is true for an annotation the object has, even when it's nothing
+    create(Author; name = "HP Author")
+    an = first(annotate(filter(Author; name = "HP Author"); n = Count(:articles), none_ = Max(:articles__rating)))
+    @test hasproperty(an, :n) && an.n == 0 && hasproperty(an, :none_) && an.none_ === nothing
+    @test !hasproperty(first(filter(Author; name = "HP Author")), :n)
     # #180: lookup paths on instances
     lv = create(Article; title = "lv", author = create(Author; name = "LV Author"))
     @test lookup_value(lv, "author__name") == "LV Author" && lookup_value(lv, :author__name) == "LV Author" && lookup_value(lv, "author.name") == "LV Author"
@@ -2278,4 +2283,30 @@ end
     @test_throws ArgumentError union(values_list(arts, :author_id; flat = true), values_list(objects(Author), :id, :name))
     @test_throws ArgumentError union(arts, filter(Author; name = "SQ Two"))                   # objects: one model
     @test_throws ArgumentError union(arts, values_list(arts, :id; flat = true))
+end
+
+@testset "pre_write: before every write, the rows as they were (#189)" begin
+    au = create(Author; name = "PRW Author")
+    a = create(Article; title = "prw", author = au, views = 1)
+    seen = Any[]
+    function rec(sender; action, via, ids, fields, instances, kw...)
+        old = ids === nothing || action === :m2m ? nothing :
+              [x.views for x in filter(Article; id__in = [i for i in ids if i !== nothing])]
+        push!(seen, (action, via, old))
+    end
+    connect!(pre_write, rec; sender = Article)
+    try
+        update!(filter(Article; id = a.id); views = 7)
+        @test seen[end] == (:update, :update, [1])                                 # read before the UPDATE ran
+        a = get(Article; id = a.id); a.views = 9; bulk_update([a], [:views])
+        @test seen[end] == (:update, :bulk_update, [7])
+        a.views = 11; save!(a)
+        @test seen[end] == (:update, :save, [9])
+        bulk_create([Article(; title = "prw bulk", author = au)])
+        @test seen[end] == (:insert, :bulk_create, nothing)
+        delete!(a)
+        @test seen[end] == (:delete, :delete, [11])
+    finally
+        disconnect!(pre_write, rec; sender = Article)
+    end
 end

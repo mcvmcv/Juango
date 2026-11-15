@@ -37,6 +37,8 @@ or updated).
 """
 bulk_create(objs::AbstractVector{T}; db = nothing, kw...) where {T<:Model} =
     with_db(something(db, routed_db(T, true), Some(nothing))) do
+        isempty(objs) || !has_receivers(pre_write, T) ||
+            send(pre_write, T; action = :insert, via = :bulk_create, ids = nothing, fields = nothing, instances = collect(objs))
         bulk_create_here(objs; kw...)
         foreach(set_instance_db!, objs)
         if !isempty(objs) && has_receivers(post_write, T)
@@ -148,6 +150,11 @@ written too, unless `touch_auto_now = false` (Django leaves them alone).
 """
 bulk_update(objs::AbstractVector{T}, fields; db = nothing, kw...) where {T<:Model} =
     with_db(isempty(objs) ? db : write_db(first(objs), db)) do
+        isempty(objs) || !has_receivers(pre_write, T) ||
+            send(pre_write, T; action = :update, via = :bulk_update, ids = Any[o.pk for o in objs],
+                 fields = unique(vcat(Symbol[Symbol(f) for f in fields],
+                                      get(kw, :touch_auto_now, true) ? Symbol[f.name for f in all_fields(T) if f.auto_now] : Symbol[])),
+                 instances = collect(objs))
         n = bulk_update_here(objs, fields; kw...)
         isempty(objs) || !has_receivers(post_write, T) ||
             send(post_write, T; action = :update, via = :bulk_update, ids = Any[o.pk for o in objs],
@@ -333,8 +340,10 @@ function update!(qs::QuerySet; touch_auto_now::Bool = true, kw...)
     vals = touch_auto_now && !isempty(kw) ? with_auto_now(model_of(qs), kw) : kw
     in_db(qs, true) do
         T = model_of(qs)
-        has_receivers(post_write, T) || return update_here!(qs; vals...)
+        (has_receivers(post_write, T) || has_receivers(pre_write, T)) || return update_here!(qs; vals...)
         ids = row_keys(qs)                     # before: the update may change what the filter matches
+        isempty(ids) || !has_receivers(pre_write, T) ||
+            send(pre_write, T; action = :update, via = :update, ids = ids, fields = Symbol[p.first for p in vals], instances = nothing)
         n = update_here!(qs; vals...)
         isempty(ids) || send(post_write, T; action = :update, via = :update, ids = ids, fields = Symbol[p.first for p in vals], instances = nothing)
         n
@@ -519,6 +528,8 @@ Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector
     signal = has_receivers(pre_delete, T) || has_receivers(post_delete, T)
     doomed = signal ? fetch(filter(base_objects(T); id__in = ids)) : T[]
     foreach(o -> send(pre_delete, T; instance = o), doomed)
+    isempty(ids) || !has_receivers(pre_write, T) ||
+        send(pre_write, T; action = :delete, via = :delete, ids = collect(Any, ids), fields = nothing, instances = nothing)
     n = 0
     for chunk in Iterators.partition(ids, 500)
         n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE $(qname("id")) IN (" *
@@ -539,6 +550,8 @@ Base.@nospecializeinfer function delete_composite!(@nospecialize(T::Type), keys:
     signal = has_receivers(pre_delete, T) || has_receivers(post_delete, T)
     doomed = signal ? fetch(filter(base_objects(T); pk__in = keys)) : T[]
     foreach(o -> send(pre_delete, T; instance = o), doomed)
+    isempty(keys) || !has_receivers(pre_write, T) ||
+        send(pre_write, T; action = :delete, via = :delete, ids = collect(Any, keys), fields = nothing, instances = nothing)
     cond = join([qname(column(f)) * " = ?" for f in pk_fields(T)], " AND ")
     n = 0
     for k in keys

@@ -110,6 +110,13 @@ only when someone listens).
 """
 const post_write = Signal("post_write")
 """
+Before every write to a model's table, bulk ones included: `post_write`'s twin, with the same
+keywords, sent inside the write's transaction before the statement runs, so a receiver can read
+the rows as they are (an undo or audit log's old values). New rows have no ids yet: `ids` is
+`nothing` for `bulk_create`, and a new object's `save!` has `ids = Any[nothing]`.
+"""
+const pre_write = Signal("pre_write")
+"""
 A many-to-many relation changed: sender is the join model; `action` is `:pre_add`,
 `:post_add`, `:pre_remove`, `:post_remove`, `:pre_clear` or `:post_clear`; `instance`,
 `model` (the other side), `pk_set`, `reverse`.

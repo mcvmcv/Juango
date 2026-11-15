@@ -258,7 +258,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    sortable_by = nothing, empty_value_display = "-", search_help_text = nothing, save_on_top = false,
                    get_fieldsets = nothing, get_inlines = nothing, get_exclude = nothing, get_prepopulated_fields = nothing,
                    list_max_show_all = 200, preserve_filters = true, password_change_page = false, show_facets = :allow,
-                   filter_horizontal = Symbol[], filter_vertical = Symbol[])
+                   filter_horizontal = Symbol[], filter_vertical = Symbol[], import_export = nothing)
     modelmeta(T)  # validates T is a model
     slug = model_name(T)
     key = admin_key(T)
@@ -297,7 +297,8 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                                                  :password_change_page => password_change_page,
                                                  :show_facets => Symbol(show_facets),
                                                  :filter_horizontal => Symbol.(collect(filter_horizontal)),
-                                                 :filter_vertical => Symbol.(collect(filter_vertical))), modelmeta(T).app)
+                                                 :filter_vertical => Symbol.(collect(filter_vertical)),
+                                                 :import_export => import_export === true ? Juango.ModelResource(T) : import_export), modelmeta(T).app)
     filter!(!=(key), site.order)
     push!(site.order, key)
     T
@@ -809,6 +810,8 @@ function changelist(req::Request; app, model)
                          (label = gettext("Show counts"), url = query_with(req, "_facets" => "1"))) : nothing,
         "show_full_count" => ma.show_full_result_count, "total" => ma.show_full_result_count ? count(admin_queryset(ma, req)) : nothing,
         "can_add" => can(req, ma, :add), "can_delete" => can(req, ma, :delete),
+        "can_import" => option(ma, :import_export) !== nothing && can(req, ma, :add) && can(req, ma, :change),
+        "can_export" => option(ma, :import_export) !== nothing,
         "actions" => [Dict("name" => a.name, "description" => a.description) for a in ma.actions if can(req, ma, a.permission)],
         "list_editable" => fs !== nothing, "management_form" => fs === nothing ? "" : management_form(fs),
         "date_hierarchy" => drill,
@@ -1144,6 +1147,100 @@ function site_view(st::AdminSite, view; public = false)
     end)
 end
 
+# --- import and export (Admin.register!(T; import_export = true or a ModelResource)) ---
+
+function import_export_resource(ma)
+    r = option(ma, :import_export)
+    r === nothing && throw(Http404("$(ma.slug) has no import or export"))
+    r
+end
+
+"Download the model's rows (`?format=csv|xlsx|json`), or a page to choose the format."
+function export_view(req::Request; app, model)
+    ma = get_admin(app, model)
+    can_view(req, ma) || throw(PermissionDenied())
+    r = import_export_resource(ma)
+    fmt = get(req.GET, "format", nothing)
+    if fmt !== nothing
+        fmt in ("csv", "xlsx", "json") || throw(Juango.BadRequest("format is csv, xlsx or json"))
+        return Juango.export_download(r, admin_queryset(ma, req); format = Symbol(fmt))
+    end
+    m = modelmeta(ma.model)
+    ctx = base_context(req, interpolate(gettext("Export %(name)s"), Dict("name" => m.verbose_name_plural)))
+    merge!(ctx, Dict{String,Any}("opts" => opts(ma), "formats" => ["csv", "xlsx", "json"], "count" => count(admin_queryset(ma, req))))
+    render(req, "admin/export.html", ctx)
+end
+
+import_result_context(res) = Dict{String,Any}("errors" => res.errors, "ignored_columns" => res.ignored_columns,
+                                               "totals" => Dict{String,Any}(string(k) => v for (k, v) in res.totals))
+import_rows_context(res) = [Dict{String,Any}("number" => x.number, "kind" => string(x.kind), "object" => x.object_repr,
+                                              "diff" => [Dict("field" => d[1], "old" => d[2] === nothing ? "" : string(d[2]),
+                                                              "new" => d[3] === nothing ? "" : string(d[3])) for d in x.diff],
+                                              "errors" => [Dict("field" => k, "messages" => v) for (k, v) in x.errors])
+                            for x in res.rows]
+
+"""
+Upload a CSV, XLSX or JSON file: a dry run shows what would change, row by row, and the errors;
+confirming imports it (in one transaction). Needs the add and change permissions.
+"""
+function import_view(req::Request; app, model)
+    ma = get_admin(app, model)
+    (can(req, ma, :add) && can(req, ma, :change)) || throw(PermissionDenied())
+    r = import_export_resource(ma)
+    m = modelmeta(ma.model)
+    ctx = base_context(req, interpolate(gettext("Import %(name)s"), Dict("name" => m.verbose_name_plural)))
+    merge!(ctx, Dict{String,Any}("opts" => opts(ma), "fields" => [Juango.header_of(r, n) for n in r.fields],
+                                 "id_fields" => [Juango.header_of(r, n) for n in r.import_id_fields]))
+    if req.method == "POST"
+        if haskey(req.POST, "confirm")
+            token = string(req.POST["confirm"])
+            info = occursin(r"^[0-9a-f]{32}$", token) ? get(req.session, "juango_import_" * token, nothing) : nothing
+            info === nothing && throw(Juango.BadRequest("This import has expired; upload the file again."))
+            path, fmt = string(info["path"]), Symbol(info["format"])
+            res = Juango.import_data(r, read(path); format = fmt, dry_run = false)
+            rm(path; force = true)
+            delete!(req.session, "juango_import_" * token)
+            if !Juango.has_errors(res)
+                t = res.totals
+                message!(req, :success, interpolate(gettext("Import finished: %(new)d new, %(update)d updated, %(delete)d deleted, %(skip)d unchanged."),
+                                                    Dict("new" => t[:new], "update" => t[:update], "delete" => t[:delete], "skip" => t[:skip])))
+                return Juango.HttpResponseRedirect(changelist_url(ma, req))
+            end
+            ctx["result"] = import_result_context(res); ctx["rows"] = import_rows_context(res)
+        else
+            ups = Juango.getlist(req.FILES, "import_file")
+            up = isempty(ups) ? nothing : first(ups)
+            if up === nothing
+                ctx["upload_error"] = gettext("Choose a file to import.")
+            else
+                fmt = Juango.format_of(up.name)
+                if fmt === nothing
+                    ctx["upload_error"] = gettext("Upload a .csv, .xlsx or .json file.")
+                else
+                    data = read(up)
+                    res = try
+                        Juango.import_data(r, data; format = fmt)
+                    catch e
+                        ctx["upload_error"] = gettext("The file couldn't be read: ") * sprint(showerror, e)
+                        nothing
+                    end
+                    if res !== nothing
+                        ctx["result"] = import_result_context(res); ctx["rows"] = import_rows_context(res)
+                        if !Juango.has_errors(res)
+                            token = bytes2hex(rand(Juango.SECURE_RNG, UInt8, 16))
+                            path = joinpath(tempdir(), "juango-import-" * token)
+                            write(path, data)
+                            req.session["juango_import_" * token] = Dict("path" => path, "format" => string(fmt))
+                            ctx["token"] = token
+                        end
+                    end
+                end
+            end
+        end
+    end
+    render(req, "admin/import.html", ctx)
+end
+
 """
     Admin.urls(site = Admin.site)
 
@@ -1168,6 +1265,8 @@ function urls(st::AdminSite = site)
         path("<slug:app>/<slug:model>/", s(changelist); name = "changelist"),
         path("<slug:app>/<slug:model>/add/", s(add_view); name = "add"),
         path("<slug:app>/<slug:model>/autocomplete/", s(autocomplete_view); name = "autocomplete"),
+        path("<slug:app>/<slug:model>/import/", s(import_view); name = "import"),
+        path("<slug:app>/<slug:model>/export/", s(export_view); name = "export"),
         path("<slug:app>/<slug:model>/<str:id>/change/", s(change_view); name = "change"),
         path("<slug:app>/<slug:model>/<str:id>/delete/", s(delete_view); name = "delete"),
         path("<slug:app>/<slug:model>/<str:id>/history/", s(history_view); name = "history"),

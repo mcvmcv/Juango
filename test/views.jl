@@ -2598,3 +2598,79 @@ api_search161(req, q::String, limit::Union{Int,Nothing} = nothing, tags::Vector{
     pg = paginate_api(collect(1:10), Request("GET", "/x?limit=3&offset=8"))
     @test pg == Dict("count" => 10, "items" => [9, 10])
 end
+
+@testset "import and export: CSV, XLSX, JSON (#112: django-import-export)" begin
+    # the readers
+    @test parse_csv("a,b\r\n\"x, y\",\"he said \"\"hi\"\"\"\n\"two\nlines\",'=1+1\n\n") == [["a", "b"], ["x, y", "he said \"hi\""], ["two\nlines", "=1+1"]]
+    @test parse_csv("﻿a;b\n1;2"; delimiter = ';') == [["a", "b"], ["1", "2"]] && parse_csv("\"'=x\"") == [["'=x"]]   # quoted: kept as written
+    x = read_xlsx(xlsx_bytes([["Name", "Born", "N", "Ok"], ["Ann", Date(1990, 5, 1), 3, true], ["Bob & co", nothing, 2.5, false]]))
+    @test x[1] == ["Name", "Born", "N", "Ok"] && x[2][1] == "Ann" && excel_date(x[2][2]) == Date(1990, 5, 1) && x[2][3] == 3 && x[2][4] === true
+    @test x[3] == Any["Bob & co", nothing, 2.5, false]
+    # export
+    ie_a = create(Author; name = "IE Ann", email = "ann@ie.io"); ie_b = create(Author; name = "IE Bob")
+    a1 = create(Article; title = "IE one", author = ie_a, views = 3, published = true)
+    a2 = create(Article; title = "=HYPERLINK(1)", author = ie_b, views = 0)
+    r = ModelResource(Article; fields = [:id, :title, :author, :views, :published], fk = Dict(:author => :name), headers = Dict(:views => "Views"))
+    qs = order_by(filter(Article; title__in = ["IE one", "=HYPERLINK(1)"]), "id")
+    rows = export_rows(r, qs)
+    @test rows[1] == ["id", "title", "author", "Views", "published"] && rows[2] == Any[a1.id, "IE one", "IE Ann", 3, true]
+    csv = String(export_data(r, qs; format = :csv))
+    @test occursin("'=HYPERLINK(1)", csv)                                       # formula-protected
+    @test parse_csv(csv)[3][2] == "=HYPERLINK(1)"                               # and back as written
+    @test read_xlsx(export_data(r, qs; format = :xlsx))[2] == Any[a1.id, "IE one", "IE Ann", 3, true]
+    @test Juango.JSON.parse(String(export_data(r, qs; format = :json)))[1]["author"] == "IE Ann"
+    d = export_download(r, qs; format = :xlsx)
+    @test occursin("attachment", getheader(d, "Content-Disposition")) && occursin(".xlsx", getheader(d, "Content-Disposition"))
+    # import: a dry run says what would happen and keeps nothing
+    up = "id,title,author,Views,published\n$(a1.id),IE one,IE Bob,5,true\n$(a2.id),=HYPERLINK(1),IE Bob,0,false\n,IE new,IE Ann,7,false\n"
+    res = import_data(r, up; format = :csv)
+    @test !has_errors(res) && res.dry_run && res.totals[:update] == 1 && res.totals[:skip] == 1 && res.totals[:new] == 1
+    u = only(filter(x -> x.kind === :update, res.rows))
+    @test u.number == 2 && Set(u.diff) == Set([("author", "IE Ann", "IE Bob"), ("Views", 3, 5)])
+    @test get(Article; id = a1.id).views == 3 && !exists(filter(Article; title = "IE new"))               # nothing kept
+    # for real
+    res = import_data(r, up; format = :csv, dry_run = false)
+    @test !has_errors(res) && get(Article; id = a1.id).views == 5 && get(Article; id = a1.id).author.name == "IE Bob"
+    @test get(Article; title = "IE new").author.name == "IE Ann"
+    # an invalid row refuses the whole import, with the reasons
+    bad = "title,author,Views\nIE good,IE Ann,1\nIE bad,Nobody,lots\n"
+    res = import_data(ModelResource(Article; fields = [:title, :author, :views], fk = Dict(:author => :name), headers = Dict(:views => "Views"),
+                                    import_id_fields = [:title]), bad; format = :csv, dry_run = false)
+    @test has_errors(res) && !exists(filter(Article; title = "IE good"))
+    b = only(filter(x -> x.kind === :invalid, res.rows))
+    @test b.number == 3 && occursin("No author with name \"Nobody\"", only(b.errors["author"])) && haskey(b.errors, "views")
+    # a natural key, XLSX, a column matched by its label, an unknown column ignored, validation errors
+    ar = ModelResource(Author; fields = [:name, :email], import_id_fields = [:name])
+    file = xlsx_bytes([["Name", "Email", "Shoe size"], ["IE Ann", "ann2@ie.io", 9], ["IE Cat", "cat@ie.io", 7], ["IE Dan", "not an email", 8]])
+    res = import_data(ar, file; format = :xlsx)
+    @test res.ignored_columns == ["Shoe size"] && res.totals[:update] == 1 && res.totals[:new] == 1 && haskey(only(filter(x -> x.kind === :invalid, res.rows)).errors, "email")
+    res = import_data(ar, xlsx_bytes([["Name", "Email"], ["IE Ann", "ann2@ie.io"], ["IE Cat", "cat@ie.io"]]); format = :xlsx, dry_run = false)
+    @test !has_errors(res) && get(Author; name = "IE Ann").email == "ann2@ie.io" && exists(filter(Author; name = "IE Cat"))
+    # many-to-many by name; JSON
+    t1, t2 = create(Topic; name = "IE web"), create(Topic; name = "IE db")
+    er = ModelResource(Essay; fields = [:title, :topics], fk = Dict(:topics => :name), import_id_fields = [:title])
+    res = import_data(er, """[{"title": "IE essay", "topics": "IE web, IE db"}]"""; format = :json, dry_run = false)
+    @test !has_errors(res) && Set(t.name for t in get(Essay; title = "IE essay").topics) == Set(["IE web", "IE db"])
+    @test export_rows(er, filter(Essay; title = "IE essay"))[2][2] in ("IE web, IE db", "IE db, IE web")
+    @test import_data(er, """[{"title": "IE essay", "topics": "IE db, IE web"}]"""; format = :json).totals[:skip] == 1   # the same set
+    # a delete column
+    dr = ModelResource(Author; fields = [:name], import_id_fields = [:name], delete_column = "Delete")
+    res = import_data(dr, "name,Delete\nIE Cat,yes\nIE Nobody,x\n"; format = :csv, dry_run = false)
+    @test res.totals[:delete] == 1 && res.totals[:skip] == 1 && !exists(filter(Author; name = "IE Cat"))
+    # file errors
+    @test has_errors(import_data(ar, "email\nx@y.io\n"; format = :csv)) && has_errors(import_data(ar, ""; format = :csv))
+    @test_throws ArgumentError ModelResource(Author; fields = [:nosuch])
+    @test Juango.format_of("x.XLSX") === :xlsx && Juango.format_of("x.txt") === nothing
+end
+
+@testset "typed QueryDict get, get_text_list (#192, #191)" begin
+    q = Request("GET", "/x/?id=12&n=abc&on=yes&d=2026-11-16&f=1.5&e=&t=1&t=x&t=3&u=6ba7b810-9dad-11d1-80b4-00c04fd430c8").GET
+    @test get(q, "id", Int) === 12 && get(q, :id, Int) === 12 && get(q, "n", Int) === nothing && get(q, "e", Int) === nothing
+    @test get(q, "missing", Int) === nothing && get(q, "on", Bool) === true && get(q, "d", Date) == Date(2026, 11, 16)
+    @test get(q, "f", Float64) == 1.5 && get(q, "id", String) == "12" && get(q, "u", Juango.UUID) isa Juango.UUID
+    @test getlist(q, "t", Int) == [1, 3] && get(q, "id", "default") == "12" && get(q, "zz", "default") == "default"
+    @test_throws Juango.Http404 get_object_or_404(Author; id = get(q, "n", Int))                 # nothing: 404, no trick needed
+    @test get_text_list(["a", "b", "c"]) == "a, b or c" && get_text_list(["a", "b"], "and") == "a and b"
+    @test get_text_list(["solo"]) == "solo" && get_text_list(String[]) == "" && get_text_list([1, 2, 3], "and") == "1, 2 and 3"
+    @test render(Template("{{ xs|text_list:\"and\" }}"), Dict{String,Any}("xs" => ["x", "y", "z"])) == "x, y and z"
+end

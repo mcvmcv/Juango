@@ -475,3 +475,36 @@ end
         @test Admin.big_fk_widget(f) === nothing
     end
 end
+
+@testset "admin: import and export (#112)" begin
+    Admin.register!(Author; list_display = [:name, :email], search_fields = [:name],
+                    import_export = ModelResource(Author; fields = [:name, :email], import_id_fields = [:name]))
+    try
+        c = Client()
+        force_login!(c, root_user())
+        cl = text(get(c, "/admin/project/author/"))
+        @test occursin("/admin/project/author/import/", cl) && occursin("/admin/project/author/export/", cl)
+        @test occursin("XLSX", text(get(c, "/admin/project/author/export/")))
+        create(Author; name = "AIE Existing", email = "e@x.io")
+        csv = text(get(c, "/admin/project/author/export/?format=csv"))
+        @test startswith(csv, "name,email") && occursin("AIE Existing,e@x.io", csv)
+        @test get(c, "/admin/project/author/export/?format=pdf").status == 400
+        # a dry run first: nothing is kept, and a confirm button
+        up = UploadedFile("authors.csv", "name,email\nAIE New,n@x.io\nAIE Existing,changed@x.io\n")
+        r = post(c, "/admin/project/author/import/", Dict("import_file" => up))
+        t = text(r)
+        @test r.status == 200 && occursin("1 new", t) && occursin("1 updated", t) && occursin("changed@x.io", t)
+        @test !exists(filter(Author; name = "AIE New"))
+        token = match(r"name=\"confirm\" value=\"([0-9a-f]{32})\"", t)[1]
+        r = post(c, "/admin/project/author/import/", Dict("confirm" => token))
+        @test r.status == 302 && exists(filter(Author; name = "AIE New")) && get(Author; name = "AIE Existing").email == "changed@x.io"
+        @test post(c, "/admin/project/author/import/", Dict("confirm" => token)).status == 400               # used up
+        # an invalid row: no confirm button
+        t = text(post(c, "/admin/project/author/import/", Dict("import_file" => UploadedFile("a.csv", "name,email\nAIE Bad,not-an-email\n"))))
+        @test occursin("1 invalid", t) && !occursin("name=\"confirm\"", t) && occursin("not-an-email", t) || occursin("valid email", t)
+        @test occursin("Upload a .csv", text(post(c, "/admin/project/author/import/", Dict("import_file" => UploadedFile("a.txt", "x")))))
+        @test get(c, "/admin/project/article/import/").status == 404                                       # not offered for Article
+    finally
+        Admin.register!(Author; list_display = [:name, :email], search_fields = [:name])
+    end
+end

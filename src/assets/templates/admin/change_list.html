@@ -3,7 +3,7 @@
 {% block content %}
 <div class="toolbar" style="justify-content:space-between">
   <h1 class="page" style="margin:0">{{ title }}</h1>
-  {% if can_add %}<a class="button" href="{% url 'admin:add' app=opts.app_label model=opts.slug %}">Add {{ opts.verbose_name }} +</a>{% endif %}
+  <span>{% if can_import %}<a class="button secondary" href="{% url 'admin:import' app=opts.app_label model=opts.slug %}">{% translate "Import" %}</a> {% endif %}{% if can_export %}<a class="button secondary" href="{% url 'admin:export' app=opts.app_label model=opts.slug %}">{% translate "Export" %}</a> {% endif %}{% if can_add %}<a class="button" href="{% url 'admin:add' app=opts.app_label model=opts.slug %}">Add {{ opts.verbose_name }} +</a>{% endif %}</span>
 </div>
 <div class="layout">
   <div class="main">

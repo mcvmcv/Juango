@@ -70,13 +70,14 @@ export F, Value, Count, Sum, Avg, Min, Max, Lower, Upper, Length, Coalesce, Conc
 export migrate, makemigrations
 # forms
 export Form, @form, ModelForm, is_valid, add_widget_attrs!, add_error!, as_p, cleaned_data, save_m2m!, has_changed,
-       changed_fields, FormSet, formset_factory, nested_form, nested_formset, nested_model_form, nested_row, NestedForm, form_html, field_html, modelformset_factory, inlineformset_factory,
+       changed_fields, FormSet, formset_factory, active_forms, is_deleted, is_blank_extra, nested_form, nested_formset, nested_model_form, nested_row, NestedForm, form_html, field_html, modelformset_factory, inlineformset_factory,
        Widget, MultiWidget, MultiValueField, SplitDateTimeField, Media, ModelChoiceField,
        ModelMultipleChoiceField, TypedChoiceField, TypedMultipleChoiceField, MultipleChoiceField, MultipleFileField, RegexField,
        ComboField, as_field_group, as_div, as_table, NullBooleanField, SelectDateWidget, SplitHiddenDateTimeWidget,
        order_fields!, non_field_errors, errors_json_data, errors_as_json, legend_tag, set_field!, delete_field!
 # views
-export render, redirect, query_param, component!, API, route!, add_router!, api_urls, ModelSchema, openapi_schema,
+export render, redirect, query_param, component!, get_text_list, ModelResource, export_data, export_rows, export_download, import_data,
+       read_table, parse_csv, read_xlsx, excel_date, has_errors, ImportResult, API, route!, add_router!, api_urls, ModelSchema, openapi_schema,
        paginate_api, api_key_auth, bearer_auth, session_auth, get_object_or_404, get_list_or_404, TemplateView, RedirectView, ListView,
        DetailView, CreateView, UpdateView, DeleteView, FormView, ArchiveIndexView, YearArchiveView,
        MonthArchiveView, DayArchiveView, DateDetailView, WeekArchiveView, TodayArchiveView, ViewCall, default_hook, Paginator, page, get_page,
@@ -101,7 +102,7 @@ export FilterSet, Filter, CharFilter, NumberFilter, BooleanFilter, ChoiceFilter,
        ModelMultipleChoiceFilter, DateFilter, DateTimeFilter, DateFromToRangeFilter, NumberRangeFilter, IsNullFilter, OrderingFilter
 # signals
 export Signal, connect!, disconnect!, receiver, send, pre_save, post_save, pre_delete, post_delete,
-       m2m_changed, post_write, request_started, request_finished, user_logged_in, user_logged_out,
+       m2m_changed, post_write, pre_write, request_started, request_finished, user_logged_in, user_logged_out,
        user_login_failed, pre_migrate, post_migrate, connection_created, got_request_exception, setting_changed,
        pre_init, post_init, class_prepared
 # translations and time zones
@@ -117,7 +118,7 @@ export cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, ge
 # mail
 export send_mail, mail_admins, mail_managers, EmailMessage, EmailMultiAlternatives, send!, attach!, attach_file,
        send_mass_mail, get_connection, send_messages,
-       XlsxResponse, write_xlsx, csv_field,
+       XlsxResponse, write_xlsx, xlsx_bytes, csv_field,
        attach_alternative!
 # apps, contrib apps, tasks
 export App, get_model, lookup_value, concrete_fields, many_to_many, attname, column, is_relation, is_primary_key, related_model,

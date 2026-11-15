@@ -1,0 +1,7 @@
+{% extends "admin/base.html" %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a> › <a href="{% url 'admin:app_list' app=opts.app_label %}">{{ opts.app_name }}</a> › <a href="{% url 'admin:changelist' app=opts.app_label model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › {% translate "Export" %}</div>{% endblock %}
+{% block content %}
+<h1 class="page">{{ title }}</h1>
+<div class="module"><p>{{ count }} {{ opts.verbose_name_plural }}, as:</p>
+<p>{% for f in formats %}<a class="button" href="?format={{ f }}">{{ f|upper }}</a> {% endfor %}</p></div>
+{% endblock %}

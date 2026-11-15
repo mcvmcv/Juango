@@ -140,8 +140,23 @@ function linebreaks_html(s::AbstractString, autoescape::Bool)
     join(["<p>" * replace(autoescape ? escape_html(strip(p)) : strip(p), "\n" => "<br>") * "</p>" for p in paras if !isempty(strip(p))], "\n\n")
 end
 
+"""
+    get_text_list(items, last_word = "or") -> String
+
+`["a", "b", "c"]` as `"a, b or c"` (Django's `django.utils.text.get_text_list`): `last_word` is
+translated, so `get_text_list(names, "and")` reads "a, b und c" in German. Also the template
+filter `{{ names|text_list:"and" }}`.
+"""
+function get_text_list(items, last_word::AbstractString = "or")
+    xs = [display_string(x) for x in items]
+    isempty(xs) && return ""
+    length(xs) == 1 && return xs[1]
+    join(xs[1:end-1], ", ") * " " * gettext(String(last_word)) * " " * xs[end]
+end
+
 let F = register_filter!
     F("upper", (v, _) -> uppercase(str(v)); is_safe = true)
+    F("text_list", (v, a) -> get_text_list(v isa AbstractString ? [v] : v, a === nothing ? "or" : display_string(a)))
     F("lower", (v, _) -> lowercase(str(v)); is_safe = true)
     F("title", (v, _) -> titlecase(str(v)); is_safe = true)
     F("capfirst", (v, _) -> uppercasefirst(str(v)); is_safe = true)
