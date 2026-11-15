@@ -76,6 +76,16 @@
     t = create(Tag; label = "t", article = a3)
     lk = create(Locked; article = a2)
     @test_throws ProtectedError delete!(a2)
+    # #179: the error carries the blocking rows, and protected_message makes a sentence of them
+    pe = try delete!(a2); nothing catch e; e end
+    @test pe isa ProtectedError && pe.model === Article && count(pe.protected_objects) == 1
+    @test protected_message(pe) == "Can't delete this article: 1 $(Juango.modelmeta(Locked).verbose_name) still refers to it (“$(lk)”)."
+    lk2 = create(Locked; article = a2)
+    pe = try delete!(a2); nothing catch e; e end
+    @test startswith(protected_message(pe), "Can't delete this article: 2 $(Juango.modelmeta(Locked).verbose_name_plural) still refer to it (")
+    @test occursin("and 1 more", protected_message(pe; limit = 1))
+    @test protected_message(ProtectedError("plain")) == "plain"
+    delete!(lk2)
     delete!(lk)
     delete!(a3)
     @test refresh!(t).article === nothing                               # SET_NULL
@@ -1650,6 +1660,8 @@ end
     rec = create(Record; band = band, title = "Multiple Dispatch")
     create(Track; band = band, record = rec)
     @test_throws RestrictedError delete!(rec)
+    re_ = try delete!(rec); nothing catch e; e end
+    @test re_.model === Record && occursin("still refers to it", protected_message(re_))
     @test exists(filter(Record; id = rec.id))
     # ...but deleting the band takes the records and the tracks together
     delete!(band)

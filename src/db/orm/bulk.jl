@@ -355,15 +355,48 @@ Base.@nospecializeinfer function update_here!(@nospecialize(qs::QuerySet); kw...
     execute_changes("UPDATE $(qname(meta.table)) SET $(join(sets, ", ")) WHERE $target IN ($(in_subquery(backend(), sub)))", vcat(ps, sps))
 end
 
+"""
+Deleting was refused because rows still point at the objects through an `on_delete = :PROTECT`
+key. `protected_objects` is a queryset of those rows (as Django's), `model` the model being
+deleted; `protected_message(e)` is a sentence for users.
+"""
 struct ProtectedError <: Exception
     msg::String
+    protected_objects::Any
+    model::Any
 end
+ProtectedError(msg::AbstractString) = ProtectedError(String(msg), nothing, nothing)
 Base.showerror(io::IO, e::ProtectedError) = print(io, "ProtectedError: ", e.msg)
-"Deleting would leave rows pointing through an `on_delete = :RESTRICT` key at deleted rows."
+"Deleting would leave rows pointing through an `on_delete = :RESTRICT` key at deleted rows (`restricted_objects`, as Django's)."
 struct RestrictedError <: Exception
     msg::String
+    restricted_objects::Any
+    model::Any
 end
+RestrictedError(msg::AbstractString) = RestrictedError(String(msg), nothing, nothing)
 Base.showerror(io::IO, e::RestrictedError) = print(io, "RestrictedError: ", e.msg)
+
+"""
+    protected_message(e::Union{ProtectedError,RestrictedError}; limit = 5) -> String
+
+A sentence for users about a refused delete, naming what blocks it, with plurals that agree:
+`Can't delete this author: 1 article still refers to it (“Hello”).`,
+`Can't delete this author: 3 articles still refer to it (“A”, “B”, “C”).` Up to `limit`
+objects are named, then "and N more". Falls back to the error's own message.
+"""
+function protected_message(e::Union{ProtectedError,RestrictedError}; limit::Int = 5)
+    rows = e isa ProtectedError ? e.protected_objects : e.restricted_objects
+    (rows === nothing || e.model === nothing) && return e.msg
+    M = model_of(rows)
+    n = count(rows)
+    n == 0 && return e.msg
+    names = ["“" * string(o) * "”" for o in fetch(rows[1:min(n, limit)])]
+    n > limit && push!(names, interpolate(gettext("and %(n)d more"), Dict("n" => n - limit)))
+    noun = n == 1 ? modelmeta(M).verbose_name : modelmeta(M).verbose_name_plural
+    interpolate(ngettext("Can't delete this %(model)s: %(n)d %(noun)s still refers to it (%(names)s).",
+                         "Can't delete this %(model)s: %(n)d %(noun)s still refer to it (%(names)s).", n),
+                Dict("model" => modelmeta(e.model).verbose_name, "n" => n, "noun" => noun, "names" => join(names, ", ")))
+end
 
 """
 Every row a deletion reaches through cascades (model => keys), and the `:RESTRICT` relations it
@@ -407,7 +440,8 @@ Base.@nospecializeinfer function check_restricted(@nospecialize(T), ids)
     deletion_closure!(seen, restricts, T, ids)
     for (R, M, f, rel) in restricts
         left = setdiff(Set{Any}(row_keys(rel)), get(seen, concrete_model(M), Set{Any}()))
-        isempty(left) || throw(RestrictedError("cannot delete some $(nameof(R)) objects because they are referenced through restricted foreign key $(nameof(M)).$(f.name)"))
+        isempty(left) || throw(RestrictedError("cannot delete some $(nameof(R)) objects because they are referenced through restricted foreign key $(nameof(M)).$(f.name)",
+                                               filter(base_objects(M); id__in = collect(left)), R))
     end
 end
 
@@ -448,7 +482,7 @@ Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector
         elseif f.on_delete === :SET_DEFAULT || f.on_delete isa OnDeleteSet
             update!(rel; Symbol(attname(f)) => on_delete_value(f))
         elseif f.on_delete === :PROTECT
-            exists(rel) && throw(ProtectedError("cannot delete $(nameof(T)) objects because they are referenced through protected foreign key $(nameof(M)).$(f.name)"))
+            exists(rel) && throw(ProtectedError("cannot delete $(nameof(T)) objects because they are referenced through protected foreign key $(nameof(M)).$(f.name)", rel, T))
         end
     end
     signal = has_receivers(pre_delete, T) || has_receivers(post_delete, T)

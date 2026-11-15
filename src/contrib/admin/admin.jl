@@ -649,7 +649,7 @@ Base.@nospecializeinfer function delete_selected(ma::ModelAdmin, req::Request, @
         message!(req, :success, "Successfully deleted $n $(n == 1 ? meta.verbose_name : meta.verbose_name_plural).")
     catch e
         e isa Union{ProtectedError,RestrictedError} || rethrow()
-        message!(req, :error, e.msg)
+        message!(req, :error, Juango.protected_message(e))
     end
     nothing
 end
@@ -1065,7 +1065,7 @@ function delete_view(req::Request; app, model, id)
             return Juango.HttpResponseRedirect(changelist_url(ma, req))
         catch e
             e isa Union{ProtectedError,RestrictedError} || rethrow()
-            message!(req, :error, e.msg)
+            message!(req, :error, Juango.protected_message(e))
             return Juango.HttpResponseRedirect(reverse_url("admin:change"; app = ma.app, model = ma.slug, id = id))
         end
     end

@@ -147,7 +147,7 @@ Base.@nospecializeinfer function delete_fobj_refs!(@nospecialize(T::Type), keys:
         elseif f.on_delete === :SET_NULL
             update!(rel; (p[1] => nothing for p in parts)...)
         elseif f.on_delete === :PROTECT
-            exists(rel) && throw(ProtectedError("cannot delete $(nameof(T)) objects because they are referenced through protected foreign object $(nameof(M)).$(f.name)"))
+            exists(rel) && throw(ProtectedError("cannot delete $(nameof(T)) objects because they are referenced through protected foreign object $(nameof(M)).$(f.name)", rel, T))
         end
     end
     nothing

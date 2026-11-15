@@ -259,6 +259,7 @@ backup = ForeignKey(Venue, on_delete = SET(fallback), null = true)   # an object
 
 - **The options.** `:CASCADE` deletes the referencing rows too, `:SET_NULL` clears the key (it needs `null = true`), `:PROTECT` refuses with `ProtectedError`, and `:DO_NOTHING` leaves the rows alone. `:SET_DEFAULT` points the key at its `default`, and `SET(x)` points it at `x` or at what `x()` returns.
 - **`:RESTRICT`** works like `:PROTECT`, with one exception, as in Django. Deleting is allowed when the rows pointing through the key are deleted by the same operation. For example, deleting a band deletes its records and its tracks together, even though a track's `record` key is restricted. Deleting just the record raises `RestrictedError`.
+- **Telling users.** The errors carry the rows that block the delete (`e.protected_objects`, `e.restricted_objects`, as Django's), and `protected_message(e)` makes a sentence of them, with plurals that agree: `Can't delete this author: 2 articles still refer to it (“A”, “B”).` The admin shows it.
 - **The admin's delete page** says which related rows each option affects.
 
 #### Integer sizes and primary keys
