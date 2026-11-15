@@ -428,11 +428,14 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     # As Django ≥ 3.1, a query that groups (an aggregate annotate) ignores the model's Meta.ordering: its columns
     # would join ORDER BY, which PostgreSQL refuses for values() groups (and they'd change the groups). An explicit
     # order_by still applies.
-    o, extra, ops_order = ordered ? order_clause(c, qs.order; meta_ordering = !grouped) : ("", String[], Any[])
-    (columns === nothing && !idonly && !grouped) && append!(sel, extra)
     # objects are made distinct after a multi-valued join; values() rows aren't (as in Django, equal rows
     # are all returned, and PostgreSQL would refuse ORDER BY on columns not selected)
     distinct = ((c.distinct && qs.values_fields === nothing) || qs.distinct_fields !== nothing) && !grouped
+    # distinct(values(...)) leaves Meta.ordering out too: its columns aren't selected, so PostgreSQL refuses the
+    # ORDER BY (and Django's way, selecting them, makes the rows no longer distinct). An explicit order_by applies.
+    o, extra, ops_order = ordered ? order_clause(c, qs.order; meta_ordering = !grouped && !(distinct && qs.values_fields !== nothing)) :
+                                    ("", String[], Any[])
+    (columns === nothing && !idonly && !grouped) && append!(sel, extra)
     dkw = distinct ? "DISTINCT " : ""
     if distinct && qs.distinct_fields !== nothing && !isempty(qs.distinct_fields)
         backend() isa PostgresBackend ||
