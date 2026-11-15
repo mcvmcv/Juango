@@ -1257,10 +1257,10 @@ end
             @test !any(m -> occursin("MY_THING", m.msg), Juango.run_checks(tags = [:settings]))
         end
     end
-    override_settings(DATABASE = 42, DATABASES = Dict("other" => "nosuch://x")) do
-        e = [m.msg for m in Juango.run_checks(tags = [:settings]) if m.id == "settings.E004"]
-        @test any(m -> occursin("DATABASE: must be a path", m), e) && any(m -> occursin("no database backend for 'nosuch://'", m), e)
-    end
+    # (DATABASE itself isn't overridden here: restoring it would reopen an in-memory test database empty)
+    @test occursin("must be a path", Juango.database_setting_issue(42)) && Juango.database_setting_issue(":memory:") === nothing
+    @test occursin("no database backend for 'nosuch://'", Juango.database_setting_issue("nosuch://x"))
+    @test Juango.database_setting_issue(Juango.backend()) === nothing && occursin("empty", Juango.database_setting_issue(" "))
     # declared settings: known, with defaults
     @test_throws KeyError settings.ZZ_PAGE_SIZE
     declare_settings!(:ZZ_PAGE_SIZE => 20, :ZZ_KEY)

@@ -2138,8 +2138,8 @@ end
         disconnect!(post_write, wrec)
     end
     # #180: lookup paths on instances
-    lv = first(order_by(exa, "title"))
-    @test lookup_value(lv, "author__name") == "Ex A" && lookup_value(lv, :author__name) == "Ex A" && lookup_value(lv, "author.name") == "Ex A"
+    lv = create(Article; title = "lv", author = create(Author; name = "LV Author"))
+    @test lookup_value(lv, "author__name") == "LV Author" && lookup_value(lv, :author__name) == "LV Author" && lookup_value(lv, "author.name") == "LV Author"
     @test lookup_value(Dict("a" => (b = 1,)), "a__b") == 1 && lookup_value(Dict("a" => nothing), "a__b"; default = "-") == "-"
     @test (@test_logs (:warn, r"lookup_value") lookup_value(lv, "author__nosuch"; default = 0)) == 0
     # #173: JSON can't hold NaN or infinity: refused with the place named
