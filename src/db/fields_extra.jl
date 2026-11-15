@@ -126,7 +126,11 @@ function to_db(f::Field, v)
     v === nothing && return dbparam(v)
     k = f.kind
     k === :datetime && return dbparam(to_utc_naive(v))
-    k === :json && return JSON.json(json_scalar_tree(v))
+    if k === :json
+        p = json_nonfinite_path(v)
+        p === nothing || throw(ArgumentError("$(f.name): JSON can't hold NaN or infinity (at $p)"))
+        return JSON.json(json_scalar_tree(v))
+    end
     k === :hstore && return encode_hstore(backend(), v)
     k === :array && return encode_array(backend(), v)
     k in RANGE_KINDS && return encode_range(backend(), v)
@@ -142,6 +146,22 @@ function to_db(f::Field, v)
     k === :decimal && return string(f.decimal_places === nothing ? to_decimal(v) : round(to_decimal(v); digits = f.decimal_places))
     k === :geometry && return encode_geometry(v)
     dbparam(v)
+end
+"Where a value for a JSON field holds NaN or ±Inf (`\"data.runs[2]\"`, or `\"value\"` at the top), or nothing."
+function json_nonfinite_path(v, path = "value")
+    v isa AbstractFloat && return isfinite(v) ? nothing : path
+    if v isa AbstractDict
+        for (k, x) in v
+            p = json_nonfinite_path(x, path == "value" ? string(k) : path * "." * string(k))
+            p === nothing || return p
+        end
+    elseif v isa Union{AbstractVector,Tuple}
+        for (i, x) in enumerate(v)
+            p = json_nonfinite_path(x, path * "[" * string(i - 1) * "]")
+            p === nothing || return p
+        end
+    end
+    nothing
 end
 json_scalar_tree(v::AbstractDict) = Dict{String,Any}(string(k) => json_scalar_tree(x) for (k, x) in v)
 json_scalar_tree(v::AbstractVector) = Any[json_scalar_tree(x) for x in v]

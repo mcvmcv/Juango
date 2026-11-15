@@ -343,6 +343,9 @@ function validate_field(f::Field, v)
         (!f.blank && f.kind !== :bool) && push!(errs, field_message(f, "required", gettext("This field is required.")))
         return errs
     end
+    if f.kind === :json && (p = json_nonfinite_path(v)) !== nothing
+        push!(errs, field_message(f, "invalid", gettext("JSON can't hold NaN or infinity (at %(path)s)."), Dict("path" => p)))
+    end
     if f.kind === :ipaddress
         r = clean_ip(string(v), f.related.protocol, f.related.unpack_ipv4)
         r isa Tuple && return [field_message(f, "invalid", r[1])]

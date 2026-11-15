@@ -2083,6 +2083,11 @@ end
     bio, n2 = count_queries(() -> p.user.profile.bio)
     @test bio == "hello" && n2 == 0
 
+    # #173: JSON can't hold NaN or infinity: refused with the place named
+    @test_throws ArgumentError create(Gadget; data = Dict("runs" => [1.0, NaN]))
+    @test Juango.json_nonfinite_path(Dict("runs" => [1.0, NaN])) == "runs[1]" && Juango.json_nonfinite_path(Inf) == "value"
+    @test Juango.json_nonfinite_path(Dict("a" => Dict("b" => -Inf))) == "a.b" && Juango.json_nonfinite_path(Dict("a" => [1, 2.5])) === nothing
+    @test occursin("runs[1]", only(Juango.clean_fields(Gadget(data = Dict("runs" => [1.0, NaN])))[:data]))
     # #116: JSON key paths in values, values_list and order_by
     g1 = create(Gadget; nick = "g1", data = Dict("run" => 2, "meta" => Dict("by" => "ann"), "list" => [10, 20]))
     g2 = create(Gadget; nick = "g2", data = Dict("run" => 10, "meta" => Dict("by" => "bob"), "list" => [30]))
