@@ -2006,7 +2006,7 @@ Juango.get_by_natural_key(::Type{Tag}, name) = get(Tag; name = name)
 - `inspectdb [table ...]` writes `@model` definitions for existing tables, with `Meta(managed = false)` so migrations leave those tables alone. Check the field types it guesses.
 - `flush` empties every table Juango manages (asks first, unless `--noinput`).
 - `dbshell` opens `sqlite3`, `psql` or `mysql` on the configured database.
-- `test` runs `test/runtests.jl`, or else each `tests/test*.jl`.
+- `test` runs `test/runtests.jl`, or else each `tests/test*.jl`, against a throwaway database and a throwaway `MEDIA_ROOT` (removed afterwards, so uploads made by tests don't pile up). `--coverage` runs them with Julia's coverage on and prints the lines covered per file of the project (the full report goes to `coverage/lcov.info`). `--update-snapshots` approves new output for `assert_matches_snapshot(name, output)`, which compares a report, page or export with its approved copy in `test/snapshots/` byte for byte, the safety net for a big refactor.
 - `diffsettings [--all]` lists the settings that differ from the defaults. `sendtestemail you@example.com [--managers] [--admins]` checks the mail setup. `findstatic css/site.css` shows where a static file comes from. `remove_stale_contenttypes [--include-stale-apps]` deletes the content types of models that no longer exist, along with their permissions.
 
 **System checks.** `check` runs every registered check. `--deploy` adds the deployment checks, and `--tag security,models` picks tags. `runserver` reports problems when it starts. Add your own checks:

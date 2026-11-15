@@ -665,3 +665,35 @@ function teardown_test_database(t::TestDatabases; verbose::Bool = false)
     end
     nothing
 end
+
+# --- snapshot ("golden master") tests -------------------------------------------------------------------
+
+"""
+    assert_matches_snapshot(name, value; dir = "test/snapshots")
+
+Compare `value` (a string, bytes, or an `HttpResponse`'s body) with the approved copy in
+`dir/name`, byte for byte: the way to make a big refactor safe is to snapshot every report and
+export before it and compare after. The first run (or `manage.jl test --update-snapshots`, or
+`JUANGO_UPDATE_SNAPSHOTS=1`) writes the file and passes. A difference fails, naming the first
+line that differs, and writes the new output beside the old as `name.new` for a diff tool.
+"""
+function assert_matches_snapshot(name::AbstractString, value; dir::AbstractString = joinpath("test", "snapshots"))
+    bytes = value isa HttpResponse ? Vector{UInt8}(value.body isa AbstractString ? codeunits(value.body) : value.body) :
+            value isa AbstractString ? Vector{UInt8}(codeunits(value)) : Vector{UInt8}(value)
+    path = joinpath(dir, name)
+    if !isfile(path) || get(ENV, "JUANGO_UPDATE_SNAPSHOTS", "") in ("1", "true")
+        mkpath(dirname(path))
+        write(path, bytes)
+        isfile(path * ".new") && rm(path * ".new")
+        @info "Wrote snapshot $path"
+        return true
+    end
+    old = read(path)
+    old == bytes && (isfile(path * ".new") && rm(path * ".new"); return true)
+    write(path * ".new", bytes)
+    a, b = split(String(copy(old)), '\n'), split(String(copy(bytes)), '\n')
+    i = findfirst(k -> k > length(a) || k > length(b) || a[k] != b[k], 1:max(length(a), length(b)))
+    line(v, k) = k <= length(v) ? repr(first(v[k], 200)) : "(no line)"
+    fail("Snapshot $name differs at line $i:\n  approved: $(line(a, i))\n  now:      $(line(b, i))\n" *
+         "The new output is in $(path).new; run with --update-snapshots (JUANGO_UPDATE_SNAPSHOTS=1) to approve it.")
+end

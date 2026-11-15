@@ -2184,9 +2184,36 @@ end
                 o1 = copy(Main.RUN150); empty!(Main.RUN150)
                 Juango.cmd_test(["--shuffle=7", "-k", "test_a", "-k", "test_c"])
                 @test sort(o1) == ["a", "c"] && Main.RUN150 == o1                 # the same seed, the same order
+                # #181: a throwaway MEDIA_ROOT for the run, removed afterwards
+                empty!(Main.RUN150)
+                write(joinpath(dir, "tests", "test_d.jl"), "push!(Main.RUN150, Juango.settings.MEDIA_ROOT)")
+                before = settings.MEDIA_ROOT
+                Juango.cmd_test(["-k", "test_d"])
+                m = only(Main.RUN150)
+                @test m != before && !isdir(m) && settings.MEDIA_ROOT == before
             end
         end
     end
+    # #181: snapshot tests
+    sd = mktempdir()
+    redirect_stderr(devnull) do
+        @test assert_matches_snapshot("report.csv", "a,b\n1,2\n"; dir = sd)              # first run: written
+    end
+    @test read(joinpath(sd, "report.csv"), String) == "a,b\n1,2\n" && assert_matches_snapshot("report.csv", "a,b\n1,2\n"; dir = sd)
+    e = try assert_matches_snapshot("report.csv", "a,b\n1,3\n"; dir = sd); nothing catch err; err end
+    @test e isa AssertionError && occursin("differs at line 2", e.msg) && occursin("\"1,3\"", e.msg)
+    @test read(joinpath(sd, "report.csv.new"), String) == "a,b\n1,3\n"
+    withenv("JUANGO_UPDATE_SNAPSHOTS" => "1") do
+        redirect_stderr(devnull) do
+            assert_matches_snapshot("report.csv", HttpResponse("a,b\n1,3\n"); dir = sd)      # approved
+        end
+    end
+    @test read(joinpath(sd, "report.csv"), String) == "a,b\n1,3\n" && !isfile(joinpath(sd, "report.csv.new"))
+    # #181: the coverage summary from an LCOV file
+    lc = joinpath(sd, "lcov.info")
+    write(lc, "SF:$(joinpath(sd, "src", "a.jl"))\nDA:1,3\nDA:2,0\nend_of_record\nSF:$(joinpath(sd, "test", "t.jl"))\nDA:1,1\nend_of_record\n")
+    out = sprint(io -> Juango.print_coverage(lc; io = io, root = sd))
+    @test occursin("src/a.jl", out) && occursin("50.0%   1/2 lines", out) && !occursin("t.jl", out) && occursin("TOTAL", out)
 end
 
 struct Finder151 <: Juango.StaticFinder end

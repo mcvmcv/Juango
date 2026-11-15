@@ -186,14 +186,14 @@ using ..Juango: Client, RequestFactory, request, post, force_login!, text, outbo
     assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx,
     live_test, live_event!, live_info!, live_flush!, setup_test_database, teardown_test_database, consume_stream!,
     assert_html_equal, assert_html_not_equal, assert_in_html, assert_json_equal, assert_json_not_equal,
-    assert_queryset_equal, assert_formset_error, assert_field_output
+    assert_queryset_equal, assert_formset_error, assert_field_output, assert_matches_snapshot
 export Client, RequestFactory, request, post, force_login!, text, outbox, rollback_after,
     capture_on_commit_callbacks, with_live_server, live_server_url, override_settings, assert_contains,
     assert_not_contains, assert_redirects, assert_template_used, assert_template_not_used,
     assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx,
     live_test, live_event!, live_info!, live_flush!, setup_test_database, teardown_test_database, consume_stream!,
     assert_html_equal, assert_html_not_equal, assert_in_html, assert_json_equal, assert_json_not_equal,
-    assert_queryset_equal, assert_formset_error, assert_field_output
+    assert_queryset_equal, assert_formset_error, assert_field_output, assert_matches_snapshot
 end
 
 module Functions

@@ -336,8 +336,15 @@ function cmd_test(args)
         println("Shuffling the test files with seed $seed (--shuffle=$seed repeats this order)")
         shuffle!(MersenneTwister(seed), files)
     end
+    # --coverage: run the tests again in a process that records coverage, then summarise it
+    haskey(flags, "coverage") && return test_with_coverage(args)
+    haskey(flags, "update-snapshots") && (ENV["JUANGO_UPDATE_SNAPSHOTS"] = "1")
     # a throwaway database, migrated, so the tests never touch the development one (--keepdb reuses it)
     db = setup_test_database(; keepdb = haskey(flags, "keepdb"), verbose = true)
+    # and a throwaway MEDIA_ROOT, so uploads made by tests don't pile up in the project or /tmp
+    media_before = get(SETTINGS, :MEDIA_ROOT, nothing)
+    media = mktempdir(; cleanup = false)
+    configure!(MEDIA_ROOT = media)
     failed = String[]
     try
         for f in files
@@ -356,9 +363,49 @@ function cmd_test(args)
         end
     finally
         teardown_test_database(db; verbose = true)
+        media_before === nothing ? delete!(SETTINGS, :MEDIA_ROOT) : configure!(MEDIA_ROOT = media_before)
+        rm(media; recursive = true, force = true)
     end
     isempty(failed) || error("tests failed in: " * join(failed, ", "))
     nothing
+end
+
+"`test --coverage`: rerun `manage.jl test` with Julia's coverage on for the project's files, then print a summary."
+function test_with_coverage(args)
+    out = joinpath("coverage", "lcov.info")
+    mkpath("coverage"); isfile(out) && rm(out)
+    script = isempty(PROGRAM_FILE) ? "manage.jl" : PROGRAM_FILE
+    rest = [a for a in args if a != "--coverage"]
+    cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) --code-coverage=@$(pwd()) --code-coverage=$out $script test $rest`
+    ok = success(pipeline(cmd; stdout = stdout, stderr = stderr))
+    isfile(out) ? print_coverage(out) : println("No coverage was recorded ($out is missing).")
+    ok || error("tests failed")
+    nothing
+end
+
+"Print lines covered per file from an LCOV tracefile (the project's own files, not tests or packages)."
+function print_coverage(lcov::AbstractString; io = stdout, root = pwd())
+    files = Dict{String,Tuple{Int,Int}}()
+    cur = nothing
+    for l in eachline(lcov)
+        if startswith(l, "SF:")
+            cur = relpath(l[4:end], root)
+        elseif startswith(l, "DA:") && cur !== nothing
+            _, hits = split(l[4:end], ',')
+            h, n = get(files, cur, (0, 0))
+            files[cur] = (h + (parse(Int, split(hits, ',')[1]) > 0), n + 1)
+        end
+    end
+    filter!(p -> !startswith(p.first, "..") && !startswith(p.first, "test") && !occursin(".julia", p.first), files)
+    isempty(files) && return println(io, "No project files were covered.")
+    w = maximum(length, keys(files))
+    th, tn = 0, 0
+    for (f, (h, n)) in sort(collect(files); by = p -> p.second[1] / max(p.second[2], 1))
+        println(io, rpad(f, w + 2), lpad(string(round(100h / max(n, 1); digits = 1)), 6), "%   ", h, "/", n, " lines")
+        th += h; tn += n
+    end
+    println(io, rpad("TOTAL", w + 2), lpad(string(round(100th / max(tn, 1); digits = 1)), 6), "%   ", th, "/", tn, " lines")
+    println(io, "(the full report is coverage/lcov.info: open it with an LCOV viewer, or `genhtml coverage/lcov.info -o coverage/html`)")
 end
 
 # loaddata fixture [fixture ...]
