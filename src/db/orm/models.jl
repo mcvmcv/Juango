@@ -546,7 +546,14 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
         id === nothing && return nothing
         cache = (getfield(m, :_cache)::Dict{Symbol,Any})
         c = get(cache, s, nothing)
-        (c !== nothing && (getfield(c, :_data)::Dict{Symbol,Any})[:id] == id) && return c
+        (c !== nothing && (getfield(c, :_data)::Dict{Symbol,Any})[:id] == id) && (note_eager_use(T, s); return c)
+        sib = get(cache, :__siblings, nothing)
+        if sib !== nothing                               # AUTO_PREFETCH: load it for the whole queryset at once
+            auto_prefetch!(sib, f, s, instance_db(m))
+            c = get(cache, s, nothing)
+            c === nothing || return c
+        end
+        note_lazy_load(T, s, :fk)
         obj = with_db(() -> get(base_objects(related_model(f)); id = id), instance_db(m))
         cache[s] = obj
         return obj
@@ -570,17 +577,20 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
     mm = find_m2m(T, string(s))
     if mm !== nothing
         qs = m2m_queryset(m, mm[2], mm[3])
-        pre isa PrefetchedList && return chain(qs; cache = pre.items, owner = qs.owner)
+        pre isa PrefetchedList && (note_eager_use(T, s); return chain(qs; cache = pre.items, owner = qs.owner))
+        note_lazy_load(T, s, :reverse)
         return qs
     end
     for (rn, M, rf) in reverse_relations(T)
         rn === s || continue
         qs = chain(filter(objects(M), Q(attname(rf) => data[:id])); db = instance_db(m))
         if rf.one_to_one
-            pre isa PrefetchedList && return isempty(pre.items) ? nothing : pre.items[1]
+            pre isa PrefetchedList && (note_eager_use(T, s); return isempty(pre.items) ? nothing : pre.items[1])
+            note_lazy_load(T, s, :fk)
             return first(qs)
         end
-        pre isa PrefetchedList && return chain(qs; cache = pre.items)
+        pre isa PrefetchedList && (note_eager_use(T, s); return chain(qs; cache = pre.items))
+        note_lazy_load(T, s, :reverse)
         return qs
     end
     for C in child_models(T)

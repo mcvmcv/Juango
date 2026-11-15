@@ -2450,3 +2450,47 @@ end
     end
     @test_throws ArgumentError protected_media(sendfile = :ftp)
 end
+
+@testset "N+1 queries: detection, raise, unused eager loads, auto-prefetch (#162)" begin
+    W = Base.CoreLogging.Warn
+    au = create(Author; name = "NP A")
+    for i in 1:6
+        create(Article; title = "np$i", author = au)
+    end
+    nps() = filter(Article; title__startswith = "np")
+    for i in 1:5
+        create(Author; name = "NP R$i")
+    end
+    lazy(req) = (foreach(a -> a.author.name, nps()); HttpResponse("ok"))
+    eager(req) = (foreach(a -> a.author.name, select_related(nps(), :author)); HttpResponse("ok"))
+    unused(req) = (collect(select_related(nps(), :author)); HttpResponse("ok"))
+    reverse_(req) = (foreach(a -> count(a.articles), filter(Author; name__startswith = "NP R")); HttpResponse("ok"))
+    allowed(req) = with_nplusone_allowed(() -> lazy(req))
+    override_settings(DEBUG = true, ROOT_URLCONF = [path("lazy/", lazy), path("eager/", eager), path("unused/", unused),
+                                                    path("rev/", reverse_), path("allowed/", allowed)]) do
+        c = Client()
+        @test_logs (:warn, r"N\+1 queries: Article\.author was loaded 6 times in one request \(from .*\)\. Add select_related\(:author\)") min_level = W get(c, "/lazy/")
+        @test_logs min_level = W get(c, "/eager/")
+        @test_logs (:warn, r"Unused eager load: select_related\(:author\) on Article") min_level = W get(c, "/unused/")
+        @test_logs (:warn, r"Author\.articles was loaded 5 times.*prefetch_related\(:articles\)") min_level = W get(c, "/rev/")
+        @test_logs min_level = W get(c, "/allowed/")
+        override_settings(NPLUSONE = :raise) do                                     # for test suites
+            @test_throws Juango.NPlusOneError get(c, "/lazy/")
+            @test get(c, "/eager/").status == 200
+        end
+        override_settings(NPLUSONE = false) do
+            @test_logs min_level = W get(c, "/lazy/")
+        end
+        override_settings(NPLUSONE_THRESHOLD = 10) do
+            @test_logs min_level = W get(c, "/lazy/")
+        end
+        override_settings(DEBUG = false) do                                        # off in production
+            @test_logs min_level = W get(c, "/lazy/")
+        end
+    end
+    # AUTO_PREFETCH: one query for the foreign key of the whole queryset
+    @test Juango.count_queries(() -> foreach(a -> a.author.name, nps()))[2] == 7
+    override_settings(AUTO_PREFETCH = true) do
+        @test Juango.count_queries(() -> foreach(a -> a.author.name, nps()))[2] == 2
+    end
+end

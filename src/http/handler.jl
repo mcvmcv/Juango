@@ -119,7 +119,7 @@ function handle_request(req::Request)
     delete!(task_local_storage(), :juango_template_error)    # a template failure noted for the debug page
     has_receivers(request_started, :handler) && send(request_started, :handler; request = req)
     resp = try
-        handle_request_inner(req)
+        with_nplusone_tracking(() -> handle_request_inner(req))
     finally
         cleanup_uploads(req)                         # temporary files of big uploads
     end
@@ -206,6 +206,7 @@ function error_handler_issues()
 end
 
 function response_for_exception(req::Request, e, bt)
+    e isa NPlusOneError && get(req.meta, :test_client, false) === true && throw(e)     # (NPLUSONE = :raise fails the test itself)
     if e isa Http404
         log!("juango.request", :warning, "Not Found: $(req.path)"; request = req, status_code = 404)
         settings.DEBUG && return technical_404(req, e)

@@ -581,6 +581,7 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
         end
     end
     if !isempty(related)
+        isempty(objs) || foreach(r -> note_eager_load(T, r[1][1], :select_related), related)
         for (obj, row) in zip(objs, rows)
             for (path, M, alias) in related
                 parent = obj
@@ -603,6 +604,7 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
     for p in qs.prefetch
         do_prefetch!(objs, p)
     end
+    remember_siblings!(objs)
     objs
 end
 
@@ -645,6 +647,7 @@ end
 
 Base.@nospecializeinfer function do_prefetch!(@nospecialize(objs::Vector), p::Prefetch)
     segs = Symbol.(split(p.path, "__"))
+    isempty(objs) || p.to_attr !== nothing || note_eager_load(typeof(first(objs)), segs[1], :prefetch_related)
     level = objs
     for (i, s) in enumerate(segs)
         last_ = i == length(segs)
