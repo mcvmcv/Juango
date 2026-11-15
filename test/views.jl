@@ -902,6 +902,32 @@ end
         collectstatic()
         paths2 = JSON.parse(read(joinpath(root, "staticfiles.json"), String))["paths"]
         @test paths2["img/logo.png"] != logo && paths2["css/site.css"] != site
+        # #164: SERVE_STATIC serves STATIC_ROOT with DEBUG off: hashed names immutable, .gz copies, ETags, ranges
+        @test isfile(joinpath(root, "juango", "htmx.min.js.gz")) && !isfile(joinpath(root, "img", "logo.png.gz"))
+        override_settings(DEBUG = false, SERVE_STATIC = true) do
+            c = Client()
+            r = get(c, "/static/" * paths2["img/logo.png"])
+            @test r.status == 200 && String(copy(r.body)) == "NEWPNG" && getheader(r, "Cache-Control") == "public, max-age=31536000, immutable"
+            @test getheader(r, "Content-Type") == "image/png"
+            r = get(c, "/static/css/base.css")
+            @test r.status == 200 && getheader(r, "Cache-Control") == "public, max-age=60"
+            et = getheader(r, "ETag")
+            r304 = get(c, "/static/css/base.css"; headers = Dict("If-None-Match" => et))
+            @test r304.status == 304 && isempty(r304.body)
+            plain = get(c, "/static/juango/htmx.min.js")
+            z = get(c, "/static/juango/htmx.min.js"; headers = Dict("Accept-Encoding" => "gzip, br"))
+            @test getheader(z, "Content-Encoding") == "gzip" && length(z.body) < length(plain.body) && getheader(z, "Vary") == "Accept-Encoding"
+            @test getheader(plain, "Content-Encoding") === nothing
+            @test String(transcode(Juango.CodecZlib.GzipDecompressor, Vector{UInt8}(z.body))) == String(copy(plain.body))
+            rg = get(c, "/static/css/base.css"; headers = Dict("Range" => "bytes=0-3"))
+            @test rg.status == 206 && String(copy(rg.body)) == "body" && getheader(rg, "Content-Range") == "bytes 0-3/19"
+            @test get(c, "/static/css/base.css"; headers = Dict("Range" => "bytes=50-60")).status == 416
+            @test get(c, "/static/nope.css").status == 404 && get(c, "/static/..%2F..%2Fetc%2Fpasswd").status == 404
+            @test get(c, "/static/juango/htmx.min.js.gz").status == 404                 # .gz copies aren't served by name
+        end
+        override_settings(DEBUG = false, SERVE_STATIC = false) do
+            @test get(Client(), "/static/css/base.css").status == 404                # off by default
+        end
     end
 
     # the JavaScript catalog

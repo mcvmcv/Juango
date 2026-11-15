@@ -149,6 +149,10 @@ function handle_request_inner(req::Request)
         if (settings.DEBUG || LIVE_SERVER_STATIC[]) && startswith(req.path, settings.STATIC_URL) && !isempty(static_dirs())
             return serve_static(req)
         end
+        if !settings.DEBUG && get(SETTINGS, :SERVE_STATIC, false) === true && startswith(req.path, settings.STATIC_URL) &&
+           !isempty(string(settings.STATIC_ROOT))
+            return serve_static_root(req)                # (contrib/staticfiles.jl: hashed, cached, pre-compressed)
+        end
         haskey(req.meta, :upload_error) && throw(req.meta[:upload_error])
         too_many_fields(req) && throw(BadRequest("The number of GET/POST parameters exceeded DATA_UPLOAD_MAX_NUMBER_FIELDS."))
         host_allowed(req) || (log!("juango.security.DisallowedHost", :warning, "Invalid HTTP_HOST header: '$(get_host(req))'"; request = req);

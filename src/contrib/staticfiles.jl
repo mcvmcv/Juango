@@ -90,3 +90,113 @@ function post_process_manifest!(root::AbstractString, names::Vector{String})
     MANIFEST_CACHE[] = nothing
     hashed
 end
+
+# --- serving STATIC_ROOT in production (WhiteNoise built in) -----------------------------------------
+#
+#     configure!(DEBUG = false, SERVE_STATIC = true, STATICFILES_STORAGE = :manifest, STATIC_ROOT = "staticfiles")
+#     manage.jl collectstatic        # copies, hashed names, and .gz copies of text files
+#
+# Juango then serves STATIC_URL from STATIC_ROOT itself, so no nginx or CDN is needed in front:
+# hashed names (css/site.55e7cbb9ba48.css) are cached for a year as immutable, others get a short
+# max-age and an ETag (304 when unchanged); clients that accept gzip get the .gz copy; byte ranges
+# work; small files are kept in memory.
+
+"Extensions worth a .gz copy (text; images and archives are compressed already)."
+const COMPRESSIBLE_STATIC = (".css", ".js", ".mjs", ".map", ".json", ".svg", ".txt", ".html", ".htm", ".xml", ".csv", ".ico", ".wasm", ".ttf", ".otf", ".eot")
+const HASHED_NAME_RE = r"\.[0-9a-f]{12}\.[A-Za-z0-9]+$"
+
+"Write `.gz` copies of the compressible files under `root` (smaller ones than 256 bytes aren't worth it); returns how many."
+function compress_static!(root::AbstractString)
+    n = 0
+    for (dir, _, files) in walkdir(root), f in files
+        lowercase(splitext(f)[2]) in COMPRESSIBLE_STATIC || continue
+        p = joinpath(dir, f)
+        data = read(p)
+        length(data) < 256 && continue
+        z = gzip_compress(data; max_random_bytes = 0)
+        length(z) < length(data) || continue
+        write(p * ".gz", z)
+        n += 1
+    end
+    n
+end
+
+struct StaticEntry
+    mtime::Float64
+    size::Int
+    etag::String
+    data::Union{Nothing,Vector{UInt8}}      # in memory when small
+    gz::Union{Nothing,Vector{UInt8}}
+    gzpath::Union{Nothing,String}
+end
+const STATIC_CACHE = Dict{String,StaticEntry}()
+const STATIC_CACHE_LOCK = ReentrantLock()
+
+function static_entry(p::String)
+    st = stat(p)
+    lock(STATIC_CACHE_LOCK) do
+        e = get(STATIC_CACHE, p, nothing)
+        e !== nothing && e.mtime == st.mtime && e.size == st.size && return e
+        small = st.size <= something(get(SETTINGS, :STATIC_MAX_MEMORY_FILE, 1_048_576), 0)
+        gzp = isfile(p * ".gz") ? p * ".gz" : nothing
+        e = StaticEntry(st.mtime, st.size, "\"" * string(st.size, base = 16) * "-" * string(round(Int, st.mtime * 1000), base = 16) * "\"",
+                        small ? read(p) : nothing, small && gzp !== nothing ? read(gzp) : nothing, gzp)
+        STATIC_CACHE[p] = e
+        e
+    end
+end
+
+"""
+    serve_static_root(req) -> HttpResponse
+
+Serve a file of STATIC_ROOT for STATIC_URL (`SERVE_STATIC = true`; DEBUG off): see the comment above.
+"""
+function serve_static_root(req::Request)
+    req.method in ("GET", "HEAD") || return HttpResponseNotAllowed(["GET", "HEAD"])
+    root = normpath(abspath(string(settings.STATIC_ROOT)))
+    rel = URIs.unescapeuri(req.path[ncodeunits(settings.STATIC_URL)+1:end])
+    p = normpath(joinpath(root, rel))
+    (startswith(p, root * Base.Filesystem.path_separator) && isfile(p) && !endswith(p, ".gz")) || throw(Http404("Static file '$rel' not found"))
+    e = static_entry(p)
+    ext = lowercase(splitext(p)[2])
+    ctype = get(MIME_TYPES, ext, "application/octet-stream")
+    headers = Pair{String,String}["ETag" => e.etag,
+        "Cache-Control" => occursin(HASHED_NAME_RE, basename(p)) ? "public, max-age=31536000, immutable" :
+                           "public, max-age=$(something(get(SETTINGS, :STATIC_MAX_AGE, 60), 0))",
+        "Accept-Ranges" => "bytes"]
+    e.gzpath === nothing || push!(headers, "Vary" => "Accept-Encoding")
+    inm = header(req, "if-none-match", nothing)
+    if inm !== nothing && (strip(inm) == "*" || e.etag in strip.(split(inm, ',')))
+        r = HttpResponse(""; status = 304)
+        filter!(h -> !header_eq(h.first, "Content-Type"), r.headers)
+        foreach(h -> setheader!(r, h.first, h.second), headers)
+        return r
+    end
+    rng = header(req, "range", nothing)
+    if rng !== nothing && (m = match(r"^bytes=(\d*)-(\d*)$", strip(rng))) !== nothing
+        a, b = m[1], m[2]
+        first_, last_ = isempty(a) ? (max(0, e.size - parse(Int, b)), e.size - 1) :
+                        (parse(Int, a), isempty(b) ? e.size - 1 : min(parse(Int, b), e.size - 1))
+        if isempty(a) && isempty(b) || first_ > last_ || first_ >= e.size
+            r = HttpResponse(""; status = 416)
+            setheader!(r, "Content-Range", "bytes */$(e.size)")
+            return r
+        end
+        body = e.data !== nothing ? e.data[first_+1:last_+1] : open(io -> (seek(io, first_); read(io, last_ - first_ + 1)), p)
+        r = HttpResponse(body; status = 206, content_type = ctype)
+        setheader!(r, "Content-Range", "bytes $first_-$last_/$(e.size)")
+        foreach(h -> setheader!(r, h.first, h.second), headers)
+        return r
+    end
+    gz = e.gzpath !== nothing && occursin(r"\bgzip\b"i, header(req, "accept-encoding", ""))
+    r = if gz
+        HttpResponse(something(e.gz, read(e.gzpath)); content_type = ctype)
+    elseif e.data !== nothing
+        HttpResponse(e.data; content_type = ctype)
+    else
+        FileResponse(p; content_type = ctype)
+    end
+    gz && setheader!(r, "Content-Encoding", "gzip")
+    foreach(h -> setheader!(r, h.first, h.second), headers)
+    r
+end

@@ -1978,6 +1978,8 @@ The `assert_*` functions return `true` or throw an `AssertionError` that says wh
 
 `collectstatic` copies `STATIC_DIRS` and each app's `static/` into `STATIC_ROOT`. Where static files are looked for is `STATICFILES_FINDERS` (default `[FileSystemFinder(), AppDirectoriesFinder()]`); a finder of your own subtypes `Juango.StaticFinder` and defines `find_static(finder, path)` and `list_static(finder)`. `{% get_static_prefix %}` and `{% get_media_prefix %}` give `STATIC_URL` and `MEDIA_URL`. With `STATICFILES_STORAGE = :manifest` it also writes copies with a content hash in the name (`css/site.55e7cbb9ba48.css`) and a `staticfiles.json` manifest. It rewrites `url(...)` and `@import` references inside CSS to the hashed names. Then, with `DEBUG` off, `{% static "css/site.css" %}` gives the hashed URL, so a web server can tell browsers to cache static files forever. A name missing from the manifest raises an error.
 
+**Serving them without nginx** (WhiteNoise built in): with `SERVE_STATIC = true` and `DEBUG` off, Juango serves `STATIC_URL` from `STATIC_ROOT` itself. Hashed names are sent with `Cache-Control: public, max-age=31536000, immutable`, others with `max-age=60` (`STATIC_MAX_AGE`) and an ETag, answered with 304 when unchanged. `collectstatic` writes `.gz` copies of text files (CSS, JavaScript, SVG, JSON...; `STATIC_COMPRESS = false` turns that off), sent to clients that accept gzip, with `Vary: Accept-Encoding`. Byte ranges work, files up to 1 MB are kept in memory (`STATIC_MAX_MEMORY_FILE`), and paths can't leave `STATIC_ROOT`. For uploads, see `protected_media`.
+
 ### Model introspection
 
 Generic code that works on any model, such as an audit log, an undo, a CSV export or a "copy

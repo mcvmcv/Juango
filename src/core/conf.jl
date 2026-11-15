@@ -156,7 +156,11 @@ function default_settings()
         :NPLUSONE => :warn,                            # N+1 queries: :warn (in DEBUG), :raise (tests), false
         :NPLUSONE_THRESHOLD => 5,
         :AUTO_PREFETCH => false,
-        :MIGRATION_LINT => :warn,                      # unsafe migrations: :warn, :error (fail `check`), false                       # load a foreign key for a whole fetched queryset on first read                      # lazy loads of one relation in one request before it's reported
+        :MIGRATION_LINT => :warn,
+        :SERVE_STATIC => false,                        # serve STATIC_ROOT with DEBUG off (hashed, cached, pre-compressed)
+        :STATIC_COMPRESS => true,                      # collectstatic writes .gz copies of text files
+        :STATIC_MAX_AGE => 60,                         # Cache-Control max-age for static files without a hash in the name
+        :STATIC_MAX_MEMORY_FILE => 1_048_576,          # SERVE_STATIC keeps files up to this size in memory                      # unsafe migrations: :warn, :error (fail `check`), false                       # load a foreign key for a whole fetched queryset on first read                      # lazy loads of one relation in one request before it's reported
         :ADMIN_FK_SELECT_LIMIT => 1000,                # admin: a foreign key to a bigger table gets a search (or id) box
     )
 end

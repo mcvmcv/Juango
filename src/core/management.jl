@@ -846,5 +846,6 @@ function collectstatic(; clear = false, verbose = false)
         verbose && println("  ", rel)
     end
     manifest_storage() && post_process_manifest!(root, [replace(r, '\\' => '/') for r in seen])
+    get(SETTINGS, :STATIC_COMPRESS, true) === true && compress_static!(root)      # .gz copies for SERVE_STATIC (or nginx gzip_static)
     length(seen)
 end
