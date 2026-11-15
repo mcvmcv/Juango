@@ -51,7 +51,7 @@ export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_lis
        none, in_bulk, dates, datetimes, raw, explain, iterator, select_for_update, intersection,
        difference, create, get_or_create, update_or_create, update!, save!, refresh!, full_clean,
        clean_fields, validate_unique, validate_constraints, get_next_by, get_previous_by, bulk_create,
-       bulk_update, add!, remove!, set!, clear!, through, atomic, advisory_lock, with_nplusone_allowed, deploy_task!, deploy_waiting, run_deploy_tasks, on_commit, using_db, set_rollback!, get_rollback,
+       bulk_update, add!, remove!, set!, clear!, through, atomic, advisory_lock, swap_user_model, with_nplusone_allowed, deploy_task!, deploy_waiting, run_deploy_tasks, on_commit, using_db, set_rollback!, get_rollback,
        get_order, set_order!, get_next_in_order, get_previous_in_order,
        get_autocommit, savepoint, savepoint_commit, savepoint_rollback, execute_wrapper,
        DoesNotExist, MultipleObjectsReturned, ProtectedError, RestrictedError, protected_message, SET, IntegrityError, DatabaseError, ValidationError, TransactionManagementError

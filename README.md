@@ -1501,7 +1501,7 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 
 #### Custom user model
 
-Extend `AbstractUser` and name it in `AUTH_USER_MODEL` before the first `migrate`:
+Extend `AbstractUser` and name it in `AUTH_USER_MODEL`, best before the first `migrate` (a new project should start with one, even an empty one, so it can grow fields later):
 
 ```julia
 @model struct Member <: AbstractUser
@@ -1517,6 +1517,14 @@ end
 ```
 
 `get_user_model()` returns it, and `create_user`, `authenticate`, sessions, permissions, password reset, the admin and `createsuperuser` all use it. Migrations record `ForeignKey(USER_MODEL)` references as swappable, so an app's migrations work whichever user model a project picks. Only the chosen user model has a table: Juango's `User` drops out of content types, permissions and reverse relations when it's swapped. The auth app's migration then skips `auth_user` and its join tables, as Django does.
+
+**Switching later**, with users in the database, is supported (Django leaves you to hand-write it):
+
+1. Write the new model and run `makemigrations` and `migrate` with the old one still in `AUTH_USER_MODEL`, so its tables exist, empty.
+2. `manage.jl swap_user_model accounts.Member` (`--dry-run` prints the plan) copies the users with their ids, their groups and permissions, moves every foreign key that points at the old user table (the admin's log and your models) to the new one, and moves the id sequence on, in one transaction where the database allows.
+3. Set `AUTH_USER_MODEL = "accounts.Member"`. Sessions stay valid, since the ids are the same. The old table is left alone; drop it with a migration when you're sure.
+
+If `AUTH_USER_MODEL` is switched without moving the users, the `auth.W020` check says so.
 
 #### Authentication backends
 
@@ -2215,7 +2223,7 @@ configure!(
 ## Differences from Django (current limitations)
 
 - **SQLite, PostgreSQL and MySQL/MariaDB.** Postgres and MySQL use a connection pool; SQLite uses one connection behind a lock.
-- **Swappable user models** have Django's limitation: choose `AUTH_USER_MODEL` before the first `migrate`.
+- **Swappable user models** can be switched after the first `migrate` with `swap_user_model` (Django has no supported way).
 - `runserver` is HTTP.jl's server. It speaks HTTP/1.1 and HTTP/2 (cleartext with prior knowledge, or negotiated over TLS), and serves HTTPS with `runserver 8443 --cert cert.pem --key key.pem` (or `runserver(...; certfile, keyfile)`). WebSockets need HTTP/1.1, which browsers use for them anyway. It is fine for development and small deployments. For production, put it behind a reverse proxy, set `DEBUG=false`, set a real `SECRET_KEY` and `ALLOWED_HOSTS`, and run `manage.jl check --deploy`.
 
 ## Layout

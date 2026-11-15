@@ -144,6 +144,7 @@ include("db/fixtureformats.jl")
 include("db/dbtools.jl")
 include("contrib/staticfiles.jl")
 include("i18n/jscatalog.jl")
+include("contrib/auth/swapuser.jl")
 include("core/management.jl")
 include("core/build.jl")
 

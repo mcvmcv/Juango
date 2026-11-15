@@ -162,6 +162,7 @@ register_check!(tags = [:migrations]) do
     end
     [CheckMessage(mode === :error ? :error : :warning, "$(w.migration), operation $(w.op): $(w.msg)"; id = w.id, hint = w.hint) for w in ws]
 end
+register_check!(() -> [CheckMessage(:warning, m; id = "auth.W020") for m in user_model_swap_issues()]; tags = [:models])
 register_check!(deploy_checks; tags = [:security], deploy = true)
 
 "Print check messages as `manage.jl check` does (with how many were silenced); returns them."
@@ -477,6 +478,13 @@ for (n, h, f) in (
     ("optimizemigration", "Rewrite a migration with fewer operations: optimizemigration <app> <migration> [--check]", cmd_optimizemigration),
     ("makemigrations", "Write migrations for model changes (--name, --empty, --merge, --update, --dry-run, --check, --noinput, --app)", cmd_makemigrations),
     ("showmigrations", "List migrations and whether they are applied", _ -> showmigrations()),
+    ("swap_user_model", "Move the users to a new user model before switching AUTH_USER_MODEL: swap_user_model <app.Model> [--dry-run]",
+     function (args)
+         pos, flags = parse_flags(args)
+         length(pos) == 1 || error("usage: swap_user_model <app.Model> [--dry-run]")
+         swap_user_model(pos[1]; dry_run = haskey(flags, "dry-run"))
+         nothing
+     end),
     ("deploy", "Run the deploy tasks this database hasn't run: deploy [--plan] [--fake]",
      function (args)
          _, flags = parse_flags(args)

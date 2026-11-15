@@ -1227,6 +1227,39 @@ end
     end
 end
 
+@testset "swap_user_model: switching AUTH_USER_MODEL with users in the database (#167)" begin
+    f = tempname() * ".sqlite3"
+    override_settings(DATABASES = Dict("swaptest" => f)) do
+        Juango.with_db("swaptest") do
+            quiet(() -> migrate(sync = true, verbose = false))
+            u = create_user("swapper", "pw-swap-12345"; email = "s@x.io")
+            g = create(Group; name = "swappers")
+            add!(get(User; id = u.id).groups, g)
+            create(Juango.LogEntry; user = get(User; id = u.id), action_flag = 1, object_repr = "x", change_message = "")
+            plan = swap_user_model(SwapMember; dry_run = true, log = (xs...) -> nothing)
+            @test any(s -> startswith(s, "INSERT INTO \"swap_member\""), plan) && count(objects(SwapMember)) == 0      # (dry run: nothing done)
+            @test_throws ArgumentError swap_user_model(User; log = (xs...) -> nothing)                # already AUTH_USER_MODEL
+            swap_user_model(SwapMember; log = (xs...) -> nothing)
+            m = get(SwapMember; username = "swapper")
+            @test m.id == u.id && m.email == "s@x.io" && check_password(m, "pw-swap-12345")
+            @test [x.name for x in m.groups] == ["swappers"]
+            override_settings(AUTH_USER_MODEL = SwapMember) do
+                @test isempty(Juango.user_model_swap_issues())
+                e = create(Juango.LogEntry; user = m, action_flag = 1, object_repr = "y", change_message = "")   # the foreign key follows
+                @test get(Juango.LogEntry; id = e.id).user.username == "swapper"
+                @test create(SwapMember; username = "after").id > u.id                              # the sequence moved on
+            end
+            @test_throws ArgumentError swap_user_model(SwapMember; log = (xs...) -> nothing)          # the new table has rows now
+        end
+    end
+    rm(f; force = true)
+    # the check: AUTH_USER_MODEL switched without moving the users
+    create_user("swapcheck", "pw-swap-12345")
+    override_settings(AUTH_USER_MODEL = SwapMember) do
+        @test occursin("swap_user_model project.SwapMember", only(Juango.user_model_swap_issues()))
+    end
+end
+
 @testset "historical models: relations" begin
     g = Juango.Migrations.build_graph()
     apps = Juango.HistoricalApps(Juango.Migrations.replay(g, keys(g.nodes)))
