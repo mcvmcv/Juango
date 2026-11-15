@@ -553,7 +553,7 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
             c = get(cache, s, nothing)
             c === nothing || return c
         end
-        note_lazy_load(T, s, :fk)
+        note_lazy_load(T, s, :fk, m)
         obj = with_db(() -> get(base_objects(related_model(f)); id = id), instance_db(m))
         cache[s] = obj
         return obj
@@ -578,7 +578,7 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
     if mm !== nothing
         qs = m2m_queryset(m, mm[2], mm[3])
         pre isa PrefetchedList && (note_eager_use(T, s); return chain(qs; cache = pre.items, owner = qs.owner))
-        note_lazy_load(T, s, :reverse)
+        note_lazy_load(T, s, :reverse, m)
         return qs
     end
     for (rn, M, rf) in reverse_relations(T)
@@ -586,11 +586,11 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
         qs = chain(filter(objects(M), Q(attname(rf) => data[:id])); db = instance_db(m))
         if rf.one_to_one
             pre isa PrefetchedList && (note_eager_use(T, s); return isempty(pre.items) ? nothing : pre.items[1])
-            note_lazy_load(T, s, :fk)
+            note_lazy_load(T, s, :fk, m)
             return first(qs)
         end
         pre isa PrefetchedList && (note_eager_use(T, s); return chain(qs; cache = pre.items))
-        note_lazy_load(T, s, :reverse)
+        note_lazy_load(T, s, :reverse, m)
         return qs
     end
     for C in child_models(T)

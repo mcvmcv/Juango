@@ -2492,16 +2492,26 @@ end
     unused(req) = (collect(select_related(nps(), :author)); HttpResponse("ok"))
     reverse_(req) = (foreach(a -> count(a.articles), filter(Author; name__startswith = "NP R")); HttpResponse("ok"))
     allowed(req) = with_nplusone_allowed(() -> lazy(req))
+    # one object's relation used several ways (#195): not an N+1, however many times
+    function oneobj(req)
+        a = get(Author; name = "NP A")
+        update!(a.articles; views = 1); count(a.articles); collect(values_list(a.articles, :id))
+        exists(filter(a.articles; title = "np1")); first(a.articles); length(collect(a.articles))
+        a2 = get(Author; name = "NP A"); count(a2.articles)                   # the same row, loaded again
+        HttpResponse("ok")
+    end
     override_settings(DEBUG = true, ROOT_URLCONF = [path("lazy/", lazy), path("eager/", eager), path("unused/", unused),
-                                                    path("rev/", reverse_), path("allowed/", allowed)]) do
+                                                    path("rev/", reverse_), path("allowed/", allowed), path("one/", oneobj)]) do
         c = Client()
-        @test_logs (:warn, r"N\+1 queries: Article\.author was loaded 6 times in one request \(from .*\)\. Add select_related\(:author\)") min_level = W get(c, "/lazy/")
+        @test_logs (:warn, r"N\+1 queries: Article\.author was loaded for 6 objects one at a time in one request \(from .*\)\. Add select_related\(:author\)") min_level = W get(c, "/lazy/")
         @test_logs min_level = W get(c, "/eager/")
         @test_logs (:warn, r"Unused eager load: select_related\(:author\) on Article") min_level = W get(c, "/unused/")
-        @test_logs (:warn, r"Author\.articles was loaded 5 times.*prefetch_related\(:articles\)") min_level = W get(c, "/rev/")
+        @test_logs (:warn, r"Author\.articles was loaded for 5 objects.*prefetch_related\(:articles\)") min_level = W get(c, "/rev/")
         @test_logs min_level = W get(c, "/allowed/")
+        @test_logs min_level = W get(c, "/one/")
         override_settings(NPLUSONE = :raise) do                                     # for test suites
             @test_throws Juango.NPlusOneError get(c, "/lazy/")
+            @test get(c, "/one/").status == 200
             @test get(c, "/eager/").status == 200
         end
         override_settings(NPLUSONE = false) do
