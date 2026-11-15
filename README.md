@@ -1854,6 +1854,7 @@ Admin.register!(Person;
     urls = [path("<str:id>/promote/", promote; name = "person_promote")])                 # admin/hr/person/3/promote/
 ```
 
+- **Big tables.** A foreign key to a table with more than `ADMIN_FK_SELECT_LIMIT` rows (1000) becomes a search box when the related model is in the admin with `search_fields`, else an id box, instead of a select of every row (`raw_id_fields` and `autocomplete_fields` choose explicitly; `ADMIN_FK_SELECT_LIMIT = nothing` turns this off).
 - **Filters.** `:field => :empty` filters on empty values and `:fk => :related_only` lists only the related objects in use.
 - **Permissions per object.** `has_*_permission(req, obj)` is asked for the model (with `obj = nothing`) and for each object, so a change page can be view-only for some objects. Custom views in `urls` run behind the admin's login and permission checks.
 - **Hooks**, as Django's ModelAdmin methods:

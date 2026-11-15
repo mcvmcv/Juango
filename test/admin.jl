@@ -452,3 +452,26 @@ end
     end
     @test !Admin.is_registered(AdminDup.Article) && Admin.is_registered(Article)
 end
+
+@testset "admin: foreign keys to big tables get a search box (#174)" begin
+    f = Juango.findfield(Juango.modelmeta(Article), :author)
+    @test count(objects(Author)) > 1
+    override_settings(ADMIN_FK_SELECT_LIMIT = 1) do                  # Author is in the admin with search_fields
+        @test Admin.big_fk_widget(f) === :autocomplete
+        c = Client()
+        force_login!(c, root_user())
+        @test occursin("data-autocomplete=\"project/author\"", text(get(c, "/admin/project/article/add/")))
+        Admin.unregister!(Author)
+        try
+            @test Admin.big_fk_widget(f) === :raw_id                     # not searchable: an id box
+        finally
+            Admin.register!(Author; list_display = [:name, :email], search_fields = [:name])
+        end
+    end
+    override_settings(ADMIN_FK_SELECT_LIMIT = 1_000_000) do
+        @test Admin.big_fk_widget(f) === nothing
+    end
+    override_settings(ADMIN_FK_SELECT_LIMIT = nothing) do
+        @test Admin.big_fk_widget(f) === nothing
+    end
+end

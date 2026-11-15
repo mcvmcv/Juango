@@ -920,8 +920,23 @@ function configure_widgets!(ma::ModelAdmin, form, req = nothing)
         end
         f.name in ma.raw_id_fields && (f.widget = :raw_id)
         f.name in ma.autocomplete_fields && (f.widget = :autocomplete)
+        f.kind === :fk && Juango.widget_kind(f.widget) === nothing && (w = big_fk_widget(f)) !== nothing && (f.widget = w)
     end
     form
+end
+
+"""
+A foreign key to a table with more than `ADMIN_FK_SELECT_LIMIT` rows (1000; `nothing` turns this
+off) would render a select of every row: use the search box when the related model is in the
+admin with `search_fields`, else an id box.
+"""
+function big_fk_widget(f)
+    limit = get(settings, :ADMIN_FK_SELECT_LIMIT, 1000)
+    limit === nothing && return nothing
+    R = related_model(f)
+    count(objects(R)[1:limit+1]) > limit || return nothing        # (a capped count: cheap on a big table)
+    ra = get(current_site().registry, admin_key(R), nothing)
+    ra !== nothing && !isempty(ra.search_fields) ? :autocomplete : :raw_id
 end
 
 Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nospecialize(obj))

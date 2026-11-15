@@ -153,6 +153,7 @@ function default_settings()
         :FILE_UPLOAD_DIRECTORY_PERMISSIONS => nothing, # mode of directories it creates
         :MIGRATION_MODULES => Dict{String,String}(),
         :SITE_NAME => "Juango",
+        :ADMIN_FK_SELECT_LIMIT => 1000,                # admin: a foreign key to a bigger table gets a search (or id) box
     )
 end
 
