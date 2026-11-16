@@ -358,7 +358,8 @@ function DecimalField(; max_digits::Integer, decimal_places::Integer, kw...)
     decimal_places <= max_digits || throw(ArgumentError("DecimalField: decimal_places ($decimal_places) can't exceed max_digits ($max_digits)"))
     Field(:decimal; max_digits = max_digits, decimal_places = decimal_places, kw...)
 end
-BooleanField(; default = false, kw...) = Field(:bool; default = default, blank = true, kw...)
+# a nullable one starts as NULL, as Django's (a non-nullable one as false, which Django leaves to the form)
+BooleanField(; null::Bool = false, default = null ? nothing : false, kw...) = Field(:bool; default = default, null = null, blank = true, kw...)
 DateTimeField(; kw...) = Field(:datetime; kw...)
 DateField(; kw...) = Field(:date; kw...)
 """

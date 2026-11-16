@@ -37,7 +37,8 @@ insert_sql(b::PostgresBackend, table, cols::Vector{String}) =
 # After inserting an explicit id, move the identity sequence past it so later inserts don't collide.
 function sync_sequence(b::PostgresBackend, table)
     t = quote_name(b, table)
-    execute("SELECT setval(pg_get_serial_sequence(?, 'id'), COALESCE(MAX(\"id\"), 1), MAX(\"id\") IS NOT NULL) FROM $t", [t])
+    # (a sequence can't go below 1: explicit ids of 0 or less, as Django's tests use, leave it where it starts)
+    execute("SELECT setval(pg_get_serial_sequence(?, 'id'), GREATEST(COALESCE(MAX(\"id\"), 1), 1), COALESCE(MAX(\"id\") >= 1, false)) FROM $t", [t])
     nothing
 end
 

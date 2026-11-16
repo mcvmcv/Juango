@@ -1088,10 +1088,15 @@ end
 @model struct DqSchool
     Meta(table = "dq_school")
 end
+@model struct DqStudent
+    school = ForeignKey(DqSchool; on_delete = :CASCADE, related_name = :student)
+    Meta(table = "dq_student")
+end
 @model struct DqClassroom
     name = CharField(max_length = 20)
     has_blackboard = BooleanField(null = true)
     school = ForeignKey(DqSchool; on_delete = :CASCADE, related_name = :classroom)
+    students = ManyToManyField(DqStudent; related_name = :classroom)
     Meta(table = "dq_classroom")
 end
 @model struct DqArticle
@@ -1129,6 +1134,12 @@ end
     name = CharField(max_length = 50)
     Meta(table = "dq_objecta")
 end
+@model struct DqChildObjectA <: DqObjectA
+    Meta(table = "dq_childobjecta")
+end
+@model struct DqProxyObjectA <: DqObjectA
+    Meta(proxy = true)
+end
 @model struct DqObjectB
     name = CharField(max_length = 50)
     objecta = ForeignKey(DqObjectA; on_delete = :CASCADE, related_name = :objectb)
@@ -1139,6 +1150,7 @@ end
     name = CharField(max_length = 50)
     objecta = ForeignKey(DqObjectA; on_delete = :SET_NULL, null = true, related_name = :objectc)
     objectb = ForeignKey(DqObjectB; on_delete = :SET_NULL, null = true, related_name = :objectc)
+    childobjecta = ForeignKey(DqChildObjectA; on_delete = :SET_NULL, null = true, related_name = :ca_pk)
     Meta(table = "dq_objectc")
 end
 @model struct DqJob
@@ -1215,6 +1227,7 @@ end
     Meta(table = "dq_program")
 end
 @model struct DqChannel
+    programs = ManyToManyField(DqProgram; related_name = :channel)
     identifier = OneToOneField(DqIdentifier; on_delete = :CASCADE, related_name = :channel)
     Meta(table = "dq_channel")
 end
@@ -1237,6 +1250,76 @@ end
     date = DateTimeField(primary_key = true, default = now)
     Meta(table = "dq_datetimepk", ordering = ["date"])
 end
+@model struct DqPage
+    text = TextField()
+    Meta(table = "dq_page")
+end
+@model struct DqParagraph
+    text = TextField()
+    page = ManyToManyField(DqPage; related_name = :paragraph)
+    Meta(table = "dq_paragraph")
+end
+@model struct DqChapter
+    title = TextField()
+    paragraph = ForeignKey(DqParagraph; on_delete = :CASCADE, related_name = :chapter)
+    Meta(table = "dq_chapter")
+end
+@model struct DqBook
+    title = TextField()
+    chapter = ForeignKey(DqChapter; on_delete = :CASCADE, related_name = :book)
+    Meta(table = "dq_book")
+end
+@model struct DqMyObject
+    parent = ForeignKey(:self; on_delete = :SET_NULL, null = true, blank = true, related_name = :children)
+    data = CharField(max_length = 100)
+    Meta(table = "dq_myobject")
+end
+@model struct DqLeafA
+    data = CharField(max_length = 10)
+    Meta(table = "dq_leafa")
+end
+@model struct DqLeafB
+    data = CharField(max_length = 10)
+    Meta(table = "dq_leafb")
+end
+@model struct DqJoin
+    a = ForeignKey(DqLeafA; on_delete = :CASCADE, related_name = :join)
+    b = ForeignKey(DqLeafB; on_delete = :CASCADE, related_name = :join)
+    Meta(table = "dq_join")
+end
+@model struct DqSharedConnection
+    data = CharField(max_length = 10)
+    Meta(table = "dq_sharedconnection")
+end
+@model struct DqPointerA
+    connection = ForeignKey(DqSharedConnection; on_delete = :CASCADE, related_name = :pointera)
+    Meta(table = "dq_pointera")
+end
+@model struct DqT23605AParent
+    Meta(table = "dq_t23605aparent")
+end
+@model struct DqT23605A <: DqT23605AParent
+    Meta(table = "dq_t23605a")
+end
+@model struct DqT23605C
+    field_c0 = FloatField()
+    Meta(table = "dq_t23605c")
+end
+@model struct DqT23605B
+    modela_fk = ForeignKey(DqT23605A; on_delete = :CASCADE, related_name = :ticket23605b)
+    modelc_fk = ForeignKey(DqT23605C; on_delete = :CASCADE, related_name = :ticket23605b)
+    field_b0 = IntegerField(null = true)
+    field_b1 = BooleanField(default = false)
+    Meta(table = "dq_t23605b")
+end
+@model struct DqIndividual
+    alive = BooleanField()
+    Meta(table = "dq_individual")
+end
+@model struct DqRelatedIndividual
+    related = ForeignKey(DqIndividual; on_delete = :CASCADE, related_name = :related_individual)
+    Meta(table = "dq_relatedindividual")
+end
 @model struct DqTeacher
     schools = ManyToManyField(DqSchool; related_name = :teacher)
     friends = ManyToManyField(:self; symmetrical = true)
@@ -1245,11 +1328,13 @@ end
 redirect_stdout(devnull) do
     ms = [DqDumbCategory, DqNamedCategory, DqTag, DqNote, DqAnnotation, through(DqAnnotation, :notes), DqExtraInfo, DqAuthor,
           DqItem, through(DqItem, :tags), DqReport, DqRanking, DqCover, DqNumber, DqValid, through(DqValid, :parent),
-          DqManagedModel, DqSimpleCategory, DqSpecialCategory, DqCategoryItem, DqOneToOneCategory, DqSchool, DqClassroom, DqArticle, DqFood, DqEaten, DqReservedName,
-          DqLoopX, DqLoopY, DqLoopZ, DqObjectA, DqObjectB, DqObjectC, DqJob, DqResponsibility, DqJobResponsibilities,
+          DqManagedModel, DqSimpleCategory, DqSpecialCategory, DqCategoryItem, DqOneToOneCategory, DqSchool, DqStudent, DqClassroom, through(DqClassroom, :students), DqArticle, DqFood, DqEaten, DqReservedName,
+          DqLoopX, DqLoopY, DqLoopZ, DqObjectA, DqChildObjectA, DqObjectB, DqObjectC, DqJob, DqResponsibility, DqJobResponsibilities,
           DqOrder, DqOrderItem, DqCategoryRelationship, DqNullableName, DqNode, DqModelD, DqModelC, DqModelB, DqModelA,
-          DqFK1, DqBaseA, DqIdentifier, DqProgram, DqChannel, DqCustomPk, DqRelated, DqCustomPkTag,
-          through(DqCustomPkTag, :custom_pk), DqDateTimePK, DqTeacher,
+          DqFK1, DqBaseA, DqIdentifier, DqProgram, DqChannel, through(DqChannel, :programs), DqCustomPk, DqRelated, DqCustomPkTag,
+          through(DqCustomPkTag, :custom_pk), DqDateTimePK, DqPage, DqParagraph, through(DqParagraph, :page), DqChapter, DqBook,
+          DqMyObject, DqLeafA, DqLeafB, DqJoin, DqSharedConnection, DqPointerA, DqT23605AParent, DqT23605A, DqT23605C, DqT23605B,
+          DqIndividual, DqRelatedIndividual, DqTeacher,
           through(DqTeacher, :schools), through(DqTeacher, :friends)]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
 end
@@ -2076,5 +2161,148 @@ end
     # a datetime as the key (Django's DateTimePK)
     d = create(DqDateTimePK; date = DateTime(2020, 1, 2, 3, 4, 5))
     @test get(DqDateTimePK; pk = DateTime(2020, 1, 2, 3, 4, 5)).pk == DateTime(2020, 1, 2, 3, 4, 5)
+  end
+end
+
+@testset "django queries: join reuse, many-to-many exclude, wrong-type lookups and the rest" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    joins(qs) = length(collect(eachmatch(r" JOIN ", first(Juango.select_sql(qs)))))
+    # JoinReuseTest: a forward relation is joined once, a reverse one once per filter() call
+    A = objects(DqAnnotation)
+    @test joins(filter(filter(A; tag__name = "foo"); tag__name = "bar")) == 1
+    @test joins(select_related(filter(A; tag__name = "foo"), :tag)) == 1
+    @test joins(annotate(filter(A; tag__name = "foo"); cnt = Count(:tag__name))) == 1
+    @test joins(filter(A, Q(tag__name = "foo") | Q(tag__name = "bar"))) == 1
+    @test joins(order_by(filter(A; tag__name = "foo"), "tag__name")) == 1
+    @test joins(filter(filter(DqAuthor; report__name = "r4"); report__name = "r1")) == 2
+    # ReverseJoinTrimmingTest
+    t = create(DqTag; name = "")
+    @test isempty(collect(filter(DqTag; annotation__tag = t.pk)))
+    delete!(t)
+  end
+  port_block() do
+    # JoinReuseTest.test_inverted_q_across_relations, Ticket22429Tests
+    sp, hw = create(DqSchool), create(DqSchool)
+    create(DqStudent; school = sp); hp = create(DqStudent; school = hw)
+    create(DqClassroom; school = hw, name = "Potion"); create(DqClassroom; school = sp, name = "Main")
+    @test [x.pk for x in filter(objects(DqStudent), ~(Q(school__classroom__name = "Main") & Q(school__classroom__has_blackboard = nothing)))] == [hp.pk]
+  end
+  port_block() do
+    sc1 = create(DqSchool); st1 = create(DqStudent; school = sc1); sc2 = create(DqSchool); st2 = create(DqStudent; school = sc2)
+    cr = create(DqClassroom; school = sc1, name = "c"); add!(cr.students, st1)
+    @test [x.pk for x in filter(objects(DqStudent), ~Q(classroom__school = F(:school)))] == [st2.pk]
+  end
+  port_block() do
+    # ManyToManyExcludeTest.test_exclude_many_to_many
+    nm(qs) = [x.name for x in qs]
+    i_extra = create(DqIdentifier; name = "extra"); i_program = create(DqIdentifier; name = "program")
+    program = create(DqProgram; identifier = i_program)
+    i_channel = create(DqIdentifier; name = "channel"); channel = create(DqChannel; identifier = i_channel)
+    add!(channel.programs, program)
+    @test nm(order_by(exclude(objects(DqIdentifier); program__channel = channel), "name")) == ["channel", "extra"]
+    @test nm(order_by(exclude(objects(DqIdentifier); program__channel = nothing), "name")) == ["program"]
+  end
+  port_block() do
+    # ManyToManyExcludeTest.test_ticket_12823, Ticket20788Tests
+    pg3, pg2, pg1 = create(DqPage; text = "pg3"), create(DqPage; text = "pg2"), create(DqPage; text = "pg1")
+    pa1 = create(DqParagraph; text = "pa1"); set!(pa1.page, [pg1, pg2])
+    pa2 = create(DqParagraph; text = "pa2"); set!(pa2.page, [pg2, pg3])
+    pa3 = create(DqParagraph; text = "pa3")
+    chs = [create(DqChapter; title = "ch$i", paragraph = p) for (i, p) in enumerate((pa1, pa2, pa3))]
+    bs = [create(DqBook; title = "b$i", chapter = c) for (i, c) in enumerate(chs)]
+    q = exclude(objects(DqBook); chapter__paragraph__page__text = "pg1")
+    @test !occursin("IS NOT NULL", first(Juango.select_sql(q))) && Set(x.title for x in q) == Set(["b2", "b3"])
+    @test Set(x.title for x in exclude(objects(DqBook); chapter__paragraph__page = pg1)) == Set(["b2", "b3"])
+  end
+  port_block() do
+    # RelabelCloneTest.test_ticket_19964
+    my1 = create(DqMyObject; data = "foo"); my1.parent = my1; save!(my1)
+    my2 = create(DqMyObject; data = "bar", parent = my1)
+    parents = filter(DqMyObject; parent = F(:id))
+    children = exclude(filter(DqMyObject; parent__in = parents); parent = F(:id))
+    @test [x.data for x in parents] == ["foo"] && [x.data for x in children] == ["bar"] && [x.data for x in parents] == ["foo"]
+  end
+  port_block() do
+    # Ticket20101Tests: | with an exclude across a relation
+    t = create(DqTag; name = "foo")
+    a1, a2, a3 = (create(DqAnnotation; tag = t, name = n) for n in ("a1", "a2", "a3"))
+    n = create(DqNote; note = "foo", misc = "bar")
+    qs1 = exclude(objects(DqNote); annotation__in = [a1, a2]); qs2 = filter(DqNote; annotation__in = [a3])
+    @test n.pk in [x.pk for x in qs1] && !(n.pk in [x.pk for x in qs2]) && n.pk in [x.pk for x in qs1 | qs2]
+  end
+  port_block() do
+    # ValuesSubqueryTests, DoubleInSubqueryTests, Ticket12807Tests, TestTicket24279
+    o1 = create(DqOrder; id = -2); o2 = create(DqOrder; id = -1)
+    oi1 = create(DqOrderItem; order = o1, status = 0); oi1.status = oi1.pk; save!(oi1)
+    create(DqOrderItem; order = o2, status = 0)
+    @test [x.pk for x in filter(DqOrder; items__in = values_list(objects(DqOrderItem), :status))] == [-2]
+    lfa1, lfa2 = create(DqLeafA; data = "foo"), create(DqLeafA; data = "bar")
+    lfb1, lfb2 = create(DqLeafB; data = "lfb1"), create(DqLeafB; data = "lfb2")
+    create(DqJoin; a = lfa1, b = lfb1); create(DqJoin; a = lfa2, b = lfb2)
+    leaf_as = values_list(filter(DqLeafA; data = "foo"), :pk; flat = true)
+    @test [x.data for x in filter(DqLeafB; pk__in = values_list(filter(DqJoin; a__in = leaf_as), :b__id; flat = true))] == ["lfb1"]
+    p1, p2 = create(DqParagraph; text = "p1"), create(DqParagraph; text = "p2")
+    @test [x.pk for x in filter(objects(DqParagraph), (Q(pk = p2.pk) | ~Q(pk__in = Int[])) & Q(pk = p1.pk))] == [p1.pk]
+    create(DqSchool)
+    @test isempty(collect(filter(objects(DqSchool), Q(pk__in = ()) | Q())))
+  end
+  port_block() do
+    # RelatedLookupTypeTests: an object of the wrong model is refused; proxies, parents and children are fine
+    tr(f) = try f() catch err; err end
+    oa = create(DqObjectA; name = "oa"); poa = get(DqProxyObjectA; name = "oa"); coa = create(DqChildObjectA; name = "coa")
+    wrong = create(DqOrder; id = oa.pk)
+    ob = create(DqObjectB; name = "ob", objecta = oa, num = 1); pob1 = create(DqObjectB; name = "pob", objecta = oa, num = 2)
+    c = create(DqObjectC; name = "c", childobjecta = coa)
+    @test tr(() -> get(DqObjectB; objecta = wrong)) isa ArgumentError
+    @test tr(() -> collect(filter(DqObjectB; objecta__in = [wrong]))) isa ArgumentError
+    @test tr(() -> collect(filter(DqObjectA; objectb__in = [wrong, ob]))) isa ArgumentError
+    @test tr(() -> collect(filter(DqObjectB; objecta__in = [poa, ob]))) isa ArgumentError
+    @test tr(() -> collect(filter(DqObjectA; objectb__in = [oa, ob]))) isa ArgumentError
+    @test tr(() -> collect(exclude(objects(DqObjectA); objectb = oa))) isa ArgumentError
+    @test [x.name for x in order_by(filter(DqObjectB; objecta = poa), "name")] == ["ob", "pob"]
+    @test isempty(collect(filter(DqObjectB; objecta__in = [coa])))
+    @test [x.name for x in order_by(filter(DqObjectB; objecta__in = [poa, coa]), "name")] == ["ob", "pob"]
+    @test [x.name for x in exclude(objects(DqObjectC); childobjecta = oa)] == ["c"]
+    # TestInvalidValuesRelation: text for a numeric key is refused
+    @test tr(() -> collect(filter(DqAnnotation; tag = "abc"))) isa ArgumentError
+    @test tr(() -> collect(filter(DqAnnotation; tag__in = [123, "abc"]))) isa ArgumentError
+    @test isempty(collect(filter(DqAnnotation; tag = "123")))                                   # a number in text is fine
+  end
+  port_block() do
+    # Ticket14056Tests: ordering by a reverse relation's key; NULLs sort last descending except on PostgreSQL
+    s1, s2, s3 = (create(DqSharedConnection; data = d) for d in ("s1", "s2", "s3"))
+    create(DqPointerA; connection = s2)
+    @test [x.data for x in order_by(objects(DqSharedConnection), "-pointera__connection", "pk")] == (IS_POSTGRES ? ["s1", "s3", "s2"] : ["s2", "s1", "s3"])
+    # ForeignKeyToBaseExcludeTests: a reverse relation to the parent of a multi-table child
+    sc = [create(DqSpecialCategory; special_name = "sc$i", name = "sc$i") for i in 1:3]
+    c1 = create(DqCategoryItem; category = get(DqSimpleCategory; pk = sc[1].pk)); create(DqCategoryItem; category = get(DqSimpleCategory; pk = sc[2].pk))
+    @test [x.name for x in order_by(exclude(objects(DqSpecialCategory); categoryitem__id = c1.pk), "name")] == ["sc2", "sc3"]
+    @test [x.name for x in filter(DqSpecialCategory; categoryitem__id = c1.pk)] == ["sc1"]
+  end
+  port_block() do
+    # ReverseM2MCustomPkTests: a many-to-many between natural keys, from both sides
+    cpt1 = create(DqCustomPkTag; code = "cpt1", tag = "cpt1"); cp1 = create(DqCustomPk; name = "cp1", extra = "extra")
+    add!(cp1.custompktag, cpt1)
+    @test [x.pk for x in filter(DqCustomPk; custompktag = cpt1)] == ["cp1"] && [x.pk for x in filter(DqCustomPkTag; custom_pk = cp1)] == ["cpt1"]
+  end
+  port_block() do
+    # Ticket23605Tests: nested negated subqueries with expressions
+    a1, a2 = create(DqT23605A), create(DqT23605A)
+    c1 = create(DqT23605C; field_c0 = 10000.0)
+    create(DqT23605B; field_b0 = 10000, field_b1 = true, modelc_fk = c1, modela_fk = a1)
+    complex_q = Q(pk__in = filter(filter(objects(DqT23605A),
+        Q(ticket23605b__field_b0__gte = 1000000 / F(:ticket23605b__modelc_fk__field_c0)) & Q(ticket23605b__field_b1 = true) &
+        ~Q(ticket23605b__pk__in = filter(objects(DqT23605B), ~(Q(field_b1 = true) & Q(field_b0__gte = 1000000 / F(:modelc_fk__field_c0)))))); ticket23605b__field_b1 = true))
+    @test [x.pk for x in filter(objects(DqT23605A), complex_q)] == [a1.pk]
+    @test [x.pk for x in exclude(objects(DqT23605A), complex_q)] == [a2.pk]
+  end
+  port_block() do
+    # TestTicket24605: conditions on a reverse relation's absence
+    i1 = create(DqIndividual; alive = true); create(DqRelatedIndividual; related = i1)
+    i2 = create(DqIndividual; alive = false); create(DqRelatedIndividual; related = i2)
+    i3 = create(DqIndividual; alive = true); i4 = create(DqIndividual; alive = false)
+    @test [x.pk for x in filter(objects(DqIndividual), Q(alive = false), Q(related_individual__isnull = true))] == [i4.pk]
+    @test [x.pk for x in order_by(exclude(objects(DqIndividual), Q(alive = false), Q(related_individual__isnull = true)), "pk")] == [i1.pk, i2.pk, i3.pk]
   end
 end

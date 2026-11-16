@@ -260,6 +260,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
         if f === nothing && (mm = find_m2m_query(T, fname)) !== nothing
             # tags__name on Post -> through the join model: +post_tags_src__tag__name
             step1, step2 = m2m_path(mm[2], mm[3])
+            isempty(rest) && lookup == "exact" && value === nothing && (lookup = "isnull"; value = true)   # tags = nothing: no link
             if isempty(rest) && lookup == "isnull"
                 return compile_lookup(c, alias, T, string(step1, "__isnull"), value, negated)
             end
@@ -335,7 +336,14 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             if negated
                 a = new_alias!(c)
                 sql, ps = compile_lookup(c, a, M, subkey, value, negated)
-                return ("EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(qcol(a, column(rf))) = $(qcol(alias, target_column(rf))) AND $sql)", ps)
+                ex = "EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(qcol(a, column(rf))) = $(qcol(alias, target_column(rf))) AND $sql)"
+                # exclude(program__channel = nothing): with no related row at all the path is NULL, so the row
+                # matches (and is excluded), as through Django's LEFT JOIN; the forward case is handled below too
+                if (lookup == "isnull" && value === true) || (lookup == "exact" && value === nothing)
+                    b = new_alias!(c)
+                    ex = "(NOT EXISTS (SELECT 1 FROM $mt $(qname(b)) WHERE $(qcol(b, column(rf))) = $(qcol(alias, target_column(rf)))) OR $ex)"
+                end
+                return (ex, ps)
             end
             a = join!(c, alias, scope_key(c, alias, rn), modelmeta(M).table, column(rf), target_column(rf); left = true)
             rf.one_to_one || (c.distinct = true)               # (a reverse one-to-one can't repeat rows)
@@ -377,8 +385,12 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             col = qcol(alias, column(f))
         end
     end
-    conv(v) = v isa Model ? saved_key(f !== nothing && f.kind === :fk ? target_value(f, v) : v.id, v) :
-              (f === nothing || f.kind === :fk ? dbparam(v) : to_db(f, v))
+    # an object of another model, or text for a numeric key, is refused, as Django: it would compare
+    # unrelated values (or none) without an error
+    keymodel = f !== nothing && f.kind === :fk ? related_model(f) : f === nothing && fname == "id" ? T : nothing
+    conv(v) = v isa Model ? saved_key(f !== nothing && f.kind === :fk ? target_value(f, check_model_type(keymodel, v)) :
+                                      check_model_type(keymodel, v).id, v) :
+              (f === nothing || f.kind === :fk ? dbparam(check_key_value(keymodel, f, v)) : to_db(f, check_number(f, v)))
     # food__in = filter(Food; ...), for a key with a to_field: the subquery selects that field (#220)
     f !== nothing && f.kind === :fk && fk_to_field(f) !== nothing && value isa QuerySet && value.values_fields === nothing &&
         (value = values(value, fk_to_field(f)))
@@ -431,6 +443,29 @@ function int_float_bound(lookup, x::AbstractFloat)
     lookup in ("gte", "lt") && return lookup, Int(ceil(x))
     lookup == "exact" && return isinteger(x) ? ("exact", Int(x)) : ("in", Any[])     # (11.5 equals no integer)
     lookup, x
+end
+
+"An object as a value for a key of model `R`: of `R`, a proxy of it, or a parent or child in its multi-table lineage."
+function check_model_type(@nospecialize(R), @nospecialize(v::Model))
+    R === nothing && return v
+    a, b = concrete_model(R), concrete_model(typeof(v))
+    (a === b || a in lineage(b) || b in lineage(a)) ||
+        throw(ArgumentError("cannot query \"$v\": must be a $(nameof(R)) instance, not $(nameof(typeof(v)))"))
+    v
+end
+"Text given for an automatic integer key: a number in text (\"12\") is accepted, anything else refused (Django's ValueError)."
+function check_key_value(@nospecialize(R), f, v)
+    (R === nothing || !(v isa AbstractString) || (f !== nothing && fk_to_field(f) !== nothing) || !is_auto_pk(pk_kind(R))) && return v
+    n = tryparse(Int, strip(v))
+    n === nothing && throw(ArgumentError("field 'id' expected a number but got $(repr(v))"))
+    n
+end
+"Text for an integer field: a number in text is accepted, anything else refused (Django's ValueError)."
+function check_number(f, v)
+    (f !== nothing && f.kind in INT_KINDS && v isa AbstractString) || return v
+    n = tryparse(Int, strip(v))
+    n === nothing && throw(ArgumentError("field '$(f.name)' expected a number but got $(repr(v))"))
+    n
 end
 
 "An object's key as a query value; an unsaved object is refused, as Django: it would compare with NULL."
@@ -526,7 +561,9 @@ Base.@nospecializeinfer function compile_q(c::SQLCompiler, alias, @nospecialize(
     parts = String[]
     params = Any[]
     outer = c.scope
-    for (i, ch) in enumerate(q.children)
+    # an empty Q among others drops out (Q(x) | Q() is Q(x)), as Django combines them
+    kids = any(ch -> ch isa Q && empty_q(ch), q.children) ? Any[ch for ch in q.children if !(ch isa Q && empty_q(ch))] : q.children
+    for (i, ch) in enumerate(kids)
         # :SCOPES (the where clauses of a queryset combined with |): each child is one filter() call, with
         # its own joins of multi-valued relations, as it had in its queryset
         q.connector === :SCOPES && c.scope !== :expr && (c.scope = (outer, i))

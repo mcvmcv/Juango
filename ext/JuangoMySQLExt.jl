@@ -67,7 +67,9 @@ function Juango.mysql_exec(conn, sql::String, params::Vector{Any})
         catch
             0
         end
-        return rows, Int(something(cur.rows_affected, 0)), Int(something(lastid, 0))
+        # (the insert id is unsigned: an explicit negative id comes back as 2^64 - n)
+        id = something(lastid, 0)
+        return rows, Int(something(cur.rows_affected, 0)), id isa Unsigned ? reinterpret(Int64, UInt64(id)) : Int(id)
     catch e
         if e isa MySQL.Protocol.StmtError || hasproperty(e, :sqlstate)
             st = string(getproperty(e, :sqlstate))

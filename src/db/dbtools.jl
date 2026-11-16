@@ -43,7 +43,7 @@ function sequence_reset_sql(apps = nothing)
         (m.proxy || !model_in_use(T) || is_composite(T) || pk_kind(T) === :uuid) && continue
         apps === nothing || m.app in apps || continue
         t = quote_name(b, m.table)
-        push!(out, "SELECT setval(pg_get_serial_sequence($(sql_string_literal(b, t)), 'id'), COALESCE(MAX(\"id\"), 1), MAX(\"id\") IS NOT NULL) FROM $t")
+        push!(out, "SELECT setval(pg_get_serial_sequence($(sql_string_literal(b, t)), 'id'), GREATEST(COALESCE(MAX(\"id\"), 1), 1), COALESCE(MAX(\"id\") >= 1, false)) FROM $t")
     end
     out
 end

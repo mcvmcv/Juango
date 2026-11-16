@@ -179,9 +179,9 @@ end
 function cannot_match(q::Q)
     q.negated && return false               # (NOT of an impossible condition matches every row)
     q.connector === :XOR && return false
-    kids = Bool[ch isa Q ? cannot_match(ch) :
+    kids = Bool[ch isa Q ? (!empty_q(ch) && cannot_match(ch)) :
                 ch isa Pair && endswith(string(ch.first), "__in") && ch.second isa Union{AbstractArray,Tuple,AbstractSet} &&
-                all(v -> v === nothing, ch.second) for ch in q.children]
+                all(v -> v === nothing, ch.second) for ch in q.children if !(ch isa Q && empty_q(ch))]
     q.connector === :OR ? !isempty(kids) && all(kids) : any(kids)
 end
 Base.filter(@nospecialize(T::Type{<:Model}), qargs::Union{Q,Expression}...; kw...) = filter(objects(T), qargs...; kw...)
