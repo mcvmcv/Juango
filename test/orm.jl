@@ -581,7 +581,9 @@ end
     @test get(Article; title = "ex-1").views == 11
     update!(exa; views = F(:views) * 2)
     @test values_list(order_by(exa, "title"), :views; flat = true) == [22, 60, 10]
-    @test_throws ArgumentError update!(exa; views = F(:author__id))
+    @test_throws ArgumentError update!(exa; views = F(:author__name))     # a joined field: refused, as Django
+    # author__id is the key column itself (no join), so it can be used, as in Django
+    @test update!(filter(exa; title = "ex-1"); views = F(:author__id)) == 1 && get(Article; title = "ex-1").views == get(Article; title = "ex-1").author_id
     @test_throws ArgumentError annotate(exa; title = Upper(:title))
 end
 
