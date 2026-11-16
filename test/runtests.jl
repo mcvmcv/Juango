@@ -13,14 +13,18 @@ get(ENV, "JUANGO_BROWSER_TESTS", "") == "1" && push!(GROUPS[2], "browser")
 # Run each file of the group even when an earlier one fails; exit non-zero if any did.
 const RUNNER = """
 failed = String[]
+times = String[]
 for f in ARGS
+    t0 = time()
     try
         include(f)
     catch e
         push!(failed, basename(f))
         e isa LoadError && e.error isa Test.TestSetException || showerror(stderr, e, catch_backtrace())
     end
+    push!(times, string(basename(f), " ", round(Int, time() - t0), " s"))
 end
+println("file times (the first includes loading Juango): ", join(times, ", "))
 isempty(failed) || (println(stderr, "\\nFAILED: ", join(failed, ", ")); exit(1))
 """
 

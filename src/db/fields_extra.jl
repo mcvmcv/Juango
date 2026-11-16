@@ -140,6 +140,7 @@ end
 function to_db(f::Field, v)
     f.kind in (:file, :image) && return v === nothing ? "" : file_to_db(f, v)     # no file is stored as ''
     v === nothing && return dbparam(v)
+    f.kind === :fk && f.to_field !== nothing && return to_db(getfield_meta(related_model(f), f.to_field), v)   # (#220)
     k = f.kind
     v isa AbstractString && k in (:date, :datetime) && (v = parse_temporal_string(f, v))
     k === :datetime && return dbparam(to_utc_naive(v))

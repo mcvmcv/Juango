@@ -104,9 +104,9 @@ in_subquery(::MySQLBackend, sql) = occursin(r"\bLIMIT\b", sql) ? "SELECT * FROM 
 # a Decimal parameter would arrive as text, which MySQL's arithmetic turns into a double
 value_sql(::MySQLBackend, v::Decimal) = ("CAST(? AS DECIMAL(65, 30))", Any[v])
 
-foreign_key_sql(b::MySQLBackend, table, col, reftable) =
-    "ALTER TABLE $(quote_name(b, table)) ADD CONSTRAINT $(quote_name(b, constraint_name(table, col, "fk", reftable, "id"))) " *
-    "FOREIGN KEY ($(quote_name(b, col))) REFERENCES $(quote_name(b, reftable)) ($(quote_name(b, "id")))"
+foreign_key_sql(b::MySQLBackend, table, col, reftable, refcol = "id") =
+    "ALTER TABLE $(quote_name(b, table)) ADD CONSTRAINT $(quote_name(b, constraint_name(table, col, "fk", reftable, refcol))) " *
+    "FOREIGN KEY ($(quote_name(b, col))) REFERENCES $(quote_name(b, reftable)) ($(quote_name(b, refcol)))"
 
 int_div_sql(::MySQLBackend, a, b) = "($a DIV $b)"
 like_sensitive_sql(::MySQLBackend, col, pat) = "$col LIKE BINARY $pat ESCAPE '\\'"
@@ -142,3 +142,6 @@ end
 # Literals need only their quotes doubled here too: every connection sets NO_BACKSLASH_ESCAPES (above),
 # so a backslash in a literal is an ordinary character and can't end it early. (Without that mode,
 # `x\'` would.) Keep it in SQL_MODE.
+# Bitwise results are unsigned on MySQL: made signed, and >> as a division, as Django does (#217)
+bitwise_sql(::MySQLBackend, op, a, b) = op == ">>" ? "FLOOR($a / POW(2, $b))" :
+    "CONVERT(($a $(op == "#" ? "^" : op) $b), SIGNED)"

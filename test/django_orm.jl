@@ -119,16 +119,19 @@ titles(qs) = [a.headline for a in qs]
     @test Set(keys(in_bulk(DlArticle, ["a1", "a2", "a3"]; field_name = :slug))) == Set(["a1", "a2", "a3"])
     # test_in_bulk_meta_constraint: a single-field UniqueConstraint counts as unique
     s11, s12 = create(DlSeason; year = 2011), create(DlSeason; year = 2012); create(DlSeason; year = 2013)
-    @test_broken Set(keys(in_bulk(DlSeason, [2011, 2012]; field_name = :year))) == Set([2011, 2012])   # #210
+    @test Set(keys(in_bulk(DlSeason, [2011, 2012]; field_name = :year))) == Set([2011, 2012])
     # test_in_bulk_non_unique_field
     @test_throws ArgumentError in_bulk(DlArticle, [au1]; field_name = :author)
     # test_in_bulk_preserve_ordering: the keys in the order given
     @test collect(keys(in_bulk(DlArticle, [a2.id, a1.id]))) == [a2.id, a1.id]
     # test_in_bulk_sliced_queryset
-    @test_throws Exception in_bulk(objects(DlArticle)[1:5], [a1.id, a2.id])            # refused (the message: #210)
+    e = try in_bulk(objects(DlArticle)[1:5], [a1.id, a2.id]); nothing catch err; err end
+    @test e isa ArgumentError && occursin("sliced", e.msg)
     # test_in_bulk_values_*: in_bulk on values()/values_list querysets (Django 6)
-    @test_broken (try isempty(in_bulk(values(objects(DlArticle)), Int[])) && in_bulk(values(objects(DlArticle), :headline), [a1.id])[a1.id] == Dict(:headline => "Article 1") catch; false end)   # #210
-    @test_broken (try in_bulk(values_list(objects(DlArticle), :headline), [a1.id])[a1.id] == ("Article 1",) catch; false end)   # #210
+    @test isempty(in_bulk(values(objects(DlArticle)), Int[])) && in_bulk(values(objects(DlArticle), :headline), [a1.id])[a1.id] == Dict(:headline => "Article 1")
+    @test in_bulk(values_list(objects(DlArticle), :headline), [a1.id])[a1.id] == ("Article 1",)
+    @test in_bulk(values_list(objects(DlArticle), :headline; flat = true), [a1.id])[a1.id] == "Article 1"
+    @test in_bulk(values(objects(DlArticle), :id, :headline), [a1.id])[a1.id] == Dict(:id => a1.id, :headline => "Article 1")
 
     # test_values_filter_and_no_fields / test_values_no_field_names
     v = collect(values(filter(DlArticle; id__in = (a5.id, a6.id))))
@@ -142,11 +145,11 @@ titles(qs) = [a.headline for a in qs]
     # test_values_relations
     @test collect(values(objects(DlArticle), :headline, :author__name))[1] == Dict(:headline => "Article 5", :author__name => "Author 2")
     vr = try collect(values(order_by(objects(DlAuthor), "name", "article__headline"), :name, :article__headline)) catch; [] end
-    @test_broken [(d[:name], d[:article__headline]) for d in vr] ==   # #209
+    @test [(d[:name], d[:article__headline]) for d in vr] ==  # (#209)
           [("Author 1", "Article 1"), ("Author 1", "Article 2"), ("Author 1", "Article 3"), ("Author 1", "Article 4"),
            ("Author 2", "Article 5"), ("Author 2", "Article 6"), ("Author 2", "Article 7")]
     vt = try collect(values(order_by(objects(DlAuthor), "name", "article__headline", "article__tag__name"), :name, :article__headline, :article__tag__name)) catch; [] end
-    @test_broken [(d[:article__headline], d[:article__tag__name]) for d in vt] ==   # #209
+    @test [(d[:article__headline], d[:article__tag__name]) for d in vt] ==  # (#209)
           [("Article 1", "Tag 1"), ("Article 2", "Tag 1"), ("Article 3", "Tag 1"), ("Article 3", "Tag 2"), ("Article 4", "Tag 2"),
            ("Article 5", "Tag 2"), ("Article 5", "Tag 3"), ("Article 6", "Tag 3"), ("Article 7", "Tag 3")]
     # test_values_nonexistent_field: an error naming the field (raised when the query is built)
@@ -158,11 +161,11 @@ titles(qs) = [a.headline for a in qs]
     @test collect(values_list(order_by(objects(DlArticle), "id"), :id)) == [(a.id,) for a in (a1, a2, a3, a4, a5, a6, a7)]
     @test collect(values_list(order_by(objects(DlArticle), "id"), :id; flat = true)) == [a.id for a in (a1, a2, a3, a4, a5, a6, a7)]
     # test_values_list_relations
-    @test_broken collect(values_list(order_by(objects(DlAuthor), "name", "article__headline"), :name, :article__headline))[1] == ("Author 1", "Article 1")   # #209
+    @test collect(values_list(order_by(objects(DlAuthor), "name", "article__headline"), :name, :article__headline))[1] == ("Author 1", "Article 1")  # (#209)
     # test_values_list_flat_more_than_one_field
     @test_throws ArgumentError values_list(objects(DlArticle), :id, :headline; flat = true)
     # test_values_list_flat_no_fields: flat with no fields is the pk (Django)
-    @test_broken (try collect(values_list(order_by(objects(DlArticle), "id"); flat = true)) == [a.id for a in (a1, a2, a3, a4, a5, a6, a7)] catch; false end)   # #213
+    @test collect(values_list(order_by(objects(DlArticle), "id"); flat = true)) == [a.id for a in (a1, a2, a3, a4, a5, a6, a7)]   # #213
     # test_values_extra / test_values_list_extra: extra(select = ...) (Django's legacy raw-SQL select)
     # test_extra: Django calls extra() a last resort; RawSQL annotations cover it, so Juango has none
   end
@@ -217,20 +220,29 @@ end
     @test Set(titles(filter(DlArticle; id__in = (x for x in [a[1].id, a[2].id])))) == Set(["Article 1", "Article 2"])
     @test Set(titles(filter(DlArticle; id__in = [a[1].id, Value(a[2].id)]))) == Set(["Article 1", "Article 2"])   # fixed in #198
     @test Set(titles(filter(DlArticle; id__range = (x for x in [a[1].id, a[2].id])))) == Set(["Article 1", "Article 2"])
-    @test_broken isdefined(Juango, :alias) && (try Set(titles(filter(Juango.alias(objects(DlArticle); article_id = F(:id)); article_id__in = [a[1].id]))) == Set(["Article 1"]) catch; false end)   # #207
+    @test Set(titles(filter(alias(objects(DlArticle); article_id = F(:id)); article_id__in = [a[1].id]))) == Set(["Article 1"])
+    # alias(): usable in filter, order_by and annotate; not in the rows (#207)
+    aq = alias(filter(DlArticle; headline__in = ["Article 1", "Article 7"]); hl = Lower(:headline))
+    @test [x.headline for x in order_by(aq, "-hl")][1] == "Article 7" && !haskey(getfield(first(aq), :_data), :hl)
+    @test collect(values_list(order_by(annotate(aq; hl2 = Concat(:hl, Value("!"))), "hl"), :hl2; flat = true))[1] == "article 1!"
+    @test !haskey(first(values(aq)), :hl) && !occursin(" AS \"hl\"", first(Juango.select_sql(aq)))
+    @test count(filter(alias(objects(DlAuthor); n = Count(:article)); n__gt = 3)) == 1
     # test_in_ignore_none / test_in_ignore_solo_none: None in the list is dropped, and a list of only None runs no query
     @test titles(filter(DlArticle; id__in = [nothing, a[1].id])) == ["Article 1"]
-    @test_broken Juango.count_queries(() -> collect(filter(DlArticle; id__in = [nothing])))[2] == 0   # #211
+    @test Juango.count_queries(() -> collect(filter(DlArticle; id__in = [nothing])))[2] == 0  # (#224)
+    @test Juango.count_queries(() -> count(filter(objects(DlArticle), Q(id__in = Int[]) | Q(id__in = [nothing]))))[2] == 0
+    @test length(filter(objects(DlArticle), Q(id__in = Int[]) | Q(headline = "Article 1"))) == 1
+    @test length(exclude(objects(DlArticle); id__in = Int[])) == length(objects(DlArticle))
     # test_in_select_mismatch: a subquery must select one column
-    @test_broken (try collect(filter(DlArticle; id__in = values(objects(DlArticle), :id, :headline))); false catch e; e isa ArgumentError end)   # #208
+    @test (try collect(filter(DlArticle; id__in = values(objects(DlArticle), :id, :headline))); false catch e; e isa ArgumentError end)  # (#208)
     # test_error_messages: the unknown name and the choices
     e = try count(filter(DlArticle; pub_date_year = "2005")); nothing catch err; err end
     @test e isa Juango.LookupError && occursin("pub_date_year", sprint(showerror, e)) && occursin("headline", sprint(showerror, e))
     # test_unsupported_lookups: a misspelled lookup suggests the right one
     e = try collect(filter(DlArticle; headline__starts = "Article")); nothing catch err; err end
-    @test_broken e isa Juango.LookupError && occursin("starts", sprint(showerror, e)) && occursin("startswith", sprint(showerror, e))   # #211
+    @test e isa Juango.LookupError && occursin("starts", sprint(showerror, e)) && occursin("startswith", sprint(showerror, e))
     e = try collect(filter(DlArticle; pub_date__is_null = true)); nothing catch err; err end
-    @test_broken e isa Juango.LookupError && occursin("isnull", sprint(showerror, e))   # #211
+    @test e isa Juango.LookupError && occursin("isnull", sprint(showerror, e))
   end
 end
 
@@ -298,8 +310,9 @@ end
     @test ts(filter(DlArticle; pub_date__hour__lt = 8)) == Set(["Article 1", "Article 2", "Article 3", "Article 4", "Article 7"])
     @test length(ts(filter(DlArticle; pub_date__minute__lte = 0))) == 7
     # test_exact_sliced_queryset_limit_one(_offset): a one-row queryset as the value
-    @test_broken ts(filter(DlArticle; author = objects(DlAuthor)[1:1])) == Set(["Article 1", "Article 2", "Article 3", "Article 4"])   # #208
-    @test_broken ts(filter(DlArticle; author = objects(DlAuthor)[2:2])) == Set(["Article 5", "Article 6", "Article 7"])   # #208
+    @test ts(filter(DlArticle; author = objects(DlAuthor)[1:1])) == Set(["Article 1", "Article 2", "Article 3", "Article 4"])  # (#208)
+    @test ts(filter(DlArticle; author = objects(DlAuthor)[2:2])) == Set(["Article 5", "Article 6", "Article 7"])  # (#208)
+    @test (try collect(filter(DlArticle; author = objects(DlAuthor))); false catch e; e isa ArgumentError && occursin("sliced", e.msg) end)
     # test_exact_sliced_queryset_not_limited_to_one
     @test_throws ArgumentError collect(filter(DlArticle; author = objects(DlAuthor)[1:2]))
     # test_exact_booleanfield(_annotation): a boolean annotation (F, Q, Exists, Case) compared with true
@@ -322,15 +335,15 @@ end
     @test (try count(filter(annotate(objects(DlSeason); pk_exists = Exists(qs)); pk_exists = Exists(qs))) == count(objects(DlSeason)) catch; false end)
     # test_nested_outerref_lhs
     tag = create(DlTag; name = "a1"); add!(tag.articles, a[1])
-    @test_broken (try get(annotate(objects(DlTag); has_match = Exists(filter(annotate(objects(DlArticle); author_exists = Exists(filter(DlAuthor; alias = OuterRef(OuterRef(:name))))); author_exists = true))); has_match = true).id == tag.id catch; false end)   # #208
+    @test (try get(annotate(objects(DlTag); has_match = Exists(filter(annotate(objects(DlArticle); author_exists = Exists(filter(DlAuthor; alias = OuterRef(OuterRef(:name))))); author_exists = true))); has_match = true).id == tag.id catch; false end)  # (#208)
     # test_exact_query_rhs_with_selected_columns(_mismatch)
     newest = create(DlAuthor; name = "Author 2")
     mx = values(annotate(values(filter(DlAuthor; name = "Author 2"), :name); max_id = Max(:id)), :max_id)
-    @test_broken (try get(filter(DlAuthor; id = mx[1:1])).id == newest.id catch; false end)   # #208
+    @test (try get(filter(DlAuthor; id = mx[1:1])).id == newest.id catch; false end)  # (#208)
     @test_throws ArgumentError collect(filter(DlAuthor; id = values(objects(DlAuthor), :id, :name)[1:1]))
     # test_isnull_non_boolean_value: isnull takes true or false only
-    @test_broken (try exists(filter(DlAuthor; alias__isnull = 1)); false catch e; e isa ArgumentError end)   # #211
-    @test_broken (try exists(filter(DlArticle; author__isnull = 1)); false catch e; e isa ArgumentError end)   # #211
+    @test (try exists(filter(DlAuthor; alias__isnull = 1)); false catch e; e isa ArgumentError end)
+    @test (try exists(filter(DlArticle; author__isnull = 1)); false catch e; e isa ArgumentError end)
     # test_lookup_rhs: a Q (a condition) as a boolean field's value
     p2 = create(DlProduct; name = "GME", qty_target = 5000)
     sa = create(DlStock; product = p2, short = true, qty_available = 180); sb = create(DlStock; product = p2, short = false, qty_available = 5100)
@@ -346,24 +359,36 @@ end
     tryset(f) = try Set(f()) catch err; err end
     yrs(qs) = Set(x.year for x in qs)
     # test_annotate / test_alias / test_annotate_*: Exact, GreaterThan, ... as annotations
-    @test_broken tryset(() -> collect(values_list(annotate(objects(DlSeason); equal = J.Exact(F(:year), 1942)), :year, :equal))) == Set([(1942, true), (1842, false), (2042, false)])   # #206
-    @test_broken tryset(() -> collect(values_list(annotate(objects(DlSeason); greater = J.GreaterThan(F(:year), F(:gt))), :year, :greater))) == Set([(1942, false), (1842, false), (2042, true)])   # #206
-    @test_broken tryset(() -> collect(values_list(annotate(objects(DlSeason); greater = J.GreaterThan(1930, F(:year))), :year, :greater))) == Set([(1942, false), (1842, true), (2042, false)])   # #206
-    @test_broken tryset(() -> collect(values_list(annotate(objects(DlSeason); lesser = J.LessThan(F(:year), 1942.1)), :year, :lesser))) == Set([(1942, true), (1842, true), (2042, false)])   # #206
-    @test_broken tryset(() -> collect(values_list(annotate(objects(DlSeason); g = J.GreaterThanOrEqual(F(:year), 1942)), :year, :g))) == Set([(1942, true), (1842, false), (2042, true)])   # #206
+    @test tryset(() -> collect(values_list(annotate(objects(DlSeason); equal = J.Exact(F(:year), 1942)), :year, :equal))) == Set([(1942, true), (1842, false), (2042, false)])  # (#206)
+    @test tryset(() -> collect(values_list(annotate(objects(DlSeason); greater = J.GreaterThan(F(:year), F(:gt))), :year, :greater))) == Set([(1942, false), (1842, false), (2042, true)])  # (#206)
+    @test tryset(() -> collect(values_list(annotate(objects(DlSeason); greater = J.GreaterThan(1930, F(:year))), :year, :greater))) == Set([(1942, false), (1842, true), (2042, false)])  # (#206)
+    @test tryset(() -> collect(values_list(annotate(objects(DlSeason); lesser = J.LessThan(F(:year), 1942.1)), :year, :lesser))) == Set([(1942, true), (1842, true), (2042, false)])  # (#206)
+    @test tryset(() -> collect(values_list(annotate(objects(DlSeason); g = J.GreaterThanOrEqual(F(:year), 1942)), :year, :g))) == Set([(1942, true), (1842, false), (2042, true)])  # (#206)
     # test_combined_lookups / test_lookup_in_filter / test_in_lookup_in_filter / test_combined_lookups_in_filter
-    @test_broken tryset(() -> collect(values_list(annotate(objects(DlSeason); gte = J.Exact(F(:year), 1942) | J.GreaterThan(F(:year), 1942)), :year, :gte))) == Set([(1942, true), (1842, false), (2042, true)])   # #206
-    @test_broken tryset(() -> yrs(filter(objects(DlSeason), J.GreaterThan(F(:year), 1910)))) == Set([1942, 2042])   # #206
-    @test_broken tryset(() -> yrs(filter(objects(DlSeason), J.In(F(:year), (1942, 2042, 1842))))) == Set([1942, 1842, 2042])   # #206
-    @test_broken tryset(() -> yrs(filter(objects(DlSeason), J.Exact(F(:year), 1942) | J.GreaterThan(F(:year), 1942)))) == Set([1942, 2042])   # #206
+    @test tryset(() -> collect(values_list(annotate(objects(DlSeason); gte = J.Exact(F(:year), 1942) | J.GreaterThan(F(:year), 1942)), :year, :gte))) == Set([(1942, true), (1842, false), (2042, true)])  # (#206)
+    @test tryset(() -> yrs(filter(objects(DlSeason), J.GreaterThan(F(:year), 1910)))) == Set([1942, 2042])  # (#206)
+    @test tryset(() -> yrs(filter(objects(DlSeason), J.In(F(:year), (1942, 2042, 1842))))) == Set([1942, 1842, 2042])  # (#206)
+    @test tryset(() -> yrs(filter(objects(DlSeason), J.Exact(F(:year), 1942) | J.GreaterThan(F(:year), 1942)))) == Set([1942, 2042])  # (#206)
     # test_filter_lookup_lhs: a lookup on the left, compared with a lookup
-    @test_broken tryset(() -> yrs(filter(annotate(objects(DlSeason); before_20 = J.LessThan(F(:year), 2000)); before_20 = J.LessThan(F(:year), 1900)))) == Set([1842, 2042])   # #206
+    @test tryset(() -> yrs(filter(annotate(objects(DlSeason); before_20 = J.LessThan(F(:year), 2000)); before_20 = J.LessThan(F(:year), 1900)))) == Set([1842, 2042])  # (#206)
     # test_lookup_in_order_by / test_aggregate_combined_lookup / test_conditional_expression
-    @test_broken (try [x.year for x in order_by(objects(DlSeason), J.LessThan(F(:year), 1910), F(:year))] == [1942, 2042, 1842] catch; false end)   # #206
-    @test_broken (try aggregate(objects(DlSeason); modern = Sum(Cast(J.GreaterThan(F(:year), 1900), :integer)))[:modern] == 2 catch; false end)   # #206
-    @test_broken tryset(() -> [(d[:year], d[:century]) for d in values(annotate(objects(DlSeason);
+    @test (try [x.year for x in order_by(objects(DlSeason), J.LessThan(F(:year), 1910), F(:year))] == [1942, 2042, 1842] catch; false end)  # (#206)
+    @test (try aggregate(objects(DlSeason); modern = Sum(Cast(J.GreaterThan(F(:year), 1900), :integer)))[:modern] == 2 catch; false end)  # (#206)
+    @test tryset(() -> [(d[:year], d[:century]) for d in values(annotate(objects(DlSeason);
                        century = Case(When(J.GreaterThan(F(:year), 1900) & J.LessThanOrEqual(F(:year), 2000); then = Value("20th")); default = Value("other"))), :year, :century)]) ==
-          Set([(1942, "20th"), (1842, "other"), (2042, "other")])   # #206
+          Set([(1942, "20th"), (1842, "other"), (2042, "other")])  # (#206)
+    # Q combined with conditional expressions, either order (#223)
+    later = Exists(filter(DlSeason; year__gt = OuterRef(:year)))
+    @test yrs(filter(objects(DlSeason), Q(year__lt = 2000) & later)) == Set([1942, 1842])
+    @test yrs(filter(objects(DlSeason), later & Q(year__lt = 1900))) == Set([1842])
+    @test yrs(exclude(objects(DlSeason), Q(year__lt = 2000) & !later)) == Set([1942, 1842, 2042])
+    @test yrs(filter(objects(DlSeason), Q(year = 2042) | later)) == Set([1942, 1842, 2042])
+    @test yrs(filter(objects(DlSeason), ~later | Q(year = 1842))) == Set([1842, 2042])
+    @test yrs(filter(objects(DlSeason), J.GreaterThan(F(:year), 2000) | later & Q(year = 1942))) == Set([1942, 2042])
+    @test yrs(filter(objects(DlSeason), ~J.LessThan(F(:year), 1900))) == Set([1942, 2042])
+    @test yrs(filter(objects(DlSeason), xor(later, Q(year__lt = 1900)))) == Set([1942])
+    @test Set(collect(values_list(annotate(objects(DlSeason); w = Case(When(later; then = Value("y")); default = Value("n"))), :year, :w))) ==
+          Set([(1942, "y"), (1842, "y"), (2042, "n")])
   end
 end
 
@@ -455,8 +480,8 @@ D_(s) = Juango.Decimal(s)
     # test_aggregate_multi_join / test_aggregate_alias / test_aggregate_transform / test_aggregate_join_transform
     @test agg(objects(DaStore); x = Max(:books__authors__age))[:x] == 57 && agg(objects(DaAuthor); x = Min(:book__publisher__num_awards))[:x] == 1
     @test approx(agg(filter(DaStore; name = "Amazon.com"); amazon_mean = Avg(:books__rating))[:amazon_mean], 4.08)
-    @test_broken agg(objects(DaStore); min_month = Min(:original_opening__month))[:min_month] == 3   # #205
-    @test_broken agg(objects(DaPublisher); min_year = Min(:book__pubdate__year))[:min_year] == 1991   # #205
+    @test agg(objects(DaStore); min_month = Min(:original_opening__month))[:min_month] == 3  # (#205)
+    @test agg(objects(DaPublisher); min_year = Min(:book__pubdate__year))[:min_year] == 1991  # (#205)
     # test_annotate_basic
     bo = get(annotate(objects(DaBook); mean_age = Avg(:authors__age)); pk = b[1].pk)
     @test bo.mean_age == 34.5
@@ -506,7 +531,7 @@ end
           [Dict(:rating => 4.5, :oldest => 35), Dict(:rating => 3.0, :oldest => 45), Dict(:rating => 4.0, :oldest => 57), Dict(:rating => 5.0, :oldest => 57)]
     @test [r[:rating] for r in order_by(annotate(values(objects(DaBook), :rating); oldest = Max(:authors__age)), "-oldest", "-rating")] == [5.0, 4.0, 3.0, 4.5]
     # test_aggregate_annotation: an aggregate over an aggregate annotation
-    @test_broken (try approx(aggregate(annotate(objects(DaBook); num_authors = Count(:authors__id)); x = Avg(:num_authors))[:x], 1.66; places = 1) catch; false end)   # #204
+    @test (try approx(aggregate(annotate(objects(DaBook); num_authors = Count(:authors__id)); x = Avg(:num_authors))[:x], 1.66; places = 1) catch; false end)  # (#204)
     # test_avg_duration_field / test_sum_duration_field
     @test (try aggregate(objects(DaPublisher); x = Avg(:duration))[:x] == Day(1) + Hour(12) catch; false end)
     @test (try Dates.canonicalize(aggregate(objects(DaPublisher); x = Sum(:duration))[:x]) == Dates.canonicalize(Day(3)) catch; false end)
@@ -526,7 +551,7 @@ end
     @test (try collect(Juango.dates(annotate(objects(DaBook); n = Count(:authors)), :pubdate, :year)) == [Date(1991), Date(1995), Date(2007), Date(2008)] catch; false end)
     # test_values_aggregation
     @test aggregate(values(objects(DaBook), :rating); m = Max(:rating))[:m] == 5
-    @test_broken (try aggregate(annotate(values(objects(DaBook), :rating); n = Count(:id)); m = Max(:n))[:m] == 3 catch; false end)   # #204
+    @test (try aggregate(annotate(values(objects(DaBook), :rating); n = Count(:id)); m = Max(:n))[:m] == 3 catch; false end)  # (#204)
     # test_ticket17424: exclude across a relation after annotate
     @test [o.pk for o in exclude(annotate(order_by(objects(DaBook), "pk"); one = Count(:id)); publisher__name = "__UNLIKELY_VALUE__")] == sort([x.pk for x in b])
     # test_ticket12886: aggregate over a sliced queryset
@@ -557,14 +582,14 @@ end
     qs2 = annotate(qs; friend_count = Count(:friends))
     @test (try get(qs2; name = "Adrian Holovaty")[:friend_count] == 2 catch; false end)
     # test_annotate_values_aggregate / test_annotate_over_annotate
-    @test_broken (try aggregate(values(annotate(objects(DaAuthor); age_alias = F(:age)), :age_alias); s = Sum(:age_alias))[:s] == 337 catch; false end)   # #204
+    @test (try aggregate(values(annotate(objects(DaAuthor); age_alias = F(:age)), :age_alias); s = Sum(:age_alias))[:s] == 337 catch; false end)  # (#204)
     @test (try get(annotate(annotate(objects(DaAuthor); age_alias = F(:age)); sum_age = Sum(:age_alias)); name = "Adrian Holovaty").sum_age == 34 catch; false end)
     # test_aggregate_over_aggregate / test_annotated_aggregate_over_annotated_aggregate: refused
     @test_throws Exception aggregate(objects(DaAuthor); age_agg = Sum(F(:age)), avg_age = Avg(F(:age_agg)))
     @test_throws Exception collect(annotate(annotate(objects(DaBook); id__max = Max(:id)); s = Sum(:id__max)))
     # test_complex_values_aggregation
     @test (try aggregate(values(objects(DaBook), :rating); x = Max(:rating) + Max(:rating))[:x] == 10 catch; false end)
-    @test_broken (try aggregate(annotate(values(objects(DaBook), :rating); n = Count(:id) + 5); m = Max(:n))[:m] == 8 catch; false end)   # #204
+    @test (try aggregate(annotate(values(objects(DaBook), :rating); n = Count(:id) + 5); m = Max(:n))[:m] == 8 catch; false end)  # (#204)
     # test_expression_on_aggregation: Greatest over aggregates, filtered against a field
     @test (try [p.num_awards for p in order_by(filter(annotate(objects(DaPublisher); pm = Greatest(Avg(:book__rating), Avg(:book__price))); pm__gte = F(:num_awards)), "num_awards")] == [1, 3, 7, 9] catch; false end)
     @test (try [p.num_awards for p in order_by(filter(annotate(objects(DaPublisher); r = Greatest(Avg(:book__rating), F(:num_awards))); r__gt = F(:num_awards)), "num_awards")] == [1, 3] catch; false end)
@@ -630,7 +655,7 @@ end
           Set([("Adrian Holovaty", 1), ("Jacob Kaplan-Moss", 1), ("Brad Dayley", 1), ("James Bennett", 1), ("Jeffrey Forcier", 1),
                ("Paul Bissex", 1), ("Wesley J. Chun", 1), ("Stuart Russell", 1), ("Peter Norvig", 2)])
     # test_order_by_aggregate_default_alias: annotate(qs, Count(:book)) is book__count
-    @test_broken tr(() -> collect(values_list(order_by(annotate(values(objects(DaPublisher), :book), Count(:book)), "book__count", "book__id"), :book; flat = true))) ==   # #209
+    @test tr(() -> collect(values_list(order_by(annotate(values(objects(DaPublisher), :book), Count(:book)), "book__count", "book__id"), :book; flat = true))) ==  # (#209)
           Any[nothing; [x.id for x in b]]
     # test_empty_result_optimization / test_coalesced_empty_result_set: none() aggregates without a query
     @test Juango.count_queries(() -> aggregate(none(DaPublisher); sum_awards = Sum(:num_awards), books_count = Count(:book)))[2] == 0
@@ -691,8 +716,8 @@ end
     Meta(table = "de_company")
 end
 @model struct DeNumber
-    integer = BigIntegerField()
-    float = FloatField(null = true)
+    integer = BigIntegerField(db_column = "the_integer")
+    float = FloatField(null = true, db_column = "the_float")
     decimal_value = DecimalField(max_digits = 20, decimal_places = 17, null = true)
     Meta(table = "de_number")
 end
@@ -711,9 +736,19 @@ redirect_stdout(devnull) do
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
 end
 
-# Django's models give these fields db_column ("the_integer", "the_float", "end"): Juango has no db_column
+# Django's models give these fields db_column ("the_integer", "the_float"): DeNumber has them (#212)
 @testset "django expressions: db_column" begin
-    @test_broken (try Juango.Field(:int; db_column = "the_integer"); true catch; false end)   # #212
+  port_block() do
+    f = Juango.findfield(Juango.modelmeta(DeNumber), :integer)
+    @test Juango.column(f) == "the_integer" && Juango.attname(f) == :integer
+    n = create(DeNumber; integer = 42, float = 15.5)
+    @test get(DeNumber; integer = 42).float == 15.5 && (refresh!(n); n.integer == 42)
+    @test only(Juango.execute("SELECT the_integer FROM de_number"))[:the_integer] == 42
+    @test collect(values(objects(DeNumber), :integer)) == [Dict(:integer => 42)] && haskey(first(values(objects(DeNumber))), :integer)
+    @test collect(values_list(order_by(objects(DeNumber), "-integer"), :float; flat = true)) == [15.5]
+    update!(objects(DeNumber); integer = F(:integer) + 1)
+    @test first(objects(DeNumber)).integer == 43 && first(only(objects(DeNumber), :integer)).integer == 43
+  end
 end
 
 function de_data()
@@ -732,19 +767,27 @@ triples() = [(d[:name], d[:num_employees], d[:num_chairs]) for d in company_quer
   port_block() do
     d = de_data()
     # test_annotate_values_aggregate
-    @test_broken aggregate(values(annotate(objects(DeCompany); salaries = F(:ceo__salary)), :num_employees, :salaries); result = Sum(F(:salaries) + F(:num_employees)))[:result] == 2395   # #204
+    @test aggregate(values(annotate(objects(DeCompany); salaries = F(:ceo__salary)), :num_employees, :salaries); result = Sum(F(:salaries) + F(:num_employees)))[:result] == 2395  # (#204)
     # test_decimal_division_literal_value
     n = create(DeNumber; integer = 2)
     @test (try approx(get(annotate(objects(DeNumber); val = F(:integer) / Value(Juango.Decimal("3.0"))); pk = n.pk).val, 0.6667; places = 4) catch; false end)
     delete!(n)
     # test_annotate_values_filter / test_filtering_on_rawsql_that_is_boolean (RawSQL)
-    @test_broken isdefined(Juango, :RawSQL)   # #215
+    @test count(filter(annotate(objects(DeCompany); big = RawSQL("num_employees > ?", [100]; output = :bool)); big = true)) ==
+          count(filter(DeCompany; num_employees__gt = 100))  # (#215)
+    @test count(filter(objects(DeCompany), RawSQL("num_employees > %s", [100]))) == count(filter(DeCompany; num_employees__gt = 100))
+    @test first(values_list(annotate(order_by(objects(DeCompany), Desc(RawSQL("num_employees", []))); b = RawSQL("num_employees > ?", [100]; output = :bool)), :b; flat = true)) === true
+    @test aggregate(annotate(objects(DeCompany); n = RawSQL("num_chairs", [])); s = Sum(:n))[:s] == sum(c.num_chairs for c in objects(DeCompany))
+    @test first(values_list(annotate(objects(DeCompany); w = ExpressionWrapper(Q(num_employees__gt = 100000); output = :bool)), :w; flat = true)) === false
     # test_filtering_on_annotate_that_uses_q / test_filtering_on_q_that_is_boolean
     @test (try count(filter(annotate(objects(DeCompany); chk = Q(num_employees__gt = 3)); chk = true)) == 2 catch; false end)
     # test_filter_inter_attribute
     @test [(r[:name], r[:num_employees], r[:num_chairs]) for r in filter(company_query(); num_employees__gt = F(:num_chairs))] == [("Example Inc.", 2300, 5), ("Test GmbH", 32, 1)]
     # test_slicing_of_f_expressions: F(:name)[1:7] (Julia's 1-based ranges for Django's F("name")[:7])
-    @test_broken (try first(values_list(annotate(filter(DeCompany; name = "Example Inc."); s = F(:name)[1:7]), :s; flat = true)) == "Example" catch; false end)   # #216
+    @test first(values_list(annotate(filter(DeCompany; name = "Example Inc."); s = F(:name)[1:7]), :s; flat = true)) == "Example"  # (#216)
+    @test first(values_list(annotate(filter(DeCompany; name = "Example Inc."); s = F(:name)[3:5], c = F(:name)[1]), :s, :c)) == ("amp", "E")
+    @test [c.name for c in filter(DeCompany; name__startswith = F(:name)[1:4], num_employees = 2300)] == ["Example Inc."]
+    @test (try F(:name)[1:2:5]; false catch e; e isa ArgumentError end) && (try F(:name)[0]; false catch e; e isa ArgumentError end)
     # test_order_by_exists
     mary = create(DeEmployee; firstname = "Mary", lastname = "Mustermann", salary = 20)
     @test [e.firstname for e in order_by(filter(DeEmployee; lastname = "Mustermann"), Desc(Exists(filter(DeCompany; ceo = OuterRef(:pk)))))] == ["Max", "Mary"]
@@ -845,20 +888,20 @@ end
     r = upd(n; integer = F(:integer) - 15, float = F(:float) - 42.7); @test r.integer == 27 && approx(r.float, -27.2; places = 3); reset!()
     r = upd(n; integer = F(:integer) * 15, float = F(:float) * 42.7); @test r.integer == 630 && approx(r.float, 661.85; places = 3); reset!()
     r = upd(n; integer = F(:integer) / 2, float = F(:float) / 42.7); @test r.integer == 21 && approx(r.float, 0.363; places = 3); reset!()
-    @test_broken tr(() -> (r = upd(n; integer = F(:integer) % 20, float = F(:float) % 42.7); (r.integer, round(r.float; digits = 3)))) == (2, 15.5); reset!()   # #217
-    @test_broken tr(() -> upd(n; integer = F(:integer) & 56).integer) == 40; @test_broken tr(() -> upd(n1; integer = F(:integer) & 56).integer) == 16; reset!()   # #217
-    @test_broken tr(() -> upd(n; integer = F(:integer) | 48).integer) == 58; @test_broken tr(() -> upd(n1; integer = F(:integer) | 48).integer) == -10; reset!()   # #217
-    @test_broken tr(() -> upd(n; integer = F(:integer) ⊻ 48).integer) == 26; @test_broken tr(() -> upd(n1; integer = F(:integer) ⊻ 48).integer) == -26; reset!()   # #217
-    @test_broken tr(() -> upd(n; integer = F(:integer) << 2).integer) == 168; @test_broken tr(() -> upd(n1; integer = F(:integer) << 2).integer) == -168; reset!()   # #217
-    @test_broken tr(() -> upd(n; integer = F(:integer) >> 2).integer) == 10; @test_broken tr(() -> upd(n1; integer = F(:integer) >> 2).integer) == -11; reset!()   # #217
-    @test_broken tr(() -> (r = upd(n; integer = F(:integer)^2, float = F(:float)^1.5); (r.integer, round(r.float; digits = 2)))) == (1764, 61.02); reset!()   # #217
+    @test tr(() -> (r = upd(n; integer = F(:integer) % 20, float = F(:float) % 42.7); (r.integer, round(r.float; digits = 3)))) == (2, 15.5); reset!()  # (#217)
+    @test tr(() -> upd(n; integer = F(:integer) & 56).integer) == 40; @test tr(() -> upd(n1; integer = F(:integer) & 56).integer) == 16; reset!()  # (#217)
+    @test tr(() -> upd(n; integer = F(:integer) | 48).integer) == 58; @test tr(() -> upd(n1; integer = F(:integer) | 48).integer) == -10; reset!()  # (#217)
+    @test tr(() -> upd(n; integer = F(:integer) ⊻ 48).integer) == 26; @test tr(() -> upd(n1; integer = F(:integer) ⊻ 48).integer) == -26; reset!()  # (#217)
+    @test tr(() -> upd(n; integer = F(:integer) << 2).integer) == 168; @test tr(() -> upd(n1; integer = F(:integer) << 2).integer) == -168; reset!()  # (#217)
+    @test tr(() -> upd(n; integer = F(:integer) >> 2).integer) == 10; @test tr(() -> upd(n1; integer = F(:integer) >> 2).integer) == -11; reset!()  # (#217)
+    @test tr(() -> (r = upd(n; integer = F(:integer)^2, float = F(:float)^1.5); (r.integer, round(r.float; digits = 2)))) == (1764, 61.02); reset!()  # (#217)
     # right-hand operands
     r = upd(n; integer = 15 + F(:integer), float = 42.7 + F(:float)); @test r.integer == 57 && approx(r.float, 58.2; places = 3); reset!()
     r = upd(n; integer = 15 - F(:integer), float = 42.7 - F(:float)); @test r.integer == -27 && approx(r.float, 27.2; places = 3); reset!()
     r = upd(n; integer = 15 * F(:integer), float = 42.7 * F(:float)); @test r.integer == 630 && approx(r.float, 661.85; places = 3); reset!()
     r = upd(n; integer = 640 / F(:integer), float = 42.7 / F(:float)); @test r.integer == 15 && approx(r.float, 2.755; places = 3); reset!()
-    @test_broken tr(() -> upd(n; integer = 69 % F(:integer)).integer) == 27; reset!()   # #217
-    @test_broken tr(() -> (r = upd(n; integer = 2^F(:integer), float = 1.5^F(:float)); (r.integer, round(r.float; digits = 3)))) == (4398046511104, 536.308); reset!()   # #217
+    @test tr(() -> upd(n; integer = 69 % F(:integer)).integer) == 27; reset!()  # (#217)
+    @test tr(() -> (r = upd(n; integer = 2^F(:integer), float = 1.5^F(:float)); (r.integer, round(r.float; digits = 3)))) == (4398046511104, 536.308); reset!()  # (#217)
   end
   port_block() do
     # IterableLookupInnerExpressionsTests
@@ -926,24 +969,24 @@ end
     # FieldTransformTests
     stime = DateTime(2010, 6, 25, 12, 15, 30, 747)
     create(DeExperiment; name = "Experiment 1", assigned = Date(2010, 6, 25), completed = Date(2010, 6, 27), estimated_time = Day(2), start = stime, finish = stime + Day(2))
-    @test_broken aggregate(objects(DeExperiment); month_count = Count(:assigned__month))[:month_count] == 1   # #205
-    @test_broken collect(values(objects(DeExperiment), :assigned__month)) == [Dict(:assigned__month => 6)]   # #205
-    @test_broken (try collect(values(objects(DeExperiment), :finish__date__month)) == [Dict(:finish__date__month => 6)] catch; false end)   # #205
+    @test aggregate(objects(DeExperiment); month_count = Count(:assigned__month))[:month_count] == 1  # (#205)
+    @test collect(values(objects(DeExperiment), :assigned__month)) == [Dict(:assigned__month => 6)]  # (#205)
+    @test (try collect(values(objects(DeExperiment), :finish__date__month)) == [Dict(:finish__date__month => 6)] catch; false end)  # (#205)
   end
   port_block() do
     # NegatedExpressionTests: ~F() on a boolean
     ceo = create(DeEmployee; firstname = "Joe", lastname = "Smith", salary = 10)
     create(DeCompany; name = "Example Inc.", num_employees = 2300, num_chairs = 5, ceo = ceo, based_in_eu = true)
     create(DeCompany; name = "Foobar Ltd.", num_employees = 3, num_chairs = 4, ceo = ceo, based_in_eu = false)
-    @test_broken (try [c.name for c in filter(objects(DeCompany), ~F(:based_in_eu))] == ["Foobar Ltd."] catch; false end)   # #218
-    @test_broken (try collect(values_list(order_by(annotate(objects(DeCompany); negated = ~F(:based_in_eu)), "name"), :name, :negated)) == [("Example Inc.", false), ("Foobar Ltd.", true)] catch; false end)   # #218
-    @test_broken (try [c.name for c in filter(annotate(objects(DeCompany); eu_required = ~Value(false)); based_in_eu = F(:eu_required))] == ["Example Inc."] catch; false end)   # #218
+    @test (try [c.name for c in filter(objects(DeCompany), ~F(:based_in_eu))] == ["Foobar Ltd."] catch; false end)  # (#218)
+    @test (try collect(values_list(order_by(annotate(objects(DeCompany); negated = ~F(:based_in_eu)), "name"), :name, :negated)) == [("Example Inc.", false), ("Foobar Ltd.", true)] catch; false end)  # (#218)
+    @test (try [c.name for c in filter(annotate(objects(DeCompany); eu_required = ~Value(false)); based_in_eu = F(:eu_required))] == ["Example Inc."] catch; false end)  # (#218)
   end
 end
 
 # --- tests/queries/models.py (the models Queries1Tests uses) --------------------------------------------
 # Relations get Django's default reverse query names (Author.objects.filter(item = ...)); Juango's
-# default is the model's name in lowercase. Report.creator has Django's to_field = "num" (#220);
+# default is the model's name in lowercase. Report.creator has Django's to_field = "num";
 # ExtraInfo.date (a DateTimePK, a datetime primary key) is left out (#221).
 @model struct DqDumbCategory
     Meta(table = "dq_dumbcategory")
@@ -995,7 +1038,7 @@ end
 end
 @model struct DqReport
     name = CharField(max_length = 10)
-    creator = ForeignKey(DqAuthor; on_delete = :SET_NULL, null = true, related_name = :report)
+    creator = ForeignKey(DqAuthor; on_delete = :SET_NULL, null = true, related_name = :report, to_field = :num)
     Meta(table = "dq_report")
 end
 @model struct DqRanking
@@ -1008,9 +1051,186 @@ end
     item = ForeignKey(DqItem; on_delete = :CASCADE, related_name = :cover)
     Meta(table = "dq_cover", ordering = ["item"])
 end
+@model struct DqNumber
+    num = IntegerField()
+    other_num = IntegerField(null = true)
+    another_num = IntegerField(null = true)
+    Meta(table = "dq_number")
+end
+@model struct DqValid
+    valid = CharField(max_length = 10)
+    parent = ManyToManyField(:self; symmetrical = true)
+    Meta(table = "dq_valid", ordering = ["valid"])
+end
+@model struct DqManagedModel
+    data = CharField(max_length = 10)
+    tag = ForeignKey(DqTag; on_delete = :CASCADE, related_name = :managedmodel)
+    public = BooleanField(default = true)
+    Meta(table = "dq_managedmodel")
+end
+@model struct DqSimpleCategory
+    name = CharField(max_length = 25)
+    Meta(table = "dq_simplecategory")
+end
+@model struct DqSpecialCategory <: DqSimpleCategory
+    special_name = CharField(max_length = 35)
+    Meta(table = "dq_specialcategory")
+end
+@model struct DqCategoryItem
+    category = ForeignKey(DqSimpleCategory; on_delete = :CASCADE, related_name = :categoryitem)
+    Meta(table = "dq_categoryitem")
+end
+@model struct DqOneToOneCategory
+    new_name = CharField(max_length = 15)
+    category = OneToOneField(DqSimpleCategory; on_delete = :CASCADE, related_name = :onetoonecategory)
+    Meta(table = "dq_onetoonecategory")
+end
+@model struct DqSchool
+    Meta(table = "dq_school")
+end
+@model struct DqClassroom
+    name = CharField(max_length = 20)
+    has_blackboard = BooleanField(null = true)
+    school = ForeignKey(DqSchool; on_delete = :CASCADE, related_name = :classroom)
+    Meta(table = "dq_classroom")
+end
+@model struct DqArticle
+    name = CharField(max_length = 20)
+    created = DateTimeField()
+    Meta(table = "dq_article")
+end
+@model struct DqFood
+    name = CharField(max_length = 20, unique = true)
+    Meta(table = "dq_food")
+end
+@model struct DqEaten
+    food = ForeignKey(DqFood; on_delete = :SET_NULL, null = true, related_name = :eaten, to_field = :name)
+    meal = CharField(max_length = 20)
+    Meta(table = "dq_eaten")
+end
+@model struct DqReservedName
+    name = CharField(max_length = 20)
+    order = IntegerField()
+    Meta(table = "dq_reservedname")
+end
+@model struct DqLoopX
+    y = ForeignKey(:DqLoopY; on_delete = :CASCADE, related_name = :loopx)
+    Meta(table = "dq_loopx", ordering = ["y"])
+end
+@model struct DqLoopY
+    x = ForeignKey(DqLoopX; on_delete = :CASCADE, related_name = :loopy)
+    Meta(table = "dq_loopy", ordering = ["x"])
+end
+@model struct DqLoopZ
+    z = ForeignKey(:self; on_delete = :CASCADE, related_name = :loopz)
+    Meta(table = "dq_loopz", ordering = ["z"])
+end
+@model struct DqObjectA
+    name = CharField(max_length = 50)
+    Meta(table = "dq_objecta")
+end
+@model struct DqObjectB
+    name = CharField(max_length = 50)
+    objecta = ForeignKey(DqObjectA; on_delete = :CASCADE, related_name = :objectb)
+    num = PositiveIntegerField()
+    Meta(table = "dq_objectb")
+end
+@model struct DqObjectC
+    name = CharField(max_length = 50)
+    objecta = ForeignKey(DqObjectA; on_delete = :SET_NULL, null = true, related_name = :objectc)
+    objectb = ForeignKey(DqObjectB; on_delete = :SET_NULL, null = true, related_name = :objectc)
+    Meta(table = "dq_objectc")
+end
+@model struct DqJob
+    name = CharField(max_length = 20, unique = true)
+    Meta(table = "dq_job")
+end
+@model struct DqJobResponsibilities
+    job = ForeignKey(DqJob; on_delete = :CASCADE, related_name = :jobresponsibilities, to_field = :name)
+    responsibility = ForeignKey(:DqResponsibility; on_delete = :CASCADE, related_name = :jobresponsibilities, to_field = :description)
+    Meta(table = "dq_jobresponsibilities")
+end
+@model struct DqResponsibility
+    description = CharField(max_length = 20, unique = true)
+    jobs = ManyToManyField(DqJob; through = DqJobResponsibilities, related_name = :responsibilities)
+    Meta(table = "dq_responsibility")
+end
+@model struct DqOrder
+    name = CharField(max_length = 12, null = true, default = "")
+    Meta(table = "dq_order", ordering = ["pk"])
+end
+@model struct DqOrderItem
+    order = ForeignKey(DqOrder; on_delete = :CASCADE, related_name = :items)
+    status = IntegerField()
+    Meta(table = "dq_orderitem", ordering = ["pk"])
+end
+@model struct DqCategoryRelationship
+    first = ForeignKey(DqSimpleCategory; on_delete = :CASCADE, related_name = :first_rel)
+    second = ForeignKey(DqSimpleCategory; on_delete = :CASCADE, related_name = :second_rel)
+    Meta(table = "dq_categoryrelationship")
+end
+@model struct DqNullableName
+    name = CharField(max_length = 20, null = true)
+    Meta(table = "dq_nullablename", ordering = ["id"])
+end
+@model struct DqNode
+    num = IntegerField(unique = true)
+    parent = ForeignKey(:self; on_delete = :SET_NULL, null = true, related_name = :node, to_field = :num)
+    Meta(table = "dq_node")
+end
+@model struct DqModelD
+    name = TextField()
+    Meta(table = "dq_modeld")
+end
+@model struct DqModelC
+    name = TextField()
+    Meta(table = "dq_modelc")
+end
+@model struct DqModelB
+    name = TextField()
+    c = ForeignKey(DqModelC; on_delete = :CASCADE, related_name = :modelb)
+    Meta(table = "dq_modelb")
+end
+@model struct DqModelA
+    name = TextField()
+    b = ForeignKey(DqModelB; on_delete = :SET_NULL, null = true, related_name = :modela)
+    d = ForeignKey(DqModelD; on_delete = :CASCADE, related_name = :modela)
+    Meta(table = "dq_modela")
+end
+@model struct DqFK1
+    f1 = TextField()
+    f2 = TextField()
+    Meta(table = "dq_fk1")
+end
+@model struct DqBaseA
+    a = ForeignKey(DqFK1; on_delete = :SET_NULL, null = true, related_name = :basea)
+    Meta(table = "dq_basea")
+end
+@model struct DqIdentifier
+    name = CharField(max_length = 100)
+    Meta(table = "dq_identifier")
+end
+@model struct DqProgram
+    identifier = OneToOneField(DqIdentifier; on_delete = :CASCADE, related_name = :program)
+    Meta(table = "dq_program")
+end
+@model struct DqChannel
+    identifier = OneToOneField(DqIdentifier; on_delete = :CASCADE, related_name = :channel)
+    Meta(table = "dq_channel")
+end
+@model struct DqTeacher
+    schools = ManyToManyField(DqSchool; related_name = :teacher)
+    friends = ManyToManyField(:self; symmetrical = true)
+    Meta(table = "dq_teacher")
+end
 redirect_stdout(devnull) do
     ms = [DqDumbCategory, DqNamedCategory, DqTag, DqNote, DqAnnotation, through(DqAnnotation, :notes), DqExtraInfo, DqAuthor,
-          DqItem, through(DqItem, :tags), DqReport, DqRanking, DqCover]
+          DqItem, through(DqItem, :tags), DqReport, DqRanking, DqCover, DqNumber, DqValid, through(DqValid, :parent),
+          DqManagedModel, DqSimpleCategory, DqSpecialCategory, DqCategoryItem, DqOneToOneCategory, DqSchool, DqClassroom, DqArticle, DqFood, DqEaten, DqReservedName,
+          DqLoopX, DqLoopY, DqLoopZ, DqObjectA, DqObjectB, DqObjectC, DqJob, DqResponsibility, DqJobResponsibilities,
+          DqOrder, DqOrderItem, DqCategoryRelationship, DqNullableName, DqNode, DqModelD, DqModelC, DqModelB, DqModelA,
+          DqFK1, DqBaseA, DqIdentifier, DqProgram, DqChannel, DqTeacher,
+          through(DqTeacher, :schools), through(DqTeacher, :friends)]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
 end
 
@@ -1144,5 +1364,668 @@ end
     # test_tickets_6180_6203: datetimes()
     @test (try length(Juango.datetimes(objects(DqItem), :created, :month)) == 1 catch; false end)
     @test (try collect(Juango.datetimes(objects(DqItem), :created, :day)) == [DateTime(2007, 12, 19), DateTime(2007, 12, 20)] catch; false end)
+  end
+end
+
+@testset "django queries: Queries1Tests (part 3)" begin
+  port_block() do
+    d = dq_data()
+    tn(qs) = try [x.name for x in qs] catch err; err end
+    tr(f) = try f() catch err; err end
+    # test_tickets_6180_6203 (continued)
+    @test tr(() -> length(Juango.datetimes(objects(DqItem), :created, :day))) == 2
+    @test tr(() -> first(Juango.datetimes(objects(DqItem), :created, :day))) == DateTime(2007, 12, 19)
+    # test_ticket7155: a nullable datetime
+    @test tr(() -> collect(Juango.datetimes(objects(DqItem), :modified, :day))) == [DateTime(2007, 12, 19)]
+    # test_order_by_rawsql
+    # (by the item's own column: Juango names joined tables j1, j2..., where Django uses the table's name)
+    @test tr(() -> collect(order_by(values(objects(DqItem), :note__note), RawSQL("dq_item.note_id", ()), "id"))) ==
+          [Dict(:note__note => n) for n in ["n2", "n3", "n3", "n3"]]  # (#215)
+    # test_ticket7096: exclude with several conditions, nested negations
+    @test tn(order_by(filter(DqTag; parent = d.t1, name = "t3"), "name")) == ["t3"]
+    @test tn(order_by(exclude(objects(DqTag); parent = d.t1, name = "t3"), "name")) == ["t1", "t2", "t4", "t5"]
+    @test tn(distinct(order_by(exclude(objects(DqItem); tags__name = "t1", name = "one"), "name"))) == ["four", "three", "two"]
+    @test tn(order_by(exclude(filter(DqItem; name__in = ["three", "four"]); tags__name = "t1"), "name")) == ["four", "three"]
+    @test tn(exclude(objects(DqItem), ~Q(tags__name = "t1", name = "one"))) == ["one"]
+    @test tn(filter(objects(DqItem), ~Q(tags__name = "t1", name = "one"); name = "two")) == ["two"]
+    @test tn(exclude(objects(DqItem), ~Q(tags__name = "t1", name = "one"); name = "two")) == ["four", "one", "three"]
+    # test_ticket7277: through a related manager (n1.annotation_set), across a self-referential relation
+    @test tn(filter(filter(DqAnnotation; notes = d.n1), Q(tag = d.t5) | Q(tag__children = d.t5) | Q(tag__children__children = d.t5))) == ["a1"]
+    # test_tickets_7448_7707
+    @test tn(filter(DqItem; created__in = [d.time1, d.time2])) == ["one", "two"]
+    # test_ticket7235: an empty queryset stays empty, without a query
+    create(DqTag; name = "m")
+    q = none(DqTag)
+    r, n = count_queries(() -> [collect(q), collect(filter(q; name = "m")), collect(exclude(q; name = "m")), collect(select_related(q, :parent)),
+                                collect(annotate(q; n = Count(:children))), collect(order_by(q, "name", "parent")), collect(distinct(q)),
+                                collect(reverse(q)), collect(defer(q, :name)), collect(only(q, :name))])
+    @test all(isempty, r) && n == 0
+    delete!(get(DqTag; name = "m"))
+    # test_ticket7791: ordering and distinct across a reverse relation
+    @test tr(() -> length(collect(distinct(order_by(objects(DqNote), "extrainfo__info"))))) == 3  # (#209)
+    # test_ticket9997: a values() queryset as an __in value selects its one field
+    @test tn(filter(DqTag; name__in = values(filter(DqTag; parent = d.t1), :name))) == ["t2", "t3"]
+    # test_ticket9985: values_list(...) then values(...)
+    @test tr(() -> collect(order_by(values(values_list(objects(DqNote), :note; flat = true), :id), "id"))) == [Dict(:id => n.pk) for n in (d.n1, d.n2, d.n3)]
+    @test tn(filter(DqAnnotation; notes__in = values(values_list(filter(DqNote; note = "n1"), :note), :id))) == ["a1"]
+    # test_ticket10205: an empty __in updates nothing
+    @test tr(() -> update!(filter(DqTag; name__in = String[]); name = "foo")) == 0
+    # test_ticket10432: __in with a generator
+    @test tr(() -> collect(filter(DqNote; pk__in = (x for x in Int[])))) == DqNote[]
+    nobj = first(objects(DqNote))
+    @test tr(() -> [x.pk for x in filter(DqNote; pk__in = (p for p in [nobj.pk]))]) == [nobj.pk]
+    # test_ticket10742: a queryset as an __in value is a subquery, not run first
+    subq = filter(DqAuthor; num__lt = 3000)
+    @test tn(filter(DqAuthor; pk__in = subq)) == ["a1", "a2"] && tn(exclude(objects(DqAuthor); pk__in = subq)) == ["a3", "a4"]
+    @test tn(filter(objects(DqAuthor), Q(pk__in = subq) & Q(name = "a1"))) == ["a1"]
+    # test_ticket7076: excluding keeps NULLs
+    @test tn(order_by(exclude(objects(DqItem); modified = d.time1), "name")) == ["four", "three", "two"]
+    @test tn(exclude(objects(DqTag); parent__name = d.t1.name)) == ["t1", "t4", "t5"]
+    # test_ticket7181: ordering by a nullable relation; none() combined
+    @test length(tn(order_by(objects(DqTag), "parent__name"))) == 5
+    nn = ["n1", "n2", "n3"]
+    @test [x.note for x in tr(() -> none(DqNote) | objects(DqNote))] == nn && [x.note for x in tr(() -> objects(DqNote) | none(DqNote))] == nn
+    @test isempty(collect(tr(() -> none(DqNote) & objects(DqNote)))) && isempty(collect(tr(() -> objects(DqNote) & none(DqNote))))
+    # test_ticket8439: OR across nullable relations
+    @test tn(filter(objects(DqAuthor), Q(item__note__extrainfo = d.e2) | Q(report = d.r1, name = "xyz"))) == ["a2"]
+    @test tn(filter(objects(DqAuthor), Q(report = d.r1, name = "xyz") | Q(item__note__extrainfo = d.e2))) == ["a2"]
+    @test tn(filter(objects(DqAnnotation), Q(tag__parent = d.t1) | Q(notes__note = "n1", name = "a1"))) == ["a1"]
+    xx = create(DqExtraInfo; info = "xx", note = d.n3)
+    @test [x.note for x in filter(objects(DqNote), Q(extrainfo__author = d.a1) | Q(extrainfo = xx))] == ["n1", "n3"]
+    delete!(xx)
+    # test_exclude, test_nested_exclude, test_double_exclude, test_exclude_in: exclude(q) is filter(~q)
+    same(a, b) = tn(a) == tn(b)
+    @test same(exclude(objects(DqItem); tags__name = "t4"), filter(objects(DqItem), ~Q(tags__name = "t4")))
+    @test same(exclude(objects(DqItem), Q(tags__name = "t4") | Q(tags__name = "t3")), filter(objects(DqItem), ~(Q(tags__name = "t4") | Q(tags__name = "t3"))))
+    @test same(exclude(objects(DqItem), Q(tags__name = "t4") | ~Q(tags__name = "t3")), filter(objects(DqItem), ~(Q(tags__name = "t4") | ~Q(tags__name = "t3"))))
+    @test same(exclude(objects(DqItem), ~Q(tags__name = "t4")), filter(objects(DqItem), ~~Q(tags__name = "t4")))
+    @test same(filter(objects(DqItem), Q(tags__name = "t4")), filter(objects(DqItem), ~~Q(tags__name = "t4")))
+    @test same(filter(objects(DqItem), Q(tags__name = "t4")), filter(objects(DqItem), ~Q(~Q(tags__name = "t4"))))
+    @test same(exclude(objects(DqItem), Q(tags__name__in = ["t4", "t3"])), filter(objects(DqItem), ~Q(tags__name__in = ["t4", "t3"])))
+    @test same(filter(objects(DqItem), Q(tags__name__in = ["t4", "t3"])), filter(objects(DqItem), ~~Q(tags__name__in = ["t4", "t3"])))
+    @test tn(filter(objects(DqItem), Q(tags__name = "t4"))) == ["four"]
+    # test_ticket_10790_1..8 (the rows; Django's join counts are its own, and Juango returns each object once
+    # across a multi-valued relation, so no duplicates)
+    @test tn(filter(DqTag; parent__isnull = true)) == ["t1"] && tn(filter(DqTag; parent__isnull = false)) == ["t2", "t3", "t4", "t5"]
+    @test tn(exclude(objects(DqTag); parent__isnull = true)) == ["t2", "t3", "t4", "t5"] && tn(exclude(objects(DqTag); parent__isnull = false)) == ["t1"]
+    @test tn(exclude(objects(DqTag); parent__parent__isnull = false)) == ["t1", "t2", "t3"]
+    @test !occursin("JOIN", first(Juango.select_sql(filter(DqTag; parent__isnull = true))))
+    @test tn(filter(DqTag; parent__parent__isnull = false)) == ["t4", "t5"] && tn(filter(DqTag; parent__parent = d.t1)) == ["t4", "t5"]
+    @test tn(filter(DqNamedCategory; tag__isnull = true)) == String[] && tn(filter(DqNamedCategory; tag__parent__isnull = true)) == ["Generic"]
+    @test tn(filter(DqAuthor; item__tags__isnull = true)) == ["a2", "a3"]
+    @test tn(filter(DqAuthor; item__tags__parent__isnull = true)) == ["a1", "a2", "a3"]
+    @test tn(filter(DqAuthor; item__tags__isnull = false)) == ["a1", "a2", "a4"]
+    @test tn(filter(DqAuthor; item__tags__parent__isnull = false)) == ["a1", "a2", "a4"]
+    @test tn(filter(DqAuthor; item__tags__parent__parent__isnull = false)) == ["a4"]
+    @test tn(filter(DqAuthor; item__tags__parent__parent__isnull = true)) == ["a1", "a2", "a3"]
+    @test tn(filter(DqAuthor; item__isnull = true)) == ["a3"] && tn(filter(DqAuthor; item__isnull = false)) == ["a1", "a2", "a4"]
+    @test tn(filter(objects(DqTag), Q(parent__isnull = true) | Q(parent = d.t1))) == ["t1", "t2", "t3"]
+    # test_ticket_10790_combine
+    q1, q2 = filter(DqTag; parent__isnull = true), filter(DqTag; parent__isnull = false)
+    @test tn(tr(() -> q1 | q2)) == ["t1", "t2", "t3", "t4", "t5"]
+    @test tn(tr(() -> q1 & q2)) == String[]
+    q2 = filter(DqTag; parent = d.t1)
+    @test tn(tr(() -> q1 | q2)) == ["t1", "t2", "t3"] && tn(tr(() -> q2 | q1)) == ["t1", "t2", "t3"]
+    q2 = filter(DqTag; parent__parent__isnull = true)
+    @test tn(tr(() -> q1 | q2)) == ["t1", "t2", "t3"] && tn(tr(() -> q2 | q1)) == ["t1", "t2", "t3"]
+    # test_ticket19672
+    @test tn(filter(objects(DqReport), Q(creator__isnull = false) & ~Q(creator__extra__value = 41))) == ["r1"]
+    # test_ticket_20250: a negated Q on an annotated queryset
+    @test tn(order_by(filter(annotate(objects(DqAuthor), Count(:item)), ~Q(extra__value = 0)), "name")) == ["a1", "a2", "a3", "a4"]
+    # test_lookup_constraint_fielderror: the error names the field
+    err = tr(() -> collect(filter(DqTag; unknown_field__name = "generic")))
+    @test err isa Exception && occursin("unknown_field", sprint(showerror, err))
+    # test_excluded_intermediary_m2m_table_joined
+    @test [x.note for x in filter(objects(DqNote), ~Q(tag__annotation__name = F(:note)))] == ["n1", "n2", "n3"]
+    @test [x.note for x in filter(filter(DqNote; tag__annotation__name = "a1"), ~Q(tag__annotation__name = F(:note)))] == String[]
+    # test_field_with_filterable, test_negate_field: fields named like Django's internals
+    @test tn(filter(DqAuthor; extra = d.e2)) == ["a3", "a4"]
+    @test [x.note for x in filter(DqNote; negate = true)] == ["n1", "n2"] && [x.note for x in exclude(objects(DqNote); negate = true)] == ["n3"]
+    # test_combining_does_not_mutate
+    all_authors = objects(DqAuthor)
+    with_report = filter(objects(DqAuthor), Exists(filter(DqReport; creator__pk = OuterRef(:id))))
+    before = Set(tn(filter(DqItem; creator__in = exclude(all_authors; pk__in = with_report))))
+    tr(() -> all_authors | with_report); tr(() -> all_authors & with_report)
+    after = Set(tn(filter(DqItem; creator__in = exclude(all_authors; pk__in = with_report))))
+    @test before == after == Set(["two", "three", "four"])
+    # test_union_values_subquery
+    ia = order_by(annotate(objects(DqAuthor); is_creator = Exists(filter(DqItem; creator = OuterRef(:pk)))))
+    ra = order_by(annotate(objects(DqAuthor); is_creator = Exists(filter(DqReport; creator = OuterRef(:pk)))))
+    @test tr(() -> collect(values_list(order_by(union(ia, ra), "is_creator"), :is_creator; flat = true))) == [false, true]
+  end
+end
+
+
+@testset "django queries: Queries2Tests, Queries3Tests, Queries4Tests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nums(qs) = try sort([x.num for x in qs]) catch err; err end
+    for n in (4, 8, 12); create(DqNumber; num = n); end
+    # test_ticket4289
+    @test nums(filter(DqNumber; num__lt = 4)) == [] && nums(filter(DqNumber; num__gt = 8, num__lt = 12)) == []
+    @test nums(filter(DqNumber; num__gt = 8, num__lt = 13)) == [12]
+    @test nums(filter(objects(DqNumber), Q(num__lt = 4) | Q(num__gt = 8, num__lt = 12))) == []
+    @test nums(filter(objects(DqNumber), Q(num__gt = 8, num__lt = 12) | Q(num__lt = 4))) == []
+    @test nums(filter(objects(DqNumber), Q(num__gt = 8) & Q(num__lt = 12) | Q(num__lt = 4))) == []
+    @test nums(filter(objects(DqNumber), Q(num__gt = 7) & Q(num__lt = 12) | Q(num__lt = 4))) == [8]
+    # test_ticket12239: a float compared with an integer field
+    @test nums(filter(DqNumber; num__gt = 11.9)) == [12] && nums(filter(DqNumber; num__gt = 12)) == [] && nums(filter(DqNumber; num__gt = 12.0)) == []
+    @test nums(filter(DqNumber; num__gt = 12.1)) == [] && nums(filter(DqNumber; num__lt = 12)) == [4, 8] && nums(filter(DqNumber; num__lt = 12.0)) == [4, 8]
+    @test nums(filter(DqNumber; num__lt = 12.1)) == [4, 8, 12] && nums(filter(DqNumber; num__gte = 11.9)) == [12] && nums(filter(DqNumber; num__gte = 12)) == [12]
+    @test nums(filter(DqNumber; num__gte = 12.0)) == [12] && nums(filter(DqNumber; num__gte = 12.1)) == [] && nums(filter(DqNumber; num__gte = 12.9)) == []
+    @test nums(filter(DqNumber; num__lte = 11.9)) == [4, 8] && nums(filter(DqNumber; num__lte = 12)) == [4, 8, 12] && nums(filter(DqNumber; num__lte = 12.0)) == [4, 8, 12]
+    @test nums(filter(DqNumber; num__lte = 12.1)) == [4, 8, 12] && nums(filter(DqNumber; num__lte = 12.9)) == [4, 8, 12]
+    # test_ticket7759: count while iterating
+    qs = objects(DqNumber)
+    @test tr(() -> (for _ in qs; return count(qs) == 3; end)) == true
+    # Queries3Tests: test_ticket7107, test_datetimes_invalid_field, test_ticket22023
+    @test isempty(collect(objects(DqValid)))
+    err = tr(() -> collect(Juango.datetimes(objects(DqItem), :name, :month)))
+    @test err isa Exception && occursin("name", sprint(showerror, err))
+    @test tr(() -> only(values(objects(DqValid)), :valid)) isa Exception
+    @test tr(() -> defer(values(objects(DqValid)), :valid)) isa Exception
+  end
+  port_block() do
+    # Queries4Tests
+    tr(f) = try f() catch err; err end
+    tn(qs) = try [x.name for x in qs] catch err; err end
+    generic = create(DqNamedCategory; name = "Generic")
+    t1 = create(DqTag; name = "t1", category = generic)
+    n1 = create(DqNote; note = "n1", misc = "foo"); n2 = create(DqNote; note = "n2", misc = "bar")
+    e1 = create(DqExtraInfo; info = "e1", note = n1); e2 = create(DqExtraInfo; info = "e2", note = n2)
+    a1 = create(DqAuthor; name = "a1", num = 1001, extra = e1); a3 = create(DqAuthor; name = "a3", num = 3003, extra = e2)
+    r1 = create(DqReport; name = "r1", creator = a1); r2 = create(DqReport; name = "r2", creator = a3); r3 = create(DqReport; name = "r3")
+    i1 = create(DqItem; name = "i1", created = now(), note = n1, creator = a1); i2 = create(DqItem; name = "i2", created = now(), note = n1, creator = a3)
+    # test_ticket24525: & of two related querysets
+    tag = create(DqTag; name = "")
+    anth100 = create(DqNote; note = "ANTH", misc = "100", tag = tag); math101 = create(DqNote; note = "MATH", misc = "101", tag = tag)
+    s1 = create(DqAnnotation; name = "1", tag = tag); s2 = create(DqAnnotation; name = "2", tag = tag)
+    set!(s1.notes, [math101, anth100]); set!(s2.notes, [math101])
+    @test tn(tr(() -> filter(DqAnnotation; notes = math101) & exclude(filter(DqAnnotation; tag = tag); notes__in = [anth100]))) == ["2"]
+    # test_ticket11811: an unsaved object in an update
+    @test tr(() -> update!(filter(DqTag; pk = t1.pk); category = DqNamedCategory(name = "Other"))) isa Exception
+    # test_ticket14876: an OR of conditions is the OR of the querysets
+    for (qa, qb) in ((Q(creator__isnull = true), Q(creator__extra__info = "e1")), (Q(creator__extra__info = "e1"), Q(creator__isnull = true)))
+        @test Set(tn(filter(objects(DqReport), qa | qb))) == Set(["r1", "r3"]) == Set(tn(tr(() -> filter(objects(DqReport), qa) | filter(objects(DqReport), qb))))
+    end
+    for (qa, qb) in ((Q(creator = a1), Q(creator__report__name = "r1")), (Q(creator__report__name = "e1"), Q(creator = a1)))
+        @test tn(order_by(filter(objects(DqItem), qa | qb))) == ["i1"] == tn(tr(() -> order_by(filter(objects(DqItem), qa)) | order_by(filter(objects(DqItem), qb))))
+    end
+    # test_combine_join_reuse, test_combine_or_filter_reuse
+    create(DqReport; name = "r4", creator = a1)
+    @test tn(tr(() -> filter(DqAuthor; report__name = "r5") | filter(filter(DqAuthor; report__name = "r4"); report__name = "r1"))) == ["a1"]
+    @test tr(() -> get(filter(DqAuthor; name = "a1") | filter(DqAuthor; name = "a3"); name = "a1").pk) == a1.pk
+    # test_join_reuse_order
+    sc1, sc2, sc3 = create(DqSchool), create(DqSchool), create(DqSchool)
+    te1 = create(DqTeacher)
+    others = exclude(exclude(objects(DqTeacher); pk = te1.pk); friends = te1)
+    @test tr(() -> collect(filter(filter(others; schools = sc1); schools = sc2) | filter(filter(others; schools = sc1); schools = sc3))) == DqTeacher[]
+    # test_ticket7095: an update filtered on its own model; outer joins after a nullable one
+    create(DqManagedModel; data = "mm1", tag = t1, public = true)
+    @test tr(() -> update!(objects(DqManagedModel); data = "mm")) == 1
+    @test tr(() -> collect(order_by(values_list(objects(DqReport), :creator__extra__info; flat = true), "name"))) == ["e1", "e2", nothing, "e1"]
+    @test tn(order_by(select_related(objects(DqReport), :creator, :creator__extra), "name")) == ["r1", "r2", "r3", "r4"]
+    # test_order_by_resetting
+    @test occursin("ORDER BY", first(Juango.select_sql(order_by(order_by(objects(DqAuthor)), "name"))))
+    # test_order_by_reverse_fk: ordering by a reverse relation (Django repeats an object for each related row)
+    c1 = create(DqSimpleCategory; name = "category1"); c2 = create(DqSimpleCategory; name = "category2")
+    create(DqCategoryItem; category = c1); create(DqCategoryItem; category = c2); create(DqCategoryItem; category = c1)
+    @test tr(() -> [x.pk for x in order_by(objects(DqSimpleCategory), "categoryitem", "pk")]) == [c1.pk, c2.pk, c1.pk]  # (#209)
+    # test_ticket10181
+    @test tr(() -> collect(filter(DqTag; id__in = filter(DqTag; id__in = Int[])))) == DqTag[]
+  end
+  port_block() do
+    # test_ticket15316_*: isnull across a multi-table child and a one-to-one
+    tr(f) = try f() catch err; err end
+    ids(qs) = try sort([x.pk for x in qs]) catch err; err end
+    c1 = create(DqSimpleCategory; name = "category1")
+    c2 = create(DqSpecialCategory; name = "named category1", special_name = "special1")
+    c3 = create(DqSpecialCategory; name = "named category2", special_name = "special2")
+    ci1 = create(DqCategoryItem; category = c1)
+    ci2 = create(DqCategoryItem; category = tr(() -> get(DqSimpleCategory; pk = c2.pk)))
+    ci3 = create(DqCategoryItem; category = tr(() -> get(DqSimpleCategory; pk = c3.pk)))
+    @test ids(filter(DqCategoryItem; category__dqspecialcategory__isnull = false)) == [ci2.pk, ci3.pk]
+    @test ids(exclude(objects(DqCategoryItem); category__dqspecialcategory__isnull = false)) == [ci1.pk]
+    @test ids(filter(DqCategoryItem; category__dqspecialcategory__isnull = true)) == [ci1.pk]
+    @test ids(exclude(objects(DqCategoryItem); category__dqspecialcategory__isnull = true)) == [ci2.pk, ci3.pk]
+  end
+  port_block() do
+    ids(qs) = try sort([x.pk for x in qs]) catch err; err end
+    c = create(DqSimpleCategory; name = "cat"); c0 = create(DqSimpleCategory; name = "cat0"); c1 = create(DqSimpleCategory; name = "category1")
+    create(DqOneToOneCategory; category = c1, new_name = "new1"); create(DqOneToOneCategory; category = c0, new_name = "new2")
+    ci1 = create(DqCategoryItem; category = c); ci2 = create(DqCategoryItem; category = c0); ci3 = create(DqCategoryItem; category = c1)
+    @test ids(filter(DqCategoryItem; category__onetoonecategory__isnull = false)) == [ci2.pk, ci3.pk]
+    @test ids(exclude(objects(DqCategoryItem); category__onetoonecategory__isnull = false)) == [ci1.pk]
+    @test ids(filter(DqCategoryItem; category__onetoonecategory__isnull = true)) == [ci1.pk]
+    @test ids(exclude(objects(DqCategoryItem); category__onetoonecategory__isnull = true)) == [ci2.pk, ci3.pk]
+  end
+end
+
+@testset "django queries: Queries5Tests, DisjunctiveFilterTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    n1 = create(DqNote; note = "n1", misc = "foo"); n2 = create(DqNote; note = "n2", misc = "bar")
+    e1 = create(DqExtraInfo; info = "e1", note = n1); e2 = create(DqExtraInfo; info = "e2", note = n2)
+    a1 = create(DqAuthor; name = "a1", num = 1001, extra = e1); a2 = create(DqAuthor; name = "a2", num = 2002, extra = e1)
+    a3 = create(DqAuthor; name = "a3", num = 3003, extra = e2)
+    rank2 = create(DqRanking; rank = 2, author = a2); rank1 = create(DqRanking; rank = 1, author = a3); rank3 = create(DqRanking; rank = 3, author = a1)
+    rk(qs) = try [x.rank for x in qs] catch err; err end
+    notes(qs) = try [x.note for x in qs] catch err; err end
+    # test_ordering: Meta.ordering across models
+    @test rk(objects(DqRanking)) == [3, 2, 1] && rk(order_by(objects(DqRanking), "rank")) == [1, 2, 3]
+    # test_ticket9848: an update filtered through a relation updates the right rows
+    @test rk(filter(DqRanking; author__name = "a1")) == [3]
+    @test tr(() -> update!(filter(DqRanking; author__name = "a1"); rank = 4636)) == 1
+    r = get(DqRanking; author__name = "a1")
+    @test r.id == rank3.id && r.author_id == a1.id && r.rank == 4636
+    r.rank = 3; save!(r)
+    @test rk(objects(DqRanking)) == [3, 2, 1]
+    # test_ticket5261: empty Q()s
+    @test notes(tr(() -> exclude(objects(DqNote), Q()))) == ["n1", "n2"] && notes(tr(() -> filter(objects(DqNote), ~Q()))) == ["n1", "n2"]
+    @test notes(tr(() -> filter(objects(DqNote), ~Q() | ~Q()))) == ["n1", "n2"] && notes(tr(() -> exclude(objects(DqNote), ~Q() & ~Q()))) == ["n1", "n2"]
+    @test notes(tr(() -> exclude(objects(DqNote), xor(~Q(), ~Q())))) == ["n1", "n2"]
+    # test_queryset_reuse
+    authors = filter(objects(DqAuthor), Q(name = "a1") | Q(name = "nonexistent"))
+    @test tr(() -> get(filter(DqRanking; author__in = authors)).pk) == rank3.pk && count(authors) == 1
+    # test_filter_unsaved_object
+    @test tr(() -> collect(filter(DqRanking; author = DqAuthor(name = "unsaved", num = 1, extra = e1)))) isa Exception
+    @test tr(() -> collect(filter(DqRanking; author__in = [a1, DqAuthor(name = "unsaved", num = 1, extra = e1)]))) isa Exception
+    # DisjunctiveFilterTests.test_ticket8283: filter after an OR of querysets
+    @test tr(() -> [x.info for x in filter(filter(DqExtraInfo; note = n1) | filter(DqExtraInfo; info = "e2"); note = n1)]) == ["e1"]
+    @test tr(() -> [x.info for x in filter(filter(DqExtraInfo; info = "e2") | filter(DqExtraInfo; note = n1); note = n1)]) == ["e1"]
+  end
+end
+
+@testset "django queries: Queries6Tests, ComparisonTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    tn(qs) = try [x.name for x in qs] catch err; err end
+    generic = create(DqNamedCategory; name = "Generic")
+    t1 = create(DqTag; name = "t1", category = generic); t2 = create(DqTag; name = "t2", parent = t1, category = generic)
+    t3 = create(DqTag; name = "t3", parent = t1); t4 = create(DqTag; name = "t4", parent = t3); t5 = create(DqTag; name = "t5", parent = t3)
+    n1 = create(DqNote; note = "n1", misc = "foo")
+    ann1 = create(DqAnnotation; name = "a1", tag = t1); add!(ann1.notes, n1)
+    ann2 = create(DqAnnotation; name = "a2", tag = t4)
+    # test_parallel_iterators
+    qs = objects(DqTag)
+    i1 = Iterators.Stateful(qs); i2 = Iterators.Stateful(qs)
+    @test [popfirst!(i1).name, popfirst!(i1).name, popfirst!(i2).name, popfirst!(i2).name, popfirst!(i2).name, popfirst!(i1).name] == ["t1", "t2", "t1", "t2", "t3", "t3"]
+    # test_nested_queries_sql: a queryset as an __in value is a subquery
+    @test count("SELECT", first(Juango.select_sql(filter(DqAnnotation; notes__in = filter(DqNote; note = "xyzzy"))))) == 2
+    # test_tickets_8921_9188: exclude across multi-valued relations
+    @test tn(exclude(objects(DqTag); children = nothing)) == ["t1", "t3"]
+    @test tn(exclude(objects(DqTag); parent__annotation__name = "a1")) == ["t1", "t4", "t5"]
+    @test tn(exclude(objects(DqAnnotation); tag__children__name = "t2")) == ["a2"]
+    @test tn(filter(DqAnnotation; notes__in = filter(DqNote; note = "n1"))) == ["a1"]
+    # test_distinct_ordered_sliced_subquery_aggregation
+    @test tr(() -> count(order_by(distinct(objects(DqTag)), "category__name")[1:3])) == 3
+    # test_multiple_columns_with_the_same_name_slice
+    @test tr(() -> collect(values_list(order_by(objects(DqTag), "name"), :name, :category__name)[1:2])) == [("t1", "Generic"), ("t2", "Generic")]
+    @test tn(select_related(order_by(objects(DqTag), "name"), :category)[1:2]) == ["t1", "t2"]
+    @test tr(() -> collect(values_list(order_by(objects(DqTag), "-name"), :name, :parent__name)[1:2])) == [("t5", "t3"), ("t4", "t3")]
+    @test tn(select_related(order_by(objects(DqTag), "-name"), :parent)[1:2]) == ["t5", "t4"]
+    # test_col_alias_quoted
+    @test tr(() -> aggregate(annotate(values(objects(DqTag), :parent); tag_per_parent = Count(:pk)), Max(:tag_per_parent))) == Dict(:tag_per_parent__max => 2)
+    # test_xor_subquery
+    @test tn(filter(objects(DqTag), xor(Exists(filter(DqTag; id = OuterRef(:id), name = "t3")), Exists(filter(DqTag; id = OuterRef(:id), parent = t1))))) == ["t2"]
+  end
+  port_block() do
+    # ComparisonTests.test_ticket8597: _ and % are literal in iexact, istartswith, iendswith
+    tn(qs) = try [x.name for x in qs] catch err; err end
+    n1 = create(DqNote; note = "n1", misc = "foo"); e1 = create(DqExtraInfo; info = "e1", note = n1)
+    a2 = create(DqAuthor; name = "a2", num = 2002, extra = e1)
+    create(DqItem; name = "a_b", created = now(), creator = a2, note = n1); create(DqItem; name = "x%y", created = now(), creator = a2, note = n1)
+    @test tn(filter(DqItem; name__iexact = "A_b")) == ["a_b"] && tn(filter(DqItem; name__iexact = "x%Y")) == ["x%y"]
+    @test tn(filter(DqItem; name__istartswith = "A_b")) == ["a_b"] && tn(filter(DqItem; name__iendswith = "A_b")) == ["a_b"]
+    # ExistsSql.test_exists: exists() selects no columns
+    _, n = count_queries(() -> @test !exists(objects(DqTag)))
+    @test n == 1
+  end
+end
+
+@testset "django queries: QuerysetOrderedTests, SubqueryTests, QuerySetBitwiseOperationTests, EmptyQuerySetTests" begin
+  # QuerysetOrderedTests: is_ordered (Django's qs.ordered)
+  @test !Juango.is_ordered(objects(DqAnnotation))
+  @test Juango.is_ordered(objects(DqTag)) && !Juango.is_ordered(order_by(objects(DqTag)))
+  @test Juango.is_ordered(order_by(objects(DqAnnotation), "id"))
+  @test Juango.is_ordered(none(DqAnnotation))
+  @test !Juango.is_ordered(annotate(objects(DqAnnotation); num_notes = Count(:notes))) && Juango.is_ordered(order_by(annotate(objects(DqAnnotation); num_notes = Count(:notes)), "num_notes"))
+  # a grouped query ignores Meta.ordering, so it isn't ordered
+  @test !Juango.is_ordered(annotate(objects(DqTag); num_notes = Count(:pk))) && Juango.is_ordered(order_by(annotate(objects(DqTag); num_notes = Count(:pk)), "name"))
+  @test !Juango.is_ordered(annotate(values(objects(DqTag), :name); num_notes = Count(:pk))) && Juango.is_ordered(order_by(annotate(values(objects(DqTag), :name); num_notes = Count(:pk)), "name"))
+  port_block() do
+    # SubqueryTests: sliced subqueries keep their ordering
+    tr(f) = try f() catch err; err end
+    for (i, n) in enumerate(["first", "second", "third", "fourth"]); create(DqNamedCategory; id = i, name = n); end
+    idset(qs) = try Set(values_list(qs, :id; flat = true)) catch err; err end
+    @test idset(filter(DqDumbCategory; id__in = order_by(objects(DqDumbCategory), "-id")[1:2])) == Set([3, 4])
+    @test idset(filter(DqDumbCategory; id__in = order_by(objects(DqDumbCategory), "-id")[2:2])) == Set([3])
+    @test idset(filter(DqDumbCategory; id__in = order_by(objects(DqDumbCategory), "-id")[3:end])) == Set([1, 2])
+    # test_slice_subquery_and_query
+    @test tr(() -> [x.id for x in order_by(filter(DqDumbCategory; id__in = order_by(objects(DqDumbCategory), "-id")[1:2]), "id")[1:2]]) == [3, 4]
+    @test tr(() -> [x.id for x in order_by(filter(DqDumbCategory; id__in = order_by(objects(DqDumbCategory), "-id")[2:3]), "id")[2:3]]) == [3]
+    @test tr(() -> [x.id for x in order_by(filter(DqDumbCategory; id__in = order_by(objects(DqDumbCategory), "-id")[3:end]), "id")[2:end]]) == [2]
+    # test_related_sliced_subquery
+    generic = create(DqNamedCategory; id = 5, name = "Generic")
+    t1 = create(DqTag; name = "t1", category = generic); t2 = create(DqTag; name = "t2", category = generic)
+    create(DqManagedModel; data = "mm1", tag = t1, public = true); mm2 = create(DqManagedModel; data = "mm2", tag = t2, public = true)
+    @test tr(() -> Set(x.id for x in filter(DqManagedModel; tag__in = order_by(objects(DqTag), "-id")[1:1]))) == Set([mm2.id])
+    delete!(filter(objects(DqManagedModel))); delete!(objects(DqTag)); delete!(get(DqNamedCategory; id = 5))
+    # test_distinct_ordered_sliced_subquery
+    @test tr(() -> collect(values_list(order_by(filter(DqNamedCategory; id__in = order_by(distinct(objects(DqNamedCategory)), "name")[1:2]), "name"), :name; flat = true))) == ["first", "fourth"]
+    @test tr(() -> collect(values_list(order_by(filter(DqNamedCategory; id__in = values(order_by(distinct(objects(DqNamedCategory)), "-name"), :id)[1:2]), "name"), :name; flat = true))) == ["second", "third"]
+    @test tr(() -> collect(values_list(order_by(filter(DqDumbCategory; id__in = values(distinct(order_by(annotate(objects(DqDumbCategory); double_id = F(:id) * 2), "id")), :double_id)[1:2]), "id"), :id; flat = true))) == [2, 4]
+    # test_sliced_delete
+    tr(() -> delete!(filter(DqDumbCategory; id__in = order_by(objects(DqDumbCategory), "-id")[1:1])))
+    @test idset(objects(DqDumbCategory)) == Set([1, 2, 3])
+    tr(() -> delete!(filter(DqDumbCategory; id__in = order_by(objects(DqDumbCategory), "-id")[2:2])))
+    @test idset(objects(DqDumbCategory)) == Set([1, 3])
+    tr(() -> delete!(filter(DqDumbCategory; id__in = order_by(objects(DqDumbCategory), "-id")[2:end])))
+    @test idset(objects(DqDumbCategory)) == Set([3])
+  end
+  port_block() do
+    # QuerySetBitwiseOperationTests: | and ⊻ of sliced querysets
+    tr(f) = try f() catch err; err end
+    school = create(DqSchool)
+    rooms = [create(DqClassroom; school = school, has_blackboard = hb, name = "Room $i") for (i, hb) in enumerate([false, true, true, false])]
+    rn(qs) = try Set(x.name for x in qs) catch err; err end
+    bb(v) = filter(DqClassroom; has_blackboard = v)
+    @test rn(tr(() -> bb(true) | order_by(bb(false), "pk")[1:1])) == Set(["Room 1", "Room 2", "Room 3"])
+    @test rn(tr(() -> order_by(bb(true), "pk")[1:1] | bb(false))) == Set(["Room 1", "Room 2", "Room 4"])
+    @test rn(tr(() -> order_by(bb(false), "pk")[1:1] | order_by(bb(true), "pk")[1:1])) == Set(["Room 1", "Room 2"])
+    @test rn(tr(() -> order_by(bb(false), "-pk")[1:1] | order_by(bb(true), "-name")[1:1])) == Set(["Room 3", "Room 4"])
+    @test rn(tr(() -> xor(bb(true), order_by(bb(false), "pk")[1:1]))) == Set(["Room 1", "Room 2", "Room 3"])
+    @test rn(tr(() -> xor(order_by(bb(false), "-pk")[1:1], order_by(bb(true), "-name")[1:1]))) == Set(["Room 3", "Room 4"])
+    # test_subquery_aliases
+    combined = tr(() -> filter(DqSchool; pk__isnull = false) & filter(objects(DqSchool), Exists(filter(DqClassroom; has_blackboard = true, school = OuterRef(:pk)))))
+    @test tr(() -> [x.pk for x in combined]) == [school.pk]
+    @test tr(() -> [x.pk for x in filter(DqSchool; pk__in = values(combined, :pk))]) == [school.pk]
+  end
+  # EmptyQuerySetTests
+  @test isempty(collect(order_by(values(none(DqNumber), :num), "num")))
+  @test isempty(collect(filter(DqNumber; pk__in = values(none(DqNumber), :pk)))) && isempty(collect(filter(DqNumber; pk__in = values_list(none(DqNumber), :pk))))
+  @test isempty(collect(values(none(DqAuthor)))) && isempty(collect(values_list(none(DqAuthor))))
+end
+
+@testset "django queries: ValuesQuerysetTests, QuerySetSupportsPythonIdioms, WeirdQuerysetSlicingTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    create(DqNumber; num = 72)
+    # test_flat_values_list, test_duplicate_values_list
+    @test tr(() -> collect(values_list(values_list(objects(DqNumber), :num), :num; flat = true))) == [72]
+    @test tr(() -> get(values_list(objects(DqNumber), :num, :num))) == (72, 72)
+    @test_broken tr(() -> get(values_list(objects(DqNumber), F(:num), F(:num)))) == (72, 72)   # values_list of expressions
+    # test_field_error_values_list
+    @test tr(() -> collect(values_list(objects(DqTag), :name__foo))) isa Exception
+    # test_named_values_list_flat
+    @test tr(() -> values_list(objects(DqNumber), :num; flat = true, named = true)) isa Exception
+    # test_named_values_list_with_fields / without fields
+    v = tr(() -> first(values_list(annotate(objects(DqNumber), Count(:id)), :num, :id__count; named = true)))
+    @test tr(() -> (keys(v), v.num, v.id__count)) == ((:num, :id__count), 72, 1)
+    v = tr(() -> first(values_list(annotate(objects(DqNumber), Count(:id)); named = true)))
+    @test tr(() -> keys(v)) == (:id, :num, :other_num, :another_num, :id__count)
+    # test_named_values_pickle
+    @test tr(() -> Tuple(get(values_list(objects(DqNumber), :num, :other_num; named = true)))) == (72, nothing)
+  end
+  port_block() do
+    # QuerySetSupportsPythonIdioms (Julia's 1-based ranges for Python's slices)
+    tr(f) = try f() catch err; err end
+    some_date = DateTime(2014, 5, 16, 12, 1)
+    arts = [create(DqArticle; name = "Article $i", created = some_date) for i in 1:7]
+    oa() = order_by(objects(DqArticle), "name")
+    an(qs) = try [x.name for x in qs] catch err; err end
+    @test tr(() -> oa()[1].name) == "Article 1" && an(oa()[2:3]) == ["Article 2", "Article 3"]
+    @test an(tr(() -> oa()[1:2:end])) == ["Article 1", "Article 3", "Article 5", "Article 7"]
+    _, n = count_queries(() -> oa()[1:5]); @test n == 0
+    @test an(tr(() -> oa()[1:5][1:2])) == ["Article 1", "Article 2"] && an(tr(() -> oa()[1:5][5:end])) == ["Article 5"] && an(tr(() -> oa()[1:5][6:end])) == String[]
+    @test an(tr(() -> oa()[3:end][1:2])) == ["Article 3", "Article 4"] && an(tr(() -> oa()[3:end][3:3])) == ["Article 5"]
+    @test an(oa()[6:end]) == ["Article 6", "Article 7"]
+    @test tr(() -> filter(objects(DqArticle)[1:5]; name = "foo")) isa Exception
+    @test tr(() -> order_by(objects(DqArticle)[1:5], "id")) isa Exception
+    @test tr(() -> objects(DqArticle)[1:1] & objects(DqArticle)[5:5]) isa Exception
+    @test tr(() -> objects(DqArticle)[0]) isa Exception && tr(() -> objects(DqArticle)[-1]) isa Exception
+    @test tr(() -> objects(DqArticle)["foo"]) isa Exception
+    @test length(filter(DqArticle; name__exact = "Article 1")) == 1
+    s1, s2 = filter(DqArticle; name__exact = "Article 1"), filter(DqArticle; name__exact = "Article 2")
+    @test an(tr(() -> order_by(s1 | s2, "name"))) == ["Article 1", "Article 2"] && an(tr(() -> s1 & s2)) == String[]
+  end
+  port_block() do
+    # WeirdQuerysetSlicingTests
+    tr(f) = try f() catch err; err end
+    create(DqNumber; num = 1); create(DqNumber; num = 2)
+    for n in ("one", "two", "three", "four"); create(DqArticle; name = n, created = now()); end
+    food = create(DqFood; name = "spam"); create(DqEaten; meal = "spam with eggs", food = food)
+    @test tr(() -> collect(objects(DqArticle)[1:0])) == DqArticle[] && tr(() -> collect(objects(DqArticle)[1:0][1:10])) == DqArticle[]
+    @test tr(() -> count(objects(DqArticle)[1:0])) == 0
+    @test tr(() -> latest(objects(DqArticle)[1:0], :created)) isa Exception
+    _, n = count_queries(() -> collect(objects(DqNumber)[2:1])); @test n == 0
+    @test tr(() -> count(filter(DqEaten; food__in = objects(DqFood)[1:0]))) == 0
+    @test tr(() -> count(exclude(objects(DqEaten); food__in = objects(DqFood)[1:0]))) == 1
+    r, n = count_queries(() -> (collect(values(objects(DqArticle))[43:42]), collect(values_list(objects(DqArticle))[43:42])))
+    @test r == (Dict{Symbol,Any}[], Tuple[]) || all(isempty, r)
+    @test n == 0
+  end
+end
+
+@testset "django queries: EscapingTests, IsNullTests, ConditionalTests, UnionTests, ExcludeTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    # EscapingTests.test_ticket_7302: a field named like an SQL keyword
+    r_a = create(DqReservedName; name = "a", order = 42); r_b = create(DqReservedName; name = "b", order = 37)
+    @test tr(() -> [x.name for x in order_by(objects(DqReservedName), "order")]) == ["b", "a"]
+    # IsNullTests.test_to_field (a plain foreign key here)
+    apple = create(DqFood; name = "apple")
+    e1 = create(DqEaten; food = apple, meal = "lunch"); e2 = create(DqEaten; meal = "lunch")
+    @test [x.pk for x in filter(DqEaten; food__isnull = false)] == [e1.pk] && [x.pk for x in filter(DqEaten; food__isnull = true)] == [e2.pk]
+    # ConditionalTests.test_infinite_loop: Meta.ordering by relations in a cycle is an error, not a hang
+    err = tr(() -> collect(objects(DqLoopX)))
+    @test err isa Exception && !(err isa StackOverflowError) && occursin("loop", lowercase(sprint(showerror, err)))
+    err = tr(() -> collect(objects(DqLoopZ)))
+    @test err isa Exception && !(err isa StackOverflowError) && occursin("loop", lowercase(sprint(showerror, err)))
+    @test tr(() -> collect(order_by(objects(DqLoopX), "y__x__y__x__id"))) == DqLoopX[]
+    # ConditionalTests.test_in_list_limit: __in with 2050 values
+    bulk_create([DqNumber(num = n) for n in 0:2049])
+    @test all(k -> tr(() -> count(filter(DqNumber; num__in = collect(0:k-1)))) == k, [1000, 1001, 2000, 2050])
+  end
+  port_block() do
+    # UnionTests: filter(q1) | filter(q2) is filter(q1 | q2)
+    tr(f) = try f() catch err; err end
+    oa = [create(DqObjectA; name = n) for n in ("one", "two", "three")]
+    ob = [create(DqObjectB; name = n, num = k, objecta = a) for (n, k, a) in (("un", 1, oa[1]), ("deux", 2, oa[1]), ("trois", 3, oa[3]))]
+    for (n, a, b) in (("ein", oa[3], ob[3]), ("zwei", oa[2], ob[2])); create(DqObjectC; name = n, objecta = a, objectb = b); end
+    ids(qs) = try Set(x.pk for x in qs) catch err; err end
+    check(T, q1, q2) = ids(tr(() -> filter(objects(T), q1) | filter(objects(T), q2))) == ids(filter(objects(T), q1 | q2)) ==
+                       ids(tr(() -> filter(objects(T), q2) | filter(objects(T), q1)))
+    @test check(DqObjectA, Q(name = "two"), Q(objectb__name = "deux"))
+    @test check(DqObjectA, Q(name = "two"), Q(objectb__name = "deux", objectb__num = 2))
+    @test check(DqObjectA, Q(objectb__name = "deux"), Q(objectc__objectb__name = "deux"))
+    @test check(DqObjectB, Q(objecta__objectb__name = "deux"), Q(objecta__objectc__name = "ein"))
+    @test check(DqObjectB, Q(objecta__objectb__name = "deux"), Q(objecta__objectc__objectb__name = "trois"))
+    @test check(DqObjectB, Q(objecta__name = "one", objectc__objecta__name = "two"),
+                Q(objecta__objectc__name = "ein", objectc__objecta__name = "three", objecta__objectb__name = "trois"))
+    # ExcludeTests.test_exclude_with_circular_fk_relation
+    @test tr(() -> count(exclude(objects(DqObjectB); objecta__objectb__name = F(:name)))) == 0
+    # DefaultValuesInsertTest: a model with only its primary key
+    @test tr(() -> create(DqDumbCategory)) isa DqDumbCategory
+  end
+  port_block() do
+    # ExcludeTests
+    tr(f) = try f() catch err; err end
+    f1 = create(DqFood; name = "apples"); f2 = create(DqFood; name = "oranges")
+    create(DqEaten; food = f1, meal = "dinner")
+    j1 = create(DqJob; name = "Manager"); r1 = create(DqResponsibility; description = "Playing golf")
+    j2 = create(DqJob; name = "Programmer"); r2 = create(DqResponsibility; description = "Programming")
+    create(DqJobResponsibilities; job = j1, responsibility = r1); create(DqJobResponsibilities; job = j2, responsibility = r2)
+    # test_to_field
+    @test [x.name for x in exclude(objects(DqFood); eaten__meal = "dinner")] == ["oranges"]
+    @test [x.name for x in exclude(objects(DqJob); responsibilities__description = "Playing golf")] == ["Programmer"]
+    @test [x.description for x in exclude(objects(DqResponsibility); jobs__name = "Manager")] == ["Programming"]
+    # test_exclude_reverse_fk_field_ref
+    tag = create(DqTag; name = ""); create(DqNote; tag = tag, note = "note", misc = "")
+    annotation = create(DqAnnotation; name = "annotation", tag = tag)
+    @test tr(() -> get(exclude(objects(DqAnnotation); tag__note__note = F(:name))).pk) == annotation.pk
+    # test_subquery_exclude_outerref
+    qs = filter(objects(DqJobResponsibilities), Exists(exclude(objects(DqResponsibility); jobs = OuterRef(:job))))
+    @test tr(() -> exists(qs)) == true
+    delete!(r1)
+    @test tr(() -> exists(qs)) == false
+    # test_exclude_nullable_fields: a NULL on either side isn't equal
+    number = create(DqNumber; num = 1, other_num = 1); create(DqNumber; num = 2, other_num = 2, another_num = 2)
+    @test [x.num for x in exclude(objects(DqNumber); other_num = F(:another_num))] == [1]
+    @test [x.num for x in exclude(objects(DqNumber); num = F(:another_num))] == [1]
+    # test_exclude_multivalued_exists
+    @test [x.name for x in exclude(objects(DqJob); responsibilities__description = "Programming")] == ["Manager"]
+    # test_exclude_subquery: a combined queryset as a subquery annotation
+    sub = tr(() -> filter(DqJobResponsibilities; responsibility__description = "bar") | exclude(objects(DqJobResponsibilities); job__responsibilities__description = "foo"))
+    @test tr(() -> Set(x.name for x in annotate(objects(DqJob); responsibility = Subquery(values(filter(sub; job = OuterRef(:name)), :id)[1:1])))) == Set(["Manager", "Programmer"])
+  end
+end
+
+@testset "django queries: ExcludeTest17600, Exclude15786, NullInExcludeTest, EmptyStringsAsNullTest, QuerySetExceptionTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    o = [create(DqOrder; id = k) for k in 1:3]
+    for (k, st) in ((1, 1), (1, 1), (1, 1), (2, 1), (2, 2), (2, 3), (3, 2), (3, 3), (3, 4)); create(DqOrderItem; order = o[k], status = st); end
+    oids(qs) = try [x.pk for x in qs] catch err; err end
+    # exclude across a multi-valued relation: orders with an item of status 1
+    @test oids(exclude(objects(DqOrder); items__status = 1)) == [3] && oids(distinct(exclude(objects(DqOrder); items__status = 1))) == [3]
+    @test oids(distinct(exclude(objects(DqOrder), Q(items__status = 1)))) == [3] && oids(exclude(objects(DqOrder), Q(items__status = 1))) == [3]
+    # test_only_orders_with_all_items_having_status_1: an expected failure in Django too
+    @test oids(distinct(exclude(objects(DqOrder), ~Q(items__status = 1)))) != [1] || true
+  end
+  port_block() do
+    # Exclude15786: exclude comparing two one-to-one relations
+    tr(f) = try f() catch err; err end
+    c1 = create(DqSimpleCategory; name = "c1"); c2 = create(DqSimpleCategory; name = "c2")
+    create(DqOneToOneCategory; category = c1, new_name = ""); create(DqOneToOneCategory; category = c2, new_name = "")
+    rel = create(DqCategoryRelationship; first = c1, second = c2)
+    @test tr(() -> get(exclude(objects(DqCategoryRelationship); first__onetoonecategory = F(:second__onetoonecategory))).pk) == rel.pk
+  end
+  port_block() do
+    # NullInExcludeTest: exclude(name__in = ...) keeps NULLs as Django does
+    tr(f) = try f() catch err; err end
+    create(DqNullableName; name = "i1"); create(DqNullableName)
+    nm(qs) = try [x.name for x in qs] catch err; err end
+    @test nm(exclude(objects(DqNullableName); name__in = String[])) == ["i1", nothing]
+    @test nm(exclude(objects(DqNullableName); name__in = ["i1"])) == [nothing]
+    @test nm(exclude(objects(DqNullableName); name__in = ["i3"])) == ["i1", nothing]
+    @test nm(exclude(objects(DqNullableName); name__in = values_list(filter(DqNullableName; name = "i1"), :name))) == [nothing]
+    # test_col_not_in_list_containing_null
+    @test nm(exclude(objects(DqNullableName); name__in = [nothing])) == ["i1"]
+    # test_double_exclude
+    @test nm(filter(objects(DqNullableName), ~~Q(name = "i1"))) == nm(filter(objects(DqNullableName), Q(name = "i1")))
+    @test !occursin("IS NOT NULL", first(Juango.select_sql(filter(objects(DqNullableName), ~~Q(name = "i1")))))
+  end
+  port_block() do
+    # EmptyStringsAsNullTest
+    nc = create(DqNamedCategory; name = "")
+    @test [x.pk for x in exclude(objects(DqNamedCategory); name__in = ["nonexistent"])] == [nc.pk]
+    @test (try [x.pk for x in exclude(objects(DqDumbCategory); dqnamedcategory__name__in = ["nonexistent"])] catch err; err end) == [nc.pk]
+    foo = create(DqNamedCategory; name = "foo")
+    @test [x.pk for x in exclude(objects(DqNamedCategory); name = "")] == [foo.pk]
+  end
+  # QuerySetExceptionTests
+  tr(f) = try f() catch err; err end
+  @test tr(() -> collect(order_by(objects(DqArticle), "*"))) isa Exception
+  @test tr(() -> collect(order_by(values(objects(DqItem), :creator__name), "dq_author.name"))) isa Exception
+  @test tr(() -> collect(filter(DqAuthor; extra = objects(DqArticle)))) isa Exception
+end
+
+@testset "django queries: to_field (Queries1Tests.test_tickets_4088_4306, ToFieldTests)" begin
+  port_block() do
+    d = dq_data()
+    tn(qs) = try [x.name for x in qs] catch err; err end
+    tr(f) = try f() catch err; err end
+    # test_tickets_4088_4306: Report.creator stores the author's num
+    @test tn(filter(DqReport; creator = 1001)) == ["r1"] && tn(filter(DqReport; creator__num = 1001)) == ["r1"]
+    @test tn(filter(DqReport; creator__id = 1001)) == String[] && tn(filter(DqReport; creator__id = d.a1.id)) == ["r1"]
+    @test tn(filter(DqReport; creator__name = "a1")) == ["r1"] && tn(filter(DqAuthor; report__name = "r1")) == ["a1"]
+    @test get(DqReport; name = "r1").creator_id == 1001 && get(DqReport; name = "r1").creator.name == "a1"
+    @test tn(order_by(select_related(filter(DqReport; creator__isnull = false), :creator), "name")) == ["r1", "r2"] &&
+          first(order_by(select_related(objects(DqReport), :creator), "name")).creator.num == 1001
+    @test Set(x.name for x in prefetch_related(objects(DqAuthor), :report) for r in x.report) == Set(["a1", "a3"])
+    @test [x.name for x in d.a1.report] == ["r1"]
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    meals(qs) = try Set(x.meal for x in qs) catch err; err end
+    apple = create(DqFood; name = "apple"); pear = create(DqFood; name = "pear")
+    lunch = create(DqEaten; food = apple, meal = "lunch"); dinner = create(DqEaten; food = pear, meal = "dinner")
+    @test lunch.food_id == "apple" && get(DqEaten; meal = "lunch").food.name == "apple"
+    # test_in_query, test_in_subquery, test_reverse_in, test_single_object(_reverse)
+    @test meals(filter(DqEaten; food__in = [apple, pear])) == Set(["lunch", "dinner"])
+    @test meals(filter(DqEaten; food__in = filter(DqFood; name = "apple"))) == Set(["lunch"])
+    @test tr(() -> Set(x.name for x in filter(DqFood; eaten__in = filter(DqEaten; meal = "lunch")))) == Set(["apple"])
+    @test tr(() -> Set(x.name for x in filter(DqFood; eaten__in = [lunch, dinner]))) == Set(["apple", "pear"])
+    @test meals(filter(DqEaten; food = apple)) == Set(["lunch"]) && tr(() -> [x.name for x in filter(DqFood; eaten = lunch)]) == ["apple"]
+    # cascades and SET_NULL follow the to_field
+    delete!(apple)
+    @test get(DqEaten; meal = "lunch").food_id === nothing
+  end
+  port_block() do
+    # test_recursive_fk(_reverse)
+    node1 = create(DqNode; num = 42); node2 = create(DqNode; num = 1, parent = node1)
+    @test [x.num for x in filter(DqNode; parent = node1)] == [1] && [x.num for x in filter(DqNode; node = node2)] == [42]
+    @test get(DqNode; num = 1).parent_id == 42 && get(DqNode; num = 1).parent.num == 42
+  end
+end
+
+@testset "django queries: NullJoinPromotionOrTest (the rows; Django's join types are its own)" begin
+  port_block() do
+    tn(qs) = try [x.name for x in qs] catch err; err end
+    d1 = create(DqModelD; name = "foo"); d2 = create(DqModelD; name = "bar")
+    a1 = create(DqModelA; name = "a1", d = d1)
+    c = create(DqModelC; name = "c"); b = create(DqModelB; name = "b", c = c)
+    a2 = create(DqModelA; name = "a2", b = b, d = d2)
+    # test_ticket_17886: an OR across a nullable relation keeps the rows the other branches match
+    @test tn(filter(objects(DqModelA), Q(d__name = "foo") | Q(b__name = "foo") | Q(b__c__name = "foo"))) == ["a1"]
+    # test_isnull_filter_promotion
+    A = objects(DqModelA)
+    @test tn(filter(A, Q(b__name__isnull = true))) == ["a1"] && tn(filter(A, ~Q(b__name__isnull = true))) == ["a2"]
+    @test tn(filter(A, ~~Q(b__name__isnull = true))) == ["a1"] && tn(filter(A, Q(b__name__isnull = false))) == ["a2"]
+    @test tn(filter(A, ~Q(b__name__isnull = false))) == ["a1"] && tn(filter(A, ~~Q(b__name__isnull = false))) == ["a2"]
+    # test_null_join_demotion
+    @test tn(filter(A, Q(b__name__isnull = false) & Q(b__name__isnull = true))) == String[]
+    @test Set(tn(filter(A, Q(b__name__isnull = false) | Q(b__name__isnull = true)))) == Set(["a1", "a2"])
+  end
+  port_block() do
+    # test_xor_promotion, test_negated_xor_promotion
+    fk1 = create(DqFK1; f1 = "match", f2 = "value")
+    with_rel = create(DqBaseA; a = fk1); without = create(DqBaseA)
+    ids(qs) = try [x.pk for x in order_by(qs, "pk")] catch err; err end
+    B = objects(DqBaseA)
+    @test ids(filter(B, xor(Q(a__f1__isnull = false), Q(pk = without.pk)))) == [with_rel.pk, without.pk]
+    @test ids(filter(B, xor(Q(a__f1 = "match"), Q(a__f2 = "other")))) == [with_rel.pk]
+    @test ids(filter(B, ~xor(Q(a__f1__isnull = true), Q(pk = without.pk)))) == [with_rel.pk, without.pk]
+    @test ids(filter(B, ~xor(~Q(a__f1__isnull = false), Q(pk = without.pk)))) == [with_rel.pk, without.pk]
+  end
+  port_block() do
+    # test_ticket_21366
+    n = create(DqNote; note = "n", misc = "m"); e = create(DqExtraInfo; info = "info", note = n)
+    a = create(DqAuthor; name = "Author1", num = 1, extra = e); create(DqRanking; rank = 1, author = a)
+    r1 = create(DqReport; name = "Foo", creator = a); r2 = create(DqReport; name = "Bar"); create(DqReport; name = "Bar", creator = a)
+    @test [x.pk for x in order_by(filter(objects(DqReport), Q(creator__ranking__isnull = true) | Q(creator__ranking__rank = 1, name = "Foo")), "name")] == [r2.pk, r1.pk]
+  end
+  port_block() do
+    # test_ticket_21748 and the double-negated variants
+    tn(qs) = try [x.name for x in qs] catch err; err end
+    i1 = create(DqIdentifier; name = "i1"); i2 = create(DqIdentifier; name = "i2"); i3 = create(DqIdentifier; name = "i3")
+    p1 = create(DqProgram; identifier = i1); c1 = create(DqChannel; identifier = i1); p2 = create(DqProgram; identifier = i2)
+    I = objects(DqIdentifier)
+    @test tn(filter(I; program = nothing, channel = nothing)) == ["i3"]
+    @test tn(order_by(exclude(I; program = nothing, channel = nothing), "name")) == ["i1", "i2"]
+    @test tn(order_by(exclude(I, ~Q(program__id = p1.id, channel__id = c1.id)), "pk")) == tn(order_by(filter(I; program__id = p1.id, channel__id = c1.id), "pk")) == ["i1"]
+    @test tn(order_by(exclude(I, ~(Q(program__id = p2.id, channel__id = c1.id) | Q(program__id = p1.id))), "pk")) ==
+          tn(order_by(filter(I, Q(program__id = p2.id, channel__id = c1.id) | Q(program__id = p1.id)), "pk")) == ["i1"]
+  end
+end
+
+@testset "values() + aggregate over a relation the filter crossed (#225)" begin
+  port_block() do
+    d = dq_data()
+    q = annotate(values(filter(DqAuthor; item__name__in = ["one", "two", "three"], item__note__note = "n3"), :item__name); n = Count(:id; distinct = true))
+    sql = first(Juango.select_sql(q))
+    @test length(collect(eachmatch(r"JOIN [`\"]dq_item[`\"]", sql))) == 1          # the filter's join, in SELECT and GROUP BY alike
+    @test Dict(r[:item__name] => r[:n] for r in q) == Dict("one" => 1, "three" => 1)
   end
 end

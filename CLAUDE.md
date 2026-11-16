@@ -6,8 +6,9 @@ A Django-style web framework in Julia. Roadmap: GitHub issues on mcvmcv/Juango.
 
 - **Never run more than one test suite at a time.** `test/runtests.jl` already runs three
   groups of files in parallel (`JUANGO_TEST_JOBS`, default 3); each process peaks at about
-  1-1.5 GB, about 4.5 GB in all. Test the databases one after another, never in parallel, and don't raise
-  `JUANGO_TEST_JOBS` without asking.
+  1-1.5 GB, about 4.5 GB in all. Test the databases one after another, never in parallel. When the machine is
+  otherwise idle (no other Julia process, 9 GB+ free), `JUANGO_TEST_JOBS=4` under a 6G cap is allowed; don't
+  go higher without asking.
 - **Cap every run** so it can't take the machine down (the cap covers the child processes):
 
       systemd-run --user --scope -q -p MemoryMax=5G -p MemorySwapMax=0 \

@@ -59,6 +59,8 @@ mutable struct Field
     related_query_name::Union{Nothing,Symbol}   # the reverse side's name in lookups (default: related_name, else the model's name)
     error_messages::Union{Nothing,Dict{String,String}}   # code => message, overriding the built-in ones ("required", "invalid", ...)
     db_collation::Union{Nothing,String}   # CharField/TextField: the column's collation
+    db_column::Union{Nothing,String}      # the column's name when it isn't the attribute's (Django's db_column, #212)
+    to_field::Union{Nothing,Symbol}       # ForeignKey: the related model's unique field it stores (default: its id, #220)
     att::Symbol         # attname for the name in `attfor` (see `attname`)
     col::String         # string(att): the column name
     attfor::Symbol      # the name `att` and `col` were worked out for
@@ -73,7 +75,8 @@ function refresh_att!(f)
     name = getfield(f, :name)
     a = field_att(getfield(f, :kind), name)
     setfield!(f, :att, a)
-    setfield!(f, :col, string(a))
+    dc = getfield(f, :db_column)
+    setfield!(f, :col, dc === nothing ? string(a) : dc)
     setfield!(f, :attfor, name)
     a
 end
@@ -234,7 +237,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                max_digits = nothing, decimal_places = nothing, unique_for_date = nothing, unique_for_month = nothing,
                unique_for_year = nothing, template_name = nothing, related_query_name = nothing, error_messages = nothing,
                min_value = nothing, max_value = nothing, step_size = nothing, min_length = nothing,
-               input_formats = nothing, localize::Bool = false, db_collation = nothing)
+               input_formats = nothing, localize::Bool = false, db_collation = nothing, db_column = nothing, to_field = nothing)
     required === nothing || (blank = !required)
     # form fields: the date formats to accept, and numbers typed in the language's format ("1.234,5")
     if input_formats !== nothing || localize
@@ -264,7 +267,8 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           template_name === nothing ? nothing : string(template_name),
           related_query_name === nothing ? nothing : Symbol(related_query_name),
           error_messages === nothing ? nothing : Dict{String,String}(string(k) => string(v) for (k, v) in error_messages),
-          db_collation === nothing ? nothing : string(db_collation),
+          db_collation === nothing ? nothing : string(db_collation), db_column === nothing ? nothing : string(db_column),
+          to_field === nothing || to_field in (:id, :pk, "id", "pk") ? nothing : Symbol(to_field),
           field_att(kind, :_), string(field_att(kind, :_)), :_)
 end
 
@@ -431,6 +435,8 @@ DurationField(; kw...) = Field(:duration; kw...)
 
 `Model` may be a type, `:self`, or a `Symbol` naming a model defined later.
 `on_delete` is one of `:CASCADE`, `:SET_NULL`, `:PROTECT`, `:DO_NOTHING`.
+`to_field = :barcode` stores the related row's `barcode` (a unique field) instead of its id, as
+Django's `to_field`: `filter(Well; plate = "P-0001")` then compares barcodes.
 """
 function ForeignKey(to; on_delete = :CASCADE, kw...)
     f = Field(:fk; related = to, on_delete = on_delete, db_index = true, kw...)

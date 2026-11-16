@@ -373,6 +373,9 @@ function to_julia(fld::Field, raw)
             v = v2
         end
         return v, nothing
+    elseif k === :fk && fld.to_field !== nothing           # the to_field's value is submitted (#220)
+        obj = first(filter(objects(related_model(fld)), Q(fld.to_field => s)))
+        return obj, obj === nothing ? gettext("Select a valid choice. That choice is not one of the available choices.") : nothing
     elseif k === :fk
         id = parse_pk(related_model(fld), s)
         obj = id === nothing ? nothing : first(filter(objects(related_model(fld)); id = id))
@@ -772,7 +775,7 @@ function widget_html(bf::BoundField)
         print(io, "</select>")
         return String(take!(io))
     elseif fld.kind === :fk || fld.choices !== nothing || fld.kind === :filepath
-        groups = fld.kind === :fk ? [(nothing, Pair{Any,Any}[o.id => string(o) for o in objects(related_model(fld))])] :
+        groups = fld.kind === :fk ? [(nothing, Pair{Any,Any}[target_value(fld, o) => string(o) for o in objects(related_model(fld))])] :
                  fld.kind === :filepath ? [(nothing, filepath_choices(fld))] : choice_groups(fld)
         io = IOBuffer()
         print(io, "<select$attrs>")
@@ -838,7 +841,8 @@ function choice_options(fld::Field)
         sp = fld.related
         return Pair{String,String}[string(choice_key(sp, o)) => instance_label(sp, o) for o in choice_queryset(sp)]
     end
-    (k === :m2m || k === :fk) && return Pair{String,String}[string(o.id) => string(o) for o in objects(related_model(fld))]
+    k === :fk && return Pair{String,String}[string(target_value(fld, o)) => string(o) for o in objects(related_model(fld))]
+    k === :m2m && return Pair{String,String}[string(o.id) => string(o) for o in objects(related_model(fld))]
     k === :filepath && return Pair{String,String}[string(c.first) => string(c.second) for c in filepath_choices(fld)]
     fld.choices === nothing && return Pair{String,String}[]
     Pair{String,String}[string(c.first) => string(c.second) for (_, opts) in choice_groups(fld) for c in opts]

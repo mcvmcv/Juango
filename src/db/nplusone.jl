@@ -145,8 +145,8 @@ Base.@nospecializeinfer function auto_prefetch!(@nospecialize(objs::Vector), f, 
     ids = unique(Any[field_data(o, a) for o in need])
     isempty(ids) && return
     byid = Dict{Any,Any}()
-    for r in with_db(() -> fetch(filter(base_objects(related_model(f)); id__in = ids)), db)
-        byid[(getfield(r, :_data)::Dict{Symbol,Any})[:id]] = r
+    for r in with_db(() -> fetch(filter(base_objects(related_model(f)); (Symbol(target_name(f), "__in") => ids,)...)), db)
+        byid[target_value(f, r)] = r
     end
     for o in need
         r = get(byid, field_data(o, a), nothing)

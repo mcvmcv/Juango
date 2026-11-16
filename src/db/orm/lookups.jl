@@ -18,6 +18,7 @@ struct Q
 end
 Q(; kw...) = Q(:AND, Any[k => v for (k, v) in kw], false)
 Q(p::Pair) = Q(:AND, Any[Symbol(p.first) => p.second], false)
+Q(q::Q) = Q(:AND, Any[q], false)
 Base.:|(a::Q, b::Q) = Q(:OR, Any[a, b], false)
 Base.:&(a::Q, b::Q) = Q(:AND, Any[a, b], false)
 Base.:!(a::Q) = Q(a.connector, a.children, !a.negated)
@@ -100,6 +101,23 @@ end
 unregister_lookup(name) = (delete!(CUSTOM_LOOKUPS, string(name)); delete!(CUSTOM_TRANSFORMS, string(name)); nothing)
 
 is_lookup_name(s) = s in LOOKUPS || haskey(CUSTOM_LOOKUPS, s)
+
+"Similarity of two names, as Python's difflib ratio: twice the longest common subsequence over the total length."
+function name_ratio(a::AbstractString, b::AbstractString)
+    x, y = collect(a), collect(b)
+    L = zeros(Int, length(x) + 1, length(y) + 1)
+    for i in 1:length(x), j in 1:length(y)
+        L[i+1, j+1] = x[i] == y[j] ? L[i, j] + 1 : max(L[i, j+1], L[i+1, j])
+    end
+    2 * L[end, end] / max(1, length(x) + length(y))
+end
+
+"The lookup or transform names closest to a misspelled one (Django's \"perhaps you meant startswith?\")."
+function suggest_lookup(name::AbstractString)
+    names = union(LOOKUPS, keys(CUSTOM_LOOKUPS), keys(CUSTOM_TRANSFORMS), keys(DATE_TRANSFORMS))
+    scored = sort!([(name_ratio(name, n), n) for n in names if name_ratio(name, n) >= 0.6]; rev = true)
+    isempty(scored) ? "" : ", perhaps you meant " * join(last.(scored[1:min(end, 2)]), " or ") * "?"
+end
 
 "Apply registered transforms `names` to `col` of kind `kind`: `(sql, kind)`, or `nothing` if one doesn't apply."
 function apply_transforms(col::String, kind, names)

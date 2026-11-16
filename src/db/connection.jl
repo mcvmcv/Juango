@@ -203,10 +203,10 @@ lets tables reference each other in any order.
 inline_foreign_keys(::DatabaseBackend) = false
 
 "ALTER TABLE statement adding a foreign key constraint. Arguments are unquoted names."
-function foreign_key_sql(b::DatabaseBackend, table, col, reftable)
-    name = constraint_name(table, col, "fk", reftable, "id")
+function foreign_key_sql(b::DatabaseBackend, table, col, reftable, refcol = "id")
+    name = constraint_name(table, col, "fk", reftable, refcol)
     "ALTER TABLE $(quote_name(b, table)) ADD CONSTRAINT $(quote_name(b, name)) FOREIGN KEY ($(quote_name(b, col))) " *
-    "REFERENCES $(quote_name(b, reftable)) ($(quote_name(b, "id"))) DEFERRABLE INITIALLY DEFERRED"
+    "REFERENCES $(quote_name(b, reftable)) ($(quote_name(b, refcol))) DEFERRABLE INITIALLY DEFERRED"
 end
 
 "A constraint or index name of at most 63 bytes (Postgres's limit), stable across runs."

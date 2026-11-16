@@ -26,10 +26,11 @@ struct QuerySet{T<:Model}
     annotated_after::Dict{Symbol,Int}              # annotation => filter() calls before it (it reuses their joins)
     values_mode::Symbol                            # values() rows: :dict; values_list: :tuple, :named or :flat
     group_fields::Union{Nothing,Vector{String}}    # values(...) |> annotate(aggregate): the GROUP BY it fixed (#201)
+    aliases::Vector{Symbol}                        # annotations made by alias(): usable, not selected (#207)
 end
 QuerySet{T}(where, order, limit, offset, isnone) where {T} =
     QuerySet{T}(where, order, limit, offset, isnone, Vector{Symbol}[], Prefetch[], nothing, nothing,
-                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing, Dict{Symbol,Int}(), :dict, nothing)
+                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing, Dict{Symbol,Int}(), :dict, nothing, Symbol[])
 
 """
     using_db(qs, "replica")
@@ -169,8 +170,19 @@ function Base.filter(@nospecialize(qs::QuerySet), qargs::Union{Q,Expression}...;
     assert_uncombined(qs, "filter")
     (isempty(qargs) && isempty(kw)) && return chain(qs)
     w = copy(qs.where)
-    push!(w, Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], false))
-    chain(qs; where = w)
+    q = Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], false)
+    push!(w, q)
+    # a condition that can't match (id__in = []): no rows, without a query, as Django's EmptyResultSet (#224)
+    chain(qs; where = w, isnone = qs.isnone || cannot_match(q))
+end
+"Whether a condition can never match: an `__in` with no values, in an AND, or in every branch of an OR."
+function cannot_match(q::Q)
+    q.negated && return false               # (NOT of an impossible condition matches every row)
+    q.connector === :XOR && return false
+    kids = Bool[ch isa Q ? cannot_match(ch) :
+                ch isa Pair && endswith(string(ch.first), "__in") && ch.second isa Union{AbstractArray,Tuple,AbstractSet} &&
+                all(v -> v === nothing, ch.second) for ch in q.children]
+    q.connector === :OR ? !isempty(kids) && all(kids) : any(kids)
 end
 Base.filter(@nospecialize(T::Type{<:Model}), qargs::Union{Q,Expression}...; kw...) = filter(objects(T), qargs...; kw...)
 Base.filter(qargs::Union{Q,Expression}...; kw...) = qs -> filter(qs, qargs...; kw...)
@@ -195,12 +207,28 @@ either matches (an OR of their conditions, not a UNION), `&` those both match. T
 the left queryset's ordering, annotations and options. Sliced and combined (union) querysets,
 and a values() queryset with a model one, can't be combined.
 """
+# qs1 | qs2[1:1]: a sliced queryset takes part as `pk__in` its rows, as Django's | and ^ do
+unslice_for_combining(@nospecialize(q::QuerySet)) = (q.limit === nothing && q.offset == 0) || q.isnone ? q :
+    filter(base_objects(model_of(q)); pk__in = q)
 function Base.:|(a::QuerySet, b::QuerySet)
+    sa, sb = unslice_for_combining(a), unslice_for_combining(b)
+    sa === a || (sa = chain(sa; order = a.order))         # (the left side's ordering stays)
+    a, b = sa, sb
     check_combinable(a, b, "|")
     (a.isnone || b.isnone) && return a.isnone ? b : a
     (isempty(a.where) || isempty(b.where)) && return chain(a; where = Q[])          # one matches every row
-    either = Q(:OR, Any[Q(:AND, Any[a.where...], false), Q(:AND, Any[b.where...], false)], false)
+    either = Q(:OR, Any[Q(:SCOPES, Any[a.where...], false), Q(:SCOPES, Any[b.where...], false)], false)
     chain(a; where = Q[either])
+end
+"qs1 ⊻ qs2: the rows exactly one of them matches (Django's ^)."
+function Base.xor(a::QuerySet, b::QuerySet)
+    sa, sb = unslice_for_combining(a), unslice_for_combining(b)
+    sa === a || (sa = chain(sa; order = a.order))
+    a, b = sa, sb
+    check_combinable(a, b, "xor")
+    a.isnone && return b
+    b.isnone && return a
+    chain(a; where = Q[xor(Q(:SCOPES, Any[a.where...], false), Q(:SCOPES, Any[b.where...], false))])
 end
 function Base.:&(a::QuerySet, b::QuerySet)
     check_combinable(a, b, "&")
@@ -240,7 +268,7 @@ end
 Order the results. Prefix with `-` for descending, `\"?\"` for random order.
 """
 order_by(@nospecialize(qs::QuerySet), fields...) =
-    chain(qs; order = isempty(fields) ? Any[NO_ORDER] : Any[order_item(f) for f in fields])
+    (assert_unsliced(qs, "order_by"); chain(qs; order = isempty(fields) ? Any[NO_ORDER] : Any[order_item(f) for f in fields]))
 order_by(@nospecialize(T::Type{<:Model}), fields...) = order_by(objects(T), fields...)
 order_by(fields::Union{AbstractString,Symbol}...) = qs -> order_by(qs, fields...)
 
@@ -255,7 +283,7 @@ An ordering term that ends at a foreign key (`"author"`, `"-note"`), as Django o
 related model's Meta.ordering (`"-note__note"`), each term's direction flipped for `-`; by the key
 itself when that model has no ordering. Other terms are returned as they are.
 """
-function expand_fk_ordering(@nospecialize(T::Type), o::AbstractString, depth::Int = 0)
+function expand_fk_ordering(@nospecialize(T::Type), o::AbstractString, depth::Int = 0, seen::Vector{Any} = Any[])
     desc = startswith(o, "-")
     path = lstrip(o, '-')
     segs = split(path, "__")
@@ -268,12 +296,14 @@ function expand_fk_ordering(@nospecialize(T::Type), o::AbstractString, depth::In
     end
     R = M
     ord = modelmeta(R).ordering
-    (isempty(ord) || depth > 4 || !all(x -> x isa AbstractString, ord)) && return [String(o)]
+    (isempty(ord) || !all(x -> x isa AbstractString, ord)) && return [String(o)]
+    # LoopX ordered by y, LoopY by x: Django's "Infinite loop caused by ordering"
+    R in seen && throw(LookupError("infinite loop caused by ordering: $(nameof(T)) by '$path' comes back to $(nameof(R))'s Meta(ordering)"))
     out = String[]
     for r in ord
         rdesc = startswith(r, "-")
         term = (desc ⊻ rdesc ? "-" : "") * path * "__" * lstrip(r, '-')
-        append!(out, expand_fk_ordering(T, term, depth + 1))
+        append!(out, expand_fk_ordering(T, term, depth + 1, Any[seen; R]))
     end
     out
 end
@@ -300,7 +330,12 @@ function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true,
         o == "?" && (push!(parts, random_function(backend())); continue)
         desc = startswith(o, "-")
         if haskey(c.annotations, Symbol(lstrip(o, '-'))) && !is_filtered_relation(c.annotations[Symbol(lstrip(o, '-'))])
-            push!(parts, qname(lstrip(o, '-')) * (desc ? " DESC" : " ASC"))
+            if Symbol(lstrip(o, '-')) in c.alias_names        # alias(): not selected, so its expression
+                sql, aps = compile_expr(c, F(lstrip(o, '-')))
+                push!(parts, sql * (desc ? " DESC" : " ASC")); append!(ps, aps)
+            else
+                push!(parts, qname(lstrip(o, '-')) * (desc ? " DESC" : " ASC"))
+            end
             continue
         end
         segs = split(lstrip(o, '-'), "__")
@@ -315,9 +350,16 @@ function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true,
                 push!(parts, json_order_sql(backend(), qcol(field_alias!(c, alias, M, f), column(f)), String.(segs[i+1:end]), desc))
                 @goto next_order
             end
-            (f !== nothing && f.kind === :fk) || throw(LookupError("cannot order $T by '$o': '$s' is not a foreign key of $M"))
+            if f === nothing || f.kind !== :fk
+                # a reverse relation or a many-to-many (order_by("article__headline")): joined as values() joins
+                # it, one row per related row, as Django (#209)
+                f === nothing || throw(LookupError("cannot order $T by '$o': '$s' is not a relation of $M"))
+                col = first(resolve_path(c, alias, M, join(segs[i:end], "__")))
+                alias = ""
+                @goto ordered_col
+            end
             alias = field_alias!(c, alias, M, f)
-            alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, "id", column(f); left = true)
+            alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, target_column(f), column(f); left = true)
             M = related_model(f)
         end
         name = segs[end]
@@ -331,10 +373,16 @@ function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true,
             qcol(alias, "id")
         else
             f = findfield(modelmeta(M), Symbol(name))
-            f === nothing && throw(LookupError("cannot order $T by unknown field '$o'"))
-            alias = field_alias!(c, alias, M, f)
-            qcol(alias, column(f))
+            if f === nothing           # order_by("categoryitem"): a reverse relation, by the related row's key
+                rc = first(resolve_path(c, alias, M, name))
+                alias = ""
+                rc
+            else
+                alias = field_alias!(c, alias, M, f)
+                qcol(alias, column(f))
+            end
         end
+        @label ordered_col
         if (alias != c.base && c.distinct) || add_cols
             push!(extra, "$col AS $(qname("__order$(length(extra) + 1)"))")
         end
@@ -370,12 +418,12 @@ function related_columns!(c::SQLCompiler, paths)
             if f === nothing                      # reverse one-to-one: LEFT JOIN other.fk = this.id
                 _, R, rf = reverse_one_to_one(M, s)
                 left = true
-                alias = join!(c, alias, (alias, s, :rev), modelmeta(R).table, column(rf), "id"; left = true)
+                alias = join!(c, alias, (alias, s, :rev), modelmeta(R).table, column(rf), target_column(rf); left = true)
                 M = R
             else
                 left = left || f.null
                 alias = field_alias!(c, alias, M, f)
-                alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, "id", column(f); left = left)
+                alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, target_column(f), column(f); left = left)
                 M = related_model(f)
             end
             sub = path[1:i]
@@ -416,6 +464,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     for (k, v) in qs.annotations
         c.annotations[k] = v
     end
+    union!(c.alias_names, qs.aliases)
     grouped = any(p -> contains_aggregate(p.second), qs.annotations)
     # WHERE is compiled first, so values() and annotations can reuse its joins (its SQL still goes after them)
     # WHERE, HAVING for conditions on aggregate annotations, or an outer WHERE for window ones
@@ -468,7 +517,9 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
                     a = c.annotations[Symbol(f)]
                     is_filtered_relation(a) || aggregating(a, qs.annotations) || push!(group, qname(f))
                 else
+                    c.reuse_upto = length(qs.where)    # the filter's join, as the SELECT uses it (#225)
                     push!(group, first(resolve_path(c, c.base, T, f)))
+                    c.reuse_upto = 0
                 end
             end
         end
@@ -506,7 +557,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
                             [lstrip(o, '-') for o in qs.order if o isa AbstractString],
                             [o.expr.name for o in qs.order if o isa OrderBy && o.expr isa F]))
     for (k, v) in qs.annotations
-        is_filtered_relation(v) && continue
+        (is_filtered_relation(v) || k in qs.aliases) && continue           # alias(): not selected, not grouped by
         vsel === nothing || string(k) in vsel || contains_window(v) || continue      # (a window one may be filtered on, outside)
         # ordered by but neither asked for nor an aggregate: grouped by too, as Django adds it
         if vsel !== nothing && (grouped || qs.group_fields !== nothing) && !aggregating(v, qs.annotations) && !(string(k) in qs.values_fields) &&
@@ -568,7 +619,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     # distinct(values(:misc)) ordered by note: the ordering's columns are selected too (and rows are distinct
     # over them), as Django does; PostgreSQL requires it, and the rows leave them out
     o, extra, ops_order = ordered ? order_clause(c, qs.order; meta_ordering = !grouped && !(distinct && qs.values_fields !== nothing),
-                                                 add_cols = distinct && qs.values_fields !== nothing && columns === nothing && !idonly) :
+                                                 add_cols = distinct && columns === nothing && !idonly) :
                                     ("", String[], Any[])
     (columns === nothing && !idonly && !grouped) && append!(sel, extra)
     gps = grouped ? Any[x for g in unique(group) for x in get(group_ps, g, Any[])] : Any[]
@@ -731,7 +782,7 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
         objs[i] = set_instance_db!(from_row(T, rows[i], plan))
     end
     for (k, v) in qs.annotations
-        is_filtered_relation(v) && continue
+        (is_filtered_relation(v) || k in qs.aliases) && continue
         of = typed_output(T, v)
         for (o, r) in zip(objs, rows)
             (getfield(o, :_data)::Dict{Symbol,Any})[k] = expr_value(T, v, get(r, k, nothing), of)
@@ -770,13 +821,15 @@ Base.@nospecializeinfer function fetch_values(@nospecialize(qs::QuerySet))
     T = model_of(qs)
     qs.isnone && return Dict{Symbol,Any}[]
     sql, ps, c, _ = build_select(qs)
+    # a union's rows: the annotations are its parts' (the first's, as the columns are)
+    anns = qs.combinator === nothing ? qs.annotations : first(qs.combinator[2]).annotations
     convs = Dict{Symbol,Any}()
     for f in qs.values_fields
-        haskey(c.annotations, Symbol(f)) && continue
+        (haskey(c.annotations, Symbol(f)) || any(p -> p.first === Symbol(f), anns)) && continue
         _, fld = resolve_path(SQLCompiler(T), modelmeta(T).table, T, f)
         fld === nothing || (convs[Symbol(f)] = fld)
     end
-    outs = Dict{Symbol,Union{Nothing,Field}}(k => typed_output(T, v) for (k, v) in qs.annotations if !is_filtered_relation(v))
+    outs = Dict{Symbol,Union{Nothing,Field}}(k => typed_output(T, v) for (k, v) in anns if !is_filtered_relation(v))
     out = Dict{Symbol,Any}[]
     for r in execute(sql, ps)
         d = Dict{Symbol,Any}()
@@ -785,7 +838,7 @@ Base.@nospecializeinfer function fetch_values(@nospecialize(qs::QuerySet))
             v = get(r, k, nothing)
             d[k] = haskey(convs, k) ? from_db(convs[k], v) : v
         end
-        for (k, v) in qs.annotations                     # only those asked for (#201)
+        for (k, v) in anns                               # only those asked for (#201)
             is_filtered_relation(v) || !haskey(d, k) || (d[k] = expr_value(T, v, get(r, k, nothing), outs[k]))
         end
         push!(out, d)
@@ -821,8 +874,8 @@ Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), na
     if f !== nothing && f.kind === :fk && f.name === name
         R = related_model(f)
         ids = unique([field_data(o, attname(f)) for o in objs if field_data(o, attname(f)) !== nothing])
-        rel = isempty(ids) ? R[] : fetch(filter(something(qs, base_objects(R)); id__in = ids))
-        byid = Dict(r.id => r for r in rel)
+        rel = isempty(ids) ? R[] : fetch(filter(something(qs, base_objects(R)); (Symbol(target_name(f), "__in") => ids,)...))
+        byid = Dict(target_value(f, r) => r for r in rel)
         for o in objs
             id = field_data(o, attname(f))
             r = id === nothing ? nothing : get(byid, id, nothing)
@@ -843,14 +896,14 @@ Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), na
     rel = find_reverse(T, string(name))
     rel === nothing && throw(LookupError("prefetch_related: '$name' is not a relation of $T"))
     rn, M, rf = rel
-    ids = [o.id for o in objs]
+    ids = [target_value(rf, o) for o in objs]
     rows = fetch(filter(something(qs, objects(M)), Q(Symbol(attname(rf), "__in") => ids)))
     groups = Dict{Any,Vector{M}}()
     for r in rows
         push!(get!(() -> M[], groups, field_data(r, attname(rf))), r)
     end
     for o in objs
-        (getfield(o, :_cache)::Dict{Symbol,Any})[something(to_attr, rn)] = PrefetchedList(get(groups, o.id, M[]))
+        (getfield(o, :_cache)::Dict{Symbol,Any})[something(to_attr, rn)] = PrefetchedList(get(groups, target_value(rf, o), M[]))
     end
     rows
 end
@@ -904,7 +957,9 @@ Base.@nospecializeinfer truthy(@nospecialize(qs::QuerySet)) = exists(qs)
 
 "Whether the queryset has an ordering, its own or the model's `Meta(ordering)` (Django's `qs.ordered`)."
 Base.@nospecializeinfer is_ordered(@nospecialize(qs::QuerySet)) =
-    !order_cleared(qs) && (!isempty(qs.order) || !isempty(modelmeta(model_of(qs)).ordering))
+    qs.isnone || (!order_cleared(qs) && (!isempty(qs.order) ||
+                  # a grouped query (an aggregate annotation) ignores Meta.ordering, as Django
+                  (!isempty(modelmeta(model_of(qs)).ordering) && !any(p -> contains_aggregate(p.second), qs.annotations))))
 const WARNED_UNORDERED = Set{Tuple{Any,String}}()
 "In DEBUG, warn (once per model and use) that the rows of an unordered queryset come in any order, so pages can overlap or skip rows."
 Base.@nospecializeinfer function warn_unordered(@nospecialize(qs::QuerySet), what::String)
@@ -916,12 +971,23 @@ Base.@nospecializeinfer function warn_unordered(@nospecialize(qs::QuerySet), wha
     @warn "$what an unordered $(nameof(model_of(qs))) queryset: the database may return its rows in any order, so pages can overlap or miss rows. Add order_by(...) or Meta(ordering = ...)."
 end
 
+# `end` in qs[3:end]: from row 3 on, without a limit (Django's qs[2:]); the count isn't known without a query
+const OPEN_END = typemax(Int) >> 4
+Base.lastindex(@nospecialize(qs::QuerySet)) = OPEN_END
 Base.@nospecializeinfer function Base.getindex(@nospecialize(qs::QuerySet), r::AbstractUnitRange{<:Integer})
     first(r) >= 1 || throw(ArgumentError("queryset slices are 1-based"))
     first(r) > 1 && warn_unordered(qs, "Slicing (from row $(first(r)))")
-    n = length(r)
-    qs.limit !== nothing && (n = max(0, min(n, qs.limit - (first(r) - 1))))
-    chain(qs; offset = qs.offset + first(r) - 1, limit = n)
+    open = last(r) >= OPEN_END ÷ 2
+    n = open ? nothing : length(r)
+    qs.limit !== nothing && (n = max(0, min(something(n, typemax(Int)), qs.limit - (first(r) - 1))))
+    # an empty slice (qs[5:4]) has no rows: no query, as Django
+    chain(qs; offset = qs.offset + first(r) - 1, limit = n, isnone = qs.isnone || n == 0)
+end
+"qs[1:2:end]: every second row, as Django's qs[::2] (it runs the query: a step can't be done in SQL)."
+Base.@nospecializeinfer function Base.getindex(@nospecialize(qs::QuerySet), r::StepRange{<:Integer})
+    step(r) > 0 || throw(ArgumentError("queryset slices take a positive step"))
+    rows = fetch(qs[first(r):last(r)])
+    rows[1:step(r):end]
 end
 Base.@nospecializeinfer function Base.getindex(@nospecialize(qs::QuerySet), i::Integer)
     qs.cache === nothing || return qs.cache[i]
@@ -981,6 +1047,7 @@ Leave these fields out of the query; reading one later loads the object's deferr
 with one more query. `defer(qs, nothing)` clears the list.
 """
 function defer(@nospecialize(qs::QuerySet), fields...)
+    qs.values_fields === nothing || throw(ArgumentError("defer() can't follow values() or values_list()"))
     T = model_of(qs)
     fields == (nothing,) && return chain(qs; deferred = Symbol[])
     names = Symbol[Symbol(f) for f in fields]
@@ -995,6 +1062,7 @@ defer(@nospecialize(T::Type{<:Model}), fields...) = defer(objects(T), fields...)
 (Extends `Base.only`.) Load only these fields (and the id); the others are deferred, as with `defer`.
 """
 function Base.only(@nospecialize(qs::QuerySet), field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...)
+    qs.values_fields === nothing || throw(ArgumentError("only() can't follow values() or values_list()"))
     T = model_of(qs)
     keep = Symbol[Symbol(field); Symbol.(collect(fields))]
     check_deferrable(T, keep)
@@ -1046,21 +1114,47 @@ earliest(@nospecialize(T::Type{<:Model}), fields...) = earliest(objects(T), fiel
     in_bulk(qs)                          # Dict id => object
     in_bulk(qs, [1, 2, 3])
     in_bulk(qs, ["a", "b"]; field_name = :slug)
+    in_bulk(values(qs, :headline), ids)  # id => Dict(:headline => ...); values_list rows too
 
-The objects as a `Dict` keyed by `field_name` (which must be unique), optionally limited to
-those keys.
+The objects (or, after `values`/`values_list`, the rows) as a `Dict` keyed by `field_name`, which
+must be unique: `unique = true`, or a single-field `UniqueConstraint` without a condition.
+Optionally limited to those keys. Not for a sliced queryset.
 """
 Base.@nospecializeinfer function in_bulk(@nospecialize(qs::QuerySet), keys = nothing; field_name = :id)
     T = model_of(qs)
     field_name = Symbol(field_name)
+    (qs.limit !== nothing || qs.offset != 0) && throw(ArgumentError("in_bulk can't be used on a sliced queryset (limit or offset)"))
     if !(field_name in (:id, :pk))
         f = findfield(modelmeta(T), field_name)
-        (f !== nothing && f.unique) || throw(ArgumentError("in_bulk's field_name must be a unique field, not '$field_name'"))
+        (f !== nothing && (f.unique || unique_by_constraint(T, field_name))) ||
+            throw(ArgumentError("in_bulk's field_name must be a unique field, not '$field_name'"))
     end
     field_name === :pk && (field_name = :id)
-    keys !== nothing && isempty(keys) && return Dict{Any,T}()
     q = keys === nothing ? qs : filter(qs; Symbol(field_name, "__in") => collect(keys))
+    qs.values_fields === nothing || return in_bulk_values(q, keys, field_name)
+    keys !== nothing && isempty(keys) && return Dict{Any,T}()
     Dict{Any,T}(getproperty(o, field_name) => o for o in fetch(q))
+end
+"A single-field UniqueConstraint without a condition makes the field unique (as Django's in_bulk)."
+Base.@nospecializeinfer unique_by_constraint(@nospecialize(T::Type), name::Symbol) =
+    any(c -> c isa UniqueConstraint && c.fields == [name] && c.condition === nothing, model_constraints(T))
+# in_bulk after values()/values_list(): the rows keyed by the field (read along with them, and left out
+# of them when they didn't name it), as Django 6
+Base.@nospecializeinfer function in_bulk_values(@nospecialize(q::QuerySet), keys, field_name::Symbol)
+    keys !== nothing && isempty(keys) && return Dict{Any,Any}()
+    fields = String.(q.values_fields)
+    added = !(string(field_name) in fields)
+    rows = collect(values(q, vcat(fields, added ? [string(field_name)] : String[])...))
+    out = Dict{Any,Any}()
+    for r in rows
+        k = r[field_name]
+        rest = Any[r[Symbol(f)] for f in fields]
+        out[k] = q.values_mode === :flat ? rest[1] :
+                 q.values_mode === :tuple ? Tuple(rest) :
+                 q.values_mode === :named ? NamedTuple{Tuple(Symbol.(fields))}(Tuple(rest)) :
+                 (added ? (delete!(r, field_name); r) : r)
+    end
+    out
 end
 Base.@nospecializeinfer in_bulk(@nospecialize(T::Type{<:Model}), keys = nothing; kw...) = in_bulk(objects(T), keys; kw...)
 
@@ -1081,6 +1175,9 @@ function distinct_dates(qs::QuerySet, field, kind, order, kinds, what)
     kind = Symbol(kind)
     kind in kinds || throw(ArgumentError("$what: kind must be one of $(join(kinds, ", ")), not :$kind"))
     order in (:asc, :desc) || throw(ArgumentError("$what: order must be :asc or :desc"))
+    f = findfield(modelmeta(model_of(qs)), Symbol(field))
+    (f === nothing || f.kind in (:date, :datetime, :time)) ||
+        throw(ArgumentError("$what: '$field' isn't a DateField, TimeField or DateTimeField"))
     vals = DateTime[]
     for v in values_list(order_by(qs), field; flat = true)
         v === nothing && continue

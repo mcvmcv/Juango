@@ -16,6 +16,7 @@ function column_code(c::Column)
     c.comment === nothing || push!(kw, "comment = " * jl(c.comment))
     c.max_digits === nothing || push!(kw, "max_digits = $(c.max_digits), decimal_places = $(c.decimal_places)")
     c.collation === nothing || push!(kw, "collation = " * jl(c.collation))
+    c.ref_column === nothing || push!(kw, "ref_column = " * jl(c.ref_column))
     "Column($(jl(c.name)), :$(c.kind)" * (isempty(kw) ? ")" : "; " * join(kw, ", ") * ")")
 end
 

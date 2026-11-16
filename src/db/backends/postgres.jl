@@ -90,3 +90,4 @@ function advisory_acquire(::PostgresBackend, name::String, timeout)
 end
 advisory_release(::PostgresBackend, name::String) = nothing
 
+bitwise_sql(::PostgresBackend, op, a, b) = "($a $op $b)"     # # is XOR here (#217)

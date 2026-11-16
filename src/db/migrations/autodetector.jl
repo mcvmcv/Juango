@@ -32,8 +32,7 @@ function detect_changes(g::Graph, app; questioner = ask, deferred = nothing)
         t = get(to, r, nothing)
         (t === nothing || t.app == app || haskey(from, r)) && return c
         deferred === nothing || push!(deferred, (table, c.name, r, t.app))
-        Column(c.name, c.kind, c.null, c.default, c.unique, c.index, c.max_length, nothing, c.of, c.generated,
-               c.comment, c.max_digits, c.decimal_places, c.collation)
+        Juango.with_column(c; references = nothing, ref_column = nothing)
     end
 
     # renamed tables: same columns, different name

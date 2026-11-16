@@ -46,7 +46,7 @@ export Model, @model, @abstract_model, Field, CharField, TextField, EmailField, 
        Decimal, @dec_str, @choices, Choice, ChoiceSet, get_display
 export ContentType, GenericForeignKey, GenericRelation
 # querysets
-export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_list, annotate, aggregate,
+export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_list, annotate, alias, aggregate,
        select_related, prefetch_related, Prefetch, FilteredRelation, defer, distinct, latest, earliest,
        none, in_bulk, dates, datetimes, raw, explain, iterator, select_for_update, intersection,
        difference, create, get_or_create, update_or_create, update!, save!, refresh!, full_clean,
@@ -63,7 +63,8 @@ export F, Value, Count, Sum, Avg, Min, Max, Lower, Upper, Length, Coalesce, Conc
        Extract, ExtractYear, ExtractQuarter, ExtractMonth, ExtractWeek, ExtractWeekDay, ExtractIsoWeekDay,
        ExtractIsoYear, ExtractDay, ExtractHour, ExtractMinute, ExtractSecond, Trunc, TruncYear,
        TruncQuarter, TruncMonth, TruncWeek, TruncDay, TruncDate, TruncTime, TruncHour, TruncMinute,
-       TruncSecond, When, Case, OuterRef, Subquery, Exists, Window, Asc, Desc, RowRange, FirstValue, LastValue, NthValue,
+       TruncSecond, When, Case, OuterRef, Subquery, Exists, RawSQL, ExpressionWrapper, Exact, IExact, GreaterThan, GreaterThanOrEqual, LessThan, LessThanOrEqual, In, Range, IsNull,
+       Contains, IContains, StartsWith, IStartsWith, EndsWith, IEndsWith, Window, Asc, Desc, RowRange, FirstValue, LastValue, NthValue,
        Ntile, PercentRank, CumeDist, JSONObject,
        RowNumber, Rank, DenseRank, Lag, Lead
 # migrations

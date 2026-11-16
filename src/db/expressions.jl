@@ -89,7 +89,7 @@ JSONObject(; kw...) = Func(:jsonobject, Any[x for (k, v) in kw for x in (string(
 "Join values as text (NULL counts as empty)."
 Concat(xs...) = Func(:concat, Any[ref(x) for x in xs])
 "Convert to a field kind: `Cast(:views, :float)`, `Cast(:n, :string)`."
-Cast(x, kind::Symbol) = Func(:cast, Any[ref(x), kind])
+Cast(x, kind::Symbol) = Func(:cast, Any[ref(x), kind === :integer ? :int : kind])
 "The current local date and time (Julia's `now()`, the same clock `auto_now` uses)."
 Now() = Func(:now, Any[])
 
@@ -148,6 +148,7 @@ struct When
     then::Expression
 end
 When(cond::Q; then) = When(cond, lit_expr(then))
+When(cond::Expression; then) = When(as_q(cond), lit_expr(then))     # When(Exists(...)), When(GreaterThan(...))
 When(; then, kw...) = When(Q(; kw...), lit_expr(then))
 
 "`Case(When(...), When(...); default=value)`: SQL CASE WHEN ... END."
@@ -160,8 +161,11 @@ Case(whens::When...; default = nothing) = Case(collect(When, whens), lit_expr(de
 "Inside a `Subquery`/`Exists`, a field of the outer query: `filter(Post; author = OuterRef(:id))`."
 struct OuterRef <: Expression
     name::String
+    nested::Any       # OuterRef(OuterRef(:name)): a field two queries out (#208); nothing otherwise
 end
-OuterRef(s::Symbol) = OuterRef(string(s))
+OuterRef(s::AbstractString) = OuterRef(String(s), nothing)
+OuterRef(s::Symbol) = OuterRef(string(s), nothing)
+OuterRef(o::OuterRef) = OuterRef(o.name, o)
 
 """
     Subquery(qs)
@@ -189,7 +193,95 @@ struct Condition <: Expression
     q::Q
 end
 Base.:!(e::Exists) = Exists(e.qs, !e.negated)
-Base.xor(a::Union{Q,Exists}, b::Union{Q,Exists}, rest::Union{Q,Exists}...) =
+
+"""
+    Exact(lhs, rhs), IExact, GreaterThan, GreaterThanOrEqual, LessThan, LessThanOrEqual, In, Range, IsNull,
+    Contains, IContains, StartsWith, IStartsWith, EndsWith, IEndsWith
+
+A lookup as a boolean expression, for `annotate`, `filter`, `order_by`, `When` and aggregates
+(Django's lookup classes): `annotate(qs; modern = GreaterThan(F(:year), 1900))`,
+`filter(qs, Exact(F(:year), 1942) | GreaterThan(F(:year), 2000))`. Either side may be a field
+(`F`), an expression or a value (#206).
+"""
+struct LookupExpr <: Expression
+    lookup::String
+    lhs::Expression
+    rhs::Any
+end
+for (name, lk) in ((:Exact, "exact"), (:IExact, "iexact"), (:GreaterThan, "gt"), (:GreaterThanOrEqual, "gte"),
+                   (:LessThan, "lt"), (:LessThanOrEqual, "lte"), (:In, "in"), (:Range, "range"), (:IsNull, "isnull"),
+                   (:Contains, "contains"), (:IContains, "icontains"), (:StartsWith, "startswith"),
+                   (:IStartsWith, "istartswith"), (:EndsWith, "endswith"), (:IEndsWith, "iendswith"))
+    @eval $name(lhs, rhs) = LookupExpr($lk, ref(lhs), rhs isa Q ? Condition(rhs) : rhs)    # a name on the left is a field
+end
+
+"""
+    RawSQL(sql, params = []; output = nothing)
+
+An SQL fragment as an expression, with `?` (or Django's `%s`) placeholders for `params`: in
+`annotate`, `filter` (a boolean one), `order_by` (`Desc(RawSQL(...))`) and aggregates. `output`
+(`:bool`, `:int`, `:datetime`, ..., or a field) converts its values. Never put user input in `sql`:
+pass it as a parameter (#215).
+"""
+struct RawSQL <: Expression
+    sql::String
+    params::Vector{Any}
+    output::Any
+end
+RawSQL(sql::AbstractString, params = Any[]; output = nothing) =
+    RawSQL(replace(String(sql), "%s" => "?"), collect(Any, params), output_of(output))
+
+"""
+    ExpressionWrapper(expr; output)
+
+An expression with a given output type (`:duration`, `:bool`, `:datetime`, ... or a field), so its
+values convert: `ExpressionWrapper(F(:start) + F(:estimated_time); output = :datetime)` (#215).
+"""
+struct ExpressionWrapper <: Expression
+    expr::Expression
+    output::Any
+end
+ExpressionWrapper(e; output) = ExpressionWrapper(ref(e), output_of(output))
+output_of(::Nothing) = nothing
+output_of(f) = f
+function output_of(k::Symbol)
+    k === :bool ? BooleanField() : k in (:int, :integer) ? IntegerField() : k === :bigint ? BigIntegerField() :
+    k === :float ? FloatField() : k === :decimal ? DecimalField(max_digits = 65, decimal_places = 15) :
+    k in (:text, :string) ? TextField() : k === :date ? DateField() : k === :datetime ? DateTimeField() :
+    k === :time ? TimeField() : k === :duration ? DurationField() : k === :uuid ? UUIDField() :
+    k === :json ? JSONField() : throw(ArgumentError("output: unknown kind :$k"))
+end
+compile_expr(c::SQLCompiler, e::RawSQL) = ("($(e.sql))", copy(e.params))
+compile_expr(c::SQLCompiler, e::ExpressionWrapper) = compile_expr(c, e.expr)
+contains_aggregate(e::ExpressionWrapper) = contains_aggregate(e.expr)
+contains_window(e::ExpressionWrapper) = contains_window(e.expr)
+bare_refs(e::ExpressionWrapper) = bare_refs(e.expr)
+refs_columns(::RawSQL) = true
+refs_columns(e::ExpressionWrapper) = refs_columns(e.expr)
+
+"`~F(:flag)`, `~Value(false)`: a boolean expression negated (Django's `~F()`, #218)."
+struct NegatedExpr <: Expression
+    expr::Expression
+end
+Base.:~(e::Union{F,Value,Func,Case,Subquery}) = NegatedExpr(e)
+Base.:~(e::NegatedExpr) = e.expr
+Base.:!(e::NegatedExpr) = e.expr
+function compile_expr(c::SQLCompiler, e::NegatedExpr)
+    sql, ps = compile_expr(c, e.expr)
+    "(NOT $(boolean_operand(backend(), sql)))", ps
+end
+boolean_operand(::DatabaseBackend, sql) = "($sql)"
+
+# Conditions combine with & | ~ and xor whatever they are: Q objects, Exists, lookups, a Q's condition
+# (Django's conditional expressions: Q(genre = "poetry") & ~Exists(...), #223)
+const Conditional = Union{Q,Exists,LookupExpr,Condition,NegatedExpr}
+as_q(x::Q) = x
+as_q(x::Expression) = Q(:AND, Any[x], false)
+Base.:&(a::Conditional, b::Conditional) = Q(:AND, Any[as_q(a), as_q(b)], false)
+Base.:|(a::Conditional, b::Conditional) = Q(:OR, Any[as_q(a), as_q(b)], false)
+Base.:!(e::Union{LookupExpr,Condition}) = Q(:AND, Any[e], true)
+Base.:~(e::Union{Exists,LookupExpr,Condition}) = !e
+Base.xor(a::Conditional, b::Conditional, rest::Conditional...) =
     Q(:XOR, Any[c for x in (a, b, rest...) for c in xor_children(x)], false)
 
 "A window function: `RowNumber()`, `Rank()`, `DenseRank()`, `Lag(x)`, `Lead(x)`."
@@ -301,7 +393,7 @@ function compile_order_item(c::SQLCompiler, o; by_alias::Bool = false)
     # its joins and grouping would differ: #219)
     e = ob.expr
     sql, ps = by_alias && e isa F && !occursin("__", e.name) && haskey(c.annotations, Symbol(e.name)) &&
-              !is_filtered_relation(c.annotations[Symbol(e.name)]) ? (qname(e.name), Any[]) : compile_expr(c, e)
+              !(Symbol(e.name) in c.alias_names) && !is_filtered_relation(c.annotations[Symbol(e.name)]) ? (qname(e.name), Any[]) : compile_expr(c, e)
     order_term_sql(backend(), sql, ps, ob.descending, ob.nulls_first)
 end
 order_term_sql(::DatabaseBackend, sql, ps, desc, nf) =
@@ -365,10 +457,17 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
             # data__run__0: a key path inside a JSON field (values, values_list, order_by, F)
             f.kind === :json && !last_ && return json_path_sql(backend(), qcol(alias, column(f)), segs[i+1:end]), f
             if last_ || f.kind !== :fk
-                last_ || throw(LookupError("'$s' is not a relation in '$path'"))
+                last_ && return qcol(alias, column(f)), f
+                # opened__month, finish__date__month: transforms of the field, wherever an F() goes (#205)
+                tr = apply_transforms(qcol(alias, column(f)), f.kind, segs[i+1:end])
+                tr === nothing && throw(LookupError("'$s' is not a relation in '$path', and '$(join(segs[i+1:end], "__"))' isn't a transform of it"))
+                return tr[1], nothing
+            end
+            # author__id (or the to_field's name): the key column itself, no join (as Django)
+            if i == length(segs) - 1 && (segs[end] == string(target_name(f)) || (f.to_field === nothing && segs[end] == "pk"))
                 return qcol(alias, column(f)), f
             end
-            alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, "id", column(f); left = f.null)
+            alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, target_column(f), column(f); left = f.null)
             T = related_model(f)
             continue
         end
@@ -391,7 +490,7 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
         rel = find_reverse(T, s)
         rel === nothing && throw(lookup_error(T, s))
         rn, M, rf = rel
-        alias = join!(c, alias, expr_key(c, alias, rn), modelmeta(M).table, column(rf), "id"; left = true)
+        alias = join!(c, alias, expr_key(c, alias, rn), modelmeta(M).table, column(rf), target_column(rf); left = true)
         T = M
         last_ && return qcol(alias, "id"), nothing
     end
@@ -419,7 +518,7 @@ end
 
 function compile_expr(c::SQLCompiler, e::OuterRef)
     c.outer === nothing && throw(ArgumentError("OuterRef($(repr(e.name))) used outside a Subquery/Exists"))
-    sql, ps = compile_expr(c.outer, F(e.name))
+    sql, ps = e.nested === nothing ? compile_expr(c.outer, F(e.name)) : compile_expr(c.outer, e.nested)
     c.outer.outer_refs === nothing || push!(c.outer.outer_refs, sql)
     sql, ps
 end
@@ -435,10 +534,14 @@ function compile_expr(c::SQLCompiler, e::CombinedExpression)
         sql = temporal_sql(bk, e.op, ka, a, kb, b)
         sql === nothing || return sql, vcat(pa, pb)
     end
+    e.op in ("&", "|", "#", "<<", ">>") && return bitwise_sql(backend(), e.op, a, b), vcat(pa, pb)
     # integers divide as on PostgreSQL and SQLite (37, not MySQL's 37.4444), as Django has them
     e.op == "/" && integer_expr(c, e.lhs) && integer_expr(c, e.rhs) && return int_div_sql(backend(), a, b), vcat(pa, pb)
     "($a $(e.op) $b)", vcat(pa, pb)
 end
+
+"Bitwise operators (#217): `#` is XOR (PostgreSQL's spelling); MySQL's results are unsigned, so made signed, as Django does."
+bitwise_sql(::DatabaseBackend, op, a, b) = op == "#" ? "(($a | $b) - ($a & $b))" : "($a $op $b)"
 
 "Whether an expression's values are integers: an integer field or literal, a count, a sum/min/max of integers, +, -, * and / of integers."
 integer_expr(c::SQLCompiler, @nospecialize(e)) = false
@@ -520,6 +623,9 @@ function compile_expr(c::SQLCompiler, e::Func)
     parts = [compile_expr(c, a) for a in e.args if a isa Expression]
     sqls, ps = first.(parts), reduce(vcat, last.(parts); init = Any[])
     n = e.name
+    # PostgreSQL has MOD only for integers and numeric: other operands go through numeric, as Django casts them
+    n === :mod && b isa PostgresBackend && !all(a -> integer_expr(c, a), e.args) &&
+        return "MOD(CAST($(sqls[1]) AS NUMERIC), CAST($(sqls[2]) AS NUMERIC))", ps
     n === :lower && return "LOWER($(sqls[1]))", ps
     n === :upper && return "UPPER($(sqls[1]))", ps
     n === :length && return "$(length_function(b))($(sqls[1]))", ps
@@ -632,9 +738,16 @@ function subquery_sql(c::SQLCompiler, qs::QuerySet; columns = nothing, idonly = 
     unsliced = qs.limit === nothing && qs.offset == 0
     keep_order = !unsliced || (qs.distinct_fields !== nothing && !isempty(qs.distinct_fields))
     keep_order || (qs = chain(qs; order = Any[NO_ORDER]))
+    # distinct, ordered and sliced: the ordering's columns are selected too (DISTINCT needs them), so the
+    # subquery is wrapped to select only its one column
+    wrap_distinct = !unsliced && qs.distinct_fields !== nothing && columns === nothing && !is_composite(model_of(qs))
+    if idonly && wrap_distinct && qs.values_fields === nothing
+        sql, ps, _, _ = build_select(qs; outer = c)
+        return "SELECT $(qname("id")) FROM ($sql) AS juango_sub", ps
+    end
     sql, ps, _, _ = build_select(qs; columns = columns, outer = c, idonly = idonly)
     if columns === nothing && !idonly && qs.values_fields !== nothing &&
-       any(p -> !is_filtered_relation(p.second) && !(string(p.first) in qs.values_fields), qs.annotations)
+       (wrap_distinct || any(p -> !is_filtered_relation(p.second) && !(string(p.first) in qs.values_fields), qs.annotations))
         sql = "SELECT " * join([qname(f) for f in qs.values_fields], ", ") * " FROM ($sql) AS juango_sub"
     end
     sql, ps
@@ -647,6 +760,19 @@ end
 
 function compile_expr(c::SQLCompiler, e::Condition)
     sql, ps = expr_condition(c, e.q)
+    "($sql)", ps
+end
+
+function compile_expr(c::SQLCompiler, e::LookupExpr)
+    lsql, lps = compile_expr(c, e.lhs)
+    if !isempty(lps)              # a value on the left: a literal number inline, so the left side can repeat (x != y OR x IS NULL)
+        e.lhs isa Value && e.lhs.value isa Real && !(e.lhs.value isa Bool) || throw(ArgumentError(
+            "$(e.lookup) lookup: the left side must be a field, an expression or a number"))
+        lsql, lps = string(e.lhs.value), Any[]
+    end
+    e.lookup == "isnull" && !(e.rhs isa Bool) && throw(ArgumentError("IsNull takes true or false, not $(repr(e.rhs))"))
+    lookup, rhs = e.rhs isa AbstractFloat && integer_expr(c, e.lhs) ? int_float_bound(e.lookup, e.rhs) : (e.lookup, e.rhs)
+    sql, ps = lookup_condition(c, "($lsql)", lookup, rhs, identity)
     "($sql)", ps
 end
 
@@ -716,6 +842,26 @@ Base.@nospecializeinfer function annotate(@nospecialize(qs::QuerySet); kw...)
     chain(qs; annotations = anns, annotated_after = after, values_fields = vf, group_fields = gf)
 end
 Base.@nospecializeinfer annotate(@nospecialize(T::Type{<:Model}); kw...) = annotate(objects(T); kw...)
+
+"""
+    alias(qs; name = expression, ...)
+
+Like `annotate`, a name for an expression that `filter`, `exclude`, `order_by`, `annotate` and
+`update!` can use, but not selected: the rows don't have it (Django's `QuerySet.alias`).
+`filter(alias(objects(Book); n = Count(:authors)); n__gt = 1)`.
+"""
+Base.@nospecializeinfer function alias(@nospecialize(qs::QuerySet); kw...)
+    T = model_of(qs)
+    anns = copy(qs.annotations)
+    after = copy(qs.annotated_after)
+    for (k, v) in kw
+        (findfield(modelmeta(T), k) !== nothing || k in (:id, :pk)) &&
+            throw(ArgumentError("alias '$k' conflicts with a field of $T"))
+        push!(anns, k => ref(v)); after[k] = length(qs.where)
+    end
+    chain(qs; annotations = anns, annotated_after = after, aliases = unique!(vcat(qs.aliases, collect(keys(kw)))))
+end
+Base.@nospecializeinfer alias(@nospecialize(T::Type{<:Model}); kw...) = alias(objects(T); kw...)
 annotate(; kw...) = qs -> annotate(qs; kw...)
 
 """
@@ -727,8 +873,13 @@ The results as `Dict{Symbol,Any}` rows instead of objects. Fields may follow rel
 """
 function Base.values(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
     T = model_of(qs)
-    fs = isempty(fields) ? vcat(["id"], [column(f) for f in all_fields(T)],                  # values(): the annotations too
-                                [string(p.first) for p in qs.annotations if !is_filtered_relation(p.second)]) :
+    if qs.combinator !== nothing && !isempty(fields)       # values_list(union(a, b), :x): each part's values, as Django
+        op, parts, keep_all = qs.combinator
+        return chain(qs; combinator = (op, Any[values(p, fields...) for p in parts], keep_all),
+                     values_fields = String[string(f) for f in fields], values_mode = :dict)
+    end
+    fs = isempty(fields) ? vcat(["id"], [string(attname(f)) for f in all_fields(T)],                  # values(): the annotations too
+                                [string(p.first) for p in qs.annotations if !is_filtered_relation(p.second) && !(p.first in qs.aliases)]) :
          String[string(f) for f in fields]
     chain(qs; values_fields = fs, values_mode = :dict,
           group_by_object = qs.group_fields === nothing && any(p -> contains_aggregate(p.second), qs.annotations))
@@ -758,9 +909,11 @@ values_list(qs::QuerySet, fields::Union{Symbol,AbstractString}...; flat::Bool = 
     values_list_of(qs, Any[f for f in fields], flat, named)
 Base.@nospecializeinfer function values_list_of(@nospecialize(qs::QuerySet), fields::Vector{Any}, flat::Bool, named::Bool)
     flat && named && throw(ArgumentError("values_list: pass flat or named, not both"))
-    flat && length(fields) != 1 && throw(ArgumentError("flat=true requires exactly one field"))
+    flat && length(fields) > 1 && throw(ArgumentError("values_list: flat=true takes one field"))
     T = model_of(qs)
-    fs = isempty(fields) ? Any[:id; [Symbol(column(f)) for f in all_fields(T)]] : fields
+    flat && isempty(fields) && (fields = Any[:id])      # as Django: the first field, the primary key (#213)
+    fs = isempty(fields) ? Any[:id; [attname(f) for f in all_fields(T)];          # the annotations too, as Django
+                               [p.first for p in qs.annotations if !is_filtered_relation(p.second) && !(p.first in qs.aliases)]] : fields
     vq = values(qs, fs...)
     length(vq.values_fields) == length(fs) || error("values_list: asked for $(length(fs)) fields, got $(length(vq.values_fields))")
     chain(vq; values_mode = flat ? :flat : named ? :named : :tuple)
@@ -845,13 +998,16 @@ numbers as Float64.
 Base.@nospecializeinfer expr_value(@nospecialize(T), e, v) = expr_value(T, e, v, typed_output(T, e))
 "The output field to convert an expression's values through (`expr_value`), or nothing: work it out once per query."
 Base.@nospecializeinfer function typed_output(@nospecialize(T), @nospecialize(e))
+    e isa Union{RawSQL,ExpressionWrapper} && return e.output isa Field ? e.output : nothing
     e isa Union{F,Aggregate,Func,Subquery,Window,WindowFunc} || return nothing
     of = output_field(T, e)
     of !== nothing && of.kind in TYPED_OUTPUT_KINDS ? of : nothing
 end
 Base.@nospecializeinfer function expr_value(@nospecialize(T), e, v, of::Union{Nothing,Field})
     v === nothing && return nothing
-    e isa Union{Exists,Condition} && return v isa Bool ? v : v != 0          # SQLite and MySQL give 0/1
+    e isa Union{RawSQL,ExpressionWrapper} && e.output isa Field && e.output.kind === :bool && return v isa Bool ? v : v != 0
+    e isa ExpressionWrapper && e.output === nothing && return expr_value(T, e.expr, v, typed_output(T, e.expr))
+    e isa Union{Exists,Condition,LookupExpr,NegatedExpr} && return v isa Bool ? v : v != 0          # SQLite and MySQL give 0/1
     if e isa Aggregate
         e.func == "ARRAY_AGG" && return v isa AbstractString ? JSON.parse(v) : v
         e.func in ("BOOL_AND", "BOOL_OR") && return v isa Bool ? v : v != 0
@@ -914,6 +1070,15 @@ Base.@nospecializeinfer function aggregate_here(@nospecialize(qs::QuerySet); kw.
         vals = Dict{Symbol,Any}(k => empty_aggregate(v) for (k, v) in kw)
         any(v -> v === NOTFOUND, values(vals)) || return vals
     end
+    # over an annotation (Avg(:num_authors) after annotate(num_authors = Count(...))): over the annotated query,
+    # as a subquery, as Django (#204); over another aggregate of the same call: an error, as Django
+    anames = Set(string(p.first) for p in qs.annotations if !is_filtered_relation(p.second))
+    for (k, v) in kw, r in all_refs(v)
+        (r in anames || findfield(modelmeta(T), Symbol(r)) !== nothing) && continue
+        r in (string(k2) for (k2, _) in kw) &&
+            throw(ArgumentError("aggregate: cannot compute $k over '$r': '$r' is an aggregate of the same call"))
+    end
+    any(p -> any(in(anames), all_refs(p.second)), kw) && return aggregate_over(qs, anames; kw...)
     plain = !isempty(qs.where) && qs.limit === nothing && qs.offset == 0 && qs.distinct_fields === nothing &&
             qs.combinator === nothing && isempty(qs.annotations) && qs.values_fields === nothing && !qs.isnone
     rel = plain ? [k for (k, v) in kw if aggregates_relation(T, ref(v))] : Symbol[]
@@ -939,6 +1104,35 @@ Base.@nospecializeinfer function aggregate_here(@nospecialize(qs::QuerySet); kw.
                   vcat(ps, c.join_params, sps))[1]
     Dict{Symbol,Any}(k => expr_value(T, ref(v), row[k]) for (k, v) in kw)
 end
+"Aggregates over a queryset's annotations: `SELECT agg FROM (the query) AS table`, the annotations its columns (#204)."
+Base.@nospecializeinfer function aggregate_over(@nospecialize(qs::QuerySet), anames; kw...)
+    T = model_of(qs)
+    inner, ips = select_sql(qs; ordered = !(qs.limit === nothing && qs.offset == 0))
+    c = SQLCompiler(T)                     # the subquery is named like the table, so the model's columns resolve too
+    for n in anames
+        c.annotations[Symbol(n)] = ColRef(qcol(c.base, n))
+    end
+    sel, ps = String[], Any[]
+    for (k, v) in kw
+        sql, p = compile_expr(c, ref(v))
+        push!(sel, "$sql AS $(qname(string(k)))")
+        append!(ps, p)
+    end
+    row = execute("SELECT $(join(sel, ", ")) FROM ($inner) AS $(qname(c.base))$(join(c.joins))", vcat(ps, ips, c.join_params))[1]
+    Dict{Symbol,Any}(k => expr_value(T, ref(v), row[k], nothing) for (k, v) in kw)
+end
+"A column of an enclosing query's FROM, as an expression (aggregate_over)."
+struct ColRef <: Expression
+    sql::String
+end
+compile_expr(c::SQLCompiler, e::ColRef) = (e.sql, Any[])
+"Every field name an expression reads, inside aggregates too."
+all_refs(@nospecialize(e)) = (out = String[]; walk_refs!(out, e); out)
+walk_refs!(out, e::F) = push!(out, e.name)
+walk_refs!(out, e::Union{Expression,When,OrderBy}) = (for f in fieldnames(typeof(e)); walk_refs!(out, getfield(e, f)); end)
+walk_refs!(out, v::AbstractVector) = foreach(x -> walk_refs!(out, x), v)
+walk_refs!(out, @nospecialize(x)) = nothing
+
 "An aggregate's value over no rows (a count's 0, a default, Coalesce of those), or NOTFOUND when it needs the database."
 empty_aggregate(@nospecialize(e)) = NOTFOUND
 empty_aggregate(e::Value) = e.value

@@ -29,12 +29,13 @@ mutable struct SQLCompiler
     join_params::Vector{Any}    # parameters in JOIN ... ON clauses (FilteredRelation conditions)
     reuse_upto::Int             # compiling an annotation made after this many filter() calls (0: none)
     outer_refs::Union{Nothing,Vector{String}}   # while compiling an annotation: the columns OuterRefs in it read here
+    alias_names::Set{Symbol}    # annotations made by alias(): compiled where used, not selected (#207)
 end
 Base.@nospecializeinfer function SQLCompiler(@nospecialize(T::Type); outer = nothing)
     table = modelmeta(T).table
     counter = outer === nothing ? Ref(0) : outer.counter
     c = SQLCompiler(T, table, table, String[], Dict{Any,String}(), Set{String}(), counter, false, 0,
-                    Dict{Symbol,Any}(), false, outer, false, Any[], 0, nothing)
+                    Dict{Symbol,Any}(), false, outer, false, Any[], 0, nothing, Set{Symbol}())
     outer === nothing || (c.base = new_alias!(c))   # subqueries alias their table: no clash with the outer one
     c
 end
@@ -97,14 +98,14 @@ Base.@nospecializeinfer function filtered_target(@nospecialize(T::Type), fr)
         f.kind === :fk || throw(ArgumentError("FilteredRelation('$rel'): '$rel' is not a relation of $T"))
         modelmeta(f.model).table == modelmeta(T).table ||
             throw(ArgumentError("FilteredRelation('$rel'): relations inherited from a parent model are not supported"))
-        return related_model(f), "id", column(f), false
+        return related_model(f), target_column(f), column(f), false
     end
     find_m2m_query(T, rel) === nothing ||
         throw(ArgumentError("FilteredRelation('$rel'): many-to-many relations are not supported; filter the through model"))
     r = find_reverse(T, rel)
     r === nothing && throw(lookup_error(T, rel))
     _, M, rf = r
-    M, column(rf), "id", true
+    M, column(rf), target_column(rf), true
 end
 
 """
@@ -202,6 +203,8 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     # inside an aggregate's filter or a Case condition, ~Q(store__name = "x") is a condition on the joined
     # row (Django's FILTER (WHERE NOT ...)), not exclude()'s "no related row matches" subquery
     c.scope === :expr && (negated = false)
+    lookup == "isnull" && !(value isa Bool) &&
+        throw(ArgumentError("the value for an isnull lookup must be true or false, not $(repr(value)) ($key)"))
     meta = modelmeta(T)
     fname = parts[1] == "pk" ? "id" : String(parts[1])
     rest = String.(parts[2:end])
@@ -319,18 +322,20 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             rel === nothing && throw(lookup_error(T, fname))
             rn, M, rf = rel
             mt = qname(modelmeta(M).table)
+            # children = nothing: no related row, as children__isnull = true (Django)
+            isempty(rest) && lookup == "exact" && value === nothing && (lookup = "isnull"; value = true)
             if isempty(rest) && lookup == "isnull"
                 a = new_alias!(c)
-                ex = "EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(qcol(a, column(rf))) = $(qcol(alias, "id")))"
+                ex = "EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(qcol(a, column(rf))) = $(qcol(alias, target_column(rf))))"
                 return (truthy(value) ? "NOT " * ex : ex, Any[])
             end
             subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
             if negated
                 a = new_alias!(c)
                 sql, ps = compile_lookup(c, a, M, subkey, value, negated)
-                return ("EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(qcol(a, column(rf))) = $(qcol(alias, "id")) AND $sql)", ps)
+                return ("EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(qcol(a, column(rf))) = $(qcol(alias, target_column(rf))) AND $sql)", ps)
             end
-            a = join!(c, alias, scope_key(c, alias, rn), modelmeta(M).table, column(rf), "id"; left = true)
+            a = join!(c, alias, scope_key(c, alias, rn), modelmeta(M).table, column(rf), target_column(rf); left = true)
             rf.one_to_one || (c.distinct = true)               # (a reverse one-to-one can't repeat rows)
             return compile_lookup(c, a, M, subkey, value, negated)
         end
@@ -345,8 +350,9 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             col, kind = tr                  # registered transforms: name__lower__...
             kind === f.kind || (f = nothing)
         elseif !isempty(rest)
-            f.kind === :fk || throw(LookupError("'$fname' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
-            if rest in (["id"], ["pk"])
+            f.kind === :fk || throw(LookupError("unsupported lookup '$(join(rest, "__"))' for $(f.kind) field '$fname'" *
+                                                suggest_lookup(rest[1])))
+            if rest == [string(target_name(f))] || (f.to_field === nothing && rest == ["pk"])
                 col = qcol(alias, column(f))     # author__id is just author_id: no join
             else
                 R = related_model(f)
@@ -354,7 +360,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                 if negated
                     a = new_alias!(c)
                     sql, ps = compile_lookup(c, a, R, subkey, value, negated)
-                    ex = "EXISTS (SELECT 1 FROM $(qname(modelmeta(R).table)) $(qname(a)) WHERE $(qcol(a, "id")) = $(qcol(alias, column(f))) AND $sql)"
+                    ex = "EXISTS (SELECT 1 FROM $(qname(modelmeta(R).table)) $(qname(a)) WHERE $(qcol(a, target_column(f))) = $(qcol(alias, column(f))) AND $sql)"
                     # exclude(parent__parent__isnull = true): with no parent, the path is NULL, so the row matches
                     # (and is excluded), as through Django's LEFT JOIN
                     if f.null && ((lookup == "isnull" && truthy(value)) || (lookup == "exact" && value === nothing))
@@ -362,15 +368,20 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                     end
                     return (ex, ps)
                 end
-                a = join!(c, alias, (alias, f.name), modelmeta(R).table, "id", column(f); left = f.null)
+                a = join!(c, alias, (alias, f.name), modelmeta(R).table, target_column(f), column(f); left = f.null)
                 return compile_lookup(c, a, R, subkey, value, negated)
             end
         else
             col = qcol(alias, column(f))
         end
     end
-    conv(v) = v isa Model ? v.id : (f === nothing || f.kind === :fk ? dbparam(v) : to_db(f, v))
+    conv(v) = v isa Model ? saved_key(f !== nothing && f.kind === :fk ? target_value(f, v) : v.id, v) :
+              (f === nothing || f.kind === :fk ? dbparam(v) : to_db(f, v))
+    # food__in = filter(Food; ...), for a key with a to_field: the subquery selects that field (#220)
+    f !== nothing && f.kind === :fk && f.to_field !== nothing && value isa QuerySet && value.values_fields === nothing &&
+        (value = values(value, f.to_field))
     f === nothing || (kind = f.kind)
+    f !== nothing && f.kind in INT_KINDS && value isa AbstractFloat && ((lookup, value) = int_float_bound(lookup, value))
     cl = isempty(CUSTOM_LOOKUPS) ? nothing : find_custom(CUSTOM_LOOKUPS, lookup, kind)
     if cl !== nothing
         if value isa Expression
@@ -389,12 +400,48 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
         col = text_cast(backend(), col)
     end
     sql, ps = lookup_condition(c, col, lookup, value, conv)
+    # Under exclude()/~Q, a NULL in a nullable column doesn't make the condition true, so the row is kept, as
+    # Django does (NOT (x = 1) alone is NULL there and would drop it); a None in an __in list matches NULL
+    if negated && !(lookup in ("isnull", "ne")) && !(lookup == "exact" && value === nothing)
+        if f !== nothing && f.null
+            sql = lookup == "in" && value isa Union{AbstractArray,Tuple,AbstractSet} && any(isnothing, value) ?
+                  "($sql OR $col IS NULL)" : "($sql AND $col IS NOT NULL)"
+        end
+        # exclude(x = F(:y)) with y nullable: the same for the other side
+        if value isa F && !occursin("__", value.name) && !haskey(c.annotations, Symbol(value.name))
+            rf = findfield(modelmeta(c.T), Symbol(value.name))
+            rf !== nothing && rf.null && (sql = "($sql AND $(first(compile_expr(c, value))) IS NOT NULL)")
+        end
+    end
     sql, isempty(colps) ? ps : vcat(colps, ps)
 end
 
 const TEXT_LOOKUPS = ("iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "regex", "iregex")
 const TEXT_KINDS = (:char, :text, :email, :slug, :url, :file, :image, :filepath, :citext)
 const COMPARISON_OPS = Dict("exact" => "=", "ne" => "!=", "gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=")
+
+"""
+An integer column compared with a float: the integer bound that gives the same rows, as Django rounds
+(num__gte = 11.9 is num >= 12), so PostgreSQL isn't asked to read 11.9 as an integer.
+"""
+function int_float_bound(lookup, x::AbstractFloat)
+    lookup in ("gt", "lte") && return lookup, Int(floor(x))
+    lookup in ("gte", "lt") && return lookup, Int(ceil(x))
+    lookup == "exact" && return isinteger(x) ? ("exact", Int(x)) : ("in", Any[])     # (11.5 equals no integer)
+    lookup, x
+end
+
+"An object's key as a query value; an unsaved object is refused, as Django: it would compare with NULL."
+saved_key(k, @nospecialize(v)) = k === nothing ?
+    throw(ArgumentError("an unsaved $(nameof(typeof(v))) can't be used in a query: save it first")) : k
+
+"A queryset used as a value: its primary keys, or the one field values() names (two are refused, as Django: #208)."
+Base.@nospecializeinfer function one_column_subquery(c::SQLCompiler, @nospecialize(value))
+    value.values_fields === nothing && return subquery_sql(c, value; columns = nothing, idonly = true)
+    n = length(value.values_fields)
+    n == 1 || throw(ArgumentError("a QuerySet used as a value must select one field, not $n ($(join(value.values_fields, ", ")))"))
+    subquery_sql(c, value)
+end
 
 Base.@nospecializeinfer function lookup_condition(c::SQLCompiler, col, lookup, @nospecialize(value), @nospecialize(conv))
     value isa Q && (value = Condition(value))          # short = Q(qty__lt = F(:target)): the condition's value (#199)
@@ -406,6 +453,13 @@ Base.@nospecializeinfer function lookup_condition(c::SQLCompiler, col, lookup, @
         vsql, vps = compile_expr(c, value)
         lookup == "iexact" && return ("LOWER($col) = LOWER($vsql)", vps)
         return ("$col $(COMPARISON_OPS[lookup]) ($vsql)", vps)
+    end
+    if value isa QuerySet && haskey(COMPARISON_OPS, lookup)
+        # author = objects(Author)[1:1]: a subquery of one row (#208)
+        value.limit == 1 ||
+            throw(ArgumentError("a QuerySet as the value of a '$lookup' lookup must be sliced to one row (qs[1:1]); use __in for several"))
+        sql, ps = one_column_subquery(c, value)
+        return ("$col $(COMPARISON_OPS[lookup]) ($sql)", ps)
     end
     if lookup == "exact"
         value === nothing && return ("$col IS NULL", Any[])
@@ -430,8 +484,7 @@ Base.@nospecializeinfer function lookup_condition(c::SQLCompiler, col, lookup, @
         return regex_sql(backend(), col, string(value isa Regex ? value.pattern : value), lookup == "iregex")
     elseif lookup == "in"
         if value isa QuerySet
-            sql, ps = value.values_fields === nothing ? subquery_sql(c, value; columns = nothing, idonly = true) :
-                      subquery_sql(c, value)
+            sql, ps = one_column_subquery(c, value)
             return ("$col IN ($(in_subquery(backend(), sql)))", ps)
         elseif value isa Subquery
             sql, ps = compile_expr(c, value)
@@ -462,18 +515,26 @@ Base.@nospecializeinfer function lookup_condition(c::SQLCompiler, col, lookup, @
     throw(LookupError("unsupported lookup '$lookup'"))
 end
 
+empty_q(q::Q) = all(ch -> ch isa Q && empty_q(ch), q.children)
 Base.@nospecializeinfer function compile_q(c::SQLCompiler, alias, @nospecialize(T::Type), q::Q, negated::Bool)
+    # Q(), ~Q() and combinations of them only (~Q() & ~Q()) match every row: Django drops empty Qs
+    empty_q(q) && return (sql_true(backend()), Any[])
     q.connector === :XOR && return compile_xor(c, alias, T, q)
     neg = negated ⊻ q.negated
     parts = String[]
     params = Any[]
-    for ch in q.children
+    outer = c.scope
+    for (i, ch) in enumerate(q.children)
+        # :SCOPES (the where clauses of a queryset combined with |): each child is one filter() call, with
+        # its own joins of multi-valued relations, as it had in its queryset
+        q.connector === :SCOPES && c.scope !== :expr && (c.scope = (outer, i))
         sql, ps = ch isa Q ? compile_q(c, alias, T, ch, neg) :
                   ch isa Expression ? compile_expr(c, ch) :
                   compile_lookup(c, alias, T, Symbol(ch.first), ch.second, neg)
         push!(parts, sql)
         append!(params, ps)
     end
+    c.scope = outer
     sql = isempty(parts) ? sql_true(backend()) : "(" * join(parts, q.connector === :OR ? " OR " : " AND ") * ")"
     q.negated ? "NOT $sql" : sql, params
 end

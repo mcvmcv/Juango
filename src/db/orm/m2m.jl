@@ -25,6 +25,11 @@ function m2m_owner(qs::QuerySet)
     qs.owner.id === nothing && throw(ArgumentError("save the object before changing its many-to-many relations"))
     qs.owner
 end
+# The join model's keys may store another field than the id (to_field, #220): conditions go through the
+# related id (`mine__id`, which is the column itself without a to_field), and new rows get the stored value.
+idkey(f::Field) = Symbol(f.name, "__id")
+idkeys(f::Field) = Symbol(f.name, "__id__in")
+stored_value(f::Field, id) = f.to_field === nothing ? id : getproperty(get(base_objects(related_model(f)); id = id), f.to_field)
 Base.@nospecializeinfer objid(@nospecialize(x::Model)) = (x.id === nothing && throw(ArgumentError("cannot relate an unsaved $(typeof(x))")); x.id)
 objid(x) = x
 
@@ -55,20 +60,20 @@ function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}())
     ids = unique(objid.(collect(objs)))
     isempty(ids) && return qs
     atomic() do
-        have = Set(values_list(filter(base_objects(o.through), Q(attname(o.mine) => o.id), Q(Symbol(attname(o.other), "__in") => ids)),
-                               attname(o.other); flat = true))
+        have = Set(values_list(filter(base_objects(o.through), Q(idkey(o.mine) => o.id), Q(idkeys(o.other) => ids)),
+                               idkey(o.other); flat = true))
         new = [id for id in ids if !(id in have)]
         isempty(new) && return
         m2m_signal(o, :pre_add, new)
         for id in new
-            save!(o.through(; attname(o.mine) => o.id, attname(o.other) => id,
+            save!(o.through(; attname(o.mine) => stored_value(o.mine, o.id), attname(o.other) => stored_value(o.other, id),
                             (Symbol(k) => v for (k, v) in pairs(through_defaults))...))
         end
         if o.symmetrical          # and the other way round
-            back = Set(values_list(filter(base_objects(o.through), Q(attname(o.other) => o.id), Q(Symbol(attname(o.mine), "__in") => new)),
-                                   attname(o.mine); flat = true))
+            back = Set(values_list(filter(base_objects(o.through), Q(idkey(o.other) => o.id), Q(idkeys(o.mine) => new)),
+                                   idkey(o.mine); flat = true))
             for id in new
-                id in back || id == o.id || save!(o.through(; attname(o.mine) => id, attname(o.other) => o.id))
+                id in back || id == o.id || save!(o.through(; attname(o.mine) => stored_value(o.mine, id), attname(o.other) => stored_value(o.other, o.id)))
             end
         end
         m2m_signal(o, :post_add, new)
@@ -82,8 +87,8 @@ function remove!(qs::QuerySet, objs...)
     ids = objid.(collect(objs))
     isempty(ids) && return qs
     m2m_signal(o, :pre_remove, ids)
-    delete!(filter(base_objects(o.through), Q(attname(o.mine) => o.id), Q(Symbol(attname(o.other), "__in") => ids)))
-    o.symmetrical && delete!(filter(base_objects(o.through), Q(attname(o.other) => o.id), Q(Symbol(attname(o.mine), "__in") => ids)))
+    delete!(filter(base_objects(o.through), Q(idkey(o.mine) => o.id), Q(idkeys(o.other) => ids)))
+    o.symmetrical && delete!(filter(base_objects(o.through), Q(idkey(o.other) => o.id), Q(idkeys(o.mine) => ids)))
     m2m_signal(o, :post_remove, ids)
     qs
 end
@@ -92,8 +97,8 @@ end
 function clear!(qs::QuerySet)
     o = m2m_owner(qs)
     m2m_signal(o, :pre_clear, nothing)
-    delete!(filter(base_objects(o.through), Q(attname(o.mine) => o.id)))
-    o.symmetrical && delete!(filter(base_objects(o.through), Q(attname(o.other) => o.id)))
+    delete!(filter(base_objects(o.through), Q(idkey(o.mine) => o.id)))
+    o.symmetrical && delete!(filter(base_objects(o.through), Q(idkey(o.other) => o.id)))
     m2m_signal(o, :post_clear, nothing)
     qs
 end
@@ -103,7 +108,7 @@ function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}())
     o = m2m_owner(qs)
     want = unique(objid.(collect(objs)))
     atomic() do
-        have = collect(values_list(filter(base_objects(o.through), Q(attname(o.mine) => o.id)), attname(o.other); flat = true))
+        have = collect(values_list(filter(base_objects(o.through), Q(idkey(o.mine) => o.id)), idkey(o.other); flat = true))
         gone = setdiff(have, want)
         isempty(gone) || remove!(qs, gone...)
         add!(qs, setdiff(want, have)...; through_defaults = through_defaults)

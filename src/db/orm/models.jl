@@ -173,6 +173,13 @@ Base.@nospecializeinfer function getfield_meta(@nospecialize(T::Type), name::Sym
     f
 end
 
+"The related model's field a foreign key stores: its id, or its `to_field` (#220)."
+target_name(f::Field) = something(f.to_field, :id)
+"The related table's column a foreign key refers to (\"id\", or the `to_field`'s column)."
+target_column(f::Field) = f.to_field === nothing ? "id" : column(getfield_meta(related_model(f), f.to_field))
+"What a foreign key stores for the related object `v`: its id, or its `to_field` value."
+target_value(f::Field, v::Model) = f.to_field === nothing ? (getfield(v, :_data)::Dict{Symbol,Any})[:id] : getproperty(v, f.to_field)
+
 function related_model(f::Field)
     r = f.related
     r === :self && return f.model
@@ -546,7 +553,7 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
         id === nothing && return nothing
         cache = (getfield(m, :_cache)::Dict{Symbol,Any})
         c = get(cache, s, nothing)
-        (c !== nothing && (getfield(c, :_data)::Dict{Symbol,Any})[:id] == id) && (note_eager_use(T, s); return c)
+        (c !== nothing && target_value(f, c) == id) && (note_eager_use(T, s); return c)
         sib = get(cache, :__siblings, nothing)
         if sib !== nothing                               # AUTO_PREFETCH: load it for the whole queryset at once
             auto_prefetch!(sib, f, s, instance_db(m))
@@ -554,7 +561,7 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
             c === nothing || return c
         end
         note_lazy_load(T, s, :fk, m)
-        obj = with_db(() -> get(base_objects(related_model(f)); id = id), instance_db(m))
+        obj = with_db(() -> get(base_objects(related_model(f)); (target_name(f) => id,)...), instance_db(m))
         cache[s] = obj
         return obj
     end
@@ -583,7 +590,7 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
     end
     for (rn, M, rf) in reverse_relations(T)
         rn === s || continue
-        qs = chain(filter(objects(M), Q(attname(rf) => data[:id])); db = instance_db(m))
+        qs = chain(filter(objects(M), Q(attname(rf) => target_value(rf, m))); db = instance_db(m))
         if rf.one_to_one
             pre isa PrefetchedList && (note_eager_use(T, s); return isempty(pre.items) ? nothing : pre.items[1])
             note_lazy_load(T, s, :fk, m)
@@ -624,7 +631,7 @@ Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::S
             data[attname(f)] = nothing
             delete!((getfield(m, :_cache)::Dict{Symbol,Any}), s)
         elseif v isa Model
-            data[attname(f)] = (getfield(v, :_data)::Dict{Symbol,Any})[:id]
+            data[attname(f)] = target_value(f, v)
             (getfield(m, :_cache)::Dict{Symbol,Any})[s] = v
         else
             data[attname(f)] = v

@@ -2,6 +2,7 @@
 
 from_db(f::Field, ::Nothing) = nothing
 function from_db(f::Field, v)
+    f.kind === :fk && f.to_field !== nothing && return from_db(getfield_meta(related_model(f), f.to_field), v)   # (#220)
     r = from_db_extra(f, v)
     r === NOTFOUND || return r
     k = f.kind
@@ -26,7 +27,7 @@ function from_db(f::Field, v)
     v isa AbstractString ? String(v) : v
 end
 
-to_db(f::Field, v::Model) = v.id      # (other values: see fields_extra.jl)
+to_db(f::Field, v::Model) = saved_key(f.kind === :fk ? target_value(f, v) : v.id, v)      # (other values: see fields_extra.jl)
 to_db(f::Field, c::Choice) = to_db(f, c.value)
 
 """
@@ -135,7 +136,7 @@ Base.@nospecializeinfer function row_plan(@nospecialize(T::Type))::Vector{Tuple{
     plan = Tuple{Field,Symbol,Symbol}[]
     for f in all_fields(T)
         t = modelmeta(f.model).table
-        push!(plan, (f, t == mytable ? attname(f) : Symbol("__", t, "__", column(f)), attname(f)))
+        push!(plan, (f, t == mytable ? Symbol(column(f)) : Symbol("__", t, "__", column(f)), attname(f)))
     end
     plan
 end

@@ -73,15 +73,17 @@ struct Column
     max_digits::Union{Nothing,Int}   # decimals: NUMERIC(max_digits, decimal_places)
     decimal_places::Union{Nothing,Int}
     collation::Union{Nothing,String} # db_collation
+    ref_column::Union{Nothing,String} # a foreign key with a to_field: the referenced column (else "id", #220)
 end
 Column(name, kind::Symbol; null = false, default = nothing, unique = false, index = false,
        max_length = nothing, references = nothing, of = nothing, generated = nothing, comment = nothing,
-       max_digits = nothing, decimal_places = nothing, collation = nothing) =
+       max_digits = nothing, decimal_places = nothing, collation = nothing, ref_column = nothing) =
     Column(string(name), kind, null, default, unique, index && !unique, max_length,
            references === nothing ? nothing : string(references), of === nothing ? nothing : Symbol(of),
            generated === nothing || generated isa GeneratedSpec ? generated : GeneratedSpec(generated...),
            comment === nothing ? nothing : string(comment), max_digits === nothing ? nothing : Int(max_digits),
-           decimal_places === nothing ? nothing : Int(decimal_places), collation === nothing ? nothing : check_collation(collation))
+           decimal_places === nothing ? nothing : Int(decimal_places), collation === nothing ? nothing : check_collation(collation),
+           ref_column === nothing || ref_column == "id" ? nothing : string(ref_column))
 
 "A collation name (`\"C\"`, `\"en-x-icu\"`, `\"utf8mb4_bin\"`, `\"NOCASE\"`), checked: it goes into SQL as it is."
 check_collation(c) = (s = string(c); occursin(r"^[A-Za-z0-9_.@-]+$", s) || throw(ArgumentError("invalid collation name '$s'")); s)
@@ -95,7 +97,7 @@ function with_column(c::Column; name = c.name, kw...)
     attrs = merge((null = c.null, default = c.default, unique = c.unique, index = c.index,
                    max_length = c.max_length, references = c.references, of = c.of, generated = c.generated,
                    comment = c.comment, max_digits = c.max_digits, decimal_places = c.decimal_places,
-                   collation = c.collation), NamedTuple(kw))
+                   collation = c.collation, ref_column = c.ref_column), NamedTuple(kw))
     Column(name, c.kind; attrs...)
 end
 
@@ -218,6 +220,16 @@ function column_state(f::Field)
     f.kind === :fk && is_composite(related_model(f)) &&
         throw(ArgumentError("$(nameof(f.model)).$(f.name): foreign keys to $(nameof(related_model(f))) has a composite primary key; point at it with ForeignObject(...; from_fields = ...)"))
     of = f.kind === :array ? f.related : f.kind === :geometry ? geo_of(f) : f.kind === :fk ? fk_of(related_model(f)) : nothing
+    if f.kind === :fk && f.to_field !== nothing          # the column holds the target field's values (#220)
+        tf = getfield_meta(related_model(f), f.to_field)
+        (tf.unique || tf.kind in (:auto, :bigauto, :smallauto)) ||
+            throw(ArgumentError("$(nameof(f.model)).$(f.name): to_field = :$(f.to_field) must be a unique field of $(nameof(related_model(f)))"))
+        k = schema_kind(tf.kind)
+        return Column(column(f), k === :intauto ? :int : k === :bigauto ? :bigint : k; null = f.null, default = d, unique = f.unique,
+                      index = f.db_index, max_length = k in (:string, :citext, :binary) ? tf.max_length : nothing, references = ref,
+                      comment = f.db_comment, max_digits = tf.max_digits, decimal_places = tf.decimal_places,
+                      collation = something(f.db_collation, tf.db_collation, Some(nothing)), ref_column = column(tf))
+    end
     Column(column(f), schema_kind(f.kind); null = f.null, default = d, unique = f.unique,
            index = f.db_index, max_length = schema_kind(f.kind) in (:string, :citext, :binary) || (f.kind === :array && f.related === :string) ? f.max_length : nothing,
            references = ref, of = of, generated = gen, comment = f.db_comment,
@@ -304,7 +316,7 @@ function column_sql(b::DatabaseBackend, c::Column; adding = false, inline_fk = i
     (d === nothing && adding && !c.null) && (d = backfill_value(c))
     d === nothing || (s *= " DEFAULT " * lit(b, d))
     is_positive_kind(c.kind) && positive_check(b) && (s *= " CHECK (" * quote_name(b, c.name) * " >= 0)")
-    (c.references !== nothing && inline_fk) && (s *= " REFERENCES $(quote_name(b, ref_table(c.references))) ($(quote_name(b, "id")))")
+    (c.references !== nothing && inline_fk) && (s *= " REFERENCES $(quote_name(b, ref_table(c.references))) ($(quote_name(b, something(c.ref_column, "id"))))")
     (c.comment !== nothing && b isa MySQLBackend) && (s *= " COMMENT " * lit(b, c.comment))
     s
 end
@@ -347,7 +359,7 @@ drop_index_sql(b::DatabaseBackend, table, c::Column) =
     [drop_index_stmt(b, table, constraint_name(table, c.name, s)) for s in ("uniq", "idx")]
 
 fk_sql(b::DatabaseBackend, table, c::Column) =
-    (c.references === nothing || inline_foreign_keys(b)) ? String[] : [foreign_key_sql(b, table, c.name, ref_table(c.references))]
+    (c.references === nothing || inline_foreign_keys(b)) ? String[] : [foreign_key_sql(b, table, c.name, ref_table(c.references), something(c.ref_column, "id"))]
 
 """
     create_table_sql(b, t; if_not_exists=false) -> (statements, foreign_keys)

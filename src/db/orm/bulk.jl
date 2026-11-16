@@ -286,7 +286,7 @@ Base.@nospecializeinfer function combine(op, @nospecialize(qs::QuerySet), others
     end
     vm = first(parts).values_mode
     QuerySet{T}(Q[], String[], nothing, 0, false, Vector{Symbol}[], copy(qs.prefetch), nothing, nothing,
-                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all), qs.db, Dict{Symbol,Int}(), vm, nothing)
+                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all), qs.db, Dict{Symbol,Int}(), vm, nothing, Symbol[])
 end
 
 """
@@ -467,7 +467,7 @@ Base.@nospecializeinfer function deletion_closure!(seen::IdDict{Any,Set{Any}}, r
         deletion_closure!(seen, restricts, C, collect(values_list(filter(base_objects(C); id__in = v), :id; flat = true)))
     end
     for (_, M, f) in reverse_relations(T)
-        rel = filter(base_objects(M), Q(Symbol(attname(f), "__in") => v))
+        rel = filter(base_objects(M), referrers_q(f, v))
         f.on_delete === :CASCADE ? deletion_closure!(seen, restricts, M, row_keys(rel)) :
             f.on_delete === :RESTRICT && push!(restricts, (T, M, f, rel))
     end
@@ -498,8 +498,10 @@ end
 function on_delete_value(f::Field)
     v = f.on_delete isa OnDeleteSet ? f.on_delete.value : default_value(f)
     v isa Function && (v = v())
-    v isa Model ? v.id : v
+    v isa Model ? target_value(f, v) : v
 end
+"The rows whose foreign key `f` points at the rows with these ids (through the related table with a `to_field`)."
+referrers_q(f::Field, ids) = f.to_field === nothing ? Q(Symbol(attname(f), "__in") => ids) : Q(Symbol(f.name, "__id__in") => ids)
 
 Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector)
     isempty(ids) && return 0
@@ -516,7 +518,7 @@ Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector
         delete_ids!(C, collect(values_list(filter(base_objects(C); id__in = ids), :id; flat = true)))
     end
     for (_, M, f) in reverse_relations(T)
-        rel = filter(base_objects(M), Q(Symbol(attname(f), "__in") => ids))
+        rel = filter(base_objects(M), referrers_q(f, ids))
         if f.on_delete === :CASCADE || f.on_delete === :RESTRICT    # (restricted rows were checked: they go too)
             delete_ids!(M, row_keys(rel))
         elseif f.on_delete === :SET_NULL
