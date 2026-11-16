@@ -581,6 +581,20 @@ end
 - A `db_default` field holds `DB_DEFAULT` until the object is saved. The value the database chose is then read back. A `db_default` can be a value or `Now()`.
 - A `GeneratedField` is computed by the database and read back after every `save!`. It can use `F`, literals, `+ - * /`, `Lower`, `Upper`, `Length`, `Coalesce` and `Concat`. `db_persist = false` makes a virtual column; PostgreSQL only has stored ones.
 
+A field can be the primary key instead of `id`, as Django's `primary_key=True`:
+
+```julia
+@model struct Country
+    code = CharField(max_length = 2, primary_key = true)   # obj.pk == "NZ"; no id column
+    name = CharField(max_length = 60)
+end
+@model struct City
+    country = ForeignKey(Country, on_delete = :CASCADE)   # stores the code: city.country_id == "NZ"
+end
+```
+
+`get(Country; pk = "NZ")`, foreign keys, many-to-many fields, `select_related`, cascades and forms work with it. Saving an object after changing its key writes a new row, as in Django.
+
 A table can have a composite primary key instead of `id`:
 
 ```julia

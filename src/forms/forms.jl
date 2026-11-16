@@ -373,8 +373,8 @@ function to_julia(fld::Field, raw)
             v = v2
         end
         return v, nothing
-    elseif k === :fk && fld.to_field !== nothing           # the to_field's value is submitted (#220)
-        obj = first(filter(objects(related_model(fld)), Q(fld.to_field => s)))
+    elseif k === :fk && fk_to_field(fld) !== nothing           # the to_field's value is submitted (#220)
+        obj = first(filter(objects(related_model(fld)), Q(fk_to_field(fld) => s)))
         return obj, obj === nothing ? gettext("Select a valid choice. That choice is not one of the available choices.") : nothing
     elseif k === :fk
         id = parse_pk(related_model(fld), s)

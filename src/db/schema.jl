@@ -217,13 +217,13 @@ function column_state(f::Field)
     gen === nothing || (d = nothing)
     d !== nothing && f.kind in (:json, :hstore, :array, :intrange, :daterange, :datetimerange, :decimalrange, :uuid) && (d = nothing)  # set by Julia, not the DB
     ref = f.kind !== :fk ? nothing : f.related === :__user_model__ ? "__user_model__" : modelmeta(related_model(f)).table
-    f.kind === :fk && is_composite(related_model(f)) &&
+    f.kind === :fk && is_composite(related_model(f)) && !natural_pk(related_model(f)) &&
         throw(ArgumentError("$(nameof(f.model)).$(f.name): foreign keys to $(nameof(related_model(f))) has a composite primary key; point at it with ForeignObject(...; from_fields = ...)"))
     of = f.kind === :array ? f.related : f.kind === :geometry ? geo_of(f) : f.kind === :fk ? fk_of(related_model(f)) : nothing
-    if f.kind === :fk && f.to_field !== nothing          # the column holds the target field's values (#220)
-        tf = getfield_meta(related_model(f), f.to_field)
-        (tf.unique || tf.kind in (:auto, :bigauto, :smallauto)) ||
-            throw(ArgumentError("$(nameof(f.model)).$(f.name): to_field = :$(f.to_field) must be a unique field of $(nameof(related_model(f)))"))
+    if f.kind === :fk && fk_to_field(f) !== nothing          # the column holds the target field's values (#220)
+        tf = getfield_meta(related_model(f), fk_to_field(f))
+        (tf.unique || natural_pk(related_model(f))) ||
+            throw(ArgumentError("$(nameof(f.model)).$(f.name): to_field = :$(fk_to_field(f)) must be a unique field of $(nameof(related_model(f)))"))
         k = schema_kind(tf.kind)
         return Column(column(f), k === :intauto ? :int : k === :bigauto ? :bigint : k; null = f.null, default = d, unique = f.unique,
                       index = f.db_index, max_length = k in (:string, :citext, :binary) ? tf.max_length : nothing, references = ref,

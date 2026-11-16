@@ -86,7 +86,7 @@ end
 # -- noting writes -------------------------------------------------------------------------------------------
 
 active_recording(@nospecialize(T)) =
-    (rec = RECORDING[]; rec === nothing || UNDOING[] || is_composite(T) || model_label(T) in rec.exclude ? nothing : rec)
+    (rec = RECORDING[]; rec === nothing || UNDOING[] || (is_composite(T) && !natural_pk(T)) || model_label(T) in rec.exclude ? nothing : rec)
 
 noted_made!(rec, @nospecialize(T), ids) = union!(get!(Set{String}, rec.made, model_label(T)), (string(i) for i in ids if i !== nothing))
 

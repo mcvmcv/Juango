@@ -29,7 +29,7 @@ end
 # related id (`mine__id`, which is the column itself without a to_field), and new rows get the stored value.
 idkey(f::Field) = Symbol(f.name, "__id")
 idkeys(f::Field) = Symbol(f.name, "__id__in")
-stored_value(f::Field, id) = f.to_field === nothing ? id : getproperty(get(base_objects(related_model(f)); id = id), f.to_field)
+stored_value(f::Field, id) = fk_to_field(f) === nothing ? id : getproperty(get(base_objects(related_model(f)); id = id), fk_to_field(f))
 Base.@nospecializeinfer objid(@nospecialize(x::Model)) = (x.id === nothing && throw(ArgumentError("cannot relate an unsaved $(typeof(x))")); x.id)
 objid(x) = x
 

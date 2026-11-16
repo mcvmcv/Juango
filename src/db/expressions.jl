@@ -444,6 +444,7 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
         s == "pk" && (s = "id")
         if s == "id"
             last_ || throw(LookupError("'id' is not a relation in '$path'"))
+            natural_pk(T) && return qcol(alias, column(pk_fields(T)[1])), pk_fields(T)[1]     # (#221)
             return qcol(alias, "id"), nothing
         end
         if i == 1 && alias == c.base && is_filtered_relation(get(c.annotations, Symbol(s), nothing))
@@ -464,7 +465,7 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
                 return tr[1], nothing
             end
             # author__id (or the to_field's name): the key column itself, no join (as Django)
-            if i == length(segs) - 1 && (segs[end] == string(target_name(f)) || (f.to_field === nothing && segs[end] == "pk"))
+            if i == length(segs) - 1 && (segs[end] == string(target_name(f)) || (fk_to_field(f) === nothing && segs[end] == "pk"))
                 return qcol(alias, column(f)), f
             end
             alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, target_column(f), column(f); left = f.null)

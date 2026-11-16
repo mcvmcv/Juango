@@ -237,6 +237,8 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     elseif fname == "id" && is_composite(T)
         isempty(rest) || throw(LookupError("'pk' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
         fs = pk_fields(T)
+        # a natural key (#221): pk is its field, with any lookup
+        length(fs) == 1 && return compile_lookup(c, alias, T, Symbol(fs[1].name, "__", lookup), value isa Model ? value.pk : value, negated)
         part(tup) = (length(tup) == length(fs) || throw(ArgumentError("$(nameof(T)) has a $(length(fs))-part primary key; got $(repr(tup))"));
                      Q(:AND, Any[f.name => v for (f, v) in zip(fs, tup)], false))
         if lookup == "exact"
@@ -352,7 +354,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
         elseif !isempty(rest)
             f.kind === :fk || throw(LookupError("unsupported lookup '$(join(rest, "__"))' for $(f.kind) field '$fname'" *
                                                 suggest_lookup(rest[1])))
-            if rest == [string(target_name(f))] || (f.to_field === nothing && rest == ["pk"])
+            if rest == [string(target_name(f))] || (fk_to_field(f) === nothing && rest == ["pk"])
                 col = qcol(alias, column(f))     # author__id is just author_id: no join
             else
                 R = related_model(f)
@@ -378,8 +380,8 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     conv(v) = v isa Model ? saved_key(f !== nothing && f.kind === :fk ? target_value(f, v) : v.id, v) :
               (f === nothing || f.kind === :fk ? dbparam(v) : to_db(f, v))
     # food__in = filter(Food; ...), for a key with a to_field: the subquery selects that field (#220)
-    f !== nothing && f.kind === :fk && f.to_field !== nothing && value isa QuerySet && value.values_fields === nothing &&
-        (value = values(value, f.to_field))
+    f !== nothing && f.kind === :fk && fk_to_field(f) !== nothing && value isa QuerySet && value.values_fields === nothing &&
+        (value = values(value, fk_to_field(f)))
     f === nothing || (kind = f.kind)
     f !== nothing && f.kind in INT_KINDS && value isa AbstractFloat && ((lookup, value) = int_float_bound(lookup, value))
     cl = isempty(CUSTOM_LOOKUPS) ? nothing : find_custom(CUSTOM_LOOKUPS, lookup, kind)

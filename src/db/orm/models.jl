@@ -173,12 +173,18 @@ Base.@nospecializeinfer function getfield_meta(@nospecialize(T::Type), name::Sym
     f
 end
 
+"""
+The related model's field a foreign key stores, when not its id: its `to_field` (#220), or the related
+model's natural primary key (`primary_key = true`, #221). `nothing` for an id.
+"""
+fk_to_field(f::Field) = getfield(f, :to_field) !== nothing ? getfield(f, :to_field) :
+    f.kind === :fk && (R = related_model(f); natural_pk(R)) ? pk_fields(related_model(f))[1].name : nothing
 "The related model's field a foreign key stores: its id, or its `to_field` (#220)."
-target_name(f::Field) = something(f.to_field, :id)
+target_name(f::Field) = something(fk_to_field(f), :id)
 "The related table's column a foreign key refers to (\"id\", or the `to_field`'s column)."
-target_column(f::Field) = f.to_field === nothing ? "id" : column(getfield_meta(related_model(f), f.to_field))
+target_column(f::Field) = fk_to_field(f) === nothing ? "id" : column(getfield_meta(related_model(f), fk_to_field(f)))
 "What a foreign key stores for the related object `v`: its id, or its `to_field` value."
-target_value(f::Field, v::Model) = f.to_field === nothing ? (getfield(v, :_data)::Dict{Symbol,Any})[:id] : getproperty(v, f.to_field)
+target_value(f::Field, v::Model) = fk_to_field(f) === nothing ? (getfield(v, :_data)::Dict{Symbol,Any})[:id] : getproperty(v, fk_to_field(f))
 
 function related_model(f::Field)
     r = f.related
@@ -222,6 +228,15 @@ Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields:
         f.model = T
         name in (:id, :pk) && error("$T: '$name' is reserved for the automatic primary key")
         push!(f.kind === :m2m ? m2m : f.kind === :gfk ? gfks : f.kind === :grel ? grels : f.kind === :fobj ? fobjs : fs, f)
+    end
+    # code = CharField(max_length = 10, primary_key = true): the key is that field, as Django's (#221)
+    pkfs = [f for f in fs if f.primary_key]
+    if !isempty(pkfs)
+        length(pkfs) == 1 || error("$T: only one field can be primary_key = true (use Meta(pk = CompositePrimaryKey(...)))")
+        haskey(meta, :pk) && error("$T: give primary_key = true or Meta(pk = ...), not both")
+        parent === nothing || error("$T: a multi-table child can't have its own primary key field")
+        pkfs[1].null = false; pkfs[1].db_index = false
+        meta = merge(meta, (pk = CompositePrimaryKey(pkfs[1].name),))
     end
     # Meta(order_with_respect_to = :fk): a hidden `_order` column numbering the objects of each parent (Django's)
     owrt = get(meta, :order_with_respect_to, nothing)

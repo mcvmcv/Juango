@@ -237,7 +237,7 @@ Base.@nospecializeinfer function update_columns!(@nospecialize(M::Type), data, o
     sets = join(["$(qname(column(f))) = $ph" for (f, ph) in zip(fields, phs)], ", ")
     if is_composite(M)
         cond = join([qname(column(f)) * " = ?" for f in pk_fields(M)], " AND ")
-        n = execute_changes("UPDATE $(qname(modelmeta(M).table)) SET $sets WHERE $cond", vcat(vals, collect(Any, data[:id])))
+        n = execute_changes("UPDATE $(qname(modelmeta(M).table)) SET $sets WHERE $cond", vcat(vals, pk_parts(data[:id])))
     else
         n = execute_changes("UPDATE $(qname(modelmeta(M).table)) SET $sets WHERE $(qname("id")) = ?", vcat(vals, data[:id]))
     end
@@ -261,7 +261,7 @@ Base.@nospecializeinfer function save_table!(@nospecialize(M::Type), data, root:
         if data[:id] !== nothing          # loaded or saved before: UPDATE, else (no such row) INSERT
             cond = join([qname(column(f)) * " = ?" for f in pk_fields(M)], " AND ")
             sets, vals = upd()
-            n = execute_changes("UPDATE $tbl SET $sets WHERE $cond", vcat(vals, collect(Any, key)))
+            n = execute_changes("UPDATE $tbl SET $sets WHERE $cond", vcat(vals, pk_parts(key)))
             n > 0 && (data[:id] = key; return)
         end
         phs, vals = ins()

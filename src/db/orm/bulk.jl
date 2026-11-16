@@ -457,7 +457,7 @@ Base.@nospecializeinfer function deletion_closure!(seen::IdDict{Any,Set{Any}}, r
         f.on_delete === :CASCADE ? deletion_closure!(seen, restricts, M, row_keys(rel)) :
             f.on_delete === :RESTRICT && push!(restricts, (T, M, f, rel))
     end
-    is_composite(T) && return
+    is_composite(T) && !natural_pk(T) && return          # (a natural key is referred to like an id: #221)
     for g in generic_relations(T)
         M = related_model(g)
         ctf, fkf = g.through
@@ -501,13 +501,13 @@ function on_delete_value(f::Field)
     v isa Model ? target_value(f, v) : v
 end
 "The rows whose foreign key `f` points at the rows with these ids (through the related table with a `to_field`)."
-referrers_q(f::Field, ids) = f.to_field === nothing ? Q(Symbol(attname(f), "__in") => ids) : Q(Symbol(f.name, "__id__in") => ids)
+referrers_q(f::Field, ids) = fk_to_field(f) === nothing ? Q(Symbol(attname(f), "__in") => ids) : Q(Symbol(f.name, "__id__in") => ids)
 
 Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector)
     isempty(ids) && return 0
     T = concrete_model(T)
     delete_fobj_refs!(T, ids)
-    is_composite(T) && return delete_composite!(T, ids)
+    is_composite(T) && !natural_pk(T) && return delete_composite!(T, ids)
     for g in generic_relations(T)    # objects pointing here through a GenericForeignKey
         M = related_model(g)
         ctf, fkf = g.through
@@ -536,7 +536,7 @@ Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector
         send(pre_write, T; action = :delete, via = :delete, ids = collect(Any, ids), fields = nothing, instances = nothing)
     n = 0
     for chunk in Iterators.partition(ids, 500)
-        n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE $(qname("id")) IN (" *
+        n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE $(qname(natural_pk(T) ? column(pk_fields(T)[1]) : "id")) IN (" *
                              join(fill("?", length(chunk)), ",") * ")", collect(chunk))
     end
     foreach(o -> send(post_delete, T; instance = o), doomed)
@@ -559,7 +559,7 @@ Base.@nospecializeinfer function delete_composite!(@nospecialize(T::Type), keys:
     cond = join([qname(column(f)) * " = ?" for f in pk_fields(T)], " AND ")
     n = 0
     for k in keys
-        n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE $cond", collect(Any, k))
+        n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE $cond", pk_parts(k))
     end
     foreach(o -> send(post_delete, T; instance = o), doomed)
     n > 0 && has_receivers(post_write, T) && send(post_write, T; action = :delete, via = :delete, ids = collect(Any, keys), fields = nothing, instances = nothing)

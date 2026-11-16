@@ -1218,6 +1218,25 @@ end
     identifier = OneToOneField(DqIdentifier; on_delete = :CASCADE, related_name = :channel)
     Meta(table = "dq_channel")
 end
+@model struct DqCustomPk
+    name = CharField(max_length = 10, primary_key = true)
+    extra = CharField(max_length = 10)
+    Meta(table = "dq_custompk", ordering = ["name", "extra"])
+end
+@model struct DqRelated
+    custom = ForeignKey(DqCustomPk; on_delete = :CASCADE, null = true, related_name = :related)
+    Meta(table = "dq_related")
+end
+@model struct DqCustomPkTag             # Django's id = CharField(primary_key=True): `id` is reserved in Juango
+    code = CharField(max_length = 20, primary_key = true)
+    custom_pk = ManyToManyField(DqCustomPk; related_name = :custompktag)
+    tag = CharField(max_length = 20)
+    Meta(table = "dq_custompktag")
+end
+@model struct DqDateTimePK
+    date = DateTimeField(primary_key = true, default = now)
+    Meta(table = "dq_datetimepk", ordering = ["date"])
+end
 @model struct DqTeacher
     schools = ManyToManyField(DqSchool; related_name = :teacher)
     friends = ManyToManyField(:self; symmetrical = true)
@@ -1229,7 +1248,8 @@ redirect_stdout(devnull) do
           DqManagedModel, DqSimpleCategory, DqSpecialCategory, DqCategoryItem, DqOneToOneCategory, DqSchool, DqClassroom, DqArticle, DqFood, DqEaten, DqReservedName,
           DqLoopX, DqLoopY, DqLoopZ, DqObjectA, DqObjectB, DqObjectC, DqJob, DqResponsibility, DqJobResponsibilities,
           DqOrder, DqOrderItem, DqCategoryRelationship, DqNullableName, DqNode, DqModelD, DqModelC, DqModelB, DqModelA,
-          DqFK1, DqBaseA, DqIdentifier, DqProgram, DqChannel, DqTeacher,
+          DqFK1, DqBaseA, DqIdentifier, DqProgram, DqChannel, DqCustomPk, DqRelated, DqCustomPkTag,
+          through(DqCustomPkTag, :custom_pk), DqDateTimePK, DqTeacher,
           through(DqTeacher, :schools), through(DqTeacher, :friends)]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
 end
@@ -2027,5 +2047,34 @@ end
     sql = first(Juango.select_sql(q))
     @test length(collect(eachmatch(r"JOIN [`\"]dq_item[`\"]", sql))) == 1          # the filter's join, in SELECT and GROUP BY alike
     @test Dict(r[:item__name] => r[:n] for r in q) == Dict("one" => 1, "three" => 1)
+  end
+end
+
+@testset "django queries: custom primary keys (IsNullTests.test_primary_key, CustomPkTests) (#221)" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    custom = create(DqCustomPk; name = "pk", extra = "e")
+    null = create(DqRelated); notnull = create(DqRelated; custom = custom)
+    @test custom.pk == "pk" && get(DqCustomPk; pk = "pk").extra == "e" && get(DqCustomPk; name = "pk").pk == "pk"
+    @test notnull.custom_id == "pk" && get(DqRelated; id = notnull.id).custom.extra == "e"
+    @test [x.id for x in filter(DqRelated; custom__isnull = false)] == [notnull.id] && [x.id for x in filter(DqRelated; custom__isnull = true)] == [null.id]
+    @test [x.id for x in filter(DqRelated; custom = custom)] == [notnull.id] && [x.id for x in filter(DqRelated; custom = "pk")] == [notnull.id]
+    @test [x.pk for x in filter(DqCustomPk; related = notnull)] == ["pk"] && [x.pk for x in filter(DqCustomPk; pk__in = ["pk", "x"])] == ["pk"]
+    @test length(collect(order_by(objects(DqRelated), "custom"))) == 2        # test_ticket7371
+    # saving under a changed key writes a new row, as Django
+    c2 = get(DqCustomPk; pk = "pk"); c2.extra = "f"; save!(c2)
+    @test get(DqCustomPk; pk = "pk").extra == "f" && count(objects(DqCustomPk)) == 1
+    # many-to-many between natural keys
+    t = create(DqCustomPkTag; code = "t1", tag = "red"); add!(t.custom_pk, custom)
+    @test [x.pk for x in t.custom_pk] == ["pk"] && [x.code for x in custom.custompktag] == ["t1"]
+    @test [x.code for x in filter(DqCustomPkTag; custom_pk__extra = "f")] == ["t1"]
+    remove!(t.custom_pk, custom); @test isempty(collect(t.custom_pk))
+    add!(t.custom_pk, custom)
+    # deleting cascades through the natural key
+    delete!(custom)
+    @test count(objects(DqRelated)) == 1 && isempty(collect(get(DqCustomPkTag; pk = "t1").custom_pk))
+    # a datetime as the key (Django's DateTimePK)
+    d = create(DqDateTimePK; date = DateTime(2020, 1, 2, 3, 4, 5))
+    @test get(DqDateTimePK; pk = DateTime(2020, 1, 2, 3, 4, 5)).pk == DateTime(2020, 1, 2, 3, 4, 5)
   end
 end

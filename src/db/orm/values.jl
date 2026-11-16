@@ -2,7 +2,7 @@
 
 from_db(f::Field, ::Nothing) = nothing
 function from_db(f::Field, v)
-    f.kind === :fk && f.to_field !== nothing && return from_db(getfield_meta(related_model(f), f.to_field), v)   # (#220)
+    f.kind === :fk && fk_to_field(f) !== nothing && return from_db(getfield_meta(related_model(f), fk_to_field(f)), v)   # (#220)
     r = from_db_extra(f, v)
     r === NOTFOUND || return r
     k = f.kind
@@ -38,6 +38,9 @@ there is no `id` column. `obj.pk` (and `obj.id`) is a tuple of their values; loo
 with `get(Model; pk = (1, 2))` or `filter(Model; pk__in = [(1, 2), (1, 3)])`. As in Django,
 other models can't point a ForeignKey or ManyToManyField at such a model, it can't take part
 in multi-table inheritance, and the admin doesn't support it.
+
+With one field (or a field declared `primary_key = true`) it's a natural key: `obj.pk` is that
+field's value, and foreign keys and many-to-many fields can point at the model (#221).
 """
 struct CompositePrimaryKey
     fields::Vector{Symbol}
@@ -81,17 +84,25 @@ Base.@nospecializeinfer pk_fields(@nospecialize(T::Type)) = Field[getfield_meta(
 pk_ref(alias, T::Type) = is_composite(T) ? "(" * join([qcol(alias, column(f)) for f in pk_fields(T)], ", ") * ")" : qcol(alias, "id")
 "The primary key column(s) of rows at `alias`, for a SELECT list."
 pk_select(alias, T::Type) = is_composite(T) ? join([qcol(alias, column(f)) for f in pk_fields(T)], ", ") : qcol(alias, "id")
-"A composite key's tuple from an object's data (`nothing` if a part is missing)."
+"A composite key's tuple from an object's data (`nothing` if a part is missing); a natural key's one value."
 Base.@nospecializeinfer function composite_pk(@nospecialize(T::Type), data)
     vals = Any[get(data, attname(f), nothing) for f in pk_fields(T)]
-    any(isnothing, vals) ? nothing : Tuple(vals)
+    any(isnothing, vals) ? nothing : length(vals) == 1 ? vals[1] : Tuple(vals)
 end
+"""
+Whether `T`'s primary key is one of its fields (`primary_key = true`, or a one-field CompositePrimaryKey):
+a natural key, as Django's `CharField(primary_key=True)`. `obj.pk` is then that field's value (#221).
+"""
+Base.@nospecializeinfer natural_pk(@nospecialize(T::Type)) = is_composite(T) && length(modelmeta(concrete_model(T)).extra[:pk].fields) == 1
+"A key's parts as a vector: a composite key's tuple, or a natural key's one value."
+pk_parts(k) = k isa Tuple ? collect(Any, k) : Any[k]
 
 """
 Parse a primary key from text (URLs, form values); `nothing` if it isn't one. A composite
 key is its parts as `pk_string` writes them: `"3,7"`.
 """
 Base.@nospecializeinfer function parse_pk(@nospecialize(T::Type), s)
+    natural_pk(T) && !(s isa AbstractString) && return s               # a natural key's value, as it is (#221)
     s isa Integer && return is_auto_pk(pk_kind(T)) ? s : nothing
     s isa UUID && return s
     s isa Tuple && return s
@@ -101,7 +112,7 @@ Base.@nospecializeinfer function parse_pk(@nospecialize(T::Type), s)
 end
 Base.@nospecializeinfer function parse_composite_pk(@nospecialize(T::Type), s::AbstractString)
     fs = pk_fields(T)
-    bits = split(s, ',')
+    bits = length(fs) == 1 ? [s] : split(s, ',')        # a natural key is one value, commas and all
     length(bits) == length(fs) || return nothing
     vals = Any[]
     for (f, b) in zip(fs, bits)
