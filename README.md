@@ -252,6 +252,15 @@ Status.choices; Status.values; Status.label("p")
 - **Grouped choices** become optgroups in forms.
 - **A function** as `choices` is called each time the choices are needed, both for validation and for forms (Django 5's callable choices).
 
+#### Natural keys and legacy columns: to_field and db_column
+
+```julia
+plate  = ForeignKey(Plate; on_delete = :CASCADE, to_field = :barcode)   # stores the plate's barcode, not its id
+count_ = IntegerField(db_column = "count")                              # a column named other than the field
+```
+
+`to_field` names a unique field of the related model. The column takes that field's type, and the database constraint refers to it. `filter(Well; plate = "P-0001")` compares barcodes, `well.plate_id` is the barcode, and joins, `select_related`, `prefetch_related`, cascades and forms follow the field. `db_column` changes only the column's name: lookups, `values()` keys and serializers still use the field's name.
+
 #### What deleting does: on_delete
 
 ```julia
@@ -407,6 +416,12 @@ With DEBUG on, paginating an unordered queryset, or slicing one from a later row
 - **Subqueries:**
   - `annotate(objects(Author); latest = Subquery(values(order_by(filter(Post; author=OuterRef(:id)), "-created"), :title)[1:1]))`
   - `filter(objects(Author), Exists(filter(Post; author=OuterRef(:id))))`, negated with `!Exists(...)`
+  - Conditions combine whatever they are: `Q(genre = "poetry") & !Exists(...)`, `Q(rating__gt = 4) | Exists(...)`, `xor(...)`, and `When(Exists(...); then = ...)`.
+- **Lookups as expressions:** `Exact`, `IExact`, `GreaterThan`, `GreaterThanOrEqual`, `LessThan`, `LessThanOrEqual`, `In`, `Range`, `IsNull`, `Contains`, `StartsWith`, `EndsWith` (and `I...` forms), in `annotate`, `filter`, `order_by` and `When`: `annotate(qs; modern = GreaterThan(F(:year), 1900))`, `filter(qs, Exact(F(:year), 1942) | GreaterThan(F(:year), 2000))`.
+- **Operators:** `F(:x) + 1`, `-`, `*`, `/`, `%` (MOD), `^` (POWER), and on integers `&`, `|`, `⊻`, `<<`, `>>`. `~F(:flag)` negates a boolean. `F(:name)[1:3]` and `OuterRef(:code)[1]` are substrings.
+- **`alias(qs; n = Count(:books))`:** a name for `filter`, `order_by` and `annotate` to use, without selecting it.
+- **`RawSQL("num_employees > ?", [100]; output = :bool)`:** an SQL fragment as an expression, with parameters (never put user input in the SQL itself). `ExpressionWrapper(expr; output = :duration)` gives an expression a type, so its values convert.
+- **`aggregate` over annotations:** `aggregate(annotate(qs; n = Count(:authors)); avg = Avg(:n))` runs the annotated query as a subquery.
 - **Window functions:** `annotate(qs; rank = Window(RowNumber(); partition_by=[:author], order_by=["-views"]))`, also with `Rank`, `DenseRank`, `Lag`, `Lead`, `FirstValue`, `LastValue`, `NthValue`, `Ntile`, `PercentRank`, `CumeDist` and aggregates over a window. A frame narrows the window: `Window(Sum(:amount); order_by = ["day"], frame = RowRange(start = -6, stop = 0))` is a seven-row moving sum, `RowRange(stop = 0)` a running total, and `ValueRange(...)` counts in the ordering's values (`RANGE`). `exclusion = :current_row` (or `:group`, `:ties`) works on PostgreSQL and SQLite. You can order and filter by them: `filter(qs; rank = 1)` wraps the query, because SQL can't filter on a window function directly. Plain conditions in the same queryset apply before the window is computed, as in Django.
 - **`FilteredRelation`:** join a relation with an extra condition in the JOIN's `ON` clause, so authors without a match are kept and aggregates see only matching rows. It works with forward and reverse relations, one level deep:
   - `qs = annotate(Author; pub = FilteredRelation(:posts; condition = Q(posts__published = true)))`
@@ -2130,6 +2145,22 @@ model_label(Material), get_model("lab.Material")
 
 The automatic primary key is `obj.pk`, not a field. A `CompositePrimaryKey`'s fields are
 concrete fields, with `is_primary_key(Material, f)` true.
+
+### Undo
+
+An app can record what one action writes and put it back later (`django-reversion`'s idea, organised around one action at a time):
+
+```julia
+data = recording() do rec
+    plate.status = "done"; save!(plate)
+    delete!(filter(Well; plate = plate, empty = true))
+    recorded(rec)                  # JSON-ready: store it with the action, in a JSONField
+end
+undo_problem(data)                 # nothing, or why it can't be undone now (it's tried and rolled back)
+undo_recorded!(data)               # puts it all back in one transaction, or throws UndoProblem
+```
+
+Every write inside `recording` is noted, whatever made it: `save!`, `update!`, `bulk_create`, `bulk_update`, `delete!` with its cascades and the links it empties, and many-to-many changes. An undo refuses, saying why, when a row it changed has been changed again since, when deleting what it made would take something made or changed since with it, or when a deleted row's place (a unique value) has been taken. Deleted rows come back with their own keys and `auto_now` stamps. `recording(; exclude = [AuditEntry])` leaves models out, and Juango's own bookkeeping (sessions, the admin log, content types, permissions) is never recorded. A receiver of `undoing_recorded` can redo what an app works out from the rows, since an undo's `update!` and `bulk_create` send no `post_save`. Rows made by `bulk_create` on MySQL have no ids to note, so an undo can't delete them.
 
 ### Fixtures and serialization
 

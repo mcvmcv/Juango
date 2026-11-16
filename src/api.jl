@@ -77,7 +77,8 @@ export Form, @form, ModelForm, is_valid, add_widget_attrs!, add_error!, as_p, cl
        ComboField, as_field_group, as_div, as_table, NullBooleanField, SelectDateWidget, SplitHiddenDateTimeWidget,
        order_fields!, non_field_errors, errors_json_data, errors_as_json, legend_tag, set_field!, delete_field!
 # views
-export render, redirect, query_param, component!, get_text_list, ModelResource, export_data, export_rows, export_download, import_data,
+export recording, recorded, undo_recorded!, undo_problem, UndoProblem, not_recording, undoing, undoing_recorded, has_changes,
+       render, redirect, query_param, component!, get_text_list, ModelResource, export_data, export_rows, export_download, import_data,
        read_table, parse_csv, read_xlsx, excel_date, has_errors, ImportResult, API, route!, add_router!, api_urls, ModelSchema, openapi_schema,
        paginate_api, api_key_auth, bearer_auth, session_auth, get_object_or_404, get_list_or_404, TemplateView, RedirectView, ListView,
        DetailView, CreateView, UpdateView, DeleteView, FormView, ArchiveIndexView, YearArchiveView,

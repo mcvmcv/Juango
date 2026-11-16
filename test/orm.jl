@@ -2310,3 +2310,60 @@ end
         disconnect!(pre_write, rec; sender = Article)
     end
 end
+
+@testset "undo: recording what an action writes, and putting it back (#194)" begin
+    au = create(Author; name = "Undo Author")
+    keep = create(Article; title = "undo keep", author = au, views = 1)
+    gone = create(Article; title = "undo gone", author = au, views = 2)
+    t1 = create(Tag; label = "undo t1", article = gone)
+    p1, p2 = create(Topic; name = "undo p1"), create(Topic; name = "undo p2")
+    e = create(Essay; title = "undo essay"); add!(e.topics, p1)
+    gone_id = gone.id                                                # (delete! clears gone.id)
+    created_at = get(Article; id = gone_id).created
+    data = recording() do rec
+        keep.views = 10; keep.title = "undo kept"; save!(keep)
+        made = create(Article; title = "undo made", author = au)
+        update!(filter(Article; id = made.id); views = 5)            # made then changed: still just made
+        delete!(gone)                                                # SET_NULL on its tag
+        add!(e.topics, p2); remove!(e.topics, p1)
+        recorded(rec)
+    end
+    L = Juango.model_label(Article)
+    @test has_changes(data) && haskey(data["made"], L) && haskey(data["deleted"], L)
+    @test data["changed"][L][string(keep.id)]["views"] == [1, 10]
+    @test Juango.JSON.parse(Juango.JSON.json(data)) == data           # storable as JSON
+    @test undo_problem(data) === nothing
+    @test exists(filter(Article; title = "undo made"))              # (trying it changed nothing)
+    undo_recorded!(data)
+    @test get(Article; id = keep.id).views == 1 && get(Article; id = keep.id).title == "undo keep"
+    @test !exists(filter(Article; title = "undo made"))
+    g = get(Article; id = gone_id)
+    @test g.title == "undo gone" && g.created == created_at         # back with its own key and stamps
+    @test get(Tag; id = t1.id).article_id == gone_id                 # the link the delete emptied
+    @test Set(t.name for t in e.topics) == Set(["undo p1"])
+    # changed again since: refused, and nothing is changed
+    data2 = recording() do rec
+        k = get(Article; id = keep.id); k.views = 20; save!(k)
+        recorded(rec)
+    end
+    update!(filter(Article; id = keep.id); views = 30)
+    @test occursin("changed or deleted since", something(undo_problem(data2), ""))
+    @test_throws UndoProblem undo_recorded!(data2)
+    @test get(Article; id = keep.id).views == 30
+    # what it made is used since: refused
+    data3 = recording() do rec
+        a = create(Author; name = "Undo Made Author")
+        recorded(rec)
+    end
+    create(Article; title = "uses it", author = get(Author; name = "Undo Made Author"))
+    @test occursin("since", something(undo_problem(data3), ""))
+    # outside recording(), and the writes undo makes, aren't recorded; excluded models aren't either
+    data4 = recording(; exclude = [Tag]) do rec
+        create(Tag; label = "undo excluded")
+        recorded(rec)
+    end
+    @test !has_changes(data4)
+    delete!(filter(Article; title__startswith = "undo")); delete!(filter(Article; title = "uses it"))
+    delete!(filter(Author; name__startswith = "Undo")); delete!(e); delete!(filter(Topic; name__startswith = "undo"))
+    delete!(filter(Tag; label__startswith = "undo"))
+end
