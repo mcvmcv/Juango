@@ -11,6 +11,10 @@
 # into a shared environment (`@juango-build`) the first time, so it isn't a dependency of the project.
 
 const BUILD_ENV = "@juango-build"
+# The image is compiled in one process that loads every package from source (PackageCompiler builds
+# with --pkgimages=no): the example blog peaked at 12 GB. A heap-size hint makes its collector work
+# harder: 10.9 GB, and faster too (8.6 minutes, not 11).
+const BUILD_ARGS = "`--heap-size-hint=3G`"
 sysimage_ext() = Sys.iswindows() ? "dll" : Sys.isapple() ? "dylib" : "so"
 
 "Template names (relative paths) under the template directories, for the build workload."
@@ -157,17 +161,22 @@ end
 
 Build a system image for the project (see the top of this file). `workload` is `:urls`, `:tests`
 (the URLs and the project's tests) or `:none`. `packages` defaults to the project's `[deps]`.
-`dry_run = true` writes the workload and returns the command without running it.
+`dry_run = true` writes the workload and returns the command without running it. `app = true`
+builds a standalone app instead (`build_app`). `cpu_target` is passed to PackageCompiler: by
+default an image is compiled for this machine's CPU and an app for several CPU types, so it runs
+on other machines; `cpu_target = "native"` compiles an app for this CPU only, which needs less
+memory and time to build.
 """
 function build(; output = nothing, workload = :urls, project_file = nothing, packages = nothing,
-               dry_run::Bool = false, app::Bool = false, julia = Base.julia_cmd(), log = println)
+               dry_run::Bool = false, app::Bool = false, cpu_target = nothing, julia = Base.julia_cmd(), log = println)
     proj_dir = dirname(something(Base.active_project(), joinpath(pwd(), "Project.toml")))
     pf = abspath(something(project_file, joinpath(proj_dir, "project.jl")))
     isfile(pf) || throw(ArgumentError("build: no project file at $pf (pass project_file)"))
     out = abspath(something(output, joinpath(proj_dir, "build", app ? "app" : "juango." * sysimage_ext())))
     mkpath(dirname(out))
     wl = Symbol(workload)
-    app && return build_app(proj_dir, pf, out, wl; dry_run, julia, log)
+    cpu = cpu_target === nothing ? "" : ", cpu_target = $(repr(string(cpu_target)))"
+    app && return build_app(proj_dir, pf, out, wl; dry_run, julia, log, cpu)
     wl in (:urls, :tests, :none) || throw(ArgumentError("build: workload must be :urls, :tests or :none"))
     wfile = joinpath(dirname(out), "precompile_workload.jl")
     write(wfile, wl === :none ? "using Juango\n" : build_workload(pf; tests = wl === :tests))
@@ -175,30 +184,30 @@ function build(; output = nothing, workload = :urls, project_file = nothing, pac
            (projfile = joinpath(proj_dir, "Project.toml"); isfile(projfile) ?
             sort(collect(keys(get(TOML.parsefile(projfile), "deps", Dict())))) : ["Juango"])
     script = "using PackageCompiler; create_sysimage($(repr(pkgs)); sysimage_path = $(repr(out)), " *
-             "precompile_execution_file = $(repr(wfile)), project = $(repr(proj_dir)))"
+             "precompile_execution_file = $(repr(wfile)), project = $(repr(proj_dir)), sysimage_build_args = $BUILD_ARGS$cpu)"
     cmd = addenv(`$julia --project=$proj_dir -e $script`, "JULIA_LOAD_PATH" => "@:$BUILD_ENV:@stdlib")
     dry_run && return cmd
     ensure_package_compiler(julia; log = log)
-    log("Building $out (this takes several minutes and a few GB of memory)...")
+    log("Building $out (this takes about ten minutes and needs about 11 GB of free memory)...")
     run(cmd)
     log("Done. Start with: julia --project -J $(relpath(out, proj_dir)) manage.jl runserver")
     out
 end
 
 "`build(; app = true)`: a standalone app (see `write_app_package`)."
-function build_app(proj_dir, pf, out, wl; dry_run = false, julia = Base.julia_cmd(), log = println)
+function build_app(proj_dir, pf, out, wl; dry_run = false, julia = Base.julia_cmd(), log = println, cpu = "")
     src = joinpath(dirname(out), "app_src")
     name = write_app_package(proj_dir, src)
     wfile = joinpath(dirname(out), "precompile_workload.jl")
     write(wfile, wl === :none ? "using Juango\n" : build_workload(pf; tests = wl === :tests))
     exe = lowercase(replace(basename(normpath(proj_dir)), r"[^A-Za-z0-9_-]+" => "_"))
     script = "using PackageCompiler; create_app($(repr(src)), $(repr(out)); executables = [$(repr(exe)) => \"julia_main\"], " *
-             "precompile_execution_file = $(repr(wfile)), force = true, include_lazy_artifacts = true)"
+             "precompile_execution_file = $(repr(wfile)), force = true, include_lazy_artifacts = true, sysimage_build_args = $BUILD_ARGS$cpu)"
     cmd = addenv(`$julia --project=$src -e $script`, "JULIA_LOAD_PATH" => "@:$BUILD_ENV:@stdlib")
     dry_run && return cmd
     ensure_package_compiler(julia; log = log)
     run(addenv(`$julia --project=$src -e "import Pkg; Pkg.instantiate()"`, "JULIA_LOAD_PATH" => "@:@stdlib"))
-    log("Building the app $out (this takes a while and several GB of memory)...")
+    log("Building the app $out (this takes about ten minutes and needs about 11 GB of free memory)...")
     run(cmd)
     copy_project_into(proj_dir, joinpath(out, "project"))
     log("Done. Run it with: $(relpath(joinpath(out, "bin", exe), proj_dir)) runserver 0.0.0.0:8000 (no Julia needed)")

@@ -2187,7 +2187,7 @@ Juango's own checks use Django's ids where Django has the same check (`security.
   precompile_workload = false
   ```
 
-**Starting fast.** A freshly started Julia compiles code the first time it runs it, so a new server answers its first requests slowly; the example blog takes about 12 seconds from `runserver` to its first page on a laptop. `manage.jl build` makes a system image of the project's packages (with PackageCompiler.jl, which it installs into a shared `@juango-build` environment the first time) while running a workload taken from the project. The workload requests every URL without parameters through the test client, against an in-memory copy of the schema, and parses every template:
+**Starting fast.** A freshly started Julia compiles code the first time it runs it, so a new server answers its first requests slowly; the example blog takes 11 seconds from `runserver` to its first response. `manage.jl build` makes a system image of the project's packages (with PackageCompiler.jl, which it installs into a shared `@juango-build` environment the first time) while running a workload taken from the project. The workload requests every URL without parameters through the test client, against an in-memory copy of the schema, and parses every template:
 
 ```sh
 julia --project manage.jl build                       # build/juango.so (.dylib on macOS, .dll on Windows)
@@ -2196,18 +2196,23 @@ julia --project manage.jl build --dry-run             # write the workload and p
 julia --project -J build/juango.so manage.jl runserver 0.0.0.0:8000
 ```
 
-Building takes several minutes and needs about 8 GB of free memory (compiling the image is the expensive step). Rebuild after changing the project's dependencies. Juango's own code is in the image too, so rebuild after upgrading Juango.
+With the image, the example blog answers its first request **3.1-3.6 s** after `runserver` starts, against **11.0 s** without it (Julia 1.13, a 4-core desktop; a second page then takes 70-90 ms either way). What's left of the 3 s is loading the 470 MB image and the project's own code, which is loaded, not compiled into the image.
+
+Building takes 9-11 minutes and needs about **11 GB of free memory**. PackageCompiler compiles the image in one process that loads every package from source, and the example blog peaked at 10.9 GB with the heap-size hint `build` passes (12.1 GB without). On a smaller server, build on a 16 GB machine or a CI runner with the same OS, CPU family and Julia version, and copy `build/juango.so` across. Rebuild after changing the project's dependencies. Juango's own code is in the image too, so rebuild after upgrading Juango.
 
 **A standalone app.** `manage.jl build --app` goes one step further: `build/app` holds an executable named after the project, Julia's runtime and libraries, the compiled image, and a copy of the project's files, so it runs on a machine without Julia (of the same OS and CPU family). It's made with PackageCompiler's `create_app`, from a small wrapper package `build` writes into `build/app_src`, whose `julia_main` loads the project and runs its command line:
 
 ```sh
 julia --project manage.jl build --app                 # build/app/bin/blog, build/app/lib, build/app/project
+julia --project manage.jl build --app --cpu-target native   # for this machine's CPU only: less memory to build
 build/app/bin/blog migrate
 build/app/bin/blog runserver 0.0.0.0:8000             # any manage.jl command
 JUANGO_PROJECT_DIR=/srv/blog build/app/bin/blog runserver   # run a project kept elsewhere
 ```
 
 The project's code is still loaded when the app starts (as with `-J`), so a change to it needs no rebuild. A change to its dependencies or to Juango does.
+
+The app answers its first request **3.2 s** after it starts, like the image. By default it's compiled for several x86-64 CPU types so it runs on other machines, which costs more memory to build than this 16 GB desktop could spare. `--cpu-target native` compiles it for the build machine's CPU only: the example blog's app then took 26 minutes and peaked at 11.2 GB, and is 920 MB on disk. Build the portable default on a bigger machine or a CI runner, or use `native` when the app will run on the same kind of CPU it was built on.
 
 **Running in production.** Set `DEBUG = false`, a long random `SECRET_KEY` and `ALLOWED_HOSTS`, run `manage.jl check --deploy`, and put the server behind a reverse proxy that terminates TLS and serves static and media files:
 

@@ -1169,6 +1169,8 @@ end
     appout = joinpath(dir, "build", "app")
     cmd = Juango.build(; project_file = pf, output = appout, app = true, dry_run = true)
     @test occursin("create_app(", cmd.exec[end]) && occursin("julia_main", cmd.exec[end]) && occursin(repr(appout), cmd.exec[end])
+    @test !occursin("cpu_target", cmd.exec[end])
+    @test occursin("cpu_target = \"native\"", Juango.build(; project_file = pf, output = appout, app = true, cpu_target = "native", dry_run = true).exec[end])
     src = joinpath(dir, "build", "app_src")
     p = Juango.TOML.parsefile(joinpath(src, "Project.toml"))
     name = Juango.app_package_name(dirname(Base.active_project()))

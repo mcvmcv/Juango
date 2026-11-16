@@ -2,3 +2,4 @@ Manifest.toml
 *.sqlite3
 *.sqlite3-*
 test/Manifest.toml
+examples/*/build/

@@ -532,10 +532,10 @@ for (n, h, f) in (
     ("createcachetable", "Create the table for database caches (CACHES backend :db)", _ -> foreach(create_cache_table, keys(settings.CACHES))),
     ("sqlschema", "Print the SQL schema for all models", _ -> println(schema_sql())),
     ("check", "Run the system checks: check [--deploy] [--tag security,models]", cmd_check),
-    ("build", "Build a system image that starts fast: build [--output PATH] [--workload urls|tests|none] [--app] [--dry-run]", function (args)
+    ("build", "Build a system image that starts fast: build [--output PATH] [--workload urls|tests|none] [--app] [--cpu-target native|generic;...] [--dry-run]", function (args)
         _, f = parse_flags(args)
         r = build(; output = get(f, "output", nothing), workload = Symbol(get(f, "workload", "urls")), dry_run = haskey(f, "dry-run"),
-                  app = haskey(f, "app"))
+                  app = haskey(f, "app"), cpu_target = get(f, "cpu-target", nothing))
         haskey(f, "dry-run") && println("JULIA_LOAD_PATH='@:$BUILD_ENV:@stdlib' ", Base.shell_escape(r.exec...))
         r
     end),
@@ -733,7 +733,7 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
         .msg { padding: .5rem 1rem; background: #eef; border-radius: 4px; }
         .msg.success { background: #e6f6e6; } .msg.error { background: #fde8e8; }
         """,
-        ".gitignore" => "db.sqlite3*\nManifest.toml\n.env\n",
+        ".gitignore" => "db.sqlite3*\nManifest.toml\n.env\nbuild/\n",
     )
     for (rel, content) in files
         p = joinpath(root, rel)
