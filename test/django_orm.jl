@@ -16,8 +16,13 @@ function port_block(f)
     try
         f()
     finally
-        for T in reverse(PORT_MODELS)
-            Juango.execute("DELETE FROM " * Juango.qname(Juango.modelmeta(T).table))
+        IS_MYSQL && Juango.execute("SET FOREIGN_KEY_CHECKS = 0")     # rows that refer to rows of their own table (Tag.parent)
+        try
+            for T in reverse(PORT_MODELS)
+                Juango.execute("DELETE FROM " * Juango.qname(Juango.modelmeta(T).table))
+            end
+        finally
+            IS_MYSQL && Juango.execute("SET FOREIGN_KEY_CHECKS = 1")
         end
     end
 end

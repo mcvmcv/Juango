@@ -127,6 +127,10 @@ save, as the value: parsed as a form would (the ISO formats and the others it ac
 ValidationError, as Django's `get_prep_value` (#202).
 """
 function parse_temporal_string(f::Field, s::AbstractString)
+    if f.kind === :datetime                       # with a UTC offset ("2026-01-02T03:04:05+13:00", "...Z")
+        z = parse_aware_datetime(s)
+        z === nothing || return z
+    end
     v, err = to_julia(f, s)
     err === nothing && v !== nothing && return v
     what = f.kind === :date ? "date (YYYY-MM-DD)" : "date and time (YYYY-MM-DD HH:MM[:ss])"

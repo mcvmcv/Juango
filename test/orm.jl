@@ -1503,7 +1503,7 @@ end
     @test agg[:total] isa Decimal && agg[:total] == dec"0.3" && string(agg[:total]) == "0.30" && agg[:top] == dec"0.1" && agg[:n] == 3
     @test agg[:avg] isa Decimal && agg[:avg] == dec"0.1"
     @test aggregate(objects(Ledger); m = Avg(:id))[:m] isa Real                 # other averages are numbers as before
-    rows = values(annotate(filter(Ledger; label = "a"); double = F(:amount) * 2), :label, :amount)
+    rows = values(annotate(filter(Ledger; label = "a"); double = F(:amount) * 2), :label, :amount, :double)
     @test only(collect(rows))[:amount] == dec"19.99" && only(collect(rows))[:double] == dec"39.98"
     @test only(values_list(filter(Ledger; label = "a"), :amount; flat = true)) isa Decimal
     update!(filter(Ledger; label = "a"); amount = F(:amount) + dec"0.01")
@@ -1567,11 +1567,11 @@ end
     @test aggregate(filter(Shift; length__isnull = false); total = Sum(:length))[:total] == Hour(9) + Minute(15)
 
     # arithmetic: datetime + duration, datetime - datetime
-    ends = Dict(r[:name] => r[:ends] for r in values(annotate(filter(Shift; length__isnull = false); ends = F(:opened) + F(:length)), :name))
+    ends = Dict(r[:name] => r[:ends] for r in values(annotate(filter(Shift; length__isnull = false); ends = F(:opened) + F(:length)), :name, :ends))
     @test ends["early"] == DateTime(2026, 3, 1, 15, 0) && ends["late"] == DateTime(2026, 3, 2, 0, 35)
     @test [x.name for x in filter(Shift; opened__lt = F(:opened) + Value(Hour(1)), length__isnull = false) |> order_by("name")] == ["early", "late"]
     @test count(filter(Shift; opened__gt = Value(DateTime(2026, 3, 2)) - F(:length))) == 1
-    took = only(values(annotate(filter(Shift; name = "early"); took = Value(DateTime(2026, 3, 1, 8, 0)) - F(:opened)), :name))[:took]
+    took = only(values(annotate(filter(Shift; name = "early"); took = Value(DateTime(2026, 3, 1, 8, 0)) - F(:opened)), :name, :took))[:took]
     @test took == Hour(1) + Minute(30)
     update!(filter(Shift; name = "late"); length = F(:length) + Value(Minute(15)))
     @test get(Shift; name = "late").length == Hour(1)
@@ -1741,7 +1741,7 @@ end
     r = only(values(annotate(filter(base; name = "tz1"); y = ExtractYear(:opened), q = ExtractQuarter(:opened), w = ExtractWeek(:opened),
                              wd = ExtractWeekDay(:opened), iwd = ExtractIsoWeekDay(:opened), h = ExtractHour(:opened), s = ExtractSecond(:opened),
                              m = TruncMonth(:opened), d = TruncDate(:opened), t = TruncTime(:opened), wk = TruncWeek(:opened),
-                             hr = TruncHour(:opened), qu = TruncQuarter(:opened), sh = ExtractHour(:starts)), :name))
+                             hr = TruncHour(:opened), qu = TruncQuarter(:opened), sh = ExtractHour(:starts))))
     @test (r[:y], r[:q], r[:w], r[:wd], r[:iwd], r[:h], r[:s], r[:sh]) == (2026, 1, 9, 1, 7, 23, 45, 9)
     @test r[:m] == DateTime(2026, 3, 1) && r[:d] == Date(2026, 3, 1) && r[:t] == Dates.Time(23, 30, 45)
     @test r[:wk] == DateTime(2026, 2, 23) && r[:hr] == DateTime(2026, 3, 1, 23) && r[:qu] == DateTime(2026, 1, 1)
@@ -1756,7 +1756,7 @@ end
         try
             @test nm(filter(base; opened__day = 2, opened__hour = 12, opened__week_day = 2)) == ["tz1"]
             @test nm(filter(base; opened__date = Date(2026, 3, 2))) == ["tz1"]
-            r = only(values(annotate(filter(base; name = "tz1"); d = TruncDay(:opened), h = ExtractHour(:opened)), :name))
+            r = only(values(annotate(filter(base; name = "tz1"); d = TruncDay(:opened), h = ExtractHour(:opened))))
             @test r[:h] == 12 && r[:d] == Juango.TimeZones.ZonedDateTime(2026, 3, 2, Juango.TimeZones.tz"Pacific/Auckland")
         finally
             configure!(USE_TZ = false, TIME_ZONE = "UTC")
@@ -1766,7 +1766,7 @@ end
 
 @testset "database functions, aggregates, regex lookups" begin
     for n in ("fn Alice", "fn Bob", "fn carol"); create(Author; name = n); end
-    one(; kw...) = only(values(annotate(filter(Author; name = "fn Alice"); kw...), :name))
+    one(; kw...) = only(values(annotate(filter(Author; name = "fn Alice"); kw...)))      # (no fields: the annotations too)
     r = one(a = Replace(:name, "fn ", ""), b = Substr(:name, 4), c = Substr(:name, 4, 2), d = Left(:name, 2), e = Right(:name, 3),
             f = Trim(Value("  x  ")), g = LTrim(Value("  x")), h = RTrim(Value("x  ")), i = LPad(Value("7"), 3, "0"),
             j = RPad(Value("ab"), 4, "-"), k = Repeat(Value("ab"), 3), l = Reverse(Value("abc")), m = StrIndex(:name, Value("Al")),
