@@ -1165,6 +1165,18 @@ end
     @test_throws ArgumentError Juango.build(; project_file = joinpath(dir, "missing.jl"), output = out, dry_run = true)
     @test_throws ArgumentError Juango.build(; project_file = pf, output = out, workload = :everything, dry_run = true)
     @test "child.html" in Juango.template_names()
+    # a standalone app (#93): a wrapper package with a julia_main, built by create_app
+    appout = joinpath(dir, "build", "app")
+    cmd = Juango.build(; project_file = pf, output = appout, app = true, dry_run = true)
+    @test occursin("create_app(", cmd.exec[end]) && occursin("julia_main", cmd.exec[end]) && occursin(repr(appout), cmd.exec[end])
+    src = joinpath(dir, "build", "app_src")
+    p = Juango.TOML.parsefile(joinpath(src, "Project.toml"))
+    name = Juango.app_package_name(dirname(Base.active_project()))
+    @test p["name"] == name && haskey(p["deps"], "Juango") && endswith(name, "App")
+    code = read(joinpath(src, "src", name * ".jl"), String)
+    @test occursin("function julia_main()::Cint", code) && occursin("execute_from_command_line", code) && occursin("JUANGO_PROJECT_DIR", code)
+    @test Juango.app_package_name("/x/my-blog") == "MyBlogApp" && Juango.app_package_name("/x/2048") == "Juango2048App"
+    @test Juango.absolute_paths!(Dict("Juango" => Dict("path" => "../..")), "/a/b/c")["Juango"]["path"] == normpath("/a/")
 end
 
 @testset "settings from the environment and .env files (django-environ)" begin

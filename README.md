@@ -2198,6 +2198,17 @@ julia --project -J build/juango.so manage.jl runserver 0.0.0.0:8000
 
 Building takes several minutes and needs about 8 GB of free memory (compiling the image is the expensive step). Rebuild after changing the project's dependencies. Juango's own code is in the image too, so rebuild after upgrading Juango.
 
+**A standalone app.** `manage.jl build --app` goes one step further: `build/app` holds an executable named after the project, Julia's runtime and libraries, the compiled image, and a copy of the project's files, so it runs on a machine without Julia (of the same OS and CPU family). It's made with PackageCompiler's `create_app`, from a small wrapper package `build` writes into `build/app_src`, whose `julia_main` loads the project and runs its command line:
+
+```sh
+julia --project manage.jl build --app                 # build/app/bin/blog, build/app/lib, build/app/project
+build/app/bin/blog migrate
+build/app/bin/blog runserver 0.0.0.0:8000             # any manage.jl command
+JUANGO_PROJECT_DIR=/srv/blog build/app/bin/blog runserver   # run a project kept elsewhere
+```
+
+The project's code is still loaded when the app starts (as with `-J`), so a change to it needs no rebuild. A change to its dependencies or to Juango does.
+
 **Running in production.** Set `DEBUG = false`, a long random `SECRET_KEY` and `ALLOWED_HOSTS`, run `manage.jl check --deploy`, and put the server behind a reverse proxy that terminates TLS and serves static and media files:
 
 ```ini
