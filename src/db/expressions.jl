@@ -295,9 +295,13 @@ reverse_order(o::OrderBy) = OrderBy(o.expr, !o.descending, o.nulls_first === not
 reverse_order(o::AbstractString) = startswith(o, "-") ? o[2:end] : "-" * o
 
 "SQL for an ordering term, with its parameters."
-function compile_order_item(c::SQLCompiler, o)
+function compile_order_item(c::SQLCompiler, o; by_alias::Bool = false)
     ob = o isa OrderBy ? o : OrderBy(F(lstrip(string(o), '-')), startswith(string(o), "-"), nothing)
-    sql, ps = compile_expr(c, ob.expr)
+    # by_alias (a query's ORDER BY): Asc(:n) for an annotation n is its alias, as order_by("n") (compiled again,
+    # its joins and grouping would differ: #219)
+    e = ob.expr
+    sql, ps = by_alias && e isa F && !occursin("__", e.name) && haskey(c.annotations, Symbol(e.name)) &&
+              !is_filtered_relation(c.annotations[Symbol(e.name)]) ? (qname(e.name), Any[]) : compile_expr(c, e)
     order_term_sql(backend(), sql, ps, ob.descending, ob.nulls_first)
 end
 order_term_sql(::DatabaseBackend, sql, ps, desc, nf) =
@@ -415,7 +419,9 @@ end
 
 function compile_expr(c::SQLCompiler, e::OuterRef)
     c.outer === nothing && throw(ArgumentError("OuterRef($(repr(e.name))) used outside a Subquery/Exists"))
-    compile_expr(c.outer, F(e.name))
+    sql, ps = compile_expr(c.outer, F(e.name))
+    c.outer.outer_refs === nothing || push!(c.outer.outer_refs, sql)
+    sql, ps
 end
 
 function compile_expr(c::SQLCompiler, e::CombinedExpression)

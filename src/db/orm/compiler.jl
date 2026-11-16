@@ -28,12 +28,13 @@ mutable struct SQLCompiler
     uses_window::Bool           # set when a condition refers to a window annotation (-> wrapping query)
     join_params::Vector{Any}    # parameters in JOIN ... ON clauses (FilteredRelation conditions)
     reuse_upto::Int             # compiling an annotation made after this many filter() calls (0: none)
+    outer_refs::Union{Nothing,Vector{String}}   # while compiling an annotation: the columns OuterRefs in it read here
 end
 Base.@nospecializeinfer function SQLCompiler(@nospecialize(T::Type); outer = nothing)
     table = modelmeta(T).table
     counter = outer === nothing ? Ref(0) : outer.counter
     c = SQLCompiler(T, table, table, String[], Dict{Any,String}(), Set{String}(), counter, false, 0,
-                    Dict{Symbol,Any}(), false, outer, false, Any[], 0)
+                    Dict{Symbol,Any}(), false, outer, false, Any[], 0, nothing)
     outer === nothing || (c.base = new_alias!(c))   # subqueries alias their table: no clash with the outer one
     c
 end

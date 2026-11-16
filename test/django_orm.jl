@@ -595,12 +595,12 @@ end
     @test tr(() -> collect(pq)) == [Dict(:rating => 3.0, :total_count => 1), Dict(:rating => 4.0, :total_count => 3), Dict(:rating => 4.5, :total_count => 1), Dict(:rating => 5.0, :total_count => 1)]
     # test_aggregation_subquery_annotation_multivalued
     sq = values(filter(DaAuthor; pk = OuterRef(:pk), book__name = OuterRef(:book__name)), :pk)
-    IS_POSTGRES ? (@test_broken tr(() -> count(annotate(annotate(objects(DaAuthor); subquery_id = Subquery(sq)); count = Count(:book)))) == count(objects(DaAuthor))) : (@test tr(() -> count(annotate(annotate(objects(DaAuthor); subquery_id = Subquery(sq)); count = Count(:book)))) == count(objects(DaAuthor)))   # #219 on PostgreSQL
+    @test tr(() -> count(annotate(annotate(objects(DaAuthor); subquery_id = Subquery(sq)); count = Count(:book)))) == count(objects(DaAuthor))
     # test_aggregation_order_by_not_selected_annotation_values: ordered by an annotation over an aggregate
     asc = [b[4].pk, b[3].pk, b[1].pk, b[2].pk, b[5].pk, b[6].pk]
     oq(o) = tr(() -> collect(values_list(order_by(annotate(annotate(objects(DaBook); min_age = Min(:authors__age)); min_related_age = Coalesce(:min_age, :contact__age)), o), :pk; flat = true)))
     @test oq("min_related_age") == asc && oq("-min_related_age") == reverse(asc)
-    IS_POSTGRES ? (@test_broken oq(Asc(:min_related_age)) == asc && oq(Desc(:min_related_age)) == reverse(asc)) : (@test oq(Asc(:min_related_age)) == asc && oq(Desc(:min_related_age)) == reverse(asc))   # #219 on PostgreSQL
+    @test oq(Asc(:min_related_age)) == asc && oq(Desc(:min_related_age)) == reverse(asc)
     # test_group_by_exists_annotation: values_list of an Exists, grouped
     @test tr(() -> Dict(collect(annotate(values_list(annotate(objects(DaPublisher); has_long = Exists(filter(DaBook; publisher = OuterRef(:pk), pages__gt = 800))), :has_long); total = Count())))) == Dict(true => 2, false => 3)
     # test_group_by_nested_expression_with_params
@@ -619,10 +619,10 @@ end
     add!(bk.authors, a[5], a[6], a[7])
     q = annotate(filter(annotate(objects(DaBook); contact_publisher = Subquery(values(filter(DaPublisher; pk = OuterRef(:publisher), name = OuterRef(:contact__name)), :name)[1:1]));
                         contact_publisher__isnull = false); count = Count(:authors))
-    IS_POSTGRES ? (@test_broken tr(() -> [x.pk for x in q]) == [bk.pk]) : (@test tr(() -> [x.pk for x in q]) == [bk.pk])   # #219 on PostgreSQL
+    @test tr(() -> [x.pk for x in q]) == [bk.pk]
     delete!(bk); delete!(pub)
     # test_aggregation_exists_multivalued_outeref
-    IS_POSTGRES ? (@test_broken tr(() -> count(annotate(objects(DaPublisher); books_exists = Exists(filter(DaBook; publisher = OuterRef(:book__publisher))), books_count = Count(:book)))) == 5) : (@test tr(() -> count(annotate(objects(DaPublisher); books_exists = Exists(filter(DaBook; publisher = OuterRef(:book__publisher))), books_count = Count(:book)))) == 5)   # #219 on PostgreSQL
+    @test tr(() -> count(annotate(objects(DaPublisher); books_exists = Exists(filter(DaBook; publisher = OuterRef(:book__publisher))), books_count = Count(:book)))) == 5
     # test_filter_in_subquery_or_aggregation: an aggregate condition OR a subquery one (both in HAVING)
     @test tr(() -> count(filter(annotate(objects(DaAuthor); n = Count(:book)), Q(n__gt = 0) | Q(pk__in = values(objects(DaBook), :authors))))) == 9
     # test_aggregation_random_ordering: order_by("?") isn't grouped by

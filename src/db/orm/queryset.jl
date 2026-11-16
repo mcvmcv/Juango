@@ -293,7 +293,7 @@ function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true,
     parts, extra, ps = String[], String[], Any[]
     for o in order
         if o isa OrderBy                          # an expression (Asc, Desc), with joins as needed
-            sql, ops = compile_order_item(c, o)
+            sql, ops = compile_order_item(c, o; by_alias = true)
             push!(parts, sql); append!(ps, ops)
             continue
         end
@@ -442,6 +442,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     sel, sel_ps = String[], Any[]
     related = Tuple{Vector{Symbol},Any,String}[]
     group = String[]
+    group_ps = Dict{String,Vector{Any}}()     # the parameters of a GROUP BY entry that has some
     if idonly
         push!(sel, pk_select(c.base, T))
     elseif columns !== nothing
@@ -502,7 +503,8 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     # when values() names it, the GROUP BY uses it or the query is ordered by it (#201)
     vsel = qs.values_fields === nothing || columns !== nothing || idonly ? nothing :
            Set{String}(vcat(qs.values_fields, something(qs.group_fields, String[]),
-                            [lstrip(o, '-') for o in qs.order if o isa AbstractString]))
+                            [lstrip(o, '-') for o in qs.order if o isa AbstractString],
+                            [o.expr.name for o in qs.order if o isa OrderBy && o.expr isa F]))
     for (k, v) in qs.annotations
         is_filtered_relation(v) && continue
         vsel === nothing || string(k) in vsel || contains_window(v) || continue      # (a window one may be filtered on, outside)
@@ -514,7 +516,16 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         # an annotation made after filter() calls reuses their joins of the same relations (as in
         # Django), so Count(:book) after filter(book__shelf = 1) counts the books on that shelf
         c.reuse_upto = get(qs.annotated_after, k, 0)
+        c.outer_refs = String[]
         sql, p = compile_expr(c, v)
+        # a subquery annotation that reads the outer query (OuterRef(:book__name), across joins) is grouped by,
+        # as Django does: PostgreSQL refuses the joined table's columns in it otherwise (#219). By its value,
+        # not the columns it reads: those would split an object's group by each related row.
+        if grouped && qs.values_fields === nothing && columns === nothing && !idonly && !isempty(c.outer_refs) &&
+           !aggregating(v, qs.annotations) && !(sql in group)
+            push!(group, sql); group_ps[sql] = p
+        end
+        c.outer_refs = nothing
         if grouped && aggregating(v, qs.annotations)
             # Sum(:age) + F(:age), Coalesce(:min_age, :contact__age): the fields read outside the aggregates are
             # grouped by too, as Django does (PostgreSQL requires it); compiled here, so they use the same joins
@@ -560,6 +571,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
                                                  add_cols = distinct && qs.values_fields !== nothing && columns === nothing && !idonly) :
                                     ("", String[], Any[])
     (columns === nothing && !idonly && !grouped) && append!(sel, extra)
+    gps = grouped ? Any[x for g in unique(group) for x in get(group_ps, g, Any[])] : Any[]
     dkw = distinct ? "DISTINCT " : ""
     if distinct && qs.distinct_fields !== nothing && !isempty(qs.distinct_fields)
         backend() isa PostgresBackend ||
@@ -585,12 +597,12 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         outer_sel = idonly ? pk_select(c.base, T) : columns !== nothing ? columns : "*"
         sql = "SELECT $outer_sel FROM ($inner) AS $(qname(c.base)) WHERE " * join(oparts, " AND ") *
               o * limit_offset_sql(backend(), qs.limit, qs.offset)
-        return sql, vcat(inner_ps, c.join_params, wps, hps, ops, ops_order), c, related
+        return sql, vcat(inner_ps, c.join_params, wps, gps, hps, ops, ops_order), c, related
     end
     if qs.for_update !== nothing && columns === nothing && !idonly && qs.values_fields === nothing
         sql *= for_update_sql(backend(), qs.for_update, c, related)
     end
-    sql, vcat(sel_ps, c.join_params, wps, hps, ops_order), c, related
+    sql, vcat(sel_ps, c.join_params, wps, gps, hps, ops_order), c, related
 end
 
 """
