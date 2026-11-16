@@ -143,7 +143,10 @@ const LIVE_SERVER_STATIC = Ref(false)
 
 function handle_request_inner(req::Request)
     try
-        if settings.DEBUG && !isempty(string(settings.MEDIA_ROOT)) && startswith(req.path, settings.MEDIA_URL)
+        # in DEBUG, uploads are served as they are, unless a URL pattern of the project's takes the path
+        # (protected_media(), a login check): its route wins, as Django's opt-in static() lets it (#226)
+        if settings.DEBUG && !isempty(string(settings.MEDIA_ROOT)) && startswith(req.path, settings.MEDIA_URL) &&
+           resolve(req.path) === nothing
             return serve_media(req)
         end
         if (settings.DEBUG || LIVE_SERVER_STATIC[]) && startswith(req.path, settings.STATIC_URL) && !isempty(static_dirs())

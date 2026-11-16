@@ -2475,6 +2475,17 @@ end
         @test getheader(r, "X-Accel-Redirect") == "/protected/u/r.svg" && occursin("attachment", getheader(r, "Content-Disposition"))
     end
     @test_throws ArgumentError protected_media(sendfile = :ftp)
+    # in DEBUG, a project route at MEDIA_URL wins over serving uploads as they are (#226)
+    override_settings(DEBUG = true, MEDIA_ROOT = md, MEDIA_URL = "/media/", ROOT_URLCONF = [path("media/<path:name>", protected_media())]) do
+        c = Client()
+        r = get(c, "/media/pic.png")
+        @test r.status == 302 && occursin("next=", getheader(r, "Location"))                 # its login check runs
+        force_login!(c, root_user())
+        @test occursin("sandbox", getheader(get(c, "/media/pic.png"), "Content-Security-Policy"))
+    end
+    override_settings(DEBUG = true, MEDIA_ROOT = md, MEDIA_URL = "/media/", ROOT_URLCONF = Any[]) do
+        @test get(Client(), "/media/pic.png").status == 200                                   # no route: served in DEBUG
+    end
 end
 
 @testset "N+1 queries: detection, raise, unused eager loads, auto-prefetch (#162)" begin
