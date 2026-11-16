@@ -116,8 +116,8 @@ end
 """
     export_data(resource, queryset; format = :csv) -> Vector{UInt8}
 
-The objects as a CSV (with formula protection, `csv_field`), XLSX or JSON (a list of objects keyed
-by header) file.
+The objects as a CSV (with formula protection, `csv_field`; lines end with `\r\n`, as RFC 4180
+and Python's csv module have them), XLSX or JSON (a list of objects keyed by header) file.
 """
 function export_data(r::ModelResource, qs; format = :csv)
     fmt = Symbol(lowercase(string(format)))

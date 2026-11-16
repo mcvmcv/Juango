@@ -25,10 +25,11 @@ struct QuerySet{T<:Model}
     db::Union{Nothing,String}                      # using_db(qs, alias): the database to query
     annotated_after::Dict{Symbol,Int}              # annotation => filter() calls before it (it reuses their joins)
     values_mode::Symbol                            # values() rows: :dict; values_list: :tuple, :named or :flat
+    group_fields::Union{Nothing,Vector{String}}    # values(...) |> annotate(aggregate): the GROUP BY it fixed (#201)
 end
 QuerySet{T}(where, order, limit, offset, isnone) where {T} =
     QuerySet{T}(where, order, limit, offset, isnone, Vector{Symbol}[], Prefetch[], nothing, nothing,
-                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing, Dict{Symbol,Int}(), :dict)
+                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing, Dict{Symbol,Int}(), :dict, nothing)
 
 """
     using_db(qs, "replica")
@@ -372,7 +373,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
             if haskey(c.annotations, Symbol(f))
                 a = c.annotations[Symbol(f)]
                 # values(annotate(qs; m = TruncMonth(:created)), :m): group by the computed value (its alias)
-                is_filtered_relation(a) || contains_aggregate(a) || push!(group, qname(string(f)))
+                is_filtered_relation(a) || aggregating(a, qs.annotations) || push!(group, qname(string(f)))
                 continue
             end
             c.reuse_upto = length(qs.where)               # a value read through a filtered relation uses its join
@@ -380,6 +381,17 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
             c.reuse_upto = 0
             push!(sel, "$col AS $(qname(f))")
             push!(group, col)
+        end
+        if qs.group_fields !== nothing              # grouped by the values() an aggregate followed, not the latest
+            group = String[]
+            for f in qs.group_fields
+                if haskey(c.annotations, Symbol(f))
+                    a = c.annotations[Symbol(f)]
+                    is_filtered_relation(a) || aggregating(a, qs.annotations) || push!(group, qname(f))
+                else
+                    push!(group, first(resolve_path(c, c.base, T, f)))
+                end
+            end
         end
         qs.group_by_object && pushfirst!(group, pk_select(c.base, T))
     else
@@ -408,17 +420,48 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     end
     pre_ann = copy(sel)            # the select list without annotations (for a wrapping query)
     ann_sel, ann_ps = String[], Any[]
+    # values() rows have only the fields asked for: an annotation made before values() is selected only
+    # when values() names it, the GROUP BY uses it or the query is ordered by it (#201)
+    vsel = qs.values_fields === nothing || columns !== nothing || idonly ? nothing :
+           Set{String}(vcat(qs.values_fields, something(qs.group_fields, String[]),
+                            [lstrip(o, '-') for o in qs.order if o isa AbstractString]))
     for (k, v) in qs.annotations
         is_filtered_relation(v) && continue
+        vsel === nothing || string(k) in vsel || contains_window(v) || continue      # (a window one may be filtered on, outside)
+        # ordered by but neither asked for nor an aggregate: grouped by too, as Django adds it
+        if vsel !== nothing && (grouped || qs.group_fields !== nothing) && !aggregating(v, qs.annotations) && !(string(k) in qs.values_fields) &&
+           (qs.group_fields === nothing || !(string(k) in qs.group_fields))
+            push!(group, qname(string(k)))
+        end
         # an annotation made after filter() calls reuses their joins of the same relations (as in
         # Django), so Count(:book) after filter(book__shelf = 1) counts the books on that shelf
         c.reuse_upto = get(qs.annotated_after, k, 0)
         sql, p = compile_expr(c, v)
+        if grouped && aggregating(v, qs.annotations)
+            # Sum(:age) + F(:age), Coalesce(:min_age, :contact__age): the fields read outside the aggregates are
+            # grouped by too, as Django does (PostgreSQL requires it); compiled here, so they use the same joins
+            for r in bare_refs(v)
+                a = get(c.annotations, Symbol(r), nothing)
+                a === nothing || !aggregating(a, qs.annotations) || continue
+                g = a === nothing ? first(compile_expr(c, F(r))) : qname(r)
+                g in group || push!(group, g)
+            end
+        end
         c.reuse_upto = 0
         push!(ann_sel, "$sql AS $(qname(string(k)))")
         append!(ann_ps, p)
     end
     if columns === nothing && !idonly
+        if qs.values_fields !== nothing
+            # values() rows group by an annotation's position in the select list, not its alias: the alias can
+            # be ambiguous, a column of a joined table with the same name (Django does the same)
+            ord = Dict{String,String}()
+            for (i, s) in enumerate(ann_sel)
+                m = match(r" AS (\S+)$", s)
+                m === nothing || (ord[m[1]] = string(length(sel) + i))
+            end
+            group = [get(ord, g, g) for g in group]
+        end
         append!(sel, ann_sel)
         append!(sel_ps, ann_ps)
     end
@@ -467,6 +510,20 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         sql *= for_update_sql(backend(), qs.for_update, c, related)
     end
     sql, vcat(sel_ps, c.join_params, wps, hps, ops_order), c, related
+end
+
+"""
+Whether an annotation aggregates, itself or through another annotation it refers to
+(`Coalesce(:min_age, :contact__age)` after `min_age = Min(:authors__age)`): such a one isn't grouped by.
+"""
+function aggregating(@nospecialize(v), anns::Vector{Pair{Symbol,Any}}, depth::Int = 0)
+    contains_aggregate(v) && return true
+    depth > 8 && return false
+    for r in bare_refs(v)
+        i = findfirst(p -> string(p.first) == r, anns)
+        i !== nothing && !is_filtered_relation(anns[i].second) && aggregating(anns[i].second, anns, depth + 1) && return true
+    end
+    false
 end
 
 "The `FOR UPDATE ...` clause of `select_for_update` (nothing on SQLite, which locks the whole database)."
@@ -635,8 +692,8 @@ Base.@nospecializeinfer function fetch_values(@nospecialize(qs::QuerySet))
             v = get(r, k, nothing)
             d[k] = haskey(convs, k) ? from_db(convs[k], v) : v
         end
-        for (k, v) in qs.annotations
-            is_filtered_relation(v) || (d[k] = expr_value(T, v, get(r, k, nothing), outs[k]))
+        for (k, v) in qs.annotations                     # only those asked for (#201)
+            is_filtered_relation(v) || !haskey(d, k) || (d[k] = expr_value(T, v, get(r, k, nothing), outs[k]))
         end
         push!(out, d)
     end

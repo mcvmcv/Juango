@@ -75,6 +75,7 @@ end
 
 encode_duration(::SQLiteBackend, us::Integer) = us
 regex_sql(::SQLiteBackend, col, pattern, icase::Bool) = ("$col REGEXP ?", Any[(icase ? "(?i)" : "") * pattern])   # regexp() is registered
+regex_expr_sql(::SQLiteBackend, col, e, icase::Bool) = icase ? "$col REGEXP ('(?i)' || $e)" : "$col REGEXP $e"
 duration_param_sql(::SQLiteBackend) = "?"
 
 autoincrement_pk(b::SQLiteBackend, int = :bigint) = quote_name(b, "id") * " INTEGER PRIMARY KEY AUTOINCREMENT"
@@ -94,6 +95,15 @@ lookup_sql(::SQLiteBackend, ::Val{:startswith}, col, v) = ("substr($col, 1, ?) =
 function lookup_sql(b::SQLiteBackend, ::Val{:endswith}, col, v)
     s = string(v)
     isempty(s) ? (sql_true(b), Any[]) : ("substr($col, -?) = ?", Any[length(s), s])
+end
+
+# ... and so, with an expression for the value, do the case-sensitive ones (the column comes first,
+# then the expression as many times as it appears)
+function expr_lookup_sql(b::SQLiteBackend, lookup::String, col, e)
+    lookup == "contains" && return ("instr($col, $e) > 0", 1)
+    lookup == "startswith" && return ("substr($col, 1, length($e)) = $e", 2)
+    lookup == "endswith" && return ("(substr($col, -length($e)) = $e OR length($e) = 0)", 3)
+    invoke(expr_lookup_sql, Tuple{DatabaseBackend,String,Any,Any}, b, lookup, col, e)
 end
 
 supports_index_method(::SQLiteBackend, m::Symbol) = m === :btree

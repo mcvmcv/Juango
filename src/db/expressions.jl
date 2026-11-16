@@ -52,9 +52,11 @@ is_filtered_relation(x) = x isa FilteredRelation
 "Turn a function argument into an expression: names are field references, the rest literals."
 ref(x::FilteredRelation) = x
 ref(x::Expression) = x
+ref(x::Q) = Condition(x)
 ref(x::Union{Symbol,AbstractString}) = F(string(x))
 ref(x) = Value(x)
 lit_expr(x::Expression) = x
+lit_expr(x::Q) = Condition(x)
 lit_expr(x) = Value(x)
 
 for op in (:+, :-, :*, :/)
@@ -177,6 +179,15 @@ struct Exists <: Expression
     negated::Bool
 end
 Exists(qs) = Exists(qs, false)
+
+"""
+A condition used as a value, true or false: what a `Q` becomes in `annotate`, as a `When`'s
+`then`, or as a lookup's value (Django's `Q` in annotate, or `ExpressionWrapper(Q(...),
+output_field = BooleanField())`). `annotate(qs; big = Q(num_employees__gt = 100))` (#199).
+"""
+struct Condition <: Expression
+    q::Q
+end
 Base.:!(e::Exists) = Exists(e.qs, !e.negated)
 Base.xor(a::Union{Q,Exists}, b::Union{Q,Exists}, rest::Union{Q,Exists}...) =
     Q(:XOR, Any[c for x in (a, b, rest...) for c in xor_children(x)], false)
@@ -302,6 +313,24 @@ contains_window(::Window) = true
 contains_window(e::CombinedExpression) = contains_window(e.lhs) || contains_window(e.rhs)
 contains_window(e::Func) = any(contains_window, e.args)
 
+"Whether an expression reads a column of the row (an `F`, a condition): such a value can update a row, not insert one (#214)."
+refs_columns(@nospecialize(e)) = false
+refs_columns(::F) = true
+refs_columns(::Condition) = true
+refs_columns(e::CombinedExpression) = refs_columns(e.lhs) || refs_columns(e.rhs)
+refs_columns(e::Func) = any(refs_columns, e.args)
+refs_columns(::Case) = true
+
+"""
+The fields an expression reads outside its aggregates (`F(:age)` in `Sum(:age) + F(:age)`): a
+grouped values() query groups by them too, as Django does (PostgreSQL requires it).
+"""
+bare_refs(@nospecialize(e)) = String[]
+bare_refs(e::F) = [e.name]
+bare_refs(e::CombinedExpression) = vcat(bare_refs(e.lhs), bare_refs(e.rhs))
+bare_refs(e::Func) = reduce(vcat, (bare_refs(a) for a in e.args); init = String[])
+bare_refs(e::Case) = vcat(reduce(vcat, (bare_refs(w.then) for w in e.whens); init = String[]), bare_refs(e.default))
+
 contains_aggregate(::Any) = false
 contains_aggregate(::Aggregate) = true
 contains_aggregate(e::CombinedExpression) = contains_aggregate(e.lhs) || contains_aggregate(e.rhs)
@@ -400,8 +429,27 @@ function compile_expr(c::SQLCompiler, e::CombinedExpression)
         sql = temporal_sql(bk, e.op, ka, a, kb, b)
         sql === nothing || return sql, vcat(pa, pb)
     end
+    # integers divide as on PostgreSQL and SQLite (37, not MySQL's 37.4444), as Django has them
+    e.op == "/" && integer_expr(c, e.lhs) && integer_expr(c, e.rhs) && return int_div_sql(backend(), a, b), vcat(pa, pb)
     "($a $(e.op) $b)", vcat(pa, pb)
 end
+
+"Whether an expression's values are integers: an integer field or literal, a count, a sum/min/max of integers, +, -, * and / of integers."
+integer_expr(c::SQLCompiler, @nospecialize(e)) = false
+integer_expr(c::SQLCompiler, e::Value) = e.value isa Integer && !(e.value isa Bool)
+function integer_expr(c::SQLCompiler, e::F)
+    if !occursin("__", e.name) && haskey(c.annotations, Symbol(e.name))
+        a = c.annotations[Symbol(e.name)]
+        return !is_filtered_relation(a) && integer_expr(c, a)
+    end
+    e.name in ("id", "pk") && return true
+    f = try last(resolve_path(c, c.base, c.T, e.name)) catch; nothing end
+    f isa Field && (f.kind in INT_KINDS || f.kind === :fk)
+end
+integer_expr(c::SQLCompiler, e::Aggregate) = e.func == "COUNT" || (e.func in ("SUM", "MIN", "MAX") && e.arg !== nothing && integer_expr(c, e.arg))
+integer_expr(c::SQLCompiler, e::CombinedExpression) = e.op in ("+", "-", "*", "/") && integer_expr(c, e.lhs) && integer_expr(c, e.rhs)
+"Integer division, truncating (MySQL's `/` gives a decimal: it has `DIV`)."
+int_div_sql(::DatabaseBackend, a, b) = "($a / $b)"
 
 # --- dates, times and durations in expressions ----------------------------------------------------------
 #
@@ -591,6 +639,11 @@ function compile_expr(c::SQLCompiler, e::Subquery)
     "($sql)", ps
 end
 
+function compile_expr(c::SQLCompiler, e::Condition)
+    sql, ps = expr_condition(c, e.q)
+    "($sql)", ps
+end
+
 function compile_expr(c::SQLCompiler, e::Exists)
     sql, ps = subquery_sql(c, e.qs; columns = "1")
     (e.negated ? "NOT EXISTS" : "EXISTS") * " ($sql)", ps
@@ -645,7 +698,16 @@ Base.@nospecializeinfer function annotate(@nospecialize(qs::QuerySet); kw...)
     for (k, _) in kw
         after[k] = length(qs.where)
     end
-    chain(qs; annotations = anns, annotated_after = after)
+    qs.values_fields === nothing && return chain(qs; annotations = anns, annotated_after = after)
+    # on a values() query: the new annotations are columns of its rows (values_list's tuples too), and
+    # the first aggregate fixes the GROUP BY to the fields values() named (#201)
+    vf = qs.values_fields
+    qs.values_mode === :flat || (vf = vcat(vf, [string(k) for (k, _) in kw if !(string(k) in vf)]))
+    gf = qs.group_fields
+    if gf === nothing && !qs.group_by_object && any(p -> contains_aggregate(ref(p.second)), kw)
+        gf = [f for f in qs.values_fields if !any(p -> string(p.first) == f && contains_aggregate(p.second), qs.annotations)]
+    end
+    chain(qs; annotations = anns, annotated_after = after, values_fields = vf, group_fields = gf)
 end
 Base.@nospecializeinfer annotate(@nospecialize(T::Type{<:Model}); kw...) = annotate(objects(T); kw...)
 annotate(; kw...) = qs -> annotate(qs; kw...)
@@ -659,8 +721,11 @@ The results as `Dict{Symbol,Any}` rows instead of objects. Fields may follow rel
 """
 function Base.values(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractString}...)
     T = model_of(qs)
-    fs = isempty(fields) ? vcat(["id"], [column(f) for f in all_fields(T)]) : String[string(f) for f in fields]
-    chain(qs; values_fields = fs, values_mode = :dict, group_by_object = any(p -> contains_aggregate(p.second), qs.annotations))
+    fs = isempty(fields) ? vcat(["id"], [column(f) for f in all_fields(T)],                  # values(): the annotations too
+                                [string(p.first) for p in qs.annotations if !is_filtered_relation(p.second)]) :
+         String[string(f) for f in fields]
+    chain(qs; values_fields = fs, values_mode = :dict,
+          group_by_object = qs.group_fields === nothing && any(p -> contains_aggregate(p.second), qs.annotations))
 end
 Base.values(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...) = values(objects(T), fields...)
 
@@ -780,7 +845,7 @@ Base.@nospecializeinfer function typed_output(@nospecialize(T), @nospecialize(e)
 end
 Base.@nospecializeinfer function expr_value(@nospecialize(T), e, v, of::Union{Nothing,Field})
     v === nothing && return nothing
-    e isa Exists && return v isa Bool ? v : v != 0          # SQLite and MySQL give 0/1
+    e isa Union{Exists,Condition} && return v isa Bool ? v : v != 0          # SQLite and MySQL give 0/1
     if e isa Aggregate
         e.func == "ARRAY_AGG" && return v isa AbstractString ? JSON.parse(v) : v
         e.func in ("BOOL_AND", "BOOL_OR") && return v isa Bool ? v : v != 0
@@ -834,7 +899,15 @@ end
 
 Base.@nospecializeinfer function aggregate_here(@nospecialize(qs::QuerySet); kw...)
     T = model_of(qs)
-    isempty(kw) && throw(ArgumentError("aggregate needs at least one name = Aggregate(...)"))
+    isempty(kw) && return Dict{Symbol,Any}()
+    for (k, v) in kw                                     # Django: "fail is not an aggregate expression" (#203)
+        v isa Expression || throw(ArgumentError("aggregate received a non-expression: $k = $(repr(v))"))
+        contains_aggregate(v) || throw(ArgumentError("aggregate: $k is not an aggregate expression ($(repr(v)))"))
+    end
+    if qs.isnone                                         # none(): what the aggregates give over no rows, without a query
+        vals = Dict{Symbol,Any}(k => empty_aggregate(v) for (k, v) in kw)
+        any(v -> v === NOTFOUND, values(vals)) || return vals
+    end
     plain = !isempty(qs.where) && qs.limit === nothing && qs.offset == 0 && qs.distinct_fields === nothing &&
             qs.combinator === nothing && isempty(qs.annotations) && qs.values_fields === nothing && !qs.isnone
     rel = plain ? [k for (k, v) in kw if aggregates_relation(T, ref(v))] : Symbol[]
@@ -854,11 +927,42 @@ Base.@nospecializeinfer function aggregate_here(@nospecialize(qs::QuerySet); kw.
         push!(sel, "$sql AS $(qname(string(k)))")
         append!(ps, p)
     end
-    sub, sps = select_sql(qs; columns = pk_select(c.table, T), ordered = false)
+    # a sliced queryset keeps its order, which decides which rows are in the slice (#200)
+    sub, sps = select_sql(qs; columns = pk_select(c.table, T), ordered = !(qs.limit === nothing && qs.offset == 0))
     row = execute("SELECT $(join(sel, ", ")) FROM $(qname(c.table))$(join(c.joins)) WHERE $(pk_ref(c.base, T)) IN ($(in_subquery(backend(), sub)))",
                   vcat(ps, c.join_params, sps))[1]
     Dict{Symbol,Any}(k => expr_value(T, ref(v), row[k]) for (k, v) in kw)
 end
+"An aggregate's value over no rows (a count's 0, a default, Coalesce of those), or NOTFOUND when it needs the database."
+empty_aggregate(@nospecialize(e)) = NOTFOUND
+empty_aggregate(e::Value) = e.value
+empty_aggregate(e::Aggregate) = e.func == "COUNT" ? 0 : e.default === nothing ? nothing : empty_aggregate(lit_expr(e.default))
+function empty_aggregate(e::Func)
+    e.name === :coalesce || return NOTFOUND
+    for a in e.args
+        v = empty_aggregate(a)
+        v === NOTFOUND && return NOTFOUND
+        v === nothing || return v
+    end
+    nothing
+end
+
+"""
+The name Django gives an aggregate passed without one: `Avg(:age)` is `:age__avg`,
+`Count(:authors)` is `:authors__count` (`aggregate(qs, Avg(:age))`, `annotate(qs, Count(:authors))`).
+"""
+function default_alias(e::Aggregate)
+    e.arg isa F || throw(ArgumentError("Complex aggregates require an alias: give $(repr(e)) a name (name = ...)"))
+    f = Dict("STDDEV_POP" => "stddev", "STDDEV_SAMP" => "stddev", "VAR_POP" => "variance", "VAR_SAMP" => "variance",
+             "GROUP_CONCAT" => "stringagg", "STRING_AGG" => "stringagg", "ARRAY_AGG" => "arrayagg")
+    Symbol(replace(e.arg.name, "." => "__"), "__", get(f, e.func, lowercase(e.func)))
+end
+default_alias(e) = throw(ArgumentError("Complex aggregates require an alias: give $(repr(e)) a name (name = ...)"))
+aggregate(qs::QuerySet, a::Expression, more::Expression...; kw...) =
+    aggregate(qs; (default_alias(x) => x for x in (a, more...))..., kw...)
+annotate(qs::QuerySet, a::Expression, more::Expression...; kw...) =
+    annotate(qs; (default_alias(x) => x for x in (a, more...))..., kw...)
+
 function aggregate(qs::QuerySet, func::Symbol, field::Symbol)
     func in (:count, :sum, :avg, :min, :max) || throw(ArgumentError("unknown aggregate $func"))
     agg = Dict(:count => Count, :sum => Sum, :avg => Avg, :min => Min, :max => Max)[func]

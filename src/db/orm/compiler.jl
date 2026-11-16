@@ -160,11 +160,47 @@ function lookup_error(T, fname)
     LookupError("cannot resolve keyword '$fname' into a field of $T. Choices are: $names")
 end
 
+"""
+The model at the end of the relation path `parts` from `T` (foreign keys, many-to-many and
+reverse relations), or `nothing` when some part isn't a relation.
+"""
+Base.@nospecializeinfer function relation_target(@nospecialize(T::Type), parts)
+    M = T
+    for p in parts
+        f = findfield(modelmeta(M), Symbol(p))
+        if f !== nothing
+            f.kind === :fk || return nothing
+            M = related_model(f)
+        elseif (mm = find_m2m_query(M, p)) !== nothing
+            M = mm[3] ? related_model(mm[2]) : mm[2].model
+        elseif (r = find_reverse(M, p)) !== nothing
+            M = r[2]
+        else
+            return nothing
+        end
+    end
+    M
+end
+
+"""
+Whether the last part of a lookup key is a lookup (`season__year__gt`) rather than a field of the
+related model that has a lookup's name (`season__gt`, when Season has a field `gt`): Django
+resolves the field first (#197).
+"""
+Base.@nospecializeinfer function ends_in_lookup(@nospecialize(T::Type), parts)
+    (length(parts) > 1 && is_lookup_name(parts[end])) || return false
+    R = relation_target(T, @view parts[1:end-1])
+    R === nothing || findfield(modelmeta(R), Symbol(parts[end])) === nothing
+end
+
 "Compile one `field__path__lookup = value` against model `T` whose table is reachable as `alias`."
 Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nospecialize(value), negated::Bool)
     parts = split(string(key), "__")
     lookup = "exact"
-    (length(parts) > 1 && is_lookup_name(parts[end])) && (lookup = String(pop!(parts)))
+    ends_in_lookup(T, parts) && (lookup = String(pop!(parts)))
+    # inside an aggregate's filter or a Case condition, ~Q(store__name = "x") is a condition on the joined
+    # row (Django's FILTER (WHERE NOT ...)), not exclude()'s "no related row matches" subquery
+    c.scope === :expr && (negated = false)
     meta = modelmeta(T)
     fname = parts[1] == "pk" ? "id" : String(parts[1])
     rest = String.(parts[2:end])
@@ -212,6 +248,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     elseif fname == "id"
         isempty(rest) || throw(LookupError("'id' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
         col = qcol(alias, "id")
+        kind = pk_kind(T) === :uuid ? :uuid : :int
     else
         f = findfield(meta, Symbol(fname))
         if f === nothing && (mm = find_m2m_query(T, fname)) !== nothing
@@ -339,13 +376,21 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
         sl = special_lookup(c, something(f, Field(:text)), col, lookup, value)
         sl === nothing || return sl[1], vcat(colps, sl[2])
     end
+    # id__iexact = "12", gt__regex = "^4": a text lookup on a number, date or UUID column compares its text
+    # (PostgreSQL has no LOWER(bigint) or integer ~ text; Django casts there too)
+    if lookup in TEXT_LOOKUPS && kind !== nothing && !(kind in TEXT_KINDS)
+        col = text_cast(backend(), col)
+    end
     sql, ps = lookup_condition(c, col, lookup, value, conv)
     sql, isempty(colps) ? ps : vcat(colps, ps)
 end
 
+const TEXT_LOOKUPS = ("iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "regex", "iregex")
+const TEXT_KINDS = (:char, :text, :email, :slug, :url, :file, :image, :filepath, :citext)
 const COMPARISON_OPS = Dict("exact" => "=", "ne" => "!=", "gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=")
 
 Base.@nospecializeinfer function lookup_condition(c::SQLCompiler, col, lookup, @nospecialize(value), @nospecialize(conv))
+    value isa Q && (value = Condition(value))          # short = Q(qty__lt = F(:target)): the condition's value (#199)
     if value isa SearchQuery && lookup == "exact"
         q, qps = compile_expr(c, value)
         return "$col @@ $q", qps
@@ -362,10 +407,19 @@ Base.@nospecializeinfer function lookup_condition(c::SQLCompiler, col, lookup, @
         value === nothing && return ("$col IS NOT NULL", Any[])
         return ("($col != ? OR $col IS NULL)", Any[conv(value)])
     elseif lookup in ("iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith")
+        if value isa Expression                     # name__startswith = Substr(:alias, 1, 3): compiled, not a string (#198)
+            vsql, vps = compile_expr(c, value)
+            sql, uses = expr_lookup_sql(backend(), lookup, col, "($vsql)")
+            return sql, Any[p for _ in 1:uses for p in vps]
+        end
         return lookup_sql(backend(), Val(Symbol(lookup)), col, value)
     elseif lookup in ("gt", "gte", "lt", "lte")
         return ("$col $(COMPARISON_OPS[lookup]) ?", Any[conv(value)])
     elseif lookup in ("regex", "iregex")
+        if value isa Expression                     # name__regex = Subquery(...): compiled, not a string (#198)
+            vsql, vps = compile_expr(c, value)
+            return regex_expr_sql(backend(), col, "($vsql)", lookup == "iregex"), vps
+        end
         return regex_sql(backend(), col, string(value isa Regex ? value.pattern : value), lookup == "iregex")
     elseif lookup == "in"
         if value isa QuerySet
@@ -376,14 +430,27 @@ Base.@nospecializeinfer function lookup_condition(c::SQLCompiler, col, lookup, @
             sql, ps = compile_expr(c, value)
             return ("$col IN $sql", ps)
         end
-        vals = collect(value)
+        vals = Any[v for v in value if v !== nothing]      # NULL never matches IN: Django drops None
         isempty(vals) && return (sql_false(backend()), Any[])
+        if any(v -> v isa Expression, vals)                # [F(:x) - 10, Value(2), 3]: expressions compiled (#198)
+            parts, ps = String[], Any[]
+            for v in vals
+                if v isa Expression
+                    vsql, vps = compile_expr(c, v); push!(parts, "($vsql)"); append!(ps, vps)
+                else
+                    push!(parts, "?"); push!(ps, conv(v))
+                end
+            end
+            return ("$col IN (" * join(parts, ", ") * ")", ps)
+        end
         return ("$col IN (" * join(fill("?", length(vals)), ", ") * ")", Any[conv(v) for v in vals])
     elseif lookup == "isnull"
         return (truthy(value) ? "$col IS NULL" : "$col IS NOT NULL", Any[])
     elseif lookup == "range"
         lo, hi = value
-        return ("$col BETWEEN ? AND ?", Any[conv(lo), conv(hi)])
+        bound(v) = v isa Expression ? (vs = compile_expr(c, v); ("($(vs[1]))", vs[2])) : ("?", Any[conv(v)])
+        (ls, lps), (hs, hps) = bound(lo), bound(hi)
+        return ("$col BETWEEN $ls AND $hs", vcat(lps, hps))
     end
     throw(LookupError("unsupported lookup '$lookup'"))
 end

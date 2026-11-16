@@ -14,7 +14,7 @@ A Django-style web framework in Julia. Roadmap: GitHub issues on mcvmcv/Juango.
           julia --project=test test/runtests.jl
 
 - **Run only the part you're working on** while developing: `test/templates.jl`, `orm.jl`,
-  `forms.jl`, `views.jl`, `admin.jl`, `services.jl`, `db.jl` or `migrations.jl`, each on its
+  `forms.jl`, `views.jl`, `admin.jl`, `services.jl`, `db.jl`, `migrations.jl` or `django_orm.jl` (Django's own ORM tests, ported), each on its
   own (they share `test/setup.jl`), under the same cap. Run the whole suite once before
   committing: about 5 minutes on SQLite.
 - Juango has a precompile workload (`src/precompile.jl`). Code that takes a model, a model type

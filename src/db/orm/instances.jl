@@ -142,6 +142,7 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
     has_receivers(pre_write, T) && send(pre_write, T; action = created ? :insert : :update, via = :save, ids = Any[data[:id]],
                                         fields = only === nothing ? nothing : collect(only), instances = [obj])
     store_uploaded_files!(obj, data)
+    exprs = [f for f in all_fields(T) if get(data, attname(f), nothing) isa Expression && (only === nothing || attname(f) in only)]
     chain_ = reverse(vcat([concrete_model(T)], ancestors(T)))     # root table first
     fresh = false
     if data[:id] === nothing && pk_kind(T) === :uuid
@@ -157,6 +158,7 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
             atomic(() -> foreach(M -> save_table!(M, data, M === chain_[1], fresh), chain_))
     end
     refresh_computed!(obj)
+    refresh_expression_fields!(obj, exprs)
     has_receivers(post_save, T) && send(post_save, T; instance = obj, created = created, update_fields = only)
     has_receivers(post_write, T) && send(post_write, T; action = created ? :insert : :update, via = :save, ids = Any[obj.pk],
                                          fields = only === nothing ? nothing : collect(only), instances = [obj])
@@ -180,13 +182,59 @@ Base.@nospecializeinfer function refresh_computed!(@nospecialize(obj::Model))
     obj
 end
 
+# --- expressions as field values: obj.views = F(:views) + 1; save!(obj) (#214) ---
+
+"""
+The placeholders and parameters for writing `fields` of a row of `M`: `?` and the value, or, for an
+expression (`F(:views) + 1`, `Lower(Value("X"))`), its SQL and parameters, as Django compiles one
+into the UPDATE or INSERT. Refused, as in Django: aggregates, references through a join, and a
+column reference in an INSERT.
+"""
+Base.@nospecializeinfer function write_values(@nospecialize(M::Type), fields, data, insert::Bool)
+    phs, vals = String[], Any[]
+    for f in fields
+        v = data[attname(f)]
+        if v isa Expression
+            contains_aggregate(v) && throw(ArgumentError("Aggregate functions are not allowed in this query ($(f.name) = $(repr(v)))"))
+            insert && refs_columns(v) && throw(ArgumentError(
+                "$(nameof(M)).$(f.name) = $(repr(v)): F() expressions can only be used to update, not to insert"))
+            c = SQLCompiler(M)
+            sql, ps = compile_expr(c, v)
+            isempty(c.joins) || throw(ArgumentError("Joined field references are not permitted in this query ($(f.name) = $(repr(v)))"))
+            push!(phs, "($sql)"); append!(vals, ps)
+        else
+            push!(phs, "?"); push!(vals, to_db(f, v))
+        end
+    end
+    phs, vals
+end
+"An INSERT's `?` placeholders, in order, replaced by `phs` (expressions' SQL, or `?`)."
+function fill_placeholders(sql::AbstractString, phs::Vector{String})
+    all(==("?"), phs) && return String(sql)
+    i = 0
+    replace(sql, "?" => _ -> (i += 1; i <= length(phs) ? phs[i] : "?"))
+end
+"After a save with expression values: read the values the database computed into the object."
+Base.@nospecializeinfer function refresh_expression_fields!(@nospecialize(obj::Model), exprs)
+    isempty(exprs) && return
+    data = (getfield(obj, :_data)::Dict{Symbol,Any})
+    for tbl in unique(modelmeta(f.model).table for f in exprs)
+        mine = [f for f in exprs if modelmeta(f.model).table == tbl]
+        row = execute("SELECT " * join([qname(column(f)) for f in mine], ", ") * " FROM $(qname(tbl)) WHERE $(qname("id")) = ?", [data[:id]])
+        isempty(row) && continue
+        for f in mine
+            data[attname(f)] = from_db(f, row[1][Symbol(column(f))])
+        end
+    end
+end
+
 "UPDATE some columns of one table's row for `save!(...; update_fields)`; the row must exist."
 Base.@nospecializeinfer function update_columns!(@nospecialize(M::Type), data, only::Set{Symbol})
     fields = [f for f in modelmeta(M).fields if attname(f) in only && haskey(data, attname(f)) &&     # (not deferred)
                                                f.generated === nothing && data[attname(f)] !== DB_DEFAULT]
     isempty(fields) && return
-    sets = join(["$(qname(column(f))) = ?" for f in fields], ", ")
-    vals = Any[to_db(f, data[attname(f)]) for f in fields]
+    phs, vals = write_values(M, fields, data, false)
+    sets = join(["$(qname(column(f))) = $ph" for (f, ph) in zip(fields, phs)], ", ")
     if is_composite(M)
         cond = join([qname(column(f)) * " = ?" for f in pk_fields(M)], " AND ")
         n = execute_changes("UPDATE $(qname(modelmeta(M).table)) SET $sets WHERE $cond", vcat(vals, collect(Any, data[:id])))
@@ -203,37 +251,46 @@ Base.@nospecializeinfer function save_table!(@nospecialize(M::Type), data, root:
     # deferred fields keep their stored values; generated and not-yet-filled db_default ones are the database's
     fields = [f for f in meta.fields if haskey(data, attname(f)) && f.generated === nothing && data[attname(f)] !== DB_DEFAULT]
     cols = [qname(column(f)) for f in fields]
-    vals = Any[to_db(f, data[attname(f)]) for f in fields]
     tbl = qname(meta.table)
+    upd() = (w = write_values(M, fields, data, false); (join(["$c = $ph" for (c, ph) in zip(cols, w[1])], ", "), w[2]))
+    ins() = write_values(M, fields, data, true)
     if is_composite(M)
         # Like a changed primary key elsewhere: saving under a new key writes a new row.
         key = composite_pk(M, data)
         key === nothing && throw(ArgumentError("$(nameof(M)): every part of the composite primary key needs a value"))
         if data[:id] !== nothing          # loaded or saved before: UPDATE, else (no such row) INSERT
             cond = join([qname(column(f)) * " = ?" for f in pk_fields(M)], " AND ")
-            n = execute_changes("UPDATE $tbl SET " * join(["$c = ?" for c in cols], ", ") * " WHERE $cond", vcat(vals, collect(Any, key)))
+            sets, vals = upd()
+            n = execute_changes("UPDATE $tbl SET $sets WHERE $cond", vcat(vals, collect(Any, key)))
             n > 0 && (data[:id] = key; return)
         end
-        execute_changes(insert_sql(backend(), tbl, cols) |> s -> replace(s, r" RETURNING .*$" => ""), vals)
+        phs, vals = ins()
+        execute_changes(fill_placeholders(insert_sql(backend(), tbl, cols), phs) |> s -> replace(s, r" RETURNING .*$" => ""), vals)
         data[:id] = composite_pk(M, data)
         return
     end
     if fresh
-        execute(insert_sql(backend(), tbl, vcat(qname("id"), cols)) |> s -> replace(s, r" RETURNING .*$" => ""),
+        phs, vals = ins()
+        execute(fill_placeholders(insert_sql(backend(), tbl, vcat(qname("id"), cols)), vcat("?", phs)) |> s -> replace(s, r" RETURNING .*$" => ""),
                 vcat(data[:id], vals))
         return
     end
     if data[:id] !== nothing
-        n = isempty(cols) ? length(execute("SELECT 1 FROM $tbl WHERE $(qname("id")) = ?", [data[:id]])) :
-            execute_changes("UPDATE $tbl SET " * join(["$c = ?" for c in cols], ", ") * " WHERE $(qname("id")) = ?",
-                            vcat(vals, data[:id]))
+        n = if isempty(cols)
+            length(execute("SELECT 1 FROM $tbl WHERE $(qname("id")) = ?", [data[:id]]))
+        else
+            sets, vals = upd()
+            execute_changes("UPDATE $tbl SET $sets WHERE $(qname("id")) = ?", vcat(vals, data[:id]))
+        end
         n > 0 && return
-        execute_insert(insert_sql(backend(), tbl, vcat(qname("id"), cols)), vcat(data[:id], vals))
+        phs, vals = ins()
+        execute_insert(fill_placeholders(insert_sql(backend(), tbl, vcat(qname("id"), cols)), vcat("?", phs)), vcat(data[:id], vals))
         root && sync_sequence(backend(), meta.table)
         return
     end
     root || error("internal: child table saved before its parent")
-    data[:id] = execute_insert(insert_sql(backend(), tbl, cols), vals)
+    phs, vals = ins()
+    data[:id] = execute_insert(fill_placeholders(insert_sql(backend(), tbl, cols), phs), vals)
 end
 
 "Delete the object (and cascade to related objects)."

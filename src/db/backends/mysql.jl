@@ -80,6 +80,7 @@ autoincrement_pk(b::MySQLBackend, int = :bigint) = quote_name(b, "id") * " " * c
 positive_check(::MySQLBackend) = false
 # PCRE (MariaDB) and ICU (MySQL) take the (?i) / (?-i) flags, whatever the column's collation
 regex_sql(::MySQLBackend, col, pattern, icase::Bool) = ("$col REGEXP ?", Any[(icase ? "(?i)" : "(?-i)") * pattern])
+regex_expr_sql(::MySQLBackend, col, e, icase::Bool) = "$col REGEXP ('$(icase ? "(?i)" : "(?-i)")' || $e)"
 "Type names CAST accepts."
 cast_type(b::MySQLBackend, kind::Symbol) = kind in INT_KINDS || kind === :fk ? "SIGNED" : kind === :float ? "DOUBLE" :
     kind === :date ? "DATE" : kind === :datetime ? "DATETIME(6)" : "CHAR"
@@ -97,12 +98,18 @@ function limit_offset_sql(::MySQLBackend, limit, offset)
 end
 
 "MySQL refuses `IN (SELECT ... FROM same_table)` in UPDATE/DELETE and `LIMIT` in IN-subqueries; a derived table avoids both."
-in_subquery(::MySQLBackend, sql) = "SELECT * FROM ($sql) AS juango_in"
+# MySQL refuses LIMIT in an IN subquery, so a sliced one is wrapped in a derived table; only a sliced
+# one, since a derived table can't see the outer query's columns (a correlated subquery)
+in_subquery(::MySQLBackend, sql) = occursin(r"\bLIMIT\b", sql) ? "SELECT * FROM ($sql) AS juango_in" : sql
+# a Decimal parameter would arrive as text, which MySQL's arithmetic turns into a double
+value_sql(::MySQLBackend, v::Decimal) = ("CAST(? AS DECIMAL(65, 30))", Any[v])
 
 foreign_key_sql(b::MySQLBackend, table, col, reftable) =
     "ALTER TABLE $(quote_name(b, table)) ADD CONSTRAINT $(quote_name(b, constraint_name(table, col, "fk", reftable, "id"))) " *
     "FOREIGN KEY ($(quote_name(b, col))) REFERENCES $(quote_name(b, reftable)) ($(quote_name(b, "id")))"
 
+int_div_sql(::MySQLBackend, a, b) = "($a DIV $b)"
+like_sensitive_sql(::MySQLBackend, col, pat) = "$col LIKE BINARY $pat ESCAPE '\\'"
 lookup_sql(b::MySQLBackend, ::Val{:contains}, col, v) = ("$col LIKE BINARY ? ESCAPE '\\'", Any["%" * escape_like(string(v)) * "%"])
 lookup_sql(b::MySQLBackend, ::Val{:startswith}, col, v) = ("$col LIKE BINARY ? ESCAPE '\\'", Any[escape_like(string(v)) * "%"])
 lookup_sql(b::MySQLBackend, ::Val{:endswith}, col, v) = ("$col LIKE BINARY ? ESCAPE '\\'", Any["%" * escape_like(string(v))])

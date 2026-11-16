@@ -382,11 +382,14 @@ prefetch_related(objects(Post), :tags)            # 2 extra queries for any numb
 
 ```julia
 update!(filter(Post; id=1); views = F(:views) + 1)              # atomic increment, no race
+post.views = F(:views) + 1; save!(post)                         # the same on one object (then post.views is the new number)
 filter(Post; updated__gt = F(:created))                         # compare columns
 annotate(objects(Author); n = Count(:posts)) |> filter(n__gt = 2) |> order_by("-n")   # GROUP BY / HAVING
 annotate(objects(Author); published = Count(:posts; filter = Q(posts__published = true)))
 values(objects(Post), :status) |> annotate(n = Count())        # rows like Dict(:status => "p", :n => 12)
 aggregate(objects(Post); total = Sum(:views), avg = Avg(:views))   # Dict(:total => ..., :avg => ...)
+aggregate(objects(Post), Avg(:views))                           # Dict(:views__avg => ...), Django's default name
+annotate(objects(Post); popular = Q(views__gt = 100))           # a condition as a true/false column
 values_list(objects(Post), :title, :author__name)               # tuples; flat=true for one field, named=true for NamedTuples
 filter(Plate; id__in = values_list(filter(Event; kind = "load"), :plate_id; flat = true))   # one query: a subquery
 ```
@@ -408,7 +411,7 @@ With DEBUG on, paginating an unordered queryset, or slicing one from a later row
 - **`FilteredRelation`:** join a relation with an extra condition in the JOIN's `ON` clause, so authors without a match are kept and aggregates see only matching rows. It works with forward and reverse relations, one level deep:
   - `qs = annotate(Author; pub = FilteredRelation(:posts; condition = Q(posts__published = true)))`
   - `annotate(qs; n = Count(:pub))`, `filter(qs; pub__title__contains = "Julia")`, `exclude(qs; pub__views = 0)`, `order_by(qs, "pub__views")`
-- **`values()` is lazy.** It returns a queryset whose rows are `Dict`s. Aggregates in `annotate` after `values(:field)` group by that field. As in Django, combining aggregates over two different reverse relations multiplies rows, so use `distinct=true`.
+- **`values()` is lazy.** It returns a queryset whose rows are `Dict`s. Aggregates in `annotate` after `values(:field)` group by that field, and a later `values(...)` only picks the columns. As in Django, a row has the fields `values()` names, and the annotations made after it (an annotation made before it is there only if it's named). As in Django, combining aggregates over two different reverse relations multiplies rows, so use `distinct=true`.
 
 **More functions** live in `Juango.Functions` (Django's `django.db.models.functions`):
 

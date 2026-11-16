@@ -145,9 +145,11 @@ function register_sqlite_extras!(db)
     # variance and standard deviation (population and sample), and bitwise and/or
     for (name, final) in (("var_pop", v -> v[1] < 1 ? missing : v[3] / v[1]), ("var_samp", v -> v[1] < 2 ? missing : v[3] / (v[1] - 1)),
                           ("stddev_pop", v -> v[1] < 1 ? missing : sqrt(v[3] / v[1])), ("stddev_samp", v -> v[1] < 2 ? missing : sqrt(v[3] / (v[1] - 1))))
-        # Welford's online algorithm: (count, mean, M2)
-        SQLite.register(db, (0, 0.0, 0.0), (st, x) -> x === missing ? st : (n = st[1] + 1; d = num(x) - st[2]; m = st[2] + d / n; (n, m, st[3] + d * (num(x) - m))),
-                        final; nargs = 1, name = "juango_" * name)
+        # Welford's online algorithm: (count, mean, M2). The state starts as missing: over no rows,
+        # SQLite.jl gives back the initial state without calling `final`, and that must be NULL.
+        SQLite.register(db, missing, (st, x) -> x === missing ? st :
+                                         (st === missing && (st = (0, 0.0, 0.0)); n = st[1] + 1; d = num(x) - st[2]; m = st[2] + d / n; (n, m, st[3] + d * (num(x) - m))),
+                        v -> v === missing ? missing : final(v); nargs = 1, name = "juango_" * name)
     end
     SQLite.register(db, missing, (a, x) -> x === missing ? a : a === missing ? Int(x) : a & Int(x); nargs = 1, name = "juango_bit_and")
     SQLite.register(db, missing, (a, x) -> x === missing ? a : a === missing ? Int(x) : a | Int(x); nargs = 1, name = "juango_bit_or")

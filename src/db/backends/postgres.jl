@@ -41,6 +41,10 @@ function sync_sequence(b::PostgresBackend, table)
     nothing
 end
 
+text_cast(::PostgresBackend, col) = "($col)::text"
+# a Decimal parameter is typed from the other operand (bigint for F(:integer) / Value(Decimal("3.0")))
+value_sql(::PostgresBackend, v::Decimal) = ("CAST(? AS NUMERIC)", Any[v])
+
 # Postgres has ILIKE, which can use trigram indexes. LOWER(...) LIKE would also work.
 for (L, pre, post) in ((:icontains, "%", "%"), (:istartswith, "", "%"), (:iendswith, "%", ""))
     @eval lookup_sql(::PostgresBackend, ::Val{$(QuoteNode(L))}, col, v) =

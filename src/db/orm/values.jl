@@ -14,7 +14,12 @@ function from_db(f::Field, v)
     k === :binary && return v isa Vector{UInt8} ? v : v isa AbstractVector{UInt8} ? Vector{UInt8}(v) :
                             v isa AbstractString ? Vector{UInt8}(codeunits(v)) : Vector{UInt8}(v)
     k === :duration && return to_duration(v)
-    k === :decimal && return f.decimal_places === nothing ? to_decimal(v) : round(to_decimal(v); digits = f.decimal_places)
+    if k === :decimal
+        # SQLite computes F() arithmetic in doubles (0.5 - 0.4 is stored as 0.09999999999999998):
+        # keep the 15 digits a double holds, as Django's SQLite converter does
+        v isa AbstractFloat && (v = round(v; sigdigits = 15))
+        return f.decimal_places === nothing ? to_decimal(v) : round(to_decimal(v); digits = f.decimal_places)
+    end
     k === :datetime && return datetime_from_db(v isa DateTime || v isa TimeZones.ZonedDateTime ? v :
                                                something(parse_aware_datetime(v), todatetime(v), v))
     k === :date && return v isa Date ? v : Date(todatetime(v))

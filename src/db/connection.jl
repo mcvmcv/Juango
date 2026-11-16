@@ -277,8 +277,31 @@ lookup_sql(b::DatabaseBackend, ::Val{:iendswith}, col, v) = ("LOWER($col) LIKE ?
 
 escape_like(s) = replace(s, "\\" => "\\\\", "%" => "\\%", "_" => "\\_")
 
+"""
+    expr_lookup_sql(b, lookup, col, e) -> (sql, uses)
+
+A string lookup (`contains`, `istartswith`, ...) whose value is an expression `e` (compiled SQL)
+rather than a string: `uses` is how many times `e` appears (after `col`), so its parameters can be
+repeated. LIKE's wildcards in `e`'s value are escaped in SQL, as Django does (#198).
+"""
+function expr_lookup_sql(b::DatabaseBackend, lookup::String, col, e)
+    esc = "REPLACE(REPLACE(REPLACE($e, '\\', '\\\\'), '%', '\\%'), '_', '\\_')"
+    pre, post = lookup in ("contains", "icontains") ? ("'%' || ", " || '%'") :
+                lookup in ("startswith", "istartswith") ? ("", " || '%'") : ("'%' || ", "")
+    pat = "($pre$esc$post)"
+    insensitive = startswith(lookup, "i")
+    insensitive ? (like_insensitive_sql(b, col, pat), 1) : (like_sensitive_sql(b, col, pat), 1)
+end
+like_sensitive_sql(::DatabaseBackend, col, pat) = "$col LIKE $pat ESCAPE '\\'"
+like_insensitive_sql(::DatabaseBackend, col, pat) = "LOWER($col) LIKE LOWER($pat) ESCAPE '\\'"
+
+"A column as text, for a text lookup on a column that isn't (PostgreSQL needs the cast; the others convert)."
+text_cast(::DatabaseBackend, col) = col
+
 "The `regex` / `iregex` lookups (PostgreSQL's `~` and `~*`)."
 regex_sql(::DatabaseBackend, col, pattern, icase::Bool) = ("$col $(icase ? "~*" : "~") ?", Any[pattern])
+"The regex lookups with an expression (compiled SQL `e`) for the pattern (#198)."
+regex_expr_sql(::DatabaseBackend, col, e, icase::Bool) = "$col $(icase ? "~*" : "~") $e"
 
 # transactions
 begin_sql(::DatabaseBackend) = "BEGIN"

@@ -121,10 +121,23 @@ function encode_range(::DatabaseBackend, r::ValueRange)
     string(r.bounds[1], lo, ",", hi, r.bounds[2])
 end
 
+"""
+A string given for a date or datetime field, in a query (`pub_date = "2005-07-27 00:00:00"`) or a
+save, as the value: parsed as a form would (the ISO formats and the others it accepts), else a
+ValidationError, as Django's `get_prep_value` (#202).
+"""
+function parse_temporal_string(f::Field, s::AbstractString)
+    v, err = to_julia(f, s)
+    err === nothing && v !== nothing && return v
+    what = f.kind === :date ? "date (YYYY-MM-DD)" : "date and time (YYYY-MM-DD HH:MM[:ss])"
+    throw(ValidationError(Dict(f.name => ["\u201c$s\u201d isn't a valid $what."])))
+end
+
 function to_db(f::Field, v)
     f.kind in (:file, :image) && return v === nothing ? "" : file_to_db(f, v)     # no file is stored as ''
     v === nothing && return dbparam(v)
     k = f.kind
+    v isa AbstractString && k in (:date, :datetime) && (v = parse_temporal_string(f, v))
     k === :datetime && return dbparam(to_utc_naive(v))
     if k === :json
         p = json_nonfinite_path(v)
