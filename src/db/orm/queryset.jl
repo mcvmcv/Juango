@@ -187,6 +187,53 @@ end
 exclude(@nospecialize(T::Type{<:Model}), qargs::Q...; kw...) = exclude(objects(T), qargs...; kw...)
 
 """
+    qs1 | qs2
+    qs1 & qs2
+
+Querysets of one model combined into one query (Django's `|` and `&`): `|` matches the rows
+either matches (an OR of their conditions, not a UNION), `&` those both match. The result keeps
+the left queryset's ordering, annotations and options. Sliced and combined (union) querysets,
+and a values() queryset with a model one, can't be combined.
+"""
+function Base.:|(a::QuerySet, b::QuerySet)
+    check_combinable(a, b, "|")
+    (a.isnone || b.isnone) && return a.isnone ? b : a
+    (isempty(a.where) || isempty(b.where)) && return chain(a; where = Q[])          # one matches every row
+    either = Q(:OR, Any[Q(:AND, Any[a.where...], false), Q(:AND, Any[b.where...], false)], false)
+    chain(a; where = Q[either])
+end
+function Base.:&(a::QuerySet, b::QuerySet)
+    check_combinable(a, b, "&")
+    chain(a; where = vcat(a.where, b.where), isnone = a.isnone || b.isnone)
+end
+function check_combinable(@nospecialize(a::QuerySet), @nospecialize(b::QuerySet), op)
+    model_of(a) === model_of(b) ||
+        throw(ArgumentError("cannot combine querysets of two different models ($(nameof(model_of(a))) $op $(nameof(model_of(b))))"))
+    for q in (a, b)
+        assert_unsliced(q, "combine ($op)")
+        assert_uncombined(q, "combine ($op)")
+    end
+    (a.values_fields === nothing) == (b.values_fields === nothing) ||
+        throw(ArgumentError("cannot combine ($op) a values() queryset with a model queryset"))
+end
+
+"""
+    reverse(qs)
+
+The queryset in the opposite order (Django's `qs.reverse()`): each `order_by` term flipped, or
+the model's `Meta(ordering = ...)` flipped when there's no `order_by`. A queryset without any
+ordering stays unordered.
+"""
+function Base.reverse(@nospecialize(qs::QuerySet))
+    assert_unsliced(qs, "reverse")
+    order = order_cleared(qs) ? Any[] : isempty(qs.order) ? Any[modelmeta(model_of(qs)).ordering...] : qs.order
+    isempty(order) && return chain(qs)
+    flip(o) = o isa AbstractString ? (o == "?" ? o : startswith(o, "-") ? o[2:end] : "-" * o) :
+              o isa OrderBy ? OrderBy(o.expr, !o.descending, o.nulls_first === nothing ? nothing : !o.nulls_first) : o
+    chain(qs; order = Any[flip(o) for o in order])
+end
+
+"""
     order_by(qs, "field", "-other", ...)
     qs |> order_by("-created")
 
@@ -204,14 +251,45 @@ const NO_ORDER = NoOrder()
 Base.@nospecializeinfer order_cleared(@nospecialize(qs::QuerySet)) = length(qs.order) == 1 && qs.order[1] isa NoOrder
 
 """
+An ordering term that ends at a foreign key (`"author"`, `"-note"`), as Django orders it: by the
+related model's Meta.ordering (`"-note__note"`), each term's direction flipped for `-`; by the key
+itself when that model has no ordering. Other terms are returned as they are.
+"""
+function expand_fk_ordering(@nospecialize(T::Type), o::AbstractString, depth::Int = 0)
+    desc = startswith(o, "-")
+    path = lstrip(o, '-')
+    segs = split(path, "__")
+    M = T
+    f = nothing
+    for s in segs
+        f = findfield(modelmeta(M), Symbol(s))
+        f !== nothing && f.kind === :fk || return [String(o)]       # not a path of foreign keys: as it is
+        M = related_model(f)
+    end
+    R = M
+    ord = modelmeta(R).ordering
+    (isempty(ord) || depth > 4 || !all(x -> x isa AbstractString, ord)) && return [String(o)]
+    out = String[]
+    for r in ord
+        rdesc = startswith(r, "-")
+        term = (desc ⊻ rdesc ? "-" : "") * path * "__" * lstrip(r, '-')
+        append!(out, expand_fk_ordering(T, term, depth + 1))
+    end
+    out
+end
+
+"""
 ORDER BY clause plus extra SELECT columns (needed with DISTINCT when ordering by joined columns).
 With no ordering given, the model's `Meta(ordering = ...)` applies when `meta_ordering` is true.
 """
-function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true)
+function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true, add_cols::Bool = false)
     T = c.T
     length(order) == 1 && order[1] isa NoOrder && return "", String[], Any[]
     isempty(order) && meta_ordering && (order = modelmeta(T).ordering)
     isempty(order) && return "", String[], Any[]
+    # order_by("author") and Meta(ordering = ["-note"]): the related model's ordering, as Django
+    order = Any[x for o in order for x in (o isa AbstractString && o != "?" && !haskey(c.annotations, Symbol(lstrip(o, '-'))) ?
+                                            expand_fk_ordering(T, o) : Any[o])]
     parts, extra, ps = String[], String[], Any[]
     for o in order
         if o isa OrderBy                          # an expression (Asc, Desc), with joins as needed
@@ -257,7 +335,7 @@ function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true)
             alias = field_alias!(c, alias, M, f)
             qcol(alias, column(f))
         end
-        if alias != c.base && c.distinct
+        if (alias != c.base && c.distinct) || add_cols
             push!(extra, "$col AS $(qname("__order$(length(extra) + 1)"))")
         end
         push!(parts, col * (desc ? " DESC" : " ASC"))
@@ -476,7 +554,10 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     distinct = ((c.distinct && qs.values_fields === nothing) || qs.distinct_fields !== nothing) && !grouped
     # distinct(values(...)) leaves Meta.ordering out too: its columns aren't selected, so PostgreSQL refuses the
     # ORDER BY (and Django's way, selecting them, makes the rows no longer distinct). An explicit order_by applies.
-    o, extra, ops_order = ordered ? order_clause(c, qs.order; meta_ordering = !grouped && !(distinct && qs.values_fields !== nothing)) :
+    # distinct(values(:misc)) ordered by note: the ordering's columns are selected too (and rows are distinct
+    # over them), as Django does; PostgreSQL requires it, and the rows leave them out
+    o, extra, ops_order = ordered ? order_clause(c, qs.order; meta_ordering = !grouped && !(distinct && qs.values_fields !== nothing),
+                                                 add_cols = distinct && qs.values_fields !== nothing && columns === nothing && !idonly) :
                                     ("", String[], Any[])
     (columns === nothing && !idonly && !grouped) && append!(sel, extra)
     dkw = distinct ? "DISTINCT " : ""

@@ -321,6 +321,8 @@ Exactly one matching object. Throws `DoesNotExist` or `MultipleObjectsReturned`.
 function Base.get(@nospecialize(qs::QuerySet), qargs::Q...; kw...)
     T = model_of(qs)
     q = filter(qs, qargs...; kw...)
+    # one row is wanted: no ORDER BY (as Django), unless DISTINCT ON needs it
+    (q.distinct_fields === nothing || isempty(q.distinct_fields)) && (q = chain(q; order = Any[NO_ORDER]))
     v = fetch(chain(q; limit = 2))
     desc = join(["$k=$(repr(v))" for (k, v) in kw], ", ")
     isempty(v) && throw(DoesNotExist(T, desc))

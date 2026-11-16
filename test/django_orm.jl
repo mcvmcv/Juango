@@ -935,3 +935,209 @@ end
     @test_broken (try [c.name for c in filter(annotate(objects(DeCompany); eu_required = ~Value(false)); based_in_eu = F(:eu_required))] == ["Example Inc."] catch; false end)   # #218
   end
 end
+
+# --- tests/queries/models.py (the models Queries1Tests uses) --------------------------------------------
+# Relations get Django's default reverse query names (Author.objects.filter(item = ...)); Juango's
+# default is the model's name in lowercase. Report.creator has Django's to_field = "num" (#220);
+# ExtraInfo.date (a DateTimePK, a datetime primary key) is left out (#221).
+@model struct DqDumbCategory
+    Meta(table = "dq_dumbcategory")
+end
+@model struct DqNamedCategory <: DqDumbCategory
+    name = CharField(max_length = 10)
+    Meta(table = "dq_namedcategory")
+end
+@model struct DqTag
+    name = CharField(max_length = 10)
+    parent = ForeignKey(:self; on_delete = :SET_NULL, blank = true, null = true, related_name = :children)
+    category = ForeignKey(DqNamedCategory; on_delete = :SET_NULL, null = true, default = nothing, related_name = :tag)
+    Meta(table = "dq_tag", ordering = ["name"])
+end
+@model struct DqNote
+    note = CharField(max_length = 100)
+    misc = CharField(max_length = 25)
+    tag = ForeignKey(DqTag; on_delete = :SET_NULL, blank = true, null = true, related_name = :note)
+    negate = BooleanField(default = true)
+    Meta(table = "dq_note", ordering = ["note"])
+end
+@model struct DqAnnotation
+    name = CharField(max_length = 10)
+    tag = ForeignKey(DqTag; on_delete = :CASCADE, related_name = :annotation)
+    notes = ManyToManyField(DqNote; related_name = :annotation)
+    Meta(table = "dq_annotation")
+end
+@model struct DqExtraInfo
+    info = CharField(max_length = 100)
+    note = ForeignKey(DqNote; on_delete = :CASCADE, null = true, related_name = :extrainfo)
+    value = IntegerField(null = true)
+    filterable = BooleanField(default = true)
+    Meta(table = "dq_extrainfo", ordering = ["info"])
+end
+@model struct DqAuthor
+    name = CharField(max_length = 10)
+    num = IntegerField(unique = true)
+    extra = ForeignKey(DqExtraInfo; on_delete = :CASCADE, related_name = :author)
+    Meta(table = "dq_author", ordering = ["name"])
+end
+@model struct DqItem
+    name = CharField(max_length = 10)
+    created = DateTimeField()
+    modified = DateTimeField(blank = true, null = true)
+    tags = ManyToManyField(DqTag; blank = true, related_name = :item)
+    creator = ForeignKey(DqAuthor; on_delete = :CASCADE, related_name = :item)
+    note = ForeignKey(DqNote; on_delete = :CASCADE, related_name = :item)
+    Meta(table = "dq_item", ordering = ["-note", "name"])
+end
+@model struct DqReport
+    name = CharField(max_length = 10)
+    creator = ForeignKey(DqAuthor; on_delete = :SET_NULL, null = true, related_name = :report)
+    Meta(table = "dq_report")
+end
+@model struct DqRanking
+    rank = IntegerField()
+    author = ForeignKey(DqAuthor; on_delete = :CASCADE, related_name = :ranking)
+    Meta(table = "dq_ranking", ordering = ["author__extra__note", "author__name", "rank"])
+end
+@model struct DqCover
+    title = CharField(max_length = 50)
+    item = ForeignKey(DqItem; on_delete = :CASCADE, related_name = :cover)
+    Meta(table = "dq_cover", ordering = ["item"])
+end
+redirect_stdout(devnull) do
+    ms = [DqDumbCategory, DqNamedCategory, DqTag, DqNote, DqAnnotation, through(DqAnnotation, :notes), DqExtraInfo, DqAuthor,
+          DqItem, through(DqItem, :tags), DqReport, DqRanking, DqCover]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+function dq_data()
+    nc1 = create(DqNamedCategory; name = "Generic")
+    t1 = create(DqTag; name = "t1", category = nc1); t2 = create(DqTag; name = "t2", parent = t1, category = nc1)
+    t3 = create(DqTag; name = "t3", parent = t1); t4 = create(DqTag; name = "t4", parent = t3); t5 = create(DqTag; name = "t5", parent = t3)
+    n1 = create(DqNote; note = "n1", misc = "foo"); n2 = create(DqNote; note = "n2", misc = "bar"); n3 = create(DqNote; note = "n3", misc = "foo", negate = false)
+    ann1 = create(DqAnnotation; name = "a1", tag = t1); add!(ann1.notes, n1)
+    ann2 = create(DqAnnotation; name = "a2", tag = t4); add!(ann2.notes, n2, n3)
+    e2 = create(DqExtraInfo; info = "e2", note = n2, value = 41, filterable = false)
+    e1 = create(DqExtraInfo; info = "e1", note = n1, value = 42)
+    a1 = create(DqAuthor; name = "a1", num = 1001, extra = e1); a2 = create(DqAuthor; name = "a2", num = 2002, extra = e1)
+    a3 = create(DqAuthor; name = "a3", num = 3003, extra = e2); a4 = create(DqAuthor; name = "a4", num = 4004, extra = e2)
+    time1, time2 = DateTime(2007, 12, 19, 22, 25), DateTime(2007, 12, 19, 21, 0)
+    i1 = create(DqItem; name = "one", created = time1, modified = time1, creator = a1, note = n3); set!(i1.tags, [t1, t2])
+    i2 = create(DqItem; name = "two", created = time2, creator = a2, note = n2); set!(i2.tags, [t1, t3])
+    i3 = create(DqItem; name = "three", created = DateTime(2007, 12, 20, 22, 25), creator = a2, note = n3)
+    i4 = create(DqItem; name = "four", created = DateTime(2007, 12, 20, 21, 0), creator = a4, note = n3); set!(i4.tags, [t4])
+    r1 = create(DqReport; name = "r1", creator = a1); r2 = create(DqReport; name = "r2", creator = a3); r3 = create(DqReport; name = "r3")
+    rank1 = create(DqRanking; rank = 2, author = a2)
+    c1 = create(DqCover; title = "first", item = i4); c2 = create(DqCover; title = "second", item = i2)
+    (; nc1, t1, t2, t3, t4, t5, n1, n2, n3, ann1, ann2, e1, e2, a1, a2, a3, a4, time1, time2, i1, i2, i3, i4, r1, r2, r3, rank1, c1, c2)
+end
+names_(qs) = try [x.name for x in qs] catch err; err end
+
+@testset "django queries: Queries1Tests (part 1)" begin
+  port_block() do
+    d = dq_data()
+    # test_ticket1050
+    @test names_(filter(DqItem; tags__isnull = true)) == ["three"] && names_(filter(DqItem; tags__id__isnull = true)) == ["three"]
+    # test_ticket1801: and two querysets ANDed (qs1 & qs2)
+    @test names_(filter(DqAuthor; item = d.i2)) == ["a2"] && names_(filter(DqAuthor; item = d.i3)) == ["a2"]
+    @test names_(try filter(DqAuthor; item = d.i2) & filter(DqAuthor; item = d.i3) catch err; err end) == ["a2"]
+    # test_ticket2306
+    @test names_(order_by(filter(objects(DqItem), Q(tags = d.t1)), "name")) == ["one", "two"]
+    @test names_(filter(filter(objects(DqItem), Q(tags = d.t1)), Q(tags = d.t2))) == ["one"]
+    @test names_(filter(filter(objects(DqItem), Q(tags = d.t1)), Q(creator__name = "fred") | Q(tags = d.t2))) == ["one"]
+    @test names_(filter(objects(DqItem), Q(tags = d.t1) & Q(tags = d.t2))) == String[]       # one tag row can't be both
+    @test names_(filter(objects(DqItem), Q(tags = d.t1), Q(creator__name = "fred") | Q(tags = d.t2))) == String[]
+    @test names_(filter(DqAuthor; ranking__rank = 2, ranking__id = d.rank1.id)) == ["a2"]
+    # test_ticket4464 (Juango matches each item once across a many-to-many: no [one, one, two])
+    @test names_(filter(filter(DqItem; tags = d.t1); tags = d.t2)) == ["one"]
+    @test names_(order_by(distinct(filter(DqItem; tags__in = [d.t1, d.t2])), "name")) == ["one", "two"]
+    @test names_(filter(filter(DqItem; tags__in = [d.t1, d.t2]); tags = d.t3)) == ["two"]
+    # test_tickets_2080_3592
+    @test names_(try filter(DqAuthor; item__name = "one") | filter(DqAuthor; name = "a3") catch err; err end) == ["a1", "a3"]
+    @test names_(filter(objects(DqAuthor), Q(item__name = "one") | Q(name = "a3"))) == ["a1", "a3"]
+    @test names_(filter(objects(DqAuthor), Q(name = "a3") | Q(item__name = "one"))) == ["a1", "a3"]
+    @test names_(filter(objects(DqAuthor), Q(item__name = "three") | Q(report__name = "r3"))) == ["a2"]
+    # test_ticket6074
+    @test names_(filter(objects(DqAuthor), Q(id__in = Int[]))) == String[] && names_(filter(objects(DqAuthor), Q(id__in = Int[]) | Q(id__in = Int[]))) == String[]
+    # test_tickets_1878_2939 / test_ticket7323
+    @test count(distinct(values(objects(DqItem), :creator))) == 3
+    xx = create(DqItem; name = "four", created = d.time1, creator = d.a2, note = d.n1)
+    @test count(distinct(values(exclude(objects(DqItem); name = "two"), :creator, :name))) == 4
+    delete!(xx)
+    @test count(values(objects(DqItem), :creator, :name)) == 4
+    # test_ticket2253: querysets ORed and ANDed
+    q1 = order_by(objects(DqItem), "name"); q2 = filter(DqItem; id = d.i1.id)
+    @test names_(q1) == ["four", "one", "three", "two"] && names_(q2) == ["one"]
+    @test names_(try order_by(q1 | q2, "name") catch err; err end) == ["four", "one", "three", "two"]
+    @test names_(try order_by(q1 & q2, "name") catch err; err end) == ["one"]
+    # test_get_clears_ordering
+    sqls = String[]
+    Juango.execute_wrapper((ex, sql, ps, ctx) -> (push!(sqls, sql); ex(sql, ps))) do
+        get(order_by(objects(DqAuthor), "name"); pk = d.a1.pk)
+    end
+    @test !any(s -> occursin("order by", lowercase(s)), sqls)
+    # test_tickets_4088_4306 (Report.creator by to_field num, in Django)
+    @test names_(filter(DqReport; creator__num = 1001)) == ["r1"] && names_(filter(DqReport; creator__id = d.a1.id)) == ["r1"] && names_(filter(DqReport; creator__name = "a1")) == ["r1"]
+    # test_ticket4510 / test_ticket7378
+    @test names_(filter(DqAuthor; report__name = "r1")) == ["a1"] && names_(d.a1.report) == ["r1"]
+    # test_tickets_5324_6704
+    @test names_(filter(DqItem; tags__name = "t4")) == ["four"]
+    @test names_(distinct(order_by(exclude(objects(DqItem); tags__name = "t4"), "name"))) == ["one", "three", "two"]
+    @test names_(try reverse(distinct(order_by(exclude(objects(DqItem); tags__name = "t4"), "name"))) catch err; err end) == ["two", "three", "one"]
+    @test names_(order_by(distinct(exclude(objects(DqAuthor); item__name = "one")), "name")) == ["a2", "a3", "a4"]
+    @test names_(order_by(exclude(objects(DqItem); tags__name = "t1"), "name")) == ["four", "three"]
+    @test names_(exclude(exclude(objects(DqItem); tags__name = "t1"); tags__name = "t4")) == ["three"]
+    @test names_(order_by(filter(DqTag; parent__isnull = true), "name")) == ["t1"]
+    @test names_(order_by(exclude(objects(DqTag); parent__isnull = true), "name")) == ["t2", "t3", "t4", "t5"]
+  end
+end
+
+@testset "django queries: Queries1Tests (part 2)" begin
+  port_block() do
+    d = dq_data()
+    tn(qs) = try [x.name for x in qs] catch err; err end
+    # test_tickets_5324_6704 (continued): exclude with OR across a relation, two levels up
+    @test tn(order_by(exclude(objects(DqTag), Q(parent__name = "t1") | Q(parent__isnull = true)), "name")) == ["t4", "t5"]
+    @test tn(order_by(exclude(objects(DqTag), Q(parent__isnull = true) | Q(parent__name = "t1")), "name")) == ["t4", "t5"]
+    @test tn(order_by(exclude(objects(DqTag), Q(parent__parent__isnull = true)), "name")) == ["t4", "t5"]
+    @test tn(order_by(filter(objects(DqTag), ~Q(parent__parent__isnull = true)), "name")) == ["t4", "t5"]
+    # test_ticket2091
+    @test tn(filter(DqItem; tags__in = [get(DqTag; name = "t4")])) == ["four"]
+    # test_reasonable_number_of_subq_aliases: 20 nested subqueries
+    x = filter(DqTag; pk = 1)
+    for _ in 1:20; x = filter(DqTag; pk__in = x); end
+    @test (try collect(x); true catch; false end)
+    # test_heterogeneous_qs_combination
+    @test (try objects(DqAuthor) | objects(DqTag); false catch e; true end)
+    # test_ticket2400: reverse relations isnull
+    @test tn(filter(DqAuthor; item__isnull = true)) == ["a3"] && tn(filter(DqTag; item__isnull = true)) == ["t5"]
+    # test_tickets_2076_7256: ordering by a relation follows the related model's Meta.ordering
+    @test tn(order_by(objects(DqItem), "note__note", "name")) == ["two", "four", "one", "three"]
+    @test tn(order_by(objects(DqAuthor), "extra", "-name")) == ["a2", "a1", "a4", "a3"]
+    @test [c.title for c in objects(DqCover)] == ["first", "second"]
+    @test tn(order_by(objects(DqItem), "creator", "name")) == ["one", "three", "two", "four"]
+    @test tn(order_by(objects(DqItem), "name")) == ["four", "one", "three", "two"]
+    # the model's own ordering by a relation: Item's Meta.ordering is ["-note", "name"] (note by its Meta.ordering, "note")
+    @test tn(objects(DqItem)) == ["four", "one", "three", "two"]
+    # test_tickets_2874_3002
+    qs = order_by(select_related(objects(DqItem), :creator, :note), "note__note", "name")
+    @test tn(qs) == ["two", "four", "one", "three"] && first(qs).note.note == "n2" && first(qs).creator.extra.note.note == "n1"
+    # test_ticket3037
+    @test tn(filter(objects(DqItem), Q(creator__name = "a3", name = "two") | Q(creator__name = "a4", name = "four"))) == ["four"]
+    # test_tickets_5321_7070: distinct values ordered by a field not selected
+    @test (try collect(order_by(distinct(values(objects(DqNote), :misc)), "note", "-misc")) == [Dict(:misc => "foo"), Dict(:misc => "bar"), Dict(:misc => "foo")] catch; false end)
+    # test_ticket4358: values() keys a foreign key by its attname (note_id); values(:note) too
+    @test haskey(first(values(objects(DqExtraInfo))), :note_id)
+    @test collect(values(objects(DqExtraInfo), :note_id)) == [Dict(:note_id => d.n1.pk), Dict(:note_id => d.n2.pk)]
+    @test collect(values(objects(DqExtraInfo), :note)) == [Dict(:note => d.n1.pk), Dict(:note => d.n2.pk)]
+    # test_ticket6154
+    @test tn(filter(filter(DqAuthor; id = d.a1.id), Q(extra__note = d.n1) | Q(item__note = d.n3))) == ["a1"]
+    @test tn(filter(filter(objects(DqAuthor), Q(extra__note = d.n1) | Q(item__note = d.n3)); id = d.a1.id)) == ["a1"]
+    # test_ticket6981 / test_ticket9926
+    @test tn(order_by(select_related(objects(DqTag), :parent), "name")) == ["t1", "t2", "t3", "t4", "t5"]
+    @test tn(order_by(select_related(objects(DqTag), :parent, :category), "name")) == ["t1", "t2", "t3", "t4", "t5"]
+    @test tn(order_by(select_related(objects(DqTag), :parent, :parent__category), "name")) == ["t1", "t2", "t3", "t4", "t5"]
+    # test_tickets_6180_6203: datetimes()
+    @test (try length(Juango.datetimes(objects(DqItem), :created, :month)) == 1 catch; false end)
+    @test (try collect(Juango.datetimes(objects(DqItem), :created, :day)) == [DateTime(2007, 12, 19), DateTime(2007, 12, 20)] catch; false end)
+  end
+end

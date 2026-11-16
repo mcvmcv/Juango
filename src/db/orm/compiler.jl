@@ -353,7 +353,13 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                 if negated
                     a = new_alias!(c)
                     sql, ps = compile_lookup(c, a, R, subkey, value, negated)
-                    return ("EXISTS (SELECT 1 FROM $(qname(modelmeta(R).table)) $(qname(a)) WHERE $(qcol(a, "id")) = $(qcol(alias, column(f))) AND $sql)", ps)
+                    ex = "EXISTS (SELECT 1 FROM $(qname(modelmeta(R).table)) $(qname(a)) WHERE $(qcol(a, "id")) = $(qcol(alias, column(f))) AND $sql)"
+                    # exclude(parent__parent__isnull = true): with no parent, the path is NULL, so the row matches
+                    # (and is excluded), as through Django's LEFT JOIN
+                    if f.null && ((lookup == "isnull" && truthy(value)) || (lookup == "exact" && value === nothing))
+                        ex = "($(qcol(alias, column(f))) IS NULL OR $ex)"
+                    end
+                    return (ex, ps)
                 end
                 a = join!(c, alias, (alias, f.name), modelmeta(R).table, "id", column(f); left = f.null)
                 return compile_lookup(c, a, R, subkey, value, negated)
