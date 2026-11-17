@@ -191,7 +191,9 @@ target_name(f::Field) = something(fk_to_field(f), :id)
 "The related table's column a foreign key refers to (\"id\", or the `to_field`'s column)."
 target_column(f::Field) = fk_to_field(f) === nothing ? "id" : column(getfield_meta(related_model(f), fk_to_field(f)))
 "What a foreign key stores for the related object `v`: its id, or its `to_field` value."
-target_value(f::Field, v::Model) = fk_to_field(f) === nothing ? (getfield(v, :_data)::Dict{Symbol,Any})[:id] : getproperty(v, fk_to_field(f))
+# (the stored value: for a to_field that is itself a foreign key, such as a OneToOneField primary key, its id)
+target_value(f::Field, v::Model) = fk_to_field(f) === nothing ? (getfield(v, :_data)::Dict{Symbol,Any})[:id] :
+    field_data(v, attname(getfield_meta(related_model(f), fk_to_field(f))))
 
 function related_model(f::Field)
     r = f.related
@@ -585,6 +587,7 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
         note_lazy_load(T, s, :fk, m)
         obj = with_db(() -> get(base_objects(related_model(f)); (target_name(f) => id,)...), instance_db(m))
         cache[s] = obj
+        f.one_to_one && ((getfield(obj, :_cache)::Dict{Symbol,Any})[reverse_name(f)] = PrefetchedList(Any[m]))   # (r.place.restaurant: no query)
         return obj
     end
     cache = (getfield(m, :_cache)::Dict{Symbol,Any})
@@ -619,7 +622,11 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
         if rf.one_to_one
             pre isa PrefetchedList && (note_eager_use(T, s); return isempty(pre.items) ? nothing : pre.items[1])
             note_lazy_load(T, s, :fk, m)
-            return first(qs)
+            r = first(qs)
+            # remembered either way (a missing one too: no second query), and the other side points back
+            (getfield(m, :_cache)::Dict{Symbol,Any})[s] = PrefetchedList(r === nothing ? Any[] : Any[r])
+            r === nothing || ((getfield(r, :_cache)::Dict{Symbol,Any})[rf.name] = m)
+            return r
         end
         pre isa PrefetchedList && (note_eager_use(T, s); return chain(qs; cache = pre.items, owner = qs.owner))
         note_lazy_load(T, s, :reverse, m)
@@ -657,6 +664,7 @@ Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::S
             delete!((getfield(m, :_cache)::Dict{Symbol,Any}), s)
         elseif v isa Model
             check_related_assignment(f, typeof(m), v)
+            f.one_to_one && ((getfield(v, :_cache)::Dict{Symbol,Any})[reverse_name(f)] = PrefetchedList(Any[m]))
             # an unsaved object's key isn't known yet (a to_field may hold a value it will change): taken at save
             data[attname(f)] = (getfield(v, :_data)::Dict{Symbol,Any})[:id] === nothing ? nothing : target_value(f, v)
             (getfield(m, :_cache)::Dict{Symbol,Any})[s] = v
@@ -664,6 +672,26 @@ Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::S
             data[attname(f)] = v
         end
         return v
+    end
+    if f === nothing && s !== :id && (v isa Model || v === nothing)
+        # place.restaurant = r: the reverse side of a one-to-one points r's key at place (not saved), as Django;
+        # = nothing clears the key of the one it had (if loaded), which the caller then saves
+        for (rn, R, rf) in reverse_relations(typeof(m))
+            (rn === s && rf.one_to_one) || continue
+            cache = (getfield(m, :_cache)::Dict{Symbol,Any})
+            if v === nothing
+                old = get(cache, s, nothing)
+                old isa PrefetchedList && !isempty(old.items) && setproperty!(old.items[1], rf.name, nothing)
+                cache[s] = PrefetchedList(Any[])
+            else
+                a, b = concrete_model(R), concrete_model(typeof(v))
+                (a === b || a in lineage(b) || b in lineage(a)) ||
+                    throw(ArgumentError("cannot assign $(repr(v)): \"$(nameof(typeof(m))).$s\" must be a \"$(nameof(R))\" instance"))
+                setproperty!(v, rf.name, m)
+                cache[s] = PrefetchedList(Any[v])
+            end
+            return v
+        end
     end
     if f === nothing && s !== :id
         tattr!(m, Val(s), v) === NOTFOUND && throw(ArgumentError(

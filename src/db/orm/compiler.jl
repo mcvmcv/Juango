@@ -364,6 +364,10 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                                                 suggest_lookup(rest[1])))
             if rest == [string(target_name(f))] || (fk_to_field(f) === nothing && rest == ["pk"])
                 col = qcol(alias, column(f))     # author__id is just author_id: no join
+                # restaurant__place where the restaurant's key is its one-to-one place: the column holds a place's
+                # key, so values are compared as that relation's (a Place is right here)
+                tf = fk_to_field(f) === nothing ? nothing : getfield_meta(related_model(f), fk_to_field(f))
+                tf !== nothing && tf.kind === :fk && (f = tf)
             else
                 R = related_model(f)
                 subkey = join(vcat(rest, lookup), "__")

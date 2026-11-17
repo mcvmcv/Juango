@@ -552,6 +552,7 @@ end
 - **Abstract models** can extend each other.
 - **Multi-table children:** saving writes every table in one transaction, deleting a child removes its parent row too, and `update!` splits across the tables. Reverse relations and lookups of the parent work from the child.
 - **Migrations** create child tables with `parent = "place"`.
+- **One-to-one fields.** `user.profile` is the object or `nothing` (Django raises), remembered once read, missing included. `user.profile = p` points `p`'s key at the user (save `p`), and `= nothing` clears the key of the one it had. Reading one side caches the other, so `profile.user.profile` makes no second query. `OneToOneField(Place; primary_key = true)` makes the relation the table's key: `restaurant.pk == place.id`, and foreign keys to it store that id.
 
 #### Generic relations
 

@@ -31,7 +31,7 @@ end
 # related id (`mine__id`, which is the column itself without a to_field), and new rows get the stored value.
 idkey(f::Field) = Symbol(f.name, "__id")
 idkeys(f::Field) = Symbol(f.name, "__id__in")
-stored_value(f::Field, id) = fk_to_field(f) === nothing ? id : getproperty(get(base_objects(related_model(f)); id = id), fk_to_field(f))
+stored_value(f::Field, id) = fk_to_field(f) === nothing ? id : target_value(f, get(base_objects(related_model(f)); id = id))
 """
 An object (or key) added to, removed from or set on a many-to-many relation, as the related id: an
 object must be of the related model (Django's TypeError), a key a number for an automatic id, and with

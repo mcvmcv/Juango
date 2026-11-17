@@ -2609,3 +2609,164 @@ end
     @test isempty(collect(p4.article))
   end
 end
+
+# --- tests/one_to_one -------------------------------------------------------------------------------------
+@model struct DoPlace
+    name = CharField(max_length = 50)
+    address = CharField(max_length = 80, default = "")
+    Meta(table = "do_place")
+end
+@model struct DoRestaurant              # a one-to-one as the primary key
+    place = OneToOneField(DoPlace; on_delete = :CASCADE, primary_key = true, related_name = :restaurant)
+    serves_hot_dogs = BooleanField(default = false)
+    serves_pizza = BooleanField(default = false)
+    Meta(table = "do_restaurant")
+end
+@model struct DoBar
+    place = OneToOneField(DoPlace; on_delete = :CASCADE, related_name = :bar)
+    serves_cocktails = BooleanField(default = true)
+    Meta(table = "do_bar")
+end
+@model struct DoUndergroundBar
+    place = OneToOneField(DoPlace; on_delete = :SET_NULL, null = true, related_name = :undergroundbar)
+    serves_cocktails = BooleanField(default = true)
+    Meta(table = "do_undergroundbar")
+end
+@model struct DoWaiter
+    restaurant = ForeignKey(DoRestaurant; on_delete = :CASCADE, related_name = :waiter)
+    name = CharField(max_length = 50)
+    Meta(table = "do_waiter")
+end
+@model struct DoFavorites
+    name = CharField(max_length = 50)
+    restaurants = ManyToManyField(DoRestaurant; related_name = :favorites)
+    Meta(table = "do_favorites")
+end
+@model struct DoManualPrimaryKey
+    code = CharField(max_length = 10, primary_key = true)       # Django's field is named primary_key
+    name = CharField(max_length = 50)
+    Meta(table = "do_manualprimarykey")
+end
+@model struct DoMultiModel
+    link1 = OneToOneField(DoPlace; on_delete = :CASCADE, related_name = :multimodel)
+    link2 = OneToOneField(DoManualPrimaryKey; on_delete = :CASCADE, related_name = :multimodel)
+    name = CharField(max_length = 50)
+    Meta(table = "do_multimodel")
+end
+@model struct DoTarget
+    name = CharField(max_length = 50, unique = true)
+    Meta(table = "do_target")
+end
+@model struct DoPointer
+    other = OneToOneField(DoTarget; on_delete = :CASCADE, primary_key = true, related_name = :pointer)
+    Meta(table = "do_pointer")
+end
+@model struct DoPointer2
+    other = OneToOneField(DoTarget; on_delete = :CASCADE, related_name = :second_pointer)
+    Meta(table = "do_pointer2")
+end
+redirect_stdout(devnull) do
+    ms = [DoPlace, DoRestaurant, DoBar, DoUndergroundBar, DoWaiter, DoFavorites, through(DoFavorites, :restaurants),
+          DoManualPrimaryKey, DoMultiModel, DoTarget, DoPointer, DoPointer2]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django one_to_one: OneToOneTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    p1 = create(DoPlace; name = "Demon Dogs", address = "944 W. Fullerton"); p2 = create(DoPlace; name = "Ace Hardware", address = "1013 N. Ashland")
+    r1 = create(DoRestaurant; place = p1, serves_hot_dogs = true, serves_pizza = false)
+    b1 = create(DoBar; place = p1, serves_cocktails = false)
+    # test_getter: both ways; no restaurant is nothing in Juango (Django raises DoesNotExist)
+    @test r1.pk == p1.pk && get(DoRestaurant; pk = p1.pk).place.name == "Demon Dogs"
+    @test get(DoPlace; id = p1.id).restaurant.pk == p1.pk && get(DoPlace; id = p2.id).restaurant === nothing
+    # test_manager_get: every way of naming the key, both directions
+    for kw in ((place__id__exact = p1.pk,), (place__id = p1.pk,), (place__exact = p1.pk,), (place__exact = p1,), (place = p1.pk,), (place = p1,),
+               (pk = p1.pk,), (place__pk__exact = p1.pk,), (place__pk = p1.pk,), (place__name__startswith = "Demon",))
+        @test get(DoRestaurant; kw...).pk == p1.pk
+    end
+    for kw in ((restaurant__place__exact = p1.pk,), (restaurant__place__exact = p1,), (restaurant__place__pk = p1.pk,), (restaurant__exact = p1.pk,),
+               (restaurant__exact = r1,), (restaurant__pk = p1.pk,), (restaurant = p1.pk,), (restaurant = r1,), (id__exact = p1.pk,), (pk = p1.pk,))
+        @test get(DoPlace; kw...).id == p1.id
+    end
+    # test_foreign_key: a key to a model whose key is a one-to-one
+    w = create(get(DoRestaurant; pk = p1.pk).waiter; name = "Joe")
+    @test w.restaurant_id == p1.pk
+    for kw in ((restaurant__place__exact = p1.pk,), (restaurant__place__exact = p1,), (restaurant__exact = r1.pk,), (restaurant__exact = r1,),
+               (restaurant__pk = r1.pk,), (restaurant = r1.pk,), (restaurant = r1,), (pk = w.pk,))
+        @test [x.pk for x in filter(DoWaiter; kw...)] == [w.pk]
+    end
+    # test_create_models_m2m
+    f = create(DoFavorites; name = "Fred"); set!(f.restaurants, [r1])
+    @test [x.pk for x in f.restaurants] == [p1.pk]
+    # test_setter: changing the key writes a new restaurant
+    r1.place = p2; save!(r1)
+    @test get(DoPlace; id = p2.id).restaurant.pk == p2.pk && r1.place.name == "Ace Hardware" && r1.pk == p2.pk
+    pp = get(DoPlace; id = p1.id); pp.restaurant = r1
+    @test r1.place_id == p1.id && pp.restaurant === r1
+    @test count(objects(DoRestaurant)) == 2
+    # deleting the restaurant takes its waiter
+    delete!(get(DoRestaurant; pk = p1.pk))
+    @test count(objects(DoWaiter)) == 0
+    # test_multiple_o2o
+    o1 = create(DoManualPrimaryKey; code = "abc123", name = "primary")
+    x1 = create(DoMultiModel; link1 = p1, link2 = o1, name = "x1")
+    @test get(DoManualPrimaryKey; pk = "abc123").multimodel.name == "x1"
+    @test tr(() -> create(DoMultiModel; link1 = p2, link2 = o1, name = "x1")) isa Exception      # unique
+    # test_unsaved_object
+    place = DoPlace(name = "User", address = "London")
+    @test place.restaurant === nothing
+    @test tr(() -> create(DoRestaurant; place = place, serves_hot_dogs = true)) isa ArgumentError
+    # test_reverse_relationship_cache_cascade
+    bar = create(DoUndergroundBar; place = p1, serves_cocktails = false)
+    get(DoPlace; id = p1.id).undergroundbar
+    bar.place = nothing; save!(bar)
+    delete!(p1)
+    @test count(objects(DoUndergroundBar)) == 1 && get(DoUndergroundBar; id = bar.id).place_id === nothing
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    p = create(DoPlace; name = "Demon Dogs")
+    # test_assign_none_reverse_relation
+    ug = create(DoUndergroundBar; place = p, serves_cocktails = false)
+    p.undergroundbar = nothing
+    @test ug.place === nothing
+    save!(ug)
+    @test get(DoUndergroundBar; id = ug.id).place_id === nothing
+    # test_assign_o2o_id_value / test_assign_o2o_id_none
+    p2 = create(DoPlace; name = "p2")
+    b = create(DoUndergroundBar; place = p); b.place_id = p2.pk; save!(b)
+    @test b.place_id == p2.pk && b.place.name == "p2"
+    b.place_id = nothing; save!(b)
+    @test b.place_id === nothing && b.place === nothing
+    # test_related_object_cache
+    r = create(DoRestaurant; place = p)
+    pl = get(DoPlace; id = p.id); rr = pl.restaurant
+    @test pl.restaurant === rr
+    r2 = get(DoRestaurant; pk = rr.pk); pl.restaurant = r2
+    @test pl.restaurant === r2
+    @test tr(() -> (pl.restaurant = pl)) isa ArgumentError
+    @test DoRestaurant(place = pl).place === pl
+    rn = DoRestaurant(place_id = pl.id)
+    @test rn.place !== pl && rn.place.id == pl.id
+    # test_filter_one_to_one_relations: = nothing on a reverse one-to-one
+    target = create(DoTarget; name = "t")
+    @test [x.id for x in filter(DoTarget; pointer = nothing)] == [target.id] && isempty(collect(exclude(objects(DoTarget); pointer = nothing)))
+    @test [x.id for x in filter(DoTarget; second_pointer = nothing)] == [target.id] && isempty(collect(exclude(objects(DoTarget); second_pointer = nothing)))
+    # test_o2o_primary_key_delete
+    t = create(DoTarget; name = "name"); create(DoPointer; other = t)
+    @test delete!(filter(DoPointer; other__name = "name")) == 1
+    # test_save_nullable_o2o_after_parent
+    place = DoPlace(name = "Rose tattoo"); bar = DoUndergroundBar(place = place); save!(place); save!(bar)
+    @test get(DoUndergroundBar; id = bar.id).place_id == place.id
+    # test_reverse_object_does_not_exist_cache / cached when related is accessed / set
+    zc = create(DoPlace; name = "Zombie Cats")
+    @test Juango.count_queries(() -> zc.restaurant)[2] == 1 && Juango.count_queries(() -> zc.restaurant)[2] == 0
+    rx = get(DoRestaurant; pk = r.pk); px = rx.place
+    @test Juango.count_queries(() -> px.restaurant === rx)[2] == 0
+    py = get(DoPlace; id = p.id); ry = py.restaurant
+    @test Juango.count_queries(() -> ry.place === py)[2] == 0
+    pz = create(DoPlace; name = "Zombie 2"); rz = get(DoRestaurant; pk = r.pk); rz.place = pz
+    @test Juango.count_queries(() -> pz.restaurant === rz)[2] == 0
+  end
+end
