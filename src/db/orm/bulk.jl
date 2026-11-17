@@ -107,6 +107,10 @@ function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_
                 for f in bf
                     if isdef(o, f)
                         push!(marks, "DEFAULT")
+                    elseif get(data, attname(f), nothing) isa Expression
+                        # Lower(Value("x")), Now(): computed by the database, as save! does (it used to store their text)
+                        m, v = write_values(concrete_model(T), [f], data, true)
+                        push!(marks, m[1]); append!(ps, v)
                     else
                         push!(ps, to_db(f, get(data, attname(f), nothing))); push!(marks, "?")
                     end

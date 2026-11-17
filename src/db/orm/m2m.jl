@@ -289,16 +289,18 @@ function get_or_create(qs::QuerySet; defaults = Dict{Symbol,Any}(), through_defa
     atomic() do
         o = first(filter(qs; kw...))
         o === nothing || return (o, false)
-        (create(qs; through_defaults = through_defaults, kw..., pairs_of(defaults)...), true)
+        ps = create_params(model_of(qs), kw, defaults)
+        (create(qs; through_defaults = through_defaults, ps...), true)
     end
 end
-function update_or_create(qs::QuerySet; defaults = Dict{Symbol,Any}(), through_defaults = Dict{Symbol,Any}(), kw...)
+function update_or_create(qs::QuerySet; defaults = Dict{Symbol,Any}(), create_defaults = nothing, through_defaults = Dict{Symbol,Any}(), kw...)
     qs.owner isa Union{M2MOwner,ReverseFKOwner} || throw(ArgumentError("update_or_create(qs; ...) needs a relation such as group.members; use update_or_create(Model; ...)"))
     atomic() do
         o = first(filter(qs; kw...))
-        o === nothing && return (create(qs; through_defaults = through_defaults, kw..., pairs_of(defaults)...), true)
-        for (k, v) in pairs_of(defaults)
-            setproperty!(o, Symbol(k), v)
+        o === nothing && return (create(qs; through_defaults = through_defaults,
+                                        create_params(model_of(qs), kw, something(create_defaults, defaults))...), true)
+        for (k, v) in create_params(model_of(qs), (;), defaults)
+            setproperty!(o, k, v)
         end
         (save!(o), false)
     end

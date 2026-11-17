@@ -3463,3 +3463,381 @@ end
     @test tr(() -> update!(objects(DuDataPoint); is_active = ~F(:name))) isa ArgumentError
   end
 end
+
+# --- tests/get_or_create ----------------------------------------------------------------------------------
+@model struct DgPerson
+    first_name = CharField(max_length = 100, unique = true)
+    last_name = CharField(max_length = 100)
+    birthday = DateField()
+    defaults = TextField()
+    create_defaults = TextField()
+    Meta(table = "dg_person")
+end
+@model struct DgDefaultPerson
+    first_name = CharField(max_length = 100, default = "Anonymous")
+    Meta(table = "dg_defaultperson")
+end
+@model struct DgManualPK
+    num = IntegerField(primary_key = true)                 # (Django's is named id: #229)
+    data = CharField(max_length = 100)
+    Meta(table = "dg_manualpk")
+end
+@model struct DgTag
+    text = CharField(max_length = 255, unique = true)
+    Meta(table = "dg_tag")
+end
+@model struct DgThing
+    name = CharField(max_length = 255)
+    tags = ManyToManyField(DgTag; related_name = :things)
+    Meta(table = "dg_thing")
+end
+Juango.tattr!(t::DgThing, ::Val{:capitalized_name_property}, v) = (t.name = uppercasefirst(lowercase(v)); v)
+@model struct DgPublisher
+    name = CharField(max_length = 100)
+    Meta(table = "dg_publisher")
+end
+@model struct DgAuthor
+    name = CharField(max_length = 100)
+    Meta(table = "dg_author")
+end
+@model struct DgBook
+    name = CharField(max_length = 100)
+    authors = ManyToManyField(DgAuthor; related_name = :books)
+    publisher = ForeignKey(DgPublisher; on_delete = :CASCADE, related_name = :books, db_column = "publisher_id_column")
+    updated = DateTimeField(auto_now = true)
+    Meta(table = "dg_book")
+end
+redirect_stdout(devnull) do
+    ms = [DgPerson, DgDefaultPerson, DgManualPK, DgTag, DgThing, through(DgThing, :tags), DgPublisher, DgAuthor, DgBook, through(DgBook, :authors)]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django get_or_create: GetOrCreateTests, UpdateOrCreateTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    create(DgPerson; first_name = "John", last_name = "Lennon", birthday = Date(1940, 10, 9))
+    @test get_or_create(DgPerson; first_name = "John", last_name = "Lennon", defaults = Dict(:birthday => Date(1940, 10, 9)))[2] == false
+    @test get_or_create(DgPerson; first_name = "George", last_name = "Harrison", defaults = Dict(:birthday => Date(1943, 2, 25)))[2] == true
+    @test get_or_create(DgPerson; first_name = "George", last_name = "Harrison", defaults = Dict(:birthday => Date(1943, 2, 25)))[2] == false
+    @test count(objects(DgPerson)) == 2
+    @test tr(() -> get_or_create(DgPerson; first_name = "Tom", last_name = "Smith")) isa Exception
+    delete!(filter(DgPerson; first_name = "George"))
+    # a field named defaults: defaults__exact is a lookup, left out of what's created
+    obj, c = get_or_create(DgPerson; first_name = "George", last_name = "Harrison", defaults__exact = "testing",
+                           defaults = Dict(:birthday => Date(1943, 2, 25), :defaults => "testing"))
+    @test c && obj.defaults == "testing"
+    obj2, c = get_or_create(DgPerson; first_name = "George", last_name = "Harrison", defaults__exact = "testing",
+                            defaults = Dict(:birthday => Date(1943, 2, 25), :defaults => "testing"))
+    @test !c && obj2.pk == obj.pk
+    # callable defaults: called only when creating
+    obj, c = get_or_create(DgPerson; first_name = "Paul", defaults = Dict(:last_name => "McCartney", :birthday => () -> Date(1942, 6, 18)))
+    @test c && obj.birthday == Date(1942, 6, 18)
+    @test get_or_create(DgPerson; first_name = "John", defaults = Dict(:birthday => () -> error("called")))[2] == false
+    # pk and a setter (tattr!) in defaults
+    t, _ = get_or_create(DgThing; pk = 1, defaults = Dict(:capitalized_name_property => "annie"))
+    @test t.name == "Annie"
+    # manual primary keys: a clash is an IntegrityError and changes nothing; the connection stays usable
+    create(DgManualPK; num = 1, data = "Original")
+    @test tr(() -> get_or_create(DgManualPK; num = 1, data = "Different")) isa Juango.IntegrityError
+    @test get(DgManualPK; num = 1).data == "Original"
+    create(DgTag; text = "foo")
+    @test tr(() -> get_or_create(DgTag; pk = 123456789, defaults = Dict(:text => "foo"))) isa Juango.IntegrityError
+    create(DgTag; text = "bar")
+    @test get_or_create(DgDefaultPerson)[1].first_name == "Anonymous"
+    # invalid names
+    err = tr(() -> get_or_create(DgThing; name = "a", defaults = Dict(:nonexistent => "b")))
+    @test err isa Exception && occursin("Invalid field name(s) for model DgThing: 'nonexistent'", sprint(showerror, err))
+    @test tr(() -> get_or_create(DgThing; name = "a", nonexistent = "b")) isa Exception
+    @test tr(() -> update_or_create(DgThing; name = "zz", defaults = Dict(:nonexistent => "b"))) isa Exception
+    @test tr(() -> update_or_create(DgThing; name = "zz", create_defaults = Dict(:nonexistent => "b"))) isa Exception
+    @test !exists(filter(DgThing; name = "zz"))
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    # through relations
+    p = create(DgPublisher; name = "Acme Publishing")
+    book, c = get_or_create(p.books; name = "The Book of Ed & Fred"); @test c && count(p.books) == 1
+    book, c = get_or_create(p.books; name = "The Book of Ed & Fred"); @test !c && count(p.books) == 1
+    ed, c = get_or_create(book.authors; name = "Ed"); @test c && count(book.authors) == 1
+    ed, c = get_or_create(book.authors; name = "Ed"); @test !c && count(book.authors) == 1
+    fred, c = get_or_create(book.authors; name = "Fred"); @test c && count(book.authors) == 2
+    create(DgAuthor; name = "Ted"); @test count(objects(DgAuthor)) == 3 && count(book.authors) == 2
+    _, c = get_or_create(ed.books; name = "Ed's Recipes", publisher = p); @test c && count(ed.books) == 2 && count(fred.books) == 1
+    _, c = get_or_create(ed.books; name = "The Great Book of Ed", publisher_id = p.id); @test c
+    _, c = get_or_create(ed.books; name = "The Great Book of Ed", publisher_id = p.id); @test !c && count(p.books) == 3
+    # GetOrCreateThroughManyToMany
+    tag = create(DgTag; text = "foo"); thing = create(DgThing; name = "a"); add!(thing.tags, tag)
+    obj, c = get_or_create(thing.tags; text = "foo"); @test !c && obj.pk == tag.pk
+    thing2 = create(DgThing; name = "b")
+    obj, c = get_or_create(thing2.tags; text = "new"); @test c && obj.pk in [x.pk for x in thing2.tags]
+    @test tr(() -> get_or_create(thing2.tags; text = "foo")) isa Juango.IntegrityError   # exists, but not related
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    # UpdateOrCreateTests
+    create(DgPerson; first_name = "John", last_name = "Lennon", birthday = Date(1940, 10, 9))
+    p, c = update_or_create(DgPerson; first_name = "John", last_name = "Lennon", defaults = Dict(:birthday => Date(1940, 10, 10)))
+    @test !c && p.birthday == Date(1940, 10, 10) && get(DgPerson; first_name = "John").birthday == Date(1940, 10, 10)
+    p, c = update_or_create(DgPerson; first_name = "Ringo", last_name = "Starr",
+                            create_defaults = Dict(:birthday => Date(1940, 7, 7)), defaults = Dict(:birthday => Date(1950, 2, 2)))
+    @test c && p.birthday == Date(1940, 7, 7)
+    p, c = update_or_create(DgPerson; first_name = "Ringo", last_name = "Starr",
+                            create_defaults = Dict(:birthday => Date(1940, 7, 7)), defaults = Dict(:birthday => Date(1950, 2, 2)))
+    @test !c && p.birthday == Date(1950, 2, 2)
+    @test tr(() -> update_or_create(DgPerson; first_name = "Tom", last_name = "Smith")) isa Exception
+    create(DgManualPK; num = 1, data = "Original")
+    @test tr(() -> update_or_create(DgManualPK; num = 1, data = "Different")) isa Juango.IntegrityError
+    @test get(DgManualPK; num = 1).data == "Original"
+    t, _ = update_or_create(DgThing; pk = 1, defaults = Dict(:capitalized_name_property => "annie")); @test t.name == "Annie"
+    obj, c = update_or_create(DgPerson; first_name = "George", last_name = "Harrison", defaults__exact = "testing",
+                              defaults = Dict(:birthday => Date(1943, 2, 25), :defaults => "testing"))
+    @test c && obj.defaults == "testing"
+    obj, c = update_or_create(DgPerson; first_name = "George", last_name = "Harrison", defaults__exact = "testing",
+                              defaults = Dict(:birthday => Date(1943, 2, 25), :defaults => "another testing"))
+    @test !c && obj.defaults == "another testing"
+    obj, c = update_or_create(DgPerson; first_name = "Pete", create_defaults__exact = "testing",
+                              create_defaults = Dict(:last_name => "Best", :birthday => Date(1941, 11, 24), :create_defaults => "testing"))
+    @test c && obj.create_defaults == "testing"
+    # callable defaults: called only when needed
+    obj, c = update_or_create(DgPerson; first_name = "Stu", defaults = Dict(:last_name => "Sutcliffe", :birthday => () -> Date(1940, 6, 23)))
+    @test c && obj.birthday == Date(1940, 6, 23)
+    obj, c = update_or_create(DgPerson; first_name = "Stu", defaults = Dict(:last_name => () -> "S."))
+    @test !c && get(DgPerson; first_name = "Stu").last_name == "S."
+    # through relations, create_defaults included
+    pub = create(DgPublisher; name = "Acme Publishing")
+    book, c = update_or_create(pub.books; name = "The Book of Ed & Fred"); @test c && count(pub.books) == 1
+    book, c = update_or_create(pub.books; name = "Basics of Django", create_defaults = Dict(:name => "Advanced Django"))
+    @test c && book.name == "Advanced Django" && count(pub.books) == 2
+    b1 = get(DgBook; name = "The Book of Ed & Fred")
+    book, c = update_or_create(pub.books; id = b1.id, defaults = Dict(:name => "The Book of Django"))
+    @test !c && book.name == "The Book of Django"
+    book, c = update_or_create(pub.books; id = b1.id, create_defaults = Dict(:name => "Basics"), defaults = Dict(:name => "The Book of Django"))
+    @test !c && book.name == "The Book of Django" && count(pub.books) == 2
+    author = create(DgAuthor; name = "Ted")
+    book, c = update_or_create(author.books; name = "The Book of Ed & Fred", publisher = pub); @test c && count(author.books) == 1
+    book, c = update_or_create(author.books; name = "Basics of Django", publisher = pub, create_defaults = Dict(:name => "Advanced Django"))
+    @test c && book.name == "Advanced Django" && count(author.books) == 2
+    book, c = update_or_create(author.books; id = book.id, defaults = Dict(:name => "Renamed"))
+    @test !c && book.name == "Renamed" && count(author.books) == 2
+  end
+end
+
+# --- tests/bulk_create ------------------------------------------------------------------------------------
+@model struct DcCountry
+    name = CharField(max_length = 255)
+    iso_two_letter = CharField(max_length = 2)
+    description = TextField()
+    Meta(table = "dc_country", constraints = [UniqueConstraint(fields = [:iso_two_letter, :name], name = "dc_country_name_iso_unique")])
+end
+@model struct DcProxyCountry <: DcCountry
+    Meta(proxy = true)
+end
+@model struct DcProxyProxyCountry <: DcProxyCountry
+    Meta(proxy = true)
+end
+@model struct DcProxyMultiCountry <: DcProxyCountry
+    Meta(table = "dc_proxymulticountry")
+end
+@model struct DcRestaurant
+    name = CharField(max_length = 100)
+    Meta(table = "dc_restaurant")
+end
+@model struct DcPizzeria <: DcRestaurant
+    Meta(table = "dc_pizzeria")
+end
+@model struct DcState
+    two_letter_code = CharField(max_length = 2, primary_key = true)
+    Meta(table = "dc_state")
+end
+@model struct DcTwoFields
+    f1 = IntegerField(unique = true)
+    f2 = IntegerField(unique = true)
+    name = CharField(max_length = 15, null = true)
+    Meta(table = "dc_twofields")
+end
+@model struct DcFieldsWithDbColumns
+    rank = IntegerField(unique = true, db_column = "rAnK")
+    name = CharField(max_length = 15, null = true, db_column = "oTheRNaMe")
+    Meta(table = "dc_fieldswithdbcolumns")
+end
+@model struct DcUpsertConflict
+    number = IntegerField(unique = true)
+    rank = IntegerField()
+    name = CharField(max_length = 15)
+    Meta(table = "dc_upsertconflict")
+end
+@model struct DcNoFields
+    Meta(table = "dc_nofields")
+end
+@model struct DcBigAuto
+    Meta(table = "dc_bigauto", pk = BigAutoField())
+end
+@model struct DcSmallAuto
+    Meta(table = "dc_smallauto", pk = SmallAutoField())
+end
+@model struct DcNullableFields
+    big_int_field = BigIntegerField(null = true, default = 1)
+    date_field = DateField(null = true, default = () -> Dates.today())
+    datetime_field = DateTimeField(null = true, default = () -> Dates.now())
+    decimal_field = DecimalField(null = true, max_digits = 2, decimal_places = 1, default = Juango.Decimal("1.1"))
+    float_field = FloatField(null = true, default = 3.2)
+    integer_field = IntegerField(null = true, default = 2)
+    null_boolean_field = BooleanField(null = true, default = false)
+    positive_integer_field = PositiveIntegerField(null = true, default = 3)
+    small_integer_field = SmallIntegerField(null = true, default = 5)
+    auto_field = ForeignKey(DcNoFields; on_delete = :CASCADE, null = true, related_name = :nullables)
+    small_auto_field = ForeignKey(DcSmallAuto; on_delete = :CASCADE, null = true, related_name = :nullables)
+    big_auto_field = ForeignKey(DcBigAuto; on_delete = :CASCADE, null = true, related_name = :nullables)
+    char_field = CharField(null = true, max_length = 4, default = "char")
+    email_field = EmailField(null = true, default = "user@example.com")
+    slug_field = SlugField(null = true, default = "slug")
+    text_field = TextField(null = true, default = "text")
+    url_field = URLField(null = true, default = "/")
+    Meta(table = "dc_nullablefields")
+end
+redirect_stdout(devnull) do
+    ms = [DcCountry, DcProxyMultiCountry, DcRestaurant, DcPizzeria, DcState, DcTwoFields, DcFieldsWithDbColumns,
+          DcUpsertConflict, DcNoFields, DcBigAuto, DcSmallAuto, DcNullableFields]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+dc_data() = [DcCountry(name = "United States of America", iso_two_letter = "US"), DcCountry(name = "The Netherlands", iso_two_letter = "NL"),
+             DcCountry(name = "Germany", iso_two_letter = "DE"), DcCountry(name = "Czech Republic", iso_two_letter = "CZ")]
+dc_names(qs) = [x.name for x in qs]
+
+@testset "django bulk_create: BulkCreateTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    data = dc_data()
+    @test bulk_create(data) === data && all(o -> o.pk !== nothing, data)
+    @test dc_names(order_by(objects(DcCountry), "-name")) == ["United States of America", "The Netherlands", "Germany", "Czech Republic"]
+    @test isempty(bulk_create(DcCountry[])) && count(objects(DcCountry)) == 4
+    delete!(objects(DcCountry))
+    @test Juango.count_queries(() -> bulk_create(dc_data()))[2] == 1
+    delete!(objects(DcCountry))
+    bulk_create([DcCountry(description = "Ж"^3000)]); @test count(objects(DcCountry)) == 1
+    bulk_create([DcCountry(description = "a"^4001, iso_two_letter = "A"), DcCountry(description = "a", iso_two_letter = "B"),
+                 DcCountry(description = "Ж"^2001, iso_two_letter = "C"), DcCountry(description = "Ж", iso_two_letter = "D")])
+    @test count(objects(DcCountry)) == 5
+    delete!(objects(DcCountry))
+    # multi-table inheritance is refused; proxies are fine
+    @test tr(() -> bulk_create([DcPizzeria(name = "The Art of Pizza")])) isa Exception
+    @test tr(() -> bulk_create([DcProxyMultiCountry(name = "Fillory", iso_two_letter = "FL")])) isa Exception
+    bulk_create([DcProxyCountry(name = "Qwghlm", iso_two_letter = "QW"), DcProxyCountry(name = "Tortall", iso_two_letter = "TA")])
+    bulk_create([DcProxyProxyCountry(name = "Netherlands", iso_two_letter = "NT")])
+    @test Set(dc_names(objects(DcProxyProxyCountry))) == Set(["Qwghlm", "Tortall", "Netherlands"])
+    # natural primary keys, in one query
+    @test Juango.count_queries(() -> bulk_create([DcState(two_letter_code = s) for s in ["IL", "NY", "CA", "ME"]]))[2] == 1
+    @test [s.two_letter_code for s in order_by(objects(DcState), "two_letter_code")] == ["CA", "IL", "ME", "NY"]
+    bulk_create([DcRestaurant(name = "foo") for _ in 1:2]); @test count(objects(DcRestaurant)) == 2
+  end
+  port_block() do
+    bulk_create([DcTwoFields(f1 = i, f2 = i + 1) for i in 0:1000])
+    @test count(objects(DcTwoFields)) == 1001
+    @test count(filter(DcTwoFields; f1__gte = 450, f1__lte = 550)) == 101 && count(filter(DcTwoFields; f2__gte = 901)) == 101
+    delete!(objects(DcTwoFields))
+    @test Juango.count_queries(() -> bulk_create([DcTwoFields(f1 = i, f2 = i + 1) for i in 0:1000]))[2] < 10
+    delete!(objects(DcTwoFields))
+    # a batch mixing objects with and without a primary key
+    n = Juango.count_queries(() -> bulk_create([DcTwoFields(id = iseven(i) ? i : nothing, f1 = i, f2 = i + 1) for i in 100000:100999]))[2]
+    @test n < 10 && count(objects(DcTwoFields)) == 1000
+    @test count(filter(DcTwoFields; id__in = collect(100000:2:100999))) == 500 && count(exclude(DcTwoFields; id__in = collect(100000:2:100999))) == 500
+    delete!(objects(DcTwoFields))
+    for bs in (1, 2, 3, 4)
+        bulk_create([DcTwoFields(f1 = i, f2 = i) for i in 0:3]; batch_size = bs)
+        @test count(objects(DcTwoFields)) == 4
+        delete!(objects(DcTwoFields))
+    end
+    objs() = [DcTwoFields(f1 = i, f2 = i) for i in 0:99]
+    @test Juango.count_queries(() -> bulk_create(objs(); batch_size = 50))[2] == 2
+    delete!(objects(DcTwoFields))
+    @test Juango.count_queries(() -> bulk_create(objs(); batch_size = 100))[2] == 1
+    bulk_create([DcNoFields() for _ in 1:2]); @test count(objects(DcNoFields)) == 2
+    bulk_create([DcRestaurant() for _ in 1:501]); @test count(objects(DcRestaurant)) == 501
+  end
+  port_block() do
+    # expressions as values
+    bulk_create([DcRestaurant(name = "Sam's Shake Shack"), DcRestaurant(name = Lower(Value("Betty's Beetroot Bar")))])
+    @test count(filter(DcRestaurant; name = "betty's beetroot bar")) == 1
+    bulk_create([DcNullableFields(datetime_field = Now()), DcNullableFields(datetime_field = Now())])
+    @test count(filter(DcNullableFields; datetime_field__isnull = false)) == 2
+    @test all(d -> d isa DateTime, values_list(objects(DcNullableFields), :datetime_field; flat = true))
+    delete!(objects(DcNullableFields))
+    # every nullable field set to null in turn
+    fks = Dict(:auto_field => create(DcNoFields), :small_auto_field => create(DcSmallAuto), :big_auto_field => create(DcBigAuto))
+    names = [f.name for f in Juango.modelmeta(DcNullableFields).fields]
+    bulk_create([DcNullableFields(; fks..., n => nothing) for n in names])
+    @test count(objects(DcNullableFields)) == length(names)
+    for n in names
+        @test count(filter(DcNullableFields; Symbol(n, :__isnull) => true)) == 1
+    end
+    # objects come back as saved ones would
+    nl, be = DcCountry(name = "Netherlands", iso_two_letter = "NL"), DcCountry(name = "Belgium", iso_two_letter = "BE")
+    bulk_create([nl]); save!(be)
+    dbof(o) = get(getfield(o, :_cache), :__db, :none)
+    @test dbof(nl) == dbof(be) && dbof(nl) !== :none
+    @test get(DcCountry; pk = nl.pk).name == "Netherlands"
+    ca, ny = DcState(two_letter_code = "CA"), DcState(two_letter_code = "NY"); bulk_create([ca]); save!(ny); @test dbof(ca) == dbof(ny)
+  end
+  port_block() do
+    # ignore_conflicts
+    bulk_create([DcTwoFields(f1 = i, f2 = i) for i in 1:3])
+    conflicting = [DcTwoFields(f1 = 2, f2 = 2), DcTwoFields(f1 = 3, f2 = 3)]
+    bulk_create(conflicting[1:1]; ignore_conflicts = true)
+    bulk_create(conflicting; ignore_conflicts = true)
+    @test count(objects(DcTwoFields)) == 3 && conflicting[1].pk === nothing && conflicting[2].pk === nothing
+    new = DcTwoFields(f1 = 4, f2 = 4)
+    bulk_create([conflicting; new]; ignore_conflicts = true)
+    @test count(objects(DcTwoFields)) == 4 && new.pk === nothing
+    @test_throws Juango.IntegrityError bulk_create(conflicting)
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    # update_conflicts: argument checks
+    two() = [DcTwoFields(f1 = 1, f2 = 1), DcTwoFields(f1 = 2, f2 = 2)]
+    @test tr(() -> bulk_create(two(); update_conflicts = true, update_fields = [:nonexistent], unique_fields = [:f1])) isa Exception
+    IS_MYSQL || @test tr(() -> bulk_create(two(); update_conflicts = true, update_fields = [:f1])) isa Exception
+    @test tr(() -> bulk_create([DcBigAuto()]; update_conflicts = true, update_fields = [:id], unique_fields = [:id])) isa Exception
+    @test count(objects(DcTwoFields)) == 0
+    # on one unique field of two, either one
+    for uf in ([:f1], [:f2])
+        bulk_create([DcTwoFields(f1 = 1, f2 = 1, name = "a"), DcTwoFields(f1 = 2, f2 = 2, name = "b")])
+        res = bulk_create([DcTwoFields(f1 = 1, f2 = 1, name = "c"), DcTwoFields(f1 = 2, f2 = 2, name = "d")];
+                          update_conflicts = true, unique_fields = uf, update_fields = [:name])
+        @test length(res) == 2 && count(objects(DcTwoFields)) == 2
+        @test Set(values_list(objects(DcTwoFields), :f1, :f2, :name)) == Set([(1, 1, "c"), (2, 2, "d")])
+        delete!(objects(DcTwoFields))
+    end
+    # on the primary key
+    bulk_create([DcTwoFields(f1 = 1, f2 = 1, name = "a"), DcTwoFields(f1 = 2, f2 = 2, name = "b")])
+    o1, o2 = get(DcTwoFields; f1 = 1), get(DcTwoFields; f1 = 2)
+    bulk_create([DcTwoFields(id = o1.pk, f1 = 3, f2 = 3, name = "c"), DcTwoFields(id = o2.pk, f1 = 4, f2 = 4, name = "d")];
+                update_conflicts = true, unique_fields = [:pk], update_fields = [:name])
+    @test Set(values_list(objects(DcTwoFields), :f1, :f2, :name)) == Set([(1, 1, "c"), (2, 2, "d")])
+    # on a two-field unique constraint
+    bulk_create(dc_data())
+    res = bulk_create([DcCountry(name = "Germany", iso_two_letter = "DE", description = "Germany is a country in Central Europe."),
+                       DcCountry(name = "Czech Republic", iso_two_letter = "CZ", description = "Landlocked."),
+                       DcCountry(name = "Australia", iso_two_letter = "AU"),
+                       DcCountry(name = "Japan", iso_two_letter = "JP", description = "Japan is an island country in East Asia.")];
+                      update_conflicts = true, update_fields = [:description], unique_fields = [:iso_two_letter, :name])
+    @test length(res) == 4 && count(objects(DcCountry)) == 6
+    @test Set(values_list(objects(DcCountry), :iso_two_letter, :description)) ==
+          Set([("US", ""), ("NL", ""), ("DE", "Germany is a country in Central Europe."), ("CZ", "Landlocked."), ("AU", ""),
+               ("JP", "Japan is an island country in East Asia.")])
+    # updating two fields, then with a new row too
+    bulk_create([DcUpsertConflict(number = 1, rank = 1, name = "John"), DcUpsertConflict(number = 2, rank = 2, name = "Mary"),
+                 DcUpsertConflict(number = 3, rank = 3, name = "Hannah")])
+    conflicting = [DcUpsertConflict(number = 1, rank = 4, name = "Steve"), DcUpsertConflict(number = 2, rank = 2, name = "Olivia"),
+                   DcUpsertConflict(number = 3, rank = 1, name = "Hannah")]
+    bulk_create(conflicting; update_conflicts = true, update_fields = [:name, :rank], unique_fields = [:number])
+    @test Set(values_list(objects(DcUpsertConflict), :number, :rank, :name)) == Set([(1, 4, "Steve"), (2, 2, "Olivia"), (3, 1, "Hannah")])
+    res = bulk_create([conflicting; DcUpsertConflict(number = 4, rank = 4, name = "Mark")];
+                      update_conflicts = true, update_fields = [:name, :rank], unique_fields = [:number])
+    @test length(res) == 4 && count(objects(DcUpsertConflict)) == 4
+    # db_column names
+    bulk_create([DcFieldsWithDbColumns(rank = 1, name = "a"), DcFieldsWithDbColumns(rank = 2, name = "b")])
+    bulk_create([DcFieldsWithDbColumns(rank = 1, name = "c"), DcFieldsWithDbColumns(rank = 2, name = "d")];
+                update_conflicts = true, unique_fields = [:rank], update_fields = [:name])
+    @test Set(values_list(objects(DcFieldsWithDbColumns), :rank, :name)) == Set([(1, "c"), (2, "d")])
+  end
+end

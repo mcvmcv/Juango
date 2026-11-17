@@ -351,12 +351,51 @@ end
 "Create and save a new object."
 Base.@nospecializeinfer create(@nospecialize(T::Type{<:Model}); kw...) = save!(T(; kw...))
 
+"""
+What get_or_create/update_or_create create an object with, as Django's `_extract_model_params`: the
+lookups that aren't lookups through a relation or a transform (`name__exact` is left out; spell it
+in `defaults`), then `defaults`, a callable default called. Names that aren't fields, attnames, `pk`
+or a `tattr!` setter are refused, all of them in one message.
+"""
+Base.@nospecializeinfer function create_params(@nospecialize(T::Type{<:Model}), kw, defaults)
+    ps = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(kw) if !occursin("__", string(k)))
+    for (k, v) in pairs_of(defaults)
+        ps[Symbol(k)] = v isa Base.Callable && !(v isa Type) ? v() : v
+    end
+    bad = String[]
+    for k in keys(ps)
+        k in (:pk, :id) && continue
+        any(f -> f.name === k || attname(f) === k, all_fields(T)) && continue
+        which(tattr!, Tuple{concrete_model(T),Val{k},Any}).sig !== Tuple{typeof(tattr!),Any,Val,Any} && continue
+        push!(bad, "'$k'")
+    end
+    isempty(bad) || throw(LookupError("Invalid field name(s) for model $(nameof(T)): $(join(sort(bad), ", "))."))
+    ps
+end
+
+"""
+Create under a savepoint; if that breaks a unique constraint because another request created the row
+meanwhile, return that row instead (Django's get_or_create race handling). Any other IntegrityError,
+or one with no row to find, is rethrown.
+"""
+function create_or_find(make, find)
+    try
+        (atomic(make), true)
+    catch err
+        err isa IntegrityError || rethrow()
+        o = try find() catch; nothing end
+        o === nothing && rethrow()
+        (o, false)
+    end
+end
+
 "`(obj, created::Bool)` — fetch by lookups or create with lookups + `defaults`."
 Base.@nospecializeinfer function get_or_create(@nospecialize(T::Type{<:Model}); defaults = Dict{Symbol,Any}(), kw...)
     atomic() do
         o = first(filter(objects(T); kw...))
         o === nothing || return (o, false)
-        (create(T; kw..., pairs_of(defaults)...), true)
+        ps = create_params(T, kw, defaults)
+        create_or_find(() -> create(T; ps...), () -> first(filter(objects(T); kw...)))
     end
 end
 
@@ -365,9 +404,12 @@ Base.@nospecializeinfer function update_or_create(@nospecialize(T::Type{<:Model}
     atomic() do
         o = first(filter(objects(T); kw...))
         # create_defaults (Django 5.0): what a new object gets instead of defaults
-        o === nothing && return (create(T; kw..., pairs_of(something(create_defaults, defaults))...), true)
-        for (k, v) in pairs_of(defaults)
-            setproperty!(o, Symbol(k), v)
+        if o === nothing
+            ps = create_params(T, kw, something(create_defaults, defaults))
+            return create_or_find(() -> create(T; ps...), () -> first(filter(objects(T); kw...)))
+        end
+        for (k, v) in create_params(T, (;), defaults)
+            setproperty!(o, k, v)
         end
         (save!(o), false)
     end
