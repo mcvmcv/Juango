@@ -4659,3 +4659,58 @@ end
     @test all(b -> length(b.authors_sliced) == min(1, count(b.authors)), books)
   end
 end
+
+@testset "django prefetch_related: DirectPrefetchedObjectCacheReuseTests, ReadPrefetchedObjectsCacheTests" begin
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    names(qs) = [x.name for x in qs]
+    addrs(qs) = [x.address for x in qs]
+    b1, b2 = create(DpBook; title = "book1"), create(DpBook; title = "book2")
+    a11, a12 = create(DpAuthor; first_book = b1, name = "Author11"), create(DpAuthor; first_book = b1, name = "Author12")
+    a21 = create(DpAuthor; first_book = b2, name = "Author21")
+    create(DpAuthorAddress; author = a11, address = "Happy place"); create(DpAuthorAddress; author = a12, address = "Haunted house")
+    create(DpAuthorAddress; author = a21, address = "Happy place")
+    bwy = create(DpBookWithYear; title = "Poems", published_year = 2010); review = create(DpBookReview; book = bwy)
+    # test_detect_is_fetched: a nested Prefetch runs one query per level
+    happy = filter(DpAuthorAddress; address = "Happy place")
+    qs = prefetch_related(filter(DpBook; title__in = ["book1", "book2"]),
+                          Prefetch(:first_time_authors; queryset = prefetch_related(objects(DpAuthor), Prefetch(:addresses; queryset = happy))))
+    (bk1, bk2), n = nq(() -> collect(qs)); @test n == 3
+    r, n = nq(() -> (names(bk1.first_time_authors), names(bk2.first_time_authors), addrs(first(bk1.first_time_authors).addresses),
+                     addrs(collect(bk1.first_time_authors)[2].addresses), addrs(first(bk2.first_time_authors).addresses)))
+    @test r == (["Author11", "Author12"], ["Author21"], ["Happy place"], String[], ["Happy place"]) && n == 0
+    # ... and with to_attr at both levels
+    qs = prefetch_related(filter(DpBook; title__in = ["book1", "book2"]),
+                          Prefetch(:first_time_authors; to_attr = :first_authors,
+                                   queryset = prefetch_related(objects(DpAuthor), Prefetch(:addresses; queryset = happy, to_attr = :happy_place))))
+    (bk1, bk2), n = nq(() -> collect(qs)); @test n == 3
+    r, n = nq(() -> (names(bk1.first_authors), names(bk2.first_authors), addrs(bk1.first_authors[1].happy_place),
+                     addrs(bk1.first_authors[2].happy_place), addrs(bk2.first_authors[1].happy_place)))
+    @test r == (["Author11", "Author12"], ["Author21"], ["Happy place"], String[], ["Happy place"]) && n == 0
+    # a reverse key from a multi-table child; prefetch_related_objects on objects already prefetched runs nothing
+    (w,), n = nq(() -> collect(prefetch_related(objects(DpBookWithYear), :dpbookreview_set))); @test n == 2
+    r, n = nq(() -> [x.pk for x in w.dpbookreview_set]); @test r == [review.pk] && n == 0
+    _, n = nq(() -> prefetch_related_objects([w], :dpbookreview_set)); @test n == 0
+    # add!/remove! on a prefetched relation: it shows the change
+    w = get(DpBookWithYear; pk = bwy.pk); prefetch_related_objects([w], :dpbookreview_set)
+    @test [x.pk for x in w.dpbookreview_set] == [review.pk]
+    new = create(DpBookReview); add!(w.dpbookreview_set, new)
+    @test Set(x.pk for x in w.dpbookreview_set) == Set([review.pk, new.pk])
+    remove!(w.dpbookreview_set, review, new)
+    @test isempty(collect(w.dpbookreview_set))
+  end
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    # ReadPrefetchedObjectsCacheTests: a nested prefetch through the parent link reads the intermediate cache
+    b1, b2 = create(DpBook; title = "Les confessions Volume I"), create(DpBook; title = "Candide")
+    a1 = create(DpAuthorWithAge; name = "Rousseau", first_book = b1, age = 70)
+    a2 = create(DpAuthorWithAge; name = "Voltaire", first_book = b2, age = 65)
+    add!(b1.authors, a1); add!(b2.authors, a2)
+    create(DpFavoriteAuthors; author = a1, likes_author = a2)
+    qs = prefetch_related(objects(DpAuthorWithAge),
+                          Prefetch(:dpauthor_ptr; queryset = prefetch_related(objects(DpAuthor), :favorite_authors__first_book)))
+    r, n = nq(() -> [x.pk for x in qs]); @test r == [a1.pk, a2.pk] && n == 4
+    r, n = nq(() -> [[f.first_book.title for f in a.dpauthor_ptr.favorite_authors] for a in qs])
+    @test r == [["Candide"], String[]]
+  end
+end
