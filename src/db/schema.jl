@@ -224,11 +224,21 @@ function column_state(f::Field)
         tf = getfield_meta(related_model(f), fk_to_field(f))
         (tf.unique || natural_pk(related_model(f))) ||
             throw(ArgumentError("$(nameof(f.model)).$(f.name): to_field = :$(fk_to_field(f)) must be a unique field of $(nameof(related_model(f)))"))
-        k = schema_kind(tf.kind)
+        # the column holds what the target column holds: when that is itself a foreign key (a OneToOneField
+        # primary key, perhaps to another to_field), its type is the type at the end of that chain
+        vf = tf
+        while vf.kind === :fk && fk_to_field(vf) !== nothing
+            vf = getfield_meta(related_model(vf), fk_to_field(vf))
+        end
+        if vf.kind === :fk                                   # ... a plain key: an integer or UUID column
+            return Column(column(f), :fk; null = f.null, default = d, unique = f.unique, index = f.db_index, references = ref,
+                          of = fk_of(related_model(vf)), comment = f.db_comment, ref_column = column(tf))
+        end
+        k = schema_kind(vf.kind)
         return Column(column(f), k === :intauto ? :int : k === :bigauto ? :bigint : k; null = f.null, default = d, unique = f.unique,
-                      index = f.db_index, max_length = k in (:string, :citext, :binary) ? tf.max_length : nothing, references = ref,
-                      comment = f.db_comment, max_digits = tf.max_digits, decimal_places = tf.decimal_places,
-                      collation = something(f.db_collation, tf.db_collation, Some(nothing)), ref_column = column(tf))
+                      index = f.db_index, max_length = k in (:string, :citext, :binary) ? vf.max_length : nothing, references = ref,
+                      comment = f.db_comment, max_digits = vf.max_digits, decimal_places = vf.decimal_places,
+                      collation = something(f.db_collation, vf.db_collation, Some(nothing)), ref_column = column(tf))
     end
     Column(column(f), schema_kind(f.kind); null = f.null, default = d, unique = f.unique,
            index = f.db_index, max_length = schema_kind(f.kind) in (:string, :citext, :binary) || (f.kind === :array && f.related === :string) ? f.max_length : nothing,

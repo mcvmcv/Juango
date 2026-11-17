@@ -147,6 +147,7 @@ After fetching, load related objects with one extra query per lookup: reverse re
 and `exists` from memory; further filtering queries the database again.
 """
 prefetch_related(@nospecialize(qs::QuerySet), lookups...) =
+    lookups == (nothing,) ? chain(qs; prefetch = Prefetch[]) :         # prefetch_related(qs, nothing) clears, as Django's None
     chain(qs; prefetch = vcat(qs.prefetch, Prefetch[l isa Prefetch ? l : Prefetch(l) for l in lookups]))
 prefetch_related(@nospecialize(T::Type{<:Model}), lookups...) = prefetch_related(objects(T), lookups...)
 prefetch_related(lookups::Union{AbstractString,Symbol,Prefetch}...) = qs -> prefetch_related(qs, lookups...)
@@ -863,9 +864,23 @@ Base.@nospecializeinfer function do_prefetch!(@nospecialize(objs::Vector), p::Pr
     level = objs
     for (i, s) in enumerate(segs)
         last_ = i == length(segs)
-        level = prefetch_level!(level, s, last_ ? p.queryset : nothing, last_ ? p.to_attr : nothing)
+        qs, to = last_ ? p.queryset : nothing, last_ ? p.to_attr : nothing
+        # already loaded on every object (select_related, or an earlier lookup sharing the path): reused, not
+        # queried again, as Django ("books" and "books__read_by" load the books once)
+        cached = qs === nothing && to === nothing ? cached_level(level, s) : nothing
+        level = cached === nothing ? prefetch_level!(level, s, qs, to) : cached
     end
     nothing
+end
+"The related objects of `name` cached on every one of `objs` (prefetched or selected), or `nothing` if any lacks them."
+Base.@nospecializeinfer function cached_level(@nospecialize(objs::Vector), name::Symbol)
+    out = Any[]
+    for o in objs
+        c = get((getfield(o, :_cache)::Dict{Symbol,Any}), name, NOTFOUND)
+        c === NOTFOUND && return nothing
+        c isa PrefetchedList ? append!(out, c.items) : c isa Model ? push!(out, c) : c === nothing || return nothing
+    end
+    out
 end
 
 "Load relation `name` for all `objs` with one query; return the related objects."
@@ -901,8 +916,13 @@ Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), na
     ids = [target_value(rf, o) for o in objs]
     rows = fetch(filter(something(qs, objects(M)), Q(Symbol(attname(rf), "__in") => ids)))
     groups = Dict{Any,Vector{M}}()
+    owner_of = Dict{Any,Any}(target_value(rf, o) => o for o in objs)
     for r in rows
-        push!(get!(() -> M[], groups, field_data(r, attname(rf))), r)
+        k = field_data(r, attname(rf))
+        push!(get!(() -> M[], groups, k), r)
+        # each related row points back at its owner (bio.author: no query), as Django sets it
+        o = get(owner_of, k, nothing)
+        o === nothing || ((getfield(r, :_cache)::Dict{Symbol,Any})[rf.name] = o)
     end
     for o in objs
         (getfield(o, :_cache)::Dict{Symbol,Any})[something(to_attr, rn)] = PrefetchedList(get(groups, target_value(rf, o), M[]))

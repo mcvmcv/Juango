@@ -391,7 +391,7 @@ set!(post.tags, [julia, db])     # only the differences are written; clear = tru
 clear!(post.tags)
 post.tags                        # QuerySet{Tag};   tag.posts is QuerySet{Post}
 filter(Post; tags__name="julia")                  # lookups in both directions
-prefetch_related(objects(Post), :tags)            # 2 extra queries for any number of posts
+prefetch_related(objects(Post), :tags)            # 1 extra query for any number of posts
 ```
 
 - **What can be added.** Objects of the related model (or their keys, or with a `to_field` through model that field's value, `add!(article.authors, "jean")`); an object of another model or a key that isn't one is refused, as in Django. `post.tags = [...]` is an error: use `set!`. A change drops the relation's prefetched rows.

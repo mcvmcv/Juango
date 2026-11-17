@@ -309,14 +309,13 @@ function prefetch_m2m!(objs::Vector, name, f::Field, forward::Bool, qs, to_attr)
     mine, other = forward ? (src, dst) : (dst, src)
     Other = related_model(other)
     ids = [o.id for o in objs]
-    pairs_ = collect(values_list(filter(base_objects(through_model(f)), Q(idkeys(mine) => ids)), idkey(mine), idkey(other)))
-    owners_of = Dict{Any,Vector{Any}}()
-    for (mid, oid) in pairs_
-        push!(get!(() -> Any[], owners_of, oid), mid)
-    end
-    targets = isempty(owners_of) ? Other[] : fetch(filter(something(qs, objects(Other)); id__in = collect(keys(owners_of))))
+    # one query, as Django: the related rows joined to the through table, each with the owner it's linked to
+    step1, step2 = m2m_path(f, !forward)
+    path = fk_to_field(mine) === nothing ? Symbol(step1, "__", step2) : Symbol(step1, "__", step2, "__id")
+    targets = fetch(annotate(filter(something(qs, objects(Other)), Q(Symbol(path, "__in") => ids)); __prefetch_owner = F(string(path))))
     groups = Dict{Any,Vector{Other}}()
-    for t in targets, mid in get(owners_of, t.id, Any[])
+    for t in targets
+        mid = pop!((getfield(t, :_data)::Dict{Symbol,Any}), :__prefetch_owner, nothing)
         push!(get!(() -> Other[], groups, mid), t)
     end
     for o in objs

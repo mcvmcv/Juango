@@ -321,7 +321,7 @@ end
 
     # prefetching
     essays, n = count_queries(() -> collect(order_by(prefetch_related(filter(Essay; title__in = ["Fast web apps", "Databases"]), :topics), "title")))
-    @test n == 3      # essays, join rows, topics
+    @test n == 2      # essays, then the topics joined to their links
     @test nq(() -> [sort([t.name for t in e.topics]) for e in essays]) == 0
     @test [sort([t.name for t in e.topics]) for e in essays] == [["db", "julia"], ["julia", "web"]]
     @test count(filter(essays[1].topics; name = "db")) == 1

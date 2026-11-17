@@ -3010,3 +3010,100 @@ end
     @test tr(() -> select_related(objects(DsGenus), "species_set")) isa Exception
   end
 end
+
+# --- tests/prefetch_related -------------------------------------------------------------------------------
+@model struct DpAuthor
+    name = CharField(max_length = 50, unique = true)
+    first_book = ForeignKey(:DpBook; on_delete = :CASCADE, related_name = :first_time_authors)
+    favorite_authors = ManyToManyField(:self; through = :DpFavoriteAuthors, symmetrical = false, related_name = :favors_me)
+    Meta(table = "dp_author", ordering = ["id"])
+end
+@model struct DpFavoriteAuthors
+    author = ForeignKey(DpAuthor; on_delete = :CASCADE, to_field = :name, related_name = :i_like)
+    likes_author = ForeignKey(DpAuthor; on_delete = :CASCADE, to_field = :name, related_name = :likes_me)
+    is_active = BooleanField(default = true)
+    Meta(table = "dp_favoriteauthors", ordering = ["id"])
+end
+@model struct DpAuthorAddress
+    author = ForeignKey(DpAuthor; on_delete = :CASCADE, to_field = :name, related_name = :addresses)
+    address = TextField()
+    Meta(table = "dp_authoraddress", ordering = ["id"])
+end
+@model struct DpBook
+    title = CharField(max_length = 255)
+    authors = ManyToManyField(DpAuthor; related_name = :books)
+    Meta(table = "dp_book", ordering = ["id"])
+end
+@model struct DpBio
+    author = OneToOneField(DpAuthor; on_delete = :CASCADE, primary_key = true, to_field = :name, related_name = :bio)
+    books = ManyToManyField(DpBook; blank = true, related_name = :bio)
+    Meta(table = "dp_bio")
+end
+@model struct DpReader
+    name = CharField(max_length = 50)
+    books_read = ManyToManyField(DpBook; related_name = :read_by)
+    Meta(table = "dp_reader", ordering = ["id"])
+end
+redirect_stdout(devnull) do
+    ms = [DpBook, DpAuthor, through(DpBook, :authors), DpFavoriteAuthors, DpAuthorAddress, DpBio, through(DpBio, :books),
+          DpReader, through(DpReader, :books_read)]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django prefetch_related: PrefetchRelatedTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    names(qs) = [x.name for x in qs]
+    book1, book2, book3, book4 = (create(DpBook; title = t) for t in ("Poems", "Jane Eyre", "Wuthering Heights", "Sense and Sensibility"))
+    a1 = create(DpAuthor; name = "Charlotte", first_book = book1); a2 = create(DpAuthor; name = "Anne", first_book = book1)
+    a3 = create(DpAuthor; name = "Emily", first_book = book1); a4 = create(DpAuthor; name = "Jane", first_book = book4)
+    add!(book1.authors, a1, a2, a3); add!(book2.authors, a1); add!(book3.authors, a3); add!(book4.authors, a4)
+    r1 = create(DpReader; name = "Amy"); r2 = create(DpReader; name = "Belinda")
+    add!(r1.books_read, book1, book4); add!(r2.books_read, book2, book4)
+    # test_m2m_forward / test_m2m_reverse / test_foreignkey_forward / test_foreignkey_reverse: one query per lookup
+    lists, n = nq(() -> [names(b.authors) for b in prefetch_related(objects(DpBook), :authors)])
+    @test n == 2 && lists == [names(b.authors) for b in objects(DpBook)]
+    lists, n = nq(() -> [[b.title for b in a.books] for a in prefetch_related(objects(DpAuthor), :books)])
+    @test n == 2 && lists == [[b.title for b in a.books] for a in objects(DpAuthor)]
+    bs, n = nq(() -> [a.first_book.title for a in prefetch_related(objects(DpAuthor), :first_book)])
+    @test n == 2 && bs == ["Poems", "Poems", "Poems", "Sense and Sensibility"]
+    _, n = nq(() -> [names(b.first_time_authors) for b in prefetch_related(objects(DpBook), :first_time_authors)])
+    @test n == 2
+    # test_onetoone_reverse_with_to_field_pk: Bio's key is its author's name
+    bulk_create([DpBio(author = a1), DpBio(author = a2), DpBio(author = a3)])
+    res, n = nq(() -> [a.name == a.bio.author.name for a in prefetch_related(filter(DpAuthor; name__in = ["Charlotte", "Anne", "Emily"]), :bio)])
+    @test all(res) && n == 2
+    # test_survives_clone, test_count, test_exists
+    _, n = nq(() -> [names(b.first_time_authors) for b in exclude(prefetch_related(objects(DpBook), :first_time_authors); id = 1000)])
+    @test n == 2
+    _, n = nq(() -> [count(b.first_time_authors) for b in prefetch_related(objects(DpBook), :first_time_authors)]); @test n == 2
+    _, n = nq(() -> [exists(b.first_time_authors) for b in prefetch_related(objects(DpBook), :first_time_authors)]); @test n == 2
+    # test_clear: prefetch_related(nothing)
+    _, n = nq(() -> [[b.title for b in a.books] for a in prefetch_related(prefetch_related(objects(DpAuthor), :books), nothing)])
+    @test n == 5
+    # test_m2m_then_m2m, test_overriding_prefetch, test_get
+    expected = [[["Amy"], ["Belinda"]], [["Amy"]], [["Amy"], []], [["Amy", "Belinda"]]]
+    for lookups in ((:books__read_by,), (:books, :books__read_by), (:books__read_by, :books))
+        lists, n = nq(() -> [[names(b.read_by) for b in a.books] for a in prefetch_related(objects(DpAuthor), lookups...)])
+        @test lists == expected && n == 3
+    end
+    lists, n = nq(() -> (a = get(prefetch_related(objects(DpAuthor), :books__read_by); name = "Charlotte"); [names(b.read_by) for b in a.books]))
+    @test lists == [["Amy"], ["Belinda"]] && n == 3
+    # test_foreign_key_then_m2m
+    lists, n = nq(() -> [names(a.first_book.read_by) for a in prefetch_related(select_related(objects(DpAuthor), :first_book), :first_book__read_by)])
+    @test lists == [["Amy"], ["Amy"], ["Amy"], ["Amy", "Belinda"]] && n == 2
+    # test_attribute_error, test_invalid_final_lookup
+    @test tr(() -> collect(prefetch_related(objects(DpReader), :books_read__xyz))) isa Exception
+    @test tr(() -> collect(prefetch_related(objects(DpBook), :authors__name))) isa Exception
+    # test_m2m_then_reverse_fk_object_ids: a to_field reverse relation through an m2m
+    create(DpAuthorAddress; author = a1, address = "Haworth")
+    lists, n = nq(() -> [[[ad.address for ad in a.addresses] for a in b.authors] for b in prefetch_related(objects(DpBook), :authors__addresses)])
+    @test lists[1] == [["Haworth"], [], []] && n == 3
+    # a self-referential m2m through a to_field through model
+    create(DpFavoriteAuthors; author = a1, likes_author = a2)
+    lists, n = nq(() -> [names(a.favorite_authors) for a in prefetch_related(objects(DpAuthor), :favorite_authors)])
+    @test lists == [["Anne"], [], [], []] && n == 2
+    @test names(a2.favors_me) == ["Charlotte"]
+  end
+end
