@@ -84,6 +84,7 @@ function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}(), bulk
     # (on the database the owner came from: an object of another database relates there)
     in_db(qs, true) do
         qs.owner isa ReverseFKOwner && return rev_add!(qs, objs...; bulk = bulk)
+        qs.owner isa GenericOwner && return gen_add!(qs, objs...; bulk = bulk)
         o = m2m_owner(qs)
         m2m_add_ids!(o, unique(Any[m2m_obj_id(o, x) for x in objs]), through_defaults)
         qs
@@ -120,6 +121,7 @@ function remove!(qs::QuerySet, objs...; bulk::Bool = true)
     # (on the database the owner came from: an object of another database relates there)
     in_db(qs, true) do
         qs.owner isa ReverseFKOwner && return rev_remove!(qs, objs...; bulk = bulk)
+        qs.owner isa GenericOwner && return gen_remove!(qs, objs...; bulk = bulk)
         o = m2m_owner(qs)
         m2m_remove_ids!(o, Any[m2m_obj_id(o, x) for x in objs])
         qs
@@ -139,6 +141,7 @@ function clear!(qs::QuerySet; bulk::Bool = true)
     # (on the database the owner came from: an object of another database relates there)
     in_db(qs, true) do
         qs.owner isa ReverseFKOwner && return rev_clear!(qs; bulk = bulk)
+        qs.owner isa GenericOwner && return gen_clear!(qs; bulk = bulk)
         o = m2m_owner(qs)
         m2m_signal(o, :pre_clear, nothing)
         delete!(filter(base_objects(o.through), Q(idkey(o.mine) => o.id)))
@@ -163,6 +166,7 @@ function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}(), bulk::B
         objs isa Union{Number,AbstractString,Symbol,Model,Nothing} &&
             throw(ArgumentError("set!(relation, objs): objs must be a collection of objects or keys, not $(repr(objs)); use set!(rel, [x])"))
         qs.owner isa ReverseFKOwner && return rev_set!(qs, objs; bulk = bulk, clear = clear)
+        qs.owner isa GenericOwner && return gen_set!(qs, objs; bulk = bulk, clear = clear)
         o = m2m_owner(qs)
         want = unique(Any[m2m_obj_id(o, x) for x in collect(objs)])
         clear && return atomic(() -> (clear!(qs); m2m_add_ids!(o, want, through_defaults); qs))
@@ -288,6 +292,8 @@ function create(qs::QuerySet; through_defaults = Dict{Symbol,Any}(), kw...)
             obj = create(o.model; kw..., (o.fk.name => o.instance,)...)
             rev_changed!(o)
             return obj
+        elseif qs.owner isa GenericOwner
+            return gen_create(qs; kw...)
         elseif qs.owner isa M2MOwner
             obj = create(model_of(qs); kw...)
             add!(qs, obj; through_defaults = through_defaults)
@@ -306,7 +312,7 @@ Through a relation: the object is looked for among the related ones; one made is
 function get_or_create(qs::QuerySet; defaults = Dict{Symbol,Any}(), through_defaults = Dict{Symbol,Any}(), kw...)
     # (on the database the owner came from: an object of another database relates there)
     in_db(qs, true) do
-        qs.owner isa Union{M2MOwner,ReverseFKOwner} || throw(ArgumentError("get_or_create(qs; ...) needs a relation such as group.members; use get_or_create(Model; ...)"))
+        qs.owner isa Union{M2MOwner,ReverseFKOwner,GenericOwner} || throw(ArgumentError("get_or_create(qs; ...) needs a relation such as group.members; use get_or_create(Model; ...)"))
         atomic() do
             o = first(filter(qs; kw...))
             o === nothing || return (o, false)
@@ -318,7 +324,7 @@ end
 function update_or_create(qs::QuerySet; defaults = Dict{Symbol,Any}(), create_defaults = nothing, through_defaults = Dict{Symbol,Any}(), kw...)
     # (on the database the owner came from: an object of another database relates there)
     in_db(qs, true) do
-        qs.owner isa Union{M2MOwner,ReverseFKOwner} || throw(ArgumentError("update_or_create(qs; ...) needs a relation such as group.members; use update_or_create(Model; ...)"))
+        qs.owner isa Union{M2MOwner,ReverseFKOwner,GenericOwner} || throw(ArgumentError("update_or_create(qs; ...) needs a relation such as group.members; use update_or_create(Model; ...)"))
         atomic() do
             o = first(filter(qs; kw...))
             o === nothing && return (create(qs; through_defaults = through_defaults,

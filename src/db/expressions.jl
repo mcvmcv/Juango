@@ -494,6 +494,19 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
             last_ && return qcol(alias, "id"), nothing
             continue
         end
+        rg = find_reverse_generic(T, s)
+        if rg !== nothing                      # tag.animal (a GenericRelation's related_query_name): LEFT JOIN the owner
+            O, g = rg
+            ctf, fkf = g.through
+            ctcol, ctid = column(getfield_meta(T, ctf)), get_for_model(O).id::Integer
+            prev = alias
+            alias = join!(c, alias, expr_key(c, alias, Symbol(s)), modelmeta(O).table,
+                          natural_pk(O) ? column(pk_fields(O)[1]) : "id", column(getfield_meta(T, fkf));
+                          left = true, extra_on = a -> "$(qcol(prev, ctcol)) = $ctid")
+            T = O
+            last_ && return resolve_path(c, alias, T, "id")
+            continue
+        end
         rel = find_reverse(T, s)
         rel === nothing && throw(lookup_error(T, s))
         rn, M, rf = rel

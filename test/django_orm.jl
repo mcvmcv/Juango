@@ -4921,3 +4921,127 @@ end
         Juango.close_connection!("other")
     end
 end
+
+# --- tests/generic_relations ------------------------------------------------------------------------------
+@model struct DkTaggedItem
+    tag = SlugField(default = "")
+    content_type = ForeignKey(ContentType; on_delete = :CASCADE, related_name = :dk_tags)
+    object_id = PositiveIntegerField()
+    content_object = GenericForeignKey()
+    Meta(table = "dk_taggeditem", ordering = ["tag", "content_type__model"])
+end
+@model struct DkAnimal
+    common_name = CharField(max_length = 150)
+    latin_name = CharField(max_length = 150, default = "")
+    tags = GenericRelation(:DkTaggedItem; related_query_name = "animal")
+    Meta(table = "dk_animal", ordering = ["id"])
+end
+@model struct DkVegetable
+    name = CharField(max_length = 150)
+    is_yucky = BooleanField(default = true)
+    tags = GenericRelation(:DkTaggedItem)
+    Meta(table = "dk_vegetable", ordering = ["id"])
+end
+@model struct DkMineral
+    name = CharField(max_length = 150)
+    hardness = PositiveSmallIntegerField()
+    Meta(table = "dk_mineral", ordering = ["id"])
+end
+@model struct DkManualPK
+    code = IntegerField(primary_key = true)            # (Django's is named id: #229)
+    tags = GenericRelation(:DkTaggedItem; related_query_name = "manualpk")
+    Meta(table = "dk_manualpk")
+end
+redirect_stdout(devnull) do
+    ms = [DkTaggedItem, DkAnimal, DkVegetable, DkMineral, DkManualPK]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django generic_relations: GenericRelationsTests (part 1)" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    tags(qs) = [t.tag for t in qs]
+    comp(qs) = [(t.tag, model_class(t.content_type), t.object_id) for t in qs]
+    lion = create(DkAnimal; common_name = "Lion", latin_name = "Panthera leo")
+    platypus = create(DkAnimal; common_name = "Platypus", latin_name = "Ornithorhynchus anatinus")
+    create(DkVegetable; name = "Eggplant", is_yucky = true); bacon = create(DkVegetable; name = "Bacon", is_yucky = false)
+    quartz = create(DkMineral; name = "Quartz", hardness = 7)
+    # create through the relation
+    fatty, salty = create(bacon.tags; tag = "fatty"), create(bacon.tags; tag = "salty")
+    yellow, hairy = create(lion.tags; tag = "yellow"), create(lion.tags; tag = "hairy")
+    # get_or_create / update_or_create through the relation
+    n0 = count(bacon.tags)
+    t, c = update_or_create(bacon.tags; tag = "stinky"); @test c && count(bacon.tags) == n0 + 1
+    t, c = update_or_create(bacon.tags; create_defaults = Dict(:tag => "juicy"), defaults = Dict(:tag => "uncured"), tag = "stinky2")
+    @test c && t.tag == "juicy"
+    t, c = update_or_create(bacon.tags; defaults = Dict(:tag => "juicier"), id = t.id); @test !c && t.tag == "juicier"
+    t, c = get_or_create(bacon.tags; tag = "gross"); @test c
+    t2, c = get_or_create(bacon.tags; id = t.id, defaults = Dict(:tag => "x")); @test !c && t2.tag == "gross"
+    delete!(filter(bacon.tags; tag__in = ["stinky", "juicier", "gross"]))
+    @test tags(bacon.tags) == ["fatty", "salty"]
+    # the m2m-like API, the content object, queries from the tags to their owners
+    @test tags(lion.tags) == ["hairy", "yellow"] && tags(bacon.tags) == ["fatty", "salty"]
+    @test get(DkTaggedItem; tag = "salty").content_object.pk == bacon.pk
+    @test tags(order_by(filter(DkTaggedItem; animal__isnull = false), "animal__common_name", "tag")) == ["hairy", "yellow"]
+    mpk = create(DkManualPK; code = 1); create(mpk.tags; tag = "mpk")
+    @test tags(order_by(filter(DkTaggedItem, Q(animal__isnull = false) | Q(manualpk__code = 1)), "tag")) == ["hairy", "mpk", "yellow"]
+    delete!(mpk)
+    # a model without a GenericRelation, through the two fields
+    shiny = create(DkTaggedItem; content_object = quartz, tag = "shiny"); clearish = create(DkTaggedItem; content_object = quartz, tag = "clearish")
+    ct = get_for_model(quartz)
+    @test tags(filter(DkTaggedItem; content_type__pk = ct.id, object_id = quartz.id)) == ["clearish", "shiny"]
+    # reassigning the generic key
+    shiny.content_object = platypus; save!(shiny)
+    @test tags(platypus.tags) == ["shiny"]
+    delete!(shiny); delete!(clearish)
+    # queries across the relation respect the content type
+    mpk = create(DkManualPK; code = lion.pk); create(mpk.tags; tag = "fatty"); create(platypus.tags; tag = "fatty")
+    @test [a.pk for a in filter(DkAnimal; tags__tag = "fatty")] == [platypus.pk]
+    @test [a.pk for a in exclude(DkAnimal; tags__tag = "fatty")] == [lion.pk]
+    @test [a.pk for a in filter(DkAnimal; tags__content_type = get_for_model(DkAnimal))] == [lion.pk, platypus.pk]
+    delete!(mpk); delete!(platypus.tags |> qs -> filter(qs; tag = "fatty"))
+    # deleting: with a GenericRelation the tags go; without one they stay
+    @test comp(objects(DkTaggedItem)) == [("fatty", DkVegetable, bacon.pk), ("hairy", DkAnimal, lion.pk), ("salty", DkVegetable, bacon.pk), ("yellow", DkAnimal, lion.pk)]
+    create(DkTaggedItem; content_object = quartz, tag = "clearish"); qpk = quartz.pk; delete!(quartz)
+    @test ("clearish", DkMineral, qpk) in comp(objects(DkTaggedItem))
+    delete!(filter(DkTaggedItem; tag = "clearish"))
+    lpk = lion.pk; delete!(lion)
+    @test comp(objects(DkTaggedItem)) == [("fatty", DkVegetable, bacon.pk), ("salty", DkVegetable, bacon.pk)]
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    tags(qs) = [t.tag for t in qs]
+    lion = create(DkAnimal; common_name = "Lion")
+    quartz = create(DkMineral; name = "Quartz", hardness = 7)
+    bacon = create(DkVegetable; name = "Bacon", is_yucky = false)
+    # add!: one UPDATE (bulk), or a save of each; unsaved and wrong-model objects refused
+    t1, t2 = create(DkTaggedItem; content_object = quartz, tag = "shiny"), create(DkTaggedItem; content_object = quartz, tag = "clearish")
+    _, n = nq(() -> add!(bacon.tags, t1, t2)); @test n == 1
+    @test t1.content_object.pk == bacon.pk && get(DkTaggedItem; pk = t2.pk).content_object.pk == bacon.pk
+    b2 = create(DkVegetable; name = "Bacon2", is_yucky = false)
+    _, n = nq(() -> add!(b2.tags, t1, t2; bulk = false)); @test n == 4      # (two saves, each in a transaction here)
+    @test get(DkTaggedItem; pk = t1.pk).object_id == b2.pk
+    @test tr(() -> add!(bacon.tags, DkTaggedItem(content_object = quartz, tag = "x"))) isa Exception
+    @test tr(() -> add!(bacon.tags, lion)) isa Exception
+    delete!(objects(DkTaggedItem))
+    # set!, with and without clear and bulk; a queryset to set! from
+    fatty, salty = create(bacon.tags; tag = "fatty"), create(bacon.tags; tag = "salty")
+    set!(bacon.tags, [fatty, salty]); @test tags(bacon.tags) == ["fatty", "salty"]
+    set!(bacon.tags, [fatty]); @test tags(bacon.tags) == ["fatty"]
+    set!(bacon.tags, DkTaggedItem[]); @test isempty(collect(bacon.tags))
+    fatty, salty = create(bacon.tags; tag = "fatty"), create(bacon.tags; tag = "salty")
+    set!(bacon.tags, [fatty, salty]; bulk = false, clear = true); @test tags(bacon.tags) == ["fatty", "salty"]
+    set!(bacon.tags, [fatty]; bulk = false, clear = true); @test tags(bacon.tags) == ["fatty"]
+    set!(bacon.tags, DkTaggedItem[]; clear = true); @test isempty(collect(bacon.tags))
+    create(bacon.tags; tag = "fatty"); create(bacon.tags; tag = "salty")
+    qs = filter(bacon.tags; tag = "fatty"); set!(bacon.tags, qs)
+    @test count(bacon.tags) == 1 && count(qs) == 1
+    # clear! and remove! delete the tags
+    create(bacon.tags; tag = "salty"); create(lion.tags; tag = "hairy")
+    clear!(bacon.tags); @test isempty(collect(bacon.tags)) && tags(order_by(objects(DkTaggedItem), "tag")) == ["hairy"]
+    f2, s2 = create(bacon.tags; tag = "fatty"), create(bacon.tags; tag = "salty")
+    remove!(bacon.tags, f2); @test tags(bacon.tags) == ["salty"] && tags(order_by(objects(DkTaggedItem), "tag")) == ["hairy", "salty"]
+  end
+end

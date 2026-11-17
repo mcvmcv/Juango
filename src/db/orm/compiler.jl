@@ -333,6 +333,28 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             c.distinct = true
             return compile_lookup(c, a, M, subkey, value, negated)
         end
+        if f === nothing && (rg = find_reverse_generic(T, fname)) !== nothing
+            # tag.animal (a GenericRelation's related_query_name): the owner whose id is the object id, of its content type
+            O, g = rg
+            ctf, fkf = g.through
+            ctcol, fkcol = column(getfield_meta(T, ctf)), column(getfield_meta(T, fkf))
+            ctid = get_for_model(O).id::Integer
+            ot = qname(modelmeta(O).table)
+            # (an object id kept as text is compared as text)
+            opk = natural_pk(O) ? column(pk_fields(O)[1]) : "id"
+            rgidref(a) = getfield_meta(T, fkf).kind in STRING_KINDS ? "CAST($(qcol(a, opk)) AS $(cast_type(backend(), :text)))" : qcol(a, opk)
+            rgcond(a) = "$(rgidref(a)) = $(qcol(alias, fkcol)) AND $(qcol(alias, ctcol)) = $ctid"
+            if isempty(rest) && lookup == "isnull"
+                a = new_alias!(c)
+                ex = "EXISTS (SELECT 1 FROM $ot $(qname(a)) WHERE $(rgcond(a)))"
+                return (truthy(value) ? "NOT " * ex : ex, Any[])
+            end
+            subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
+            a = new_alias!(c)
+            sql, ps = compile_lookup(c, a, O, subkey, value, negated)
+            ex = "EXISTS (SELECT 1 FROM $ot $(qname(a)) WHERE $(rgcond(a)) AND $sql)"
+            return (negated ? "NOT " * ex : ex, ps)
+        end
         if f !== nothing && modelmeta(f.model).table != modelmeta(T).table
             # a field inherited from a multi-table parent: look it up on the parent's table
             P = table_parent(T)
