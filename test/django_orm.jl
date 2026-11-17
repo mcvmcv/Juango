@@ -4519,3 +4519,94 @@ end
     @test pks(post.primary_lines) == [foo.pk] && pks(post.secondary_lines) == [bar.pk]
   end
 end
+
+# --- tests/prefetch_related (part 3) ----------------------------------------------------------------------
+@model struct DpAuthorWithAge <: DpAuthor
+    age = IntegerField()
+    Meta(table = "dp_authorwithage")
+end
+@model struct DpBookWithYear <: DpBook
+    published_year = IntegerField()
+    aged_authors = ManyToManyField(DpAuthorWithAge; related_name = :books_with_year)
+    Meta(table = "dp_bookwithyear")
+end
+@model struct DpBookReview
+    book = ForeignKey(DpBookWithYear; on_delete = :CASCADE, null = true)
+    notes = TextField(null = true, blank = true)
+    Meta(table = "dp_bookreview", ordering = ["id"])
+end
+@model struct DpEmployee
+    name = CharField(max_length = 50)
+    boss = ForeignKey(:self; on_delete = :SET_NULL, null = true, related_name = :serfs)
+    Meta(table = "dp_employee", ordering = ["id"])
+end
+redirect_stdout(devnull) do
+    ms = [DpAuthorWithAge, DpBookWithYear, through(DpBookWithYear, :aged_authors), DpBookReview, DpEmployee]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django prefetch_related: raw, MultiTableInheritanceTest, ForeignKeyToFieldTest, NullableTest" begin
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    names(qs) = [x.name for x in qs]
+    # RawQuerySetTests, with prefetch_related_objects (Juango's raw returns the objects)
+    b1 = create(DpBook; title = "Poems")
+    a1, a2, a3 = (create(DpAuthor; name = n, first_book = b1) for n in ("Charlotte", "Anne", "Emily"))
+    add!(b1.authors, a1, a2, a3)
+    books, n = nq(() -> prefetch_related_objects(raw(DpBook, "SELECT * FROM dp_book WHERE id = ?", [b1.id]), :authors))
+    @test n == 2
+    r, n = nq(() -> Set(names(books[1].authors))); @test r == Set(["Charlotte", "Anne", "Emily"]) && n == 0
+    # ForeignKeyToFieldTest: reverse keys and an m2m through a model whose keys are to_field names
+    create(DpAuthorAddress; author = a1, address = "SomeStreet 1")
+    create(DpFavoriteAuthors; author = a1, likes_author = a2); create(DpFavoriteAuthors; author = a2, likes_author = a3)
+    create(DpFavoriteAuthors; author = a3, likes_author = a1)
+    r, n = nq(() -> [[x.address for x in o.addresses] for o in prefetch_related(objects(DpAuthor), :addresses)])
+    @test r == [["SomeStreet 1"], [], []] && n == 2
+    r, n = nq(() -> [(names(o.favorite_authors), names(o.favors_me)) for o in prefetch_related(objects(DpAuthor), :favorite_authors, :favors_me)])
+    @test r == [(["Anne"], ["Emily"]), (["Emily"], ["Charlotte"]), (["Charlotte"], ["Anne"])] && n == 3
+  end
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    names(qs) = [x.name for x in qs]
+    # MultiTableInheritanceTest
+    bk1 = create(DpBookWithYear; title = "Poems", published_year = 2010)
+    bk2 = create(DpBookWithYear; title = "More poems", published_year = 2011)
+    au1 = create(DpAuthorWithAge; name = "Jane", first_book = bk1, age = 50)
+    au2 = create(DpAuthorWithAge; name = "Tom", first_book = bk1, age = 49)
+    au3 = create(DpAuthorWithAge; name = "Robert", first_book = bk2, age = 48)
+    create(DpAuthorAddress; author = au1, address = "SomeStreet 1")
+    add!(bk2.aged_authors, au2, au3)
+    create(DpBookReview; book = bk1, notes = "review book1"); create(DpBookReview; book = bk2, notes = "review book2")
+    # a reverse key to the parent, from the child
+    r, n = nq(() -> [[x.address for x in o.addresses] for o in prefetch_related(objects(DpAuthorWithAge), :addresses)])
+    @test r == [["SomeStreet 1"], [], []] && n == 2
+    # a key to a multi-table child
+    r, n = nq(() -> [o.book.title for o in prefetch_related(objects(DpBookReview), :book)])
+    @test Set(r) == Set(["Poems", "More poems"]) && n == 2
+    # m2m to and from a multi-table child, prefetched or not
+    r, n = nq(() -> [[b.title for b in a.books_with_year] for a in prefetch_related(objects(DpAuthorWithAge), :books_with_year)])
+    @test n == 2 && r == [[b.title for b in a.books_with_year] for a in objects(DpAuthorWithAge)]
+    r, n = nq(() -> [names(b.aged_authors) for b in prefetch_related(objects(DpBookWithYear), :aged_authors)])
+    @test n == 2 && r == [names(b.aged_authors) for b in objects(DpBookWithYear)] && r == [[], ["Tom", "Robert"]]
+    # the parent link, and the child link from the parent
+    r, n = nq(() -> [a.dpauthor_ptr.name for a in prefetch_related(objects(DpAuthorWithAge), :dpauthor_ptr)])
+    @test n == 2 && r == ["Jane", "Tom", "Robert"]
+    r, n = nq(() -> [a.dpauthorwithage === nothing ? nothing : a.dpauthorwithage.age for a in prefetch_related(objects(DpAuthor), :dpauthorwithage)])
+    @test n == 2 && r == [50, 49, 48]
+  end
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    names(qs) = [x.name for x in qs]
+    # NullableTest: through a nullable key, with and without select_related; in_bulk keeps prefetches
+    boss = create(DpEmployee; name = "Peter"); create(DpEmployee; name = "Joe", boss = boss); create(DpEmployee; name = "Angela", boss = boss)
+    plain = [e.boss === nothing ? String[] : names(e.boss.serfs) for e in select_related(objects(DpEmployee), :boss)]
+    r, n = nq(() -> [e.boss === nothing ? String[] : names(e.boss.serfs) for e in prefetch_related(select_related(objects(DpEmployee), :boss), :boss__serfs)])
+    @test r == plain == [String[], ["Joe", "Angela"], ["Joe", "Angela"]]
+    @test n == 2
+    r, n = nq(() -> [e.boss === nothing ? String[] : names(e.boss.serfs) for e in prefetch_related(objects(DpEmployee), :boss__serfs)])
+    @test r == plain && n == 3
+    b1, b2 = create(DpEmployee; name = "Peter2"), create(DpEmployee; name = "Jack")
+    _, n = nq(() -> foreach(b -> collect(b.serfs), values(in_bulk(prefetch_related(objects(DpEmployee), :serfs), [b1.pk, b2.pk]))))
+    @test n == 2
+  end
+end

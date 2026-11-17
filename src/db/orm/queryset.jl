@@ -818,8 +818,14 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
             end
         end
     end
+    run_prefetches!(objs, qs.prefetch)
+    remember_siblings!(objs)
+    objs
+end
+
+Base.@nospecializeinfer function run_prefetches!(@nospecialize(objs::Vector), prefetches)
     seen = Set{String}()            # the paths prefetched so far (as their objects are named: to_attr for a last step)
-    for p in qs.prefetch
+    for p in prefetches
         # Prefetch("houses"; queryset) after "houses__rooms" would replace the houses the rooms were put on:
         # Django refuses it ("already seen with a different queryset")
         p.queryset !== nothing && p.to_attr === nothing && p.path in seen &&
@@ -830,7 +836,20 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
             push!(seen, join(i == length(segs) && p.to_attr !== nothing ? vcat(segs[1:end-1], [string(p.to_attr)]) : segs[1:i], "__"))
         end
     end
-    remember_siblings!(objs)
+    objs
+end
+
+"""
+    prefetch_related_objects(objs, lookups...)
+
+Prefetch onto objects you already have (from `raw`, a cache, `in_bulk`'s values, a list built by
+hand), as Django's `prefetch_related_objects`: `prefetch_related_objects(raw(Book, sql), :authors)`.
+The objects must be of one model. Returns `objs`.
+"""
+function prefetch_related_objects(objs, lookups...)
+    v = collect(objs)
+    isempty(v) && return objs
+    run_prefetches!(v, Prefetch[l isa Prefetch ? l : Prefetch(l) for l in lookups])
     objs
 end
 
@@ -892,7 +911,12 @@ Base.@nospecializeinfer function cached_level(@nospecialize(objs::Vector), name:
     out = Any[]
     for o in objs
         c = get((getfield(o, :_cache)::Dict{Symbol,Any}), name, NOTFOUND)
-        c === NOTFOUND && return nothing
+        if c === NOTFOUND
+            # a forward key that's null has nothing to load (select_related caches only the rows it found)
+            f = findfield(modelmeta(typeof(o)), name)
+            (f !== nothing && f.kind === :fk && f.name === name && field_data(o, attname(f)) === nothing) && continue
+            return nothing
+        end
         c isa PrefetchedList ? append!(out, c.items) : c isa Model ? push!(out, c) : c === nothing || return nothing
     end
     out
@@ -925,6 +949,20 @@ Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), na
     g === nothing || return prefetch_generic_fk!(objs, g)
     g = find_generic(generic_relations(T), name)
     g === nothing || return prefetch_generic_relation!(objs, g, qs, to_attr)
+    # a multi-table parent link (restaurant.place_ptr) or child link (place.restaurant): rows with the same ids
+    L = table_parent(T) !== nothing && name === parent_accessor(T) ? table_parent(T) :
+        let i = findfirst(C -> child_accessor(C) === name, child_models(concrete_model(T)))
+            i === nothing ? nothing : child_models(concrete_model(T))[i]
+        end
+    if L !== nothing
+        ids = [o.id for o in objs]
+        rows = fetch(filter(something(qs, base_objects(L)); id__in = ids))
+        byid = Dict(r.id => r for r in rows)
+        for o in objs
+            (getfield(o, :_cache)::Dict{Symbol,Any})[something(to_attr, name)] = get(byid, o.id, nothing)
+        end
+        return rows
+    end
     rel = find_reverse(T, string(name))
     rel === nothing && throw(LookupError("prefetch_related: '$name' is not a relation of $T"))
     rn, M, rf = rel

@@ -47,7 +47,7 @@ export Model, @model, @abstract_model, Field, CharField, TextField, EmailField, 
 export ContentType, GenericForeignKey, GenericRelation
 # querysets
 export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_list, annotate, alias, aggregate,
-       select_related, prefetch_related, Prefetch, FilteredRelation, defer, distinct, latest, earliest,
+       select_related, prefetch_related, prefetch_related_objects, Prefetch, FilteredRelation, defer, distinct, latest, earliest,
        none, in_bulk, dates, datetimes, raw, explain, iterator, select_for_update, intersection,
        difference, create, get_or_create, update_or_create, update!, save!, refresh!, full_clean,
        clean_fields, validate_unique, validate_constraints, get_next_by, get_previous_by, bulk_create,
