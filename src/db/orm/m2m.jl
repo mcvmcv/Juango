@@ -81,10 +81,13 @@ Add objects (or ids) to a many-to-many relation. Already related objects are ski
 `through_defaults` fills extra fields of a custom `through` model.
 """
 function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}(), bulk::Bool = true)
-    qs.owner isa ReverseFKOwner && return rev_add!(qs, objs...; bulk = bulk)
-    o = m2m_owner(qs)
-    m2m_add_ids!(o, unique(Any[m2m_obj_id(o, x) for x in objs]), through_defaults)
-    qs
+    # (on the database the owner came from: an object of another database relates there)
+    in_db(qs, true) do
+        qs.owner isa ReverseFKOwner && return rev_add!(qs, objs...; bulk = bulk)
+        o = m2m_owner(qs)
+        m2m_add_ids!(o, unique(Any[m2m_obj_id(o, x) for x in objs]), through_defaults)
+        qs
+    end
 end
 function m2m_add_ids!(o, ids, through_defaults)
     isempty(ids) && return
@@ -114,10 +117,13 @@ end
 
 "Remove objects (or ids) from a many-to-many relation."
 function remove!(qs::QuerySet, objs...; bulk::Bool = true)
-    qs.owner isa ReverseFKOwner && return rev_remove!(qs, objs...; bulk = bulk)
-    o = m2m_owner(qs)
-    m2m_remove_ids!(o, Any[m2m_obj_id(o, x) for x in objs])
-    qs
+    # (on the database the owner came from: an object of another database relates there)
+    in_db(qs, true) do
+        qs.owner isa ReverseFKOwner && return rev_remove!(qs, objs...; bulk = bulk)
+        o = m2m_owner(qs)
+        m2m_remove_ids!(o, Any[m2m_obj_id(o, x) for x in objs])
+        qs
+    end
 end
 function m2m_remove_ids!(o, ids)
     isempty(ids) && return
@@ -130,14 +136,17 @@ end
 
 "Remove every object from a many-to-many relation."
 function clear!(qs::QuerySet; bulk::Bool = true)
-    qs.owner isa ReverseFKOwner && return rev_clear!(qs; bulk = bulk)
-    o = m2m_owner(qs)
-    m2m_signal(o, :pre_clear, nothing)
-    delete!(filter(base_objects(o.through), Q(idkey(o.mine) => o.id)))
-    o.symmetrical && delete!(filter(base_objects(o.through), Q(idkey(o.other) => o.id)))
-    m2m_signal(o, :post_clear, nothing)
-    m2m_changed!(o)
-    qs
+    # (on the database the owner came from: an object of another database relates there)
+    in_db(qs, true) do
+        qs.owner isa ReverseFKOwner && return rev_clear!(qs; bulk = bulk)
+        o = m2m_owner(qs)
+        m2m_signal(o, :pre_clear, nothing)
+        delete!(filter(base_objects(o.through), Q(idkey(o.mine) => o.id)))
+        o.symmetrical && delete!(filter(base_objects(o.through), Q(idkey(o.other) => o.id)))
+        m2m_signal(o, :post_clear, nothing)
+        m2m_changed!(o)
+        qs
+    end
 end
 
 """
@@ -147,20 +156,23 @@ Make the relation contain exactly `objs`: only the differences are written, or w
 link is removed and the new ones added (Django's `set(clear=True)`).
 """
 function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}(), bulk::Bool = true, clear::Bool = false)
-    # a lone value is a mistake, not a one-item list (Julia iterates a number or a string): Django's
-    # "'int' object is not iterable", before any link is touched
-    objs isa Union{Number,AbstractString,Symbol,Model,Nothing} &&
-        throw(ArgumentError("set!(relation, objs): objs must be a collection of objects or keys, not $(repr(objs)); use set!(rel, [x])"))
-    qs.owner isa ReverseFKOwner && return rev_set!(qs, objs; bulk = bulk, clear = clear)
-    o = m2m_owner(qs)
-    want = unique(Any[m2m_obj_id(o, x) for x in collect(objs)])
-    clear && return atomic(() -> (clear!(qs); m2m_add_ids!(o, want, through_defaults); qs))
-    atomic() do
-        have = collect(values_list(filter(base_objects(o.through), Q(idkey(o.mine) => o.id)), idkey(o.other); flat = true))
-        m2m_remove_ids!(o, setdiff(have, want))
-        m2m_add_ids!(o, setdiff(want, have), through_defaults)
+    # (on the database the owner came from: an object of another database relates there)
+    in_db(qs, true) do
+        # a lone value is a mistake, not a one-item list (Julia iterates a number or a string): Django's
+        # "'int' object is not iterable", before any link is touched
+        objs isa Union{Number,AbstractString,Symbol,Model,Nothing} &&
+            throw(ArgumentError("set!(relation, objs): objs must be a collection of objects or keys, not $(repr(objs)); use set!(rel, [x])"))
+        qs.owner isa ReverseFKOwner && return rev_set!(qs, objs; bulk = bulk, clear = clear)
+        o = m2m_owner(qs)
+        want = unique(Any[m2m_obj_id(o, x) for x in collect(objs)])
+        clear && return atomic(() -> (clear!(qs); m2m_add_ids!(o, want, through_defaults); qs))
+        atomic() do
+            have = collect(values_list(filter(base_objects(o.through), Q(idkey(o.mine) => o.id)), idkey(o.other); flat = true))
+            m2m_remove_ids!(o, setdiff(have, want))
+            m2m_add_ids!(o, setdiff(want, have), through_defaults)
+        end
+        qs
     end
-    qs
 end
 
 # --- reverse foreign keys: reporter.article as a related manager -------------------------------------------
@@ -269,17 +281,20 @@ end
 A new object in a relation (Django's `RelatedManager.create`).
 """
 function create(qs::QuerySet; through_defaults = Dict{Symbol,Any}(), kw...)
-    if qs.owner isa ReverseFKOwner
-        o = qs.owner::ReverseFKOwner
-        obj = create(o.model; kw..., (o.fk.name => o.instance,)...)
-        rev_changed!(o)
-        return obj
-    elseif qs.owner isa M2MOwner
-        obj = create(model_of(qs); kw...)
-        add!(qs, obj; through_defaults = through_defaults)
-        return obj   # (add! dropped the prefetched rows)
+    # (on the database the owner came from: an object of another database relates there)
+    in_db(qs, true) do
+        if qs.owner isa ReverseFKOwner
+            o = qs.owner::ReverseFKOwner
+            obj = create(o.model; kw..., (o.fk.name => o.instance,)...)
+            rev_changed!(o)
+            return obj
+        elseif qs.owner isa M2MOwner
+            obj = create(model_of(qs); kw...)
+            add!(qs, obj; through_defaults = through_defaults)
+            return obj   # (add! dropped the prefetched rows)
+        end
+        throw(ArgumentError("create(qs; ...) needs a relation such as reporter.article or post.tags; use create(Model; ...)"))
     end
-    throw(ArgumentError("create(qs; ...) needs a relation such as reporter.article or post.tags; use create(Model; ...)"))
 end
 
 """
@@ -289,24 +304,30 @@ end
 Through a relation: the object is looked for among the related ones; one made is added to the relation.
 """
 function get_or_create(qs::QuerySet; defaults = Dict{Symbol,Any}(), through_defaults = Dict{Symbol,Any}(), kw...)
-    qs.owner isa Union{M2MOwner,ReverseFKOwner} || throw(ArgumentError("get_or_create(qs; ...) needs a relation such as group.members; use get_or_create(Model; ...)"))
-    atomic() do
-        o = first(filter(qs; kw...))
-        o === nothing || return (o, false)
-        ps = create_params(model_of(qs), kw, defaults)
-        (create(qs; through_defaults = through_defaults, ps...), true)
+    # (on the database the owner came from: an object of another database relates there)
+    in_db(qs, true) do
+        qs.owner isa Union{M2MOwner,ReverseFKOwner} || throw(ArgumentError("get_or_create(qs; ...) needs a relation such as group.members; use get_or_create(Model; ...)"))
+        atomic() do
+            o = first(filter(qs; kw...))
+            o === nothing || return (o, false)
+            ps = create_params(model_of(qs), kw, defaults)
+            (create(qs; through_defaults = through_defaults, ps...), true)
+        end
     end
 end
 function update_or_create(qs::QuerySet; defaults = Dict{Symbol,Any}(), create_defaults = nothing, through_defaults = Dict{Symbol,Any}(), kw...)
-    qs.owner isa Union{M2MOwner,ReverseFKOwner} || throw(ArgumentError("update_or_create(qs; ...) needs a relation such as group.members; use update_or_create(Model; ...)"))
-    atomic() do
-        o = first(filter(qs; kw...))
-        o === nothing && return (create(qs; through_defaults = through_defaults,
-                                        create_params(model_of(qs), kw, something(create_defaults, defaults))...), true)
-        for (k, v) in create_params(model_of(qs), (;), defaults)
-            setproperty!(o, k, v)
+    # (on the database the owner came from: an object of another database relates there)
+    in_db(qs, true) do
+        qs.owner isa Union{M2MOwner,ReverseFKOwner} || throw(ArgumentError("update_or_create(qs; ...) needs a relation such as group.members; use update_or_create(Model; ...)"))
+        atomic() do
+            o = first(filter(qs; kw...))
+            o === nothing && return (create(qs; through_defaults = through_defaults,
+                                            create_params(model_of(qs), kw, something(create_defaults, defaults))...), true)
+            for (k, v) in create_params(model_of(qs), (;), defaults)
+                setproperty!(o, k, v)
+            end
+            (save!(o), false)
         end
-        (save!(o), false)
     end
 end
 

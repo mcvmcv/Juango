@@ -4879,3 +4879,45 @@ end
     @test pks(gp.favorite_authors) == pks(gp.dpauthorwithage.favorite_authors) == Set([r1.pk, r2.pk, r3.pk, r4.pk])
   end
 end
+
+@testset "django prefetch_related: MultiDbTests" begin
+    # a second database: prefetches stay on the database the objects came from
+    other = joinpath(mktempdir(), "other.sqlite3")
+    old = get(settings, :DATABASES, nothing)
+    try
+        configure!(DATABASES = Dict("default" => settings.DATABASE, "other" => other))
+        redirect_stdout(devnull) do
+            Juango.with_db(() -> Juango.sync_models!([DpBook, DpAuthor, through(DpBook, :authors), DpAuthorWithAge, DpBookWithYear,
+                                                       through(DpBookWithYear, :aged_authors)]), "other")
+        end
+        nq(f) = Juango.with_db(() -> Juango.count_queries(f), "other")
+        B, A = using_db(objects(DpBook), "other"), using_db(objects(DpAuthor), "other")
+        b1, b2, b3, b4 = (using_db(() -> create(DpBook; title = t), "other") for t in ("Poems", "Jane Eyre", "Wuthering Heights", "Sense and Sensibility"))
+        a1, a2, a3, a4 = (using_db(() -> create(DpAuthor; name = n, first_book = b), "other")
+                          for (n, b) in (("Charlotte", b1), ("Anne", b1), ("Emily", b1), ("Jane", b4)))
+        add!(b1.authors, a1, a2, a3); add!(b2.authors, a1); add!(b3.authors, a3); add!(b4.authors, a4)
+        @test count(objects(DpBook)) == 0                      # (nothing in the default database)
+        r, n = nq(() -> join(["$(b.title) ($(join([a.name for a in b.authors], ", ")))\n" for b in prefetch_related(B, :authors)]))
+        @test r == "Poems (Charlotte, Anne, Emily)\nJane Eyre (Charlotte)\nWuthering Heights (Emily)\nSense and Sensibility (Jane)\n"
+        @test n == 2
+        r, n = nq(() -> join(["$(a.name): $(join([b.title for b in a.books], ", "))\n" for a in prefetch_related(A, :books)]))
+        @test r == "Charlotte: Poems, Jane Eyre\nAnne: Poems\nEmily: Poems, Wuthering Heights\nJane: Sense and Sensibility\n"
+        @test n == 2
+        r, n = nq(() -> join([a.first_book.title for a in prefetch_related(A, :first_book)], ", "))
+        @test r == "Poems, Poems, Poems, Sense and Sensibility" && n == 2
+        # a Prefetch queryset without a database follows the objects'
+        r, n = nq(() -> [length(collect(b.first_time_authors)) for b in prefetch_related(B, Prefetch(:first_time_authors; queryset = objects(DpAuthor)))])
+        @test r == [3, 0, 0, 1] && n == 2
+        # multi-table parent and child links
+        bw = using_db(() -> create(DpBookWithYear; title = "Verse", published_year = 2010), "other")
+        using_db(() -> create(DpAuthorWithAge; name = "Jane2", first_book = bw, age = 50), "other")
+        using_db(() -> create(DpAuthorWithAge; name = "Tom", first_book = bw, age = 49), "other")
+        AA = using_db(objects(DpAuthorWithAge), "other")
+        r, n = nq(() -> join([a.dpauthor_ptr.name for a in prefetch_related(AA, :dpauthor_ptr)], ", ")); @test r == "Jane2, Tom" && n == 2
+        AP = filter(A; name__in = ["Jane2", "Tom"])          # (the child link is the parent's)
+        r, n = nq(() -> join([string(a.dpauthorwithage.age) for a in prefetch_related(AP, :dpauthorwithage)], ", ")); @test r == "50, 49" && n == 2
+    finally
+        configure!(DATABASES = old)
+        Juango.close_connection!("other")
+    end
+end
