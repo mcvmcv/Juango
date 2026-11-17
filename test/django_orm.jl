@@ -2934,3 +2934,79 @@ end
     @test [i.iname for i in get(prefetch_related(objects(DtRecipe), :ingredients); rname = "curry").ingredients] == ["potato", "tomato"]
   end
 end
+
+# --- tests/select_related ---------------------------------------------------------------------------------
+@model struct DsDomain;  name = CharField(max_length = 50); Meta(table = "ds_domain"); end
+@model struct DsKingdom; name = CharField(max_length = 50); domain = ForeignKey(DsDomain; on_delete = :CASCADE, related_name = :kingdom); Meta(table = "ds_kingdom"); end
+@model struct DsPhylum;  name = CharField(max_length = 50); kingdom = ForeignKey(DsKingdom; on_delete = :CASCADE, related_name = :phylum); Meta(table = "ds_phylum"); end
+@model struct DsKlass;   name = CharField(max_length = 50); phylum = ForeignKey(DsPhylum; on_delete = :CASCADE, related_name = :klass); Meta(table = "ds_klass"); end
+@model struct DsOrder;   name = CharField(max_length = 50); klass = ForeignKey(DsKlass; on_delete = :CASCADE, related_name = :order); Meta(table = "ds_order"); end
+@model struct DsFamily;  name = CharField(max_length = 50); order = ForeignKey(DsOrder; on_delete = :CASCADE, related_name = :family); Meta(table = "ds_family"); end
+@model struct DsGenus;   name = CharField(max_length = 50); family = ForeignKey(DsFamily; on_delete = :CASCADE, related_name = :genus); Meta(table = "ds_genus"); end
+@model struct DsSpecies; name = CharField(max_length = 50); genus = ForeignKey(DsGenus; on_delete = :CASCADE, related_name = :species_set); Meta(table = "ds_species"); end
+@model struct DsHybridSpecies
+    name = CharField(max_length = 50)
+    parent_1 = ForeignKey(DsSpecies; on_delete = :CASCADE, related_name = :child_1)
+    parent_2 = ForeignKey(DsSpecies; on_delete = :CASCADE, related_name = :child_2)
+    Meta(table = "ds_hybridspecies")
+end
+redirect_stdout(devnull) do
+    ms = [DsDomain, DsKingdom, DsPhylum, DsKlass, DsOrder, DsFamily, DsGenus, DsSpecies, DsHybridSpecies]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django select_related: SelectRelatedTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    models = [DsDomain, DsKingdom, DsPhylum, DsKlass, DsOrder, DsFamily, DsGenus, DsSpecies]
+    parents = [nothing, :domain, :kingdom, :phylum, :klass, :order, :family, :genus]
+    function create_tree(s)
+        parent = nothing
+        for (name, M, pf) in zip(split(s), models, parents)
+            obj = something(first(filter(M; name = name)), M(name = name))
+            pf === nothing || setproperty!(obj, pf, parent)
+            save!(obj); parent = obj
+        end
+    end
+    create_tree("Eukaryota Animalia Anthropoda Insecta Diptera Drosophilidae Drosophila melanogaster")
+    create_tree("Eukaryota Animalia Chordata Mammalia Primates Hominidae Homo sapiens")
+    create_tree("Eukaryota Plantae Magnoliophyta Magnoliopsida Fabales Fabaceae Pisum sativum")
+    create_tree("Eukaryota Fungi Basidiomycota Homobasidiomycatae Agaricales Amanitacae Amanita muscaria")
+    fams = ["Amanitacae", "Drosophilidae", "Fabaceae", "Hominidae"]
+    # test_access_fks_without/with_select_related
+    r, n = nq(() -> get(DsSpecies; name = "melanogaster").genus.family.order.klass.phylum.kingdom.domain.name)
+    @test r == "Eukaryota" && n == 8
+    r, n = nq(() -> get(select_related(objects(DsSpecies), "genus__family__order__klass__phylum__kingdom__domain"); name = "sapiens").genus.family.order.klass.phylum.kingdom.domain.name)
+    @test r == "Eukaryota" && n == 1
+    # test_list_without/with_select_related, test_list_with_depth, test_certain_fields, test_more_certain_fields
+    r, n = nq(() -> sort([o.genus.family.name for o in objects(DsSpecies)]))
+    @test r == fams && n == 9
+    r, n = nq(() -> sort([o.genus.family.name for o in select_related(objects(DsSpecies), "genus__family")]))
+    @test r == fams && n == 1
+    r, n = nq(() -> sort([o.genus.family.order.name for o in select_related(objects(DsSpecies), "genus__family")]))
+    @test r == ["Agaricales", "Diptera", "Fabales", "Primates"] && n == 5
+    r, n = nq(() -> [o.genus.family.order.name for o in select_related(filter(DsSpecies; genus__name = "Amanita"), "genus__family")])
+    @test r == ["Agaricales"] && n == 2
+    # test_field_traversal
+    r, n = nq(() -> get(order_by(select_related(objects(DsSpecies), "genus__family__order"), "id")[1:1]).genus.family.order.name)
+    @test r == "Diptera" && n == 1
+    # test_none_clears_list, test_chaining
+    @test isempty(select_related(select_related(objects(DsSpecies), "genus"), nothing).related)
+    p1, p2 = collect(order_by(objects(DsSpecies), "id")[1:2])
+    create(DsHybridSpecies; name = "hybrid", parent_1 = p1, parent_2 = p2)
+    r, n = nq(() -> (o = first(select_related(select_related(objects(DsHybridSpecies), "parent_1"), "parent_2")); (o.parent_1.id, o.parent_2.id)))
+    @test r == (p1.id, p2.id) && n == 1
+    # test_reverse_relation_caching
+    sp = first(filter(select_related(objects(DsSpecies), "genus"); name = "melanogaster"))
+    @test nq(() -> sp.genus.name)[2] == 0
+    r, n = nq(() -> first(sp.genus.species_set).name)
+    @test r == "melanogaster" && n == 1
+    # test_select_related_after_values(_list)
+    @test tr(() -> select_related(values(objects(DsSpecies), :name), "genus")) isa ArgumentError
+    @test tr(() -> select_related(values_list(objects(DsSpecies), :name), "genus")) isa ArgumentError
+    # SelectRelatedValidationTests: not a relation, a reverse foreign key
+    @test tr(() -> select_related(objects(DsSpecies), "name")) isa Exception
+    @test tr(() -> select_related(objects(DsGenus), "species_set")) isa Exception
+  end
+end

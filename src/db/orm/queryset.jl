@@ -114,6 +114,8 @@ Fetch the objects behind forward foreign keys in the same query (with JOINs), so
 """
 function select_related(@nospecialize(qs::QuerySet), paths...)
     T = model_of(qs)
+    qs.values_fields === nothing || throw(ArgumentError("select_related() can't follow values() or values_list()"))
+    paths == (nothing,) && return chain(qs; related = Vector{Symbol}[])      # select_related(qs, nothing) clears, as Django's None
     rel = copy(qs.related)
     for p in paths
         segs = Symbol.(split(string(p), "__"))
