@@ -65,8 +65,17 @@ end
 "Whether anything is connected at all (no allocation: for signals sent very often, such as post_init)."
 any_receivers(sig::Signal) = !isempty(sig.receivers)
 live_receivers(sig::Signal, sender) = lock(() -> [r[2] for r in sig.receivers if r[3] === nothing || r[3] === sender], sig.lock)
+"""
+    receiver_active(receiver, sender) -> Bool
+
+Whether a connected receiver currently wants signals from `sender` (default: always). A receiver
+that is usually idle (contrib undo's, outside `recording`) defines a method returning `false`
+then, so `has_receivers` doesn't count it and the ORM can take its quick paths (a delete in one
+statement, an update without reading the keys first). It is still called if a signal is sent.
+"""
+receiver_active(@nospecialize(receiver), @nospecialize(sender)) = true
 "Whether any receiver would get a signal from `sender` (lets callers skip expensive work)."
-has_receivers(sig::Signal, sender) = !isempty(live_receivers(sig, sender))
+has_receivers(sig::Signal, sender) = lock(() -> any(r -> (r[3] === nothing || r[3] === sender) && receiver_active(r[2], sender), sig.receivers), sig.lock)
 
 """
     send(signal, sender; kwargs...) -> Vector{Pair{receiver, result}}

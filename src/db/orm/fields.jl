@@ -63,6 +63,7 @@ mutable struct Field
     to_field::Union{Nothing,Symbol}       # ForeignKey: the related model's unique field it stores (default: its id, #220)
     primary_key::Bool                     # the model's primary key, instead of an automatic id (#221)
     through_fields::Union{Nothing,Tuple{Symbol,Symbol}}   # ManyToManyField: the through model's keys to the owner and the target
+    db_constraint::Bool                   # ForeignKey: create the FOREIGN KEY constraint (false: the relation without one)
     att::Symbol         # attname for the name in `attfor` (see `attname`)
     col::String         # string(att): the column name
     attfor::Symbol      # the name `att` and `col` were worked out for
@@ -240,7 +241,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                unique_for_year = nothing, template_name = nothing, related_query_name = nothing, error_messages = nothing,
                min_value = nothing, max_value = nothing, step_size = nothing, min_length = nothing,
                input_formats = nothing, localize::Bool = false, db_collation = nothing, db_column = nothing, to_field = nothing,
-               primary_key::Bool = false, through_fields = nothing)
+               primary_key::Bool = false, through_fields = nothing, db_constraint::Bool = true)
     required === nothing || (blank = !required)
     # form fields: the date formats to accept, and numbers typed in the language's format ("1.234,5")
     if input_formats !== nothing || localize
@@ -273,7 +274,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           db_collation === nothing ? nothing : string(db_collation), db_column === nothing ? nothing : string(db_column),
           to_field === nothing || to_field in (:id, :pk, "id", "pk") ? nothing : Symbol(to_field),
           primary_key, through_fields === nothing ? nothing : (Symbol(through_fields[1]), Symbol(through_fields[2])),
-          field_att(kind, :_), string(field_att(kind, :_)), :_)
+          db_constraint, field_att(kind, :_), string(field_att(kind, :_)), :_)
 end
 
 """
@@ -442,6 +443,8 @@ DurationField(; kw...) = Field(:duration; kw...)
 `on_delete` is one of `:CASCADE`, `:SET_NULL`, `:PROTECT`, `:DO_NOTHING`.
 `to_field = :barcode` stores the related row's `barcode` (a unique field) instead of its id, as
 Django's `to_field`: `filter(Well; plate = "P-0001")` then compares barcodes.
+`db_constraint = false` (as Django's) creates no FOREIGN KEY constraint: the column may hold keys of
+rows that don't exist (a legacy table, rows deleted elsewhere); joins and lookups work as usual.
 """
 function ForeignKey(to; on_delete = :CASCADE, kw...)
     f = Field(:fk; related = to, on_delete = on_delete, db_index = true, kw...)

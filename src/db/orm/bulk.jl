@@ -476,7 +476,7 @@ Base.@nospecializeinfer function deletion_closure!(seen::IdDict{Any,Set{Any}}, r
     for C in child_models(T)
         deletion_closure!(seen, restricts, C, collect(values_list(filter(base_objects(C); id__in = v), :id; flat = true)))
     end
-    for (_, M, f) in reverse_relations(T)
+    for (_, M, f) in deletion_referrers(T)
         rel = filter(base_objects(M), referrers_q(f, v))
         f.on_delete === :CASCADE ? deletion_closure!(seen, restricts, M, row_keys(rel)) :
             f.on_delete === :RESTRICT && push!(restricts, (T, M, f, rel))
@@ -527,14 +527,17 @@ Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector
     for C in child_models(T)        # rows of subclasses that extend these rows
         delete_ids!(C, collect(values_list(filter(base_objects(C); id__in = ids), :id; flat = true)))
     end
-    for (_, M, f) in reverse_relations(T)
+    for (_, M, f) in deletion_referrers(T)
+        f.on_delete === :DO_NOTHING && continue
         rel = filter(base_objects(M), referrers_q(f, ids))
         if f.on_delete === :CASCADE || f.on_delete === :RESTRICT    # (restricted rows were checked: they go too)
             delete_ids!(M, row_keys(rel))
         elseif f.on_delete === :SET_NULL
             update!(rel; Symbol(attname(f)) => nothing)
         elseif f.on_delete === :SET_DEFAULT || f.on_delete isa OnDeleteSet
-            update!(rel; Symbol(attname(f)) => on_delete_value(f))
+            # a callable default is called only when some row needs it (it may create the row it returns)
+            lazy = (f.on_delete isa OnDeleteSet ? f.on_delete.value : f.default) isa Function
+            (!lazy || exists(rel)) && update!(rel; Symbol(attname(f)) => on_delete_value(f))
         elseif f.on_delete === :PROTECT
             exists(rel) && throw(ProtectedError("cannot delete $(nameof(T)) objects because they are referenced through protected foreign key $(nameof(M)).$(f.name)", rel, T))
         end
@@ -576,10 +579,37 @@ Base.@nospecializeinfer function delete_composite!(@nospecialize(T::Type), keys:
     n
 end
 
+"""
+Whether deleting `T`'s rows is one DELETE (Django's fast delete): nothing refers to them that needs
+handling (keys with any on_delete but DO_NOTHING, generic relations, foreign objects, multi-table
+children or parents) and no delete or write signal has receivers.
+"""
+Base.@nospecializeinfer function fast_deletable(@nospecialize(T::Type))
+    C = concrete_model(T)
+    is_composite(C) && return false
+    table_parent(C) === nothing && isempty(child_models(C)) && isempty(generic_relations(C)) || return false
+    isempty(reverse_foreign_objects(C)) || return false
+    all(r -> r[3].on_delete === :DO_NOTHING, deletion_referrers(C)) || return false
+    !any(s -> has_receivers(s, C), (pre_delete, post_delete, pre_write, post_write))
+end
+
 "Delete all matching rows (with `on_delete` handling for related objects). Returns the count."
 # (a sliced queryset is refused, as Django: "Cannot use 'limit' or 'offset' with delete()")
-Base.@nospecializeinfer Base.delete!(@nospecialize(qs::QuerySet)) =
-    (assert_unsliced(qs, "delete"); in_db(() -> atomic(() -> delete_rows!(model_of(qs), row_keys(qs))), qs, true))
+Base.@nospecializeinfer function Base.delete!(@nospecialize(qs::QuerySet))
+    assert_unsliced(qs, "delete")
+    qs.values_fields === nothing || throw(ArgumentError("delete() can't follow values() or values_list()"))
+    qs.distinct_fields === nothing || isempty(qs.distinct_fields) || throw(ArgumentError("delete() can't follow distinct(fields...)"))
+    in_db(qs, true) do
+        T = model_of(qs)
+        qs.isnone && return 0
+        if fast_deletable(T)                   # one statement: DELETE ... WHERE id IN (the query's ids)
+            meta = modelmeta(concrete_model(T))
+            sub, sps = select_sql(qs; columns = pk_select(meta.table, T), ordered = false)
+            return execute_changes("DELETE FROM $(qname(meta.table)) WHERE $(qname("id")) IN ($(in_subquery(backend(), sub)))", sps)
+        end
+        atomic(() -> delete_rows!(T, row_keys(qs)); savepoint = false)
+    end
+end
 
 Base.show(io::IO, qs::QuerySet{T}) where {T} = print(io, "<QuerySet{", nameof(T), "}>")
 Base.@nospecializeinfer function Base.show(io::IO, ::MIME"text/plain", @nospecialize(qs::QuerySet))

@@ -544,6 +544,26 @@ Base.@nospecializeinfer function compute_reverse_relations(@nospecialize(T::Type
 end
 
 """
+The foreign keys a deletion of `T`'s rows has to deal with: those pointing at `T`'s concrete model or
+any proxy of it (`FooImage.my_image` to the proxy `Image` refers to `File`'s rows), or at a
+multi-table ancestor's rows through `T`. (`reverse_relations` gives a model's own accessors.)
+"""
+Base.@nospecializeinfer deletion_referrers(@nospecialize(T::Type)) = cached_relations(compute_deletion_referrers, :delref, T)
+Base.@nospecializeinfer function compute_deletion_referrers(@nospecialize(T::Type))
+    out = Tuple{Symbol,Any,Field}[]
+    C = concrete_model(T)
+    for M in MODEL_LIST
+        (modelmeta(M).proxy || !model_in_use(M)) && continue
+        for f in modelmeta(M).fields
+            f.kind === :fk || continue
+            concrete_model(related_model(f)) === C || continue
+            push!(out, (reverse_name(f), M, f))
+        end
+    end
+    out
+end
+
+"""
 The stored value of a concrete field (by attribute name), loading the object's deferred
 fields (see `only`/`defer`) with one query if it isn't loaded yet.
 """

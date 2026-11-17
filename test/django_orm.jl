@@ -3984,3 +3984,251 @@ end
     @test get(DyEmployee; pk = s.pk).employee_num != 99
   end
 end
+
+# --- tests/delete_regress ---------------------------------------------------------------------------------
+@model struct DzAward
+    name = CharField(max_length = 25)
+    object_id = PositiveIntegerField()
+    content_type = ForeignKey(ContentType; on_delete = :CASCADE)
+    content_object = GenericForeignKey()
+    Meta(table = "dz_award")
+end
+@model struct DzAwardNote
+    award = ForeignKey(DzAward; on_delete = :CASCADE, related_name = :notes)
+    note = CharField(max_length = 100)
+    Meta(table = "dz_awardnote")
+end
+@model struct DzPerson
+    name = CharField(max_length = 25)
+    awards = GenericRelation(:DzAward)
+    Meta(table = "dz_person")
+end
+@model struct DzToy
+    name = CharField(max_length = 50)
+    Meta(table = "dz_toy")
+end
+@model struct DzChild
+    name = CharField(max_length = 50)
+    toys = ManyToManyField(DzToy; through = :DzPlayedWith, related_name = :children)
+    Meta(table = "dz_child")
+end
+@model struct DzBook
+    pagecount = IntegerField()
+    owner = ForeignKey(DzChild; on_delete = :CASCADE, null = true, related_name = :books)
+    Meta(table = "dz_book")
+end
+@model struct DzPlayedWith
+    child = ForeignKey(DzChild; on_delete = :CASCADE, related_name = :played)
+    toy = ForeignKey(DzToy; on_delete = :CASCADE, related_name = :played)
+    date = DateField(db_column = "date_col")
+    Meta(table = "dz_playedwith")
+end
+@model struct DzPlayedWithNote
+    played = ForeignKey(DzPlayedWith; on_delete = :CASCADE, related_name = :notes)
+    note = TextField()
+    Meta(table = "dz_playedwithnote")
+end
+@model struct DzContact
+    label = CharField(max_length = 100)
+    Meta(table = "dz_contact")
+end
+@model struct DzEmail <: DzContact
+    email_address = EmailField(max_length = 100)
+    Meta(table = "dz_email")
+end
+@model struct DzResearcher
+    contacts = ManyToManyField(DzContact; related_name = :research_contacts)
+    primary_contact = ForeignKey(DzContact; on_delete = :SET_NULL, null = true, related_name = :primary_contacts)
+    secondary_contact = ForeignKey(DzContact; on_delete = :SET_NULL, null = true, related_name = :secondary_contacts)
+    Meta(table = "dz_researcher")
+end
+@model struct DzFood
+    name = CharField(max_length = 20, unique = true)
+    Meta(table = "dz_food")
+end
+@model struct DzEaten
+    food = ForeignKey(DzFood; on_delete = :CASCADE, to_field = :name, related_name = :eaten)
+    meal = CharField(max_length = 20)
+    Meta(table = "dz_eaten")
+end
+@model struct DzPolicy
+    policy_number = CharField(max_length = 10, default = "")
+    Meta(table = "dz_policy")
+end
+@model struct DzVersion
+    policy = ForeignKey(DzPolicy; on_delete = :CASCADE, related_name = :versions)
+    Meta(table = "dz_version")
+end
+@model struct DzLocation
+    version = ForeignKey(DzVersion; on_delete = :SET_NULL, blank = true, null = true, related_name = :locations)
+    Meta(table = "dz_location")
+end
+@model struct DzItem
+    version = ForeignKey(DzVersion; on_delete = :CASCADE, related_name = :items)
+    location = ForeignKey(DzLocation; on_delete = :SET_NULL, blank = true, null = true, related_name = :items)
+    location_value = ForeignKey(DzLocation; on_delete = SET(42), default = 1, db_constraint = false, related_name = :items_value)
+    Meta(table = "dz_item")
+end
+@model struct DzFile
+    Meta(table = "dz_file")
+end
+@model struct DzImage <: DzFile
+    Meta(proxy = true)
+end
+@model struct DzPhoto <: DzImage
+    Meta(proxy = true)
+end
+@model struct DzFooImage
+    my_image = ForeignKey(DzImage; on_delete = :CASCADE, related_name = :foo_images)
+    Meta(table = "dz_fooimage")
+end
+@model struct DzFooFile
+    my_file = ForeignKey(DzFile; on_delete = :CASCADE, related_name = :foo_files)
+    Meta(table = "dz_foofile")
+end
+@model struct DzFooPhoto
+    my_photo = ForeignKey(DzPhoto; on_delete = :CASCADE, related_name = :foo_photos)
+    Meta(table = "dz_foophoto")
+end
+@model struct DzFooFileProxy <: DzFooFile
+    Meta(proxy = true)
+end
+@model struct DzOrgUnit
+    name = CharField(max_length = 64, unique = true)
+    Meta(table = "dz_orgunit")
+end
+@model struct DzLogin
+    description = CharField(max_length = 32)
+    orgunit = ForeignKey(DzOrgUnit; on_delete = :CASCADE, related_name = :logins)
+    Meta(table = "dz_login")
+end
+@model struct DzHouse
+    address = CharField(max_length = 32)
+    Meta(table = "dz_house")
+end
+@model struct DzOrderedPerson
+    name = CharField(max_length = 32)
+    lives_in = ForeignKey(DzHouse; on_delete = :CASCADE, related_name = :people)
+    Meta(table = "dz_orderedperson", ordering = ["name"])
+end
+dz_best_toy() = get_or_create(DzToy; name = "best")[1].pk
+dz_worst_toy() = get_or_create(DzToy; name = "worst")[1].pk
+@model struct DzCollector
+    best_toy = ForeignKey(DzToy; default = dz_best_toy, on_delete = :SET_DEFAULT, related_name = :toys_best)
+    worst_toy = ForeignKey(DzToy; on_delete = SET(dz_worst_toy), related_name = :bad_toys)
+    Meta(table = "dz_collector")
+end
+redirect_stdout(devnull) do
+    ms = [DzAward, DzAwardNote, DzPerson, DzToy, DzChild, DzBook, DzPlayedWith, DzPlayedWithNote, DzContact, DzEmail,
+          DzResearcher, through(DzResearcher, :contacts), DzFood, DzEaten, DzPolicy, DzVersion, DzLocation, DzItem,
+          DzFile, DzFooImage, DzFooFile, DzFooPhoto, DzOrgUnit, DzLogin, DzHouse, DzOrderedPerson, DzCollector]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django delete_regress" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)[2]
+    # DeleteCascadeTests: through a generic relation; through an m2m through model; test_15776
+    person = create(DzPerson; name = "Nelson Mandela")
+    award = create(DzAward; name = "Nobel", content_object = person)
+    create(DzAwardNote; note = "a peace prize", award = award)
+    delete!(person)
+    @test count(objects(DzAward)) == 0 && count(objects(DzAwardNote)) == 0
+    juan = create(DzChild; name = "Juan"); paints = create(DzToy; name = "Paints")
+    played = create(DzPlayedWith; child = juan, toy = paints, date = Dates.today())
+    create(DzPlayedWithNote; played = played, note = "the next Jackson Pollock")
+    delete!(paints)
+    @test count(objects(DzPlayedWith)) == 0 && count(objects(DzPlayedWithNote)) == 0
+    policy = create(DzPolicy; policy_number = "1234"); version = create(DzVersion; policy = policy)
+    location = create(DzLocation; version = version)
+    create(DzItem; version = version, location = location, location_value = location)
+    delete!(policy)
+    @test count(objects(DzItem)) == 0 && count(objects(DzVersion)) == 0
+    # an auto through table referencing a multi-table parent; a to_field key
+    r = create(DzResearcher); email = create(DzEmail; label = "office-email", email_address = "carl@science.edu")
+    add!(r.contacts, email); delete!(email)
+    @test isempty(collect(r.contacts)) && count(objects(DzContact)) == 0
+    apple = create(DzFood; name = "apple"); create(DzEaten; food = apple, meal = "lunch"); delete!(apple)
+    @test !exists(objects(DzFood)) && !exists(objects(DzEaten))
+    # LargeDeleteTests: more rows than a batch, with a post_delete receiver
+    for x in 1:300; create(DzBook; pagecount = x + 100); end
+    noop(args...; kw...) = nothing
+    connect!(post_delete, noop; sender = DzBook)
+    try
+        delete!(objects(DzBook))
+    finally
+        disconnect!(post_delete, noop; sender = DzBook)
+    end
+    @test count(objects(DzBook)) == 0
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    # ProxyDeleteTest: deleting through a proxy reaches everything that refers to the concrete row
+    function create_image()
+        img = save!(DzImage())
+        save!(DzFooImage(my_image = img))
+        save!(DzFooFile(my_file = get(DzFile; pk = img.pk)))
+        img
+    end
+    create_image(); delete!(objects(DzImage))
+    @test (count(objects(DzImage)), count(objects(DzFile)), count(objects(DzFooImage)), count(objects(DzFooFile))) == (0, 0, 0, 0)
+    img = create_image(); save!(DzFooPhoto(my_photo = get(DzPhoto; pk = img.pk))); delete!(objects(DzPhoto))
+    @test (count(objects(DzFile)), count(objects(DzFooPhoto)), count(objects(DzFooFile)), count(objects(DzFooImage))) == (0, 0, 0, 0)
+    create_image(); delete!(objects(DzFile))
+    @test (count(objects(DzImage)), count(objects(DzFooFile)), count(objects(DzFooImage))) == (0, 0, 0)
+    img = create(DzImage); create(DzFooFileProxy; my_file = get(DzFile; pk = img.pk)); delete!(objects(DzImage))
+    @test count(objects(DzFooFileProxy)) == 0
+    # test_19187_values, test_disallowed_delete_distinct_on
+    @test tr(() -> delete!(values(objects(DzImage)))) isa Exception
+    @test tr(() -> delete!(values_list(objects(DzImage), :id))) isa Exception
+    IS_POSTGRES && @test tr(() -> delete!(distinct(objects(DzBook), :id))) isa Exception
+  end
+  port_block() do
+    nq(f) = Juango.count_queries(f)[2]
+    # Ticket19102Tests: a query with a join, annotations, select_related or only(): deleted in one query
+    function logins()
+        o1, o2 = create(DzOrgUnit; name = "o1"), create(DzOrgUnit; name = "o2")
+        create(DzLogin; description = "l1", orgunit = o1), create(DzLogin; description = "l2", orgunit = o2)
+    end
+    l1, l2 = logins()
+    @test nq(() -> delete!(filter(annotate(filter(order_by(objects(DzLogin), "description"); orgunit__name__isnull = false);
+                                           n = Count(:description)); n = 1, pk = l1.pk))) == 1
+    @test !exists(filter(DzLogin; pk = l1.pk)) && exists(filter(DzLogin; pk = l2.pk))
+    delete!(objects(DzLogin)); delete!(objects(DzOrgUnit)); l1, l2 = logins()
+    @test nq(() -> delete!(select_related(order_by(filter(filter(DzLogin; pk = l1.pk); orgunit__name__isnull = false), "description"), :orgunit))) == 1
+    @test !exists(filter(DzLogin; pk = l1.pk)) && exists(filter(DzLogin; pk = l2.pk))
+    delete!(objects(DzLogin)); delete!(objects(DzOrgUnit)); l1, l2 = logins()
+    @test nq(() -> delete!(Juango.only(order_by(filter(filter(DzLogin; pk = l1.pk); orgunit__name__isnull = false), "description"), :description))) == 1
+    @test !exists(filter(DzLogin; pk = l1.pk)) && exists(filter(DzLogin; pk = l2.pk))
+    # DeleteTests: Meta ordering; two keys to one model nullify the right columns; Exists through an m2m
+    h = create(DzHouse; address = "Foo")
+    create(DzOrderedPerson; name = "Jack", lives_in = h); create(DzOrderedPerson; name = "Bob", lives_in = h)
+    delete!(filter(DzOrderedPerson; lives_in__address = "Foo")); @test count(objects(DzOrderedPerson)) == 0
+    c1, c2 = create(DzContact; label = "Contact 1"), create(DzContact; label = "Contact 2")
+    r1 = create(DzResearcher; primary_contact = c1, secondary_contact = c2)
+    r2 = create(DzResearcher; primary_contact = c2, secondary_contact = c1)
+    delete!(c1); refresh!(r1); refresh!(r2)
+    @test r1.primary_contact === nothing && r1.secondary_contact_id == c2.pk
+    @test r2.primary_contact_id == c2.pk && r2.secondary_contact === nothing
+    toy = create(DzToy; name = "Paints"); child = create(DzChild; name = "Juan")
+    create(DzBook; pagecount = 500, owner = child); create(DzPlayedWith; child = child, toy = toy, date = Dates.today())
+    @test nq(() -> delete!(filter(DzBook, Exists(filter(DzBook; pk = OuterRef(:pk), owner__toys = toy.pk))))) == 1
+    @test !exists(objects(DzBook))
+  end
+  port_block() do
+    nq(f) = Juango.count_queries(f)[2]
+    # SetQueryCountTests: SET(42) on a key without a constraint, SET_NULL: three queries
+    policy = create(DzPolicy); version = create(DzVersion; policy = policy)
+    location = create(DzLocation; version = version)
+    item = create(DzItem; version = version, location = location, location_value = location)
+    # (inside a transaction, as Django's test runs: the delete adds no savepoint)
+    atomic() do
+        @test nq(() -> delete!(location)) == 3
+    end
+    item = get(DzItem; pk = item.pk)
+    @test item.location_id === nothing && item.location_value_id == 42      # (no row 42: no constraint to stop it)
+    # SetCallableCollectorDefaultTests
+    create(DzToy; name = "test"); delete!(objects(DzToy)); @test !exists(objects(DzToy))
+  end
+end

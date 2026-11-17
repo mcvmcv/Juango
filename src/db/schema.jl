@@ -216,7 +216,7 @@ function column_state(f::Field)
     gen = f.generated === nothing ? nothing : GeneratedSpec(expr_to_columns(f.model, f.generated[1]), f.generated[2])
     gen === nothing || (d = nothing)
     d !== nothing && f.kind in (:json, :hstore, :array, :intrange, :daterange, :datetimerange, :decimalrange, :uuid) && (d = nothing)  # set by Julia, not the DB
-    ref = f.kind !== :fk ? nothing : f.related === :__user_model__ ? "__user_model__" : modelmeta(related_model(f)).table
+    ref = f.kind !== :fk || !f.db_constraint ? nothing : f.related === :__user_model__ ? "__user_model__" : modelmeta(related_model(f)).table
     f.kind === :fk && is_composite(related_model(f)) && !natural_pk(related_model(f)) &&
         throw(ArgumentError("$(nameof(f.model)).$(f.name): foreign keys to $(nameof(related_model(f))) has a composite primary key; point at it with ForeignObject(...; from_fields = ...)"))
     of = f.kind === :array ? f.related : f.kind === :geometry ? geo_of(f) : f.kind === :fk ? fk_of(related_model(f)) : nothing

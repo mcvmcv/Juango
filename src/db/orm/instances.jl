@@ -331,7 +331,8 @@ Base.@nospecializeinfer function Base.delete!(@nospecialize(obj::Model); db = no
     T = typeof(obj)
     id = obj.id
     id === nothing && error("cannot delete an unsaved $(T)")
-    with_db(() -> atomic(() -> delete_rows!(T, [id])), write_db(obj, db))
+    # nothing to cascade to: one DELETE, no transaction (Django's fast delete)
+    with_db(() -> fast_deletable(T) ? delete_ids!(T, [id]) : atomic(() -> delete_rows!(T, [id]); savepoint = false), write_db(obj, db))
     (getfield(obj, :_data)::Dict{Symbol,Any})[:id] = nothing
     obj
 end

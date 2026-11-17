@@ -148,6 +148,10 @@ function undo_links(@nospecialize(through); action, instance, model, pk_set = no
     end
 end
 
+# outside a recording the receivers do nothing: they don't count as receivers (deletes stay one statement)
+Juango.receiver_active(::typeof(undo_pre_write), @nospecialize(sender)) = sender isa Type && sender <: Model && active_recording(sender) !== nothing
+Juango.receiver_active(::typeof(undo_post_write), @nospecialize(sender)) = sender isa Type && sender <: Model && active_recording(sender) !== nothing
+
 function connect_undo!()
     UNDO_CONNECTED[] && return
     connect!(pre_write, undo_pre_write; dispatch_uid = "juango undo: before writes")
