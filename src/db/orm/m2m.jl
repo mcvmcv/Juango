@@ -147,6 +147,10 @@ Make the relation contain exactly `objs`: only the differences are written, or w
 link is removed and the new ones added (Django's `set(clear=True)`).
 """
 function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}(), bulk::Bool = true, clear::Bool = false)
+    # a lone value is a mistake, not a one-item list (Julia iterates a number or a string): Django's
+    # "'int' object is not iterable", before any link is touched
+    objs isa Union{Number,AbstractString,Symbol,Model,Nothing} &&
+        throw(ArgumentError("set!(relation, objs): objs must be a collection of objects or keys, not $(repr(objs)); use set!(rel, [x])"))
     qs.owner isa ReverseFKOwner && return rev_set!(qs, objs; bulk = bulk, clear = clear)
     o = m2m_owner(qs)
     want = unique(Any[m2m_obj_id(o, x) for x in collect(objs)])

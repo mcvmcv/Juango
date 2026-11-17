@@ -403,6 +403,13 @@ Base.@nospecializeinfer function compute_m2m_relations(@nospecialize(T::Type))
         related_model(f) === T || continue
         push!(out, (f.related_name === nothing ? something(default_related_name(M), Symbol(lowercase(modelmeta(M).name), :_set)) : f.related_name, f, false))
     end
+    # a multi-table child has its parents' relations too (its id is the parent row's id): child.related
+    P = table_parent(T)
+    if P !== nothing
+        for r in m2m_relations(P)
+            any(x -> x[1] === r[1], out) || push!(out, r)
+        end
+    end
     out
 end
 Base.@nospecializeinfer function find_m2m(@nospecialize(T::Type), name)

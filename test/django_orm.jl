@@ -4405,7 +4405,7 @@ end
     end
     # test_null_join_promotion: an INNER JOIN when the filter excludes nulls, a LEFT JOIN otherwise
     bob = create(DwClient; name = "Bob", status = active); jack = create(DwClient; name = "Jack", status = active, state = wa)
-    qs = select_related(filter(DwClient; state = wa), :state)
+    qs = select_related(filter(DwClient; state = wa, name__in = ["Bob", "Jack"]), :state)
     @test [x.pk for x in qs] == [jack.pk]
     @test_broken !occursin("LEFT", first(Juango.select_sql(qs)))   # Django makes it an INNER JOIN (the filter excludes nulls); same rows
     qs = order_by(select_related(filter(DwClient; name__in = ["Bob", "Jack"]), :state), "name")
@@ -4424,5 +4424,98 @@ end
     qc = first(results)
     @test nq(() -> (qc.name, qc.lots_of_text, qc.c_b.lots_of_text, qc.c_a.name, qc.c_b.name)) == 0
     @test (qc.name, qc.lots_of_text, qc.c_b.lots_of_text, qc.c_a.name, qc.c_b.name) == ("c", "lots_of_text_c", "lots_of_text_b", "a", "b")
+  end
+end
+
+# --- tests/m2m_regress ------------------------------------------------------------------------------------
+@model struct DvSelfRefer
+    name = CharField(max_length = 10)
+    references = ManyToManyField(:self)
+    related = ManyToManyField(:self)
+    Meta(table = "dv_selfrefer")
+end
+@model struct DvTag
+    name = CharField(max_length = 10, default = "")
+    Meta(table = "dv_tag")
+end
+@model struct DvTagCollection <: DvTag
+    tags = ManyToManyField(DvTag; related_name = :tag_collections)
+    Meta(table = "dv_tagcollection")
+end
+@model struct DvEntry
+    name = CharField(max_length = 10, default = "")
+    topics = ManyToManyField(DvTag; related_name = :entry_set)
+    related = ManyToManyField(DvTag; related_name = :similar)
+    Meta(table = "dv_entry")
+end
+@model struct DvSelfReferChild <: DvSelfRefer
+    Meta(table = "dv_selfreferchild")
+end
+@model struct DvSelfReferChildSibling <: DvSelfRefer
+    Meta(table = "dv_selfreferchildsibling")
+end
+@model struct DvLine
+    name = CharField(max_length = 100)
+    Meta(table = "dv_line")
+end
+@model struct DvWorksheet
+    code = CharField(primary_key = true, max_length = 100)        # (Django's is named id: #229)
+    lines = ManyToManyField(DvLine; blank = true, related_name = :worksheets)
+    Meta(table = "dv_worksheet")
+end
+@model struct DvPost
+    primary_lines = ManyToManyField(DvLine; related_name = Symbol("+"))
+    secondary_lines = ManyToManyField(DvLine; related_name = Symbol("+"))
+    Meta(table = "dv_post")
+end
+redirect_stdout(devnull) do
+    ms = [DvSelfRefer, through(DvSelfRefer, :references), through(DvSelfRefer, :related), DvTag, DvTagCollection,
+          through(DvTagCollection, :tags), DvEntry, through(DvEntry, :topics), through(DvEntry, :related),
+          DvSelfReferChild, DvSelfReferChildSibling, DvLine, DvWorksheet, through(DvWorksheet, :lines),
+          DvPost, through(DvPost, :primary_lines), through(DvPost, :secondary_lines)]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django m2m_regress: M2MRegressionTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    pks(qs) = [x.pk for x in qs]
+    # two many-to-many fields to the same model keep apart
+    s1, s2, s3 = create(DvSelfRefer; name = "s1"), create(DvSelfRefer; name = "s2"), create(DvSelfRefer; name = "s3")
+    add!(s1.references, s2); add!(s1.related, s3)
+    e1 = create(DvEntry; name = "e1"); t1, t2 = create(DvTag; name = "t1"), create(DvTag; name = "t2")
+    add!(e1.topics, t1); add!(e1.related, t2)
+    @test pks(s1.references) == [s2.pk] && pks(s1.related) == [s3.pk] && pks(e1.topics) == [t1.pk] && pks(e1.related) == [t2.pk]
+    # the error lists the real names, not the through tables' internal ones
+    err = tr(() -> collect(filter(DvSelfRefer; porcupine = "fred")))
+    @test err isa Exception
+    @test last(split(sprint(showerror, err), "Choices are: ")) == "dvselfreferchild, dvselfreferchildsibling, id, name, references, related"
+    # symmetry through multi-table children
+    child = save!(DvSelfReferChild(name = "Hanna")); sib = save!(DvSelfReferChildSibling(name = "Beth"))
+    add!(child.related, sib)
+    @test pks(child.related) == [sib.pk] && pks(sib.related) == [child.pk]
+    # a natural string primary key, saved and deleted with its links
+    w = save!(DvWorksheet(code = "abc")); add!(w.lines, create(DvLine; name = "l")); delete!(w)
+    @test count(objects(through(DvWorksheet, :lines))) == 0
+    # test_create_copy_with_m2m: a copy (pk cleared) gets the same links
+    delete!(objects(DvEntry)); delete!(objects(DvTag))
+    t1 = create(DvTag; name = "t1"); create(DvEntry; name = "e1")
+    entry = first(objects(DvEntry)); set!(entry.topics, [t1])
+    old = collect(entry.topics)
+    entry.pk = nothing; save!(entry); set!(entry.topics, old)
+    entry = get(DvEntry; pk = entry.pk)
+    @test pks(entry.topics) == [t1.pk] && count(objects(DvEntry)) == 2
+    # a many-to-many from a multi-table child to its parent model
+    t2 = create(DvTag; name = "t2"); c1 = create(DvTagCollection; name = "c1")
+    set!(c1.tags, [t1, t2])
+    c1 = get(DvTagCollection; name = "c1")
+    @test Set(pks(c1.tags)) == Set([t1.pk, t2.pk]) && pks(t1.tag_collections) == [c1.pk]
+    # bad data for set! leaves the links alone
+    @test tr(() -> set!(c1.tags, 7)) isa Exception
+    @test pks(order_by(c1.tags, "name")) == [t1.pk, t2.pk]
+    # two forward-only (related_name = "+") fields to one model
+    foo, bar = create(DvLine; name = "foo"), create(DvLine; name = "bar"); post = create(DvPost)
+    add!(post.primary_lines, foo); add!(post.secondary_lines, bar)
+    @test pks(post.primary_lines) == [foo.pk] && pks(post.secondary_lines) == [bar.pk]
   end
 end

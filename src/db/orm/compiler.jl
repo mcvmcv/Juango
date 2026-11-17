@@ -156,11 +156,30 @@ Base.@nospecializeinfer function find_reverse(@nospecialize(T::Type), name)
     nothing
 end
 
-function lookup_error(T, fname)
-    meta = modelmeta(T)
-    names = join(vcat(["id"], [string(x.name) for x in meta.fields], [string(r[1]) for r in reverse_relations(T)]), ", ")
-    LookupError("cannot resolve keyword '$fname' into a field of $T. Choices are: $names")
+"""
+The names a lookup on `T` may start with, sorted as Django lists them: fields (inherited too),
+many-to-many fields, reverse relations by their query names, multi-table children. Hidden ones
+(`related_name = "+"`, auto-created through tables) are left out.
+"""
+function lookup_choices(T)
+    names = Set{String}(["id"])
+    foreach(f -> push!(names, string(f.name)), all_fields(T))
+    for r in m2m_relations(T)
+        f = r[2]
+        !r[3] && f.symmetrical && continue          # a symmetrical self relation has no reverse name
+        n = r[3] ? string(r[1]) : string(something(f.related_query_name, f.related_name, default_related_name(f.model), Symbol(lowercase(modelmeta(f.model).name))))
+        startswith(n, "+") || push!(names, n)
+    end
+    for (rn, M, rf) in reverse_relations(T)
+        startswith(string(rn), "+") && continue
+        push!(names, string(something(rf.related_query_name, rf.related_name === nothing ? default_related_name(M) : nothing,
+                                      Symbol(lowercase(modelmeta(M).name)))))
+    end
+    foreach(C -> push!(names, string(child_accessor(C))), child_models(concrete_model(T)))
+    sort!(collect(names))
 end
+lookup_error(T, fname) =
+    LookupError("cannot resolve keyword '$fname' into a field of $T. Choices are: $(join(lookup_choices(T), ", "))")
 
 """
 The model at the end of the relation path `parts` from `T` (foreign keys, many-to-many and
