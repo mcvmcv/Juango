@@ -3185,3 +3185,171 @@ end
     @test length(collect(prefetch_related(objects(DpPerson), "houses__rooms", Prefetch("houses"; queryset = objects(DpHouse), to_attr = :houses_lst)))) == 2
   end
 end
+
+# --- tests/delete -----------------------------------------------------------------------------------------
+@model struct DdP
+    Meta(table = "dd_p")
+end
+@model struct DdR
+    is_default = BooleanField(default = false)
+    p = ForeignKey(DdP; on_delete = :CASCADE, null = true, related_name = :r_set)
+    Meta(table = "dd_r")
+end
+dd_default_r() = get_or_create(DdR; is_default = true)[1].pk
+@model struct DdRChild <: DdR
+    Meta(table = "dd_rchild")
+end
+@model struct DdA
+    name = CharField(max_length = 30)
+    auto = ForeignKey(DdR; on_delete = :CASCADE, related_name = :auto_set)
+    auto_nullable = ForeignKey(DdR; on_delete = :CASCADE, null = true, related_name = :auto_nullable_set)
+    setvalue = ForeignKey(DdR; on_delete = SET(dd_default_r), related_name = :setvalue)
+    setnull = ForeignKey(DdR; on_delete = :SET_NULL, null = true, related_name = :setnull_set)
+    setdefault = ForeignKey(DdR; on_delete = :SET_DEFAULT, default = dd_default_r, related_name = :setdefault_set)
+    setdefault_none = ForeignKey(DdR; on_delete = :SET_DEFAULT, default = nothing, null = true, related_name = :setnull_nullable_set)
+    cascade = ForeignKey(DdR; on_delete = :CASCADE, related_name = :cascade_set)
+    cascade_nullable = ForeignKey(DdR; on_delete = :CASCADE, null = true, related_name = :cascade_nullable_set)
+    protect = ForeignKey(DdR; on_delete = :PROTECT, null = true, related_name = :protect_set)
+    restrict = ForeignKey(DdR; on_delete = :RESTRICT, null = true, related_name = :restrict_set)
+    donothing = ForeignKey(DdR; on_delete = :DO_NOTHING, null = true, related_name = :donothing_set)
+    child = ForeignKey(DdRChild; on_delete = :CASCADE, related_name = :child)
+    child_setnull = ForeignKey(DdRChild; on_delete = :SET_NULL, null = true, related_name = :child_setnull)
+    cascade_p = ForeignKey(DdP; on_delete = :CASCADE, null = true, related_name = :cascade_p_set)
+    Meta(table = "dd_a")
+end
+@model struct DdB
+    protect = ForeignKey(DdR; on_delete = :PROTECT, related_name = :b_protect)
+    Meta(table = "dd_b")
+end
+@model struct DdB3
+    restrict = ForeignKey(DdR; on_delete = :RESTRICT, related_name = :b3_restrict)
+    Meta(table = "dd_b3")
+end
+@model struct DdDeleteTop
+    Meta(table = "dd_deletetop")
+end
+@model struct DdB1
+    delete_top = ForeignKey(DdDeleteTop; on_delete = :CASCADE, related_name = :b1)
+    Meta(table = "dd_b1")
+end
+@model struct DdB2
+    delete_top = ForeignKey(DdDeleteTop; on_delete = :CASCADE, related_name = :b2)
+    Meta(table = "dd_b2")
+end
+@model struct DdDeleteBottom
+    b1 = ForeignKey(DdB1; on_delete = :RESTRICT, related_name = :bottom)
+    b2 = ForeignKey(DdB2; on_delete = :CASCADE, related_name = :bottom)
+    Meta(table = "dd_deletebottom")
+end
+@model struct DdBase
+    Meta(table = "dd_base")
+end
+@model struct DdRelToBase
+    base = ForeignKey(DdBase; on_delete = :DO_NOTHING, related_name = :rels)
+    Meta(table = "dd_reltobase")
+end
+@model struct DdM
+    m2m = ManyToManyField(DdR; related_name = :m_set)
+    Meta(table = "dd_m")
+end
+redirect_stdout(devnull) do
+    ms = [DdP, DdR, DdRChild, DdA, DdB, DdB3, DdDeleteTop, DdB1, DdB2, DdDeleteBottom, DdBase, DdRelToBase, DdM, through(DdM, :m2m)]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+function dd_create_a(name)
+    a = DdA(name = name)
+    for f in (:auto, :auto_nullable, :setvalue, :setnull, :setdefault, :setdefault_none, :cascade, :cascade_nullable, :protect, :restrict, :donothing)
+        setproperty!(a, f, create(DdR))
+    end
+    a.child = create(DdRChild); a.child_setnull = create(DdRChild)
+    save!(a)
+end
+
+@testset "django delete: OnDeleteTests, DeletionTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    exists_a(n) = exists(filter(DdA; name = n))
+    DEFAULT = dd_default_r()
+    # CASCADE, SET(...), SET_NULL, SET_DEFAULT
+    a = dd_create_a("auto"); delete!(a.auto); @test !exists_a("auto")
+    a = dd_create_a("auto_nullable"); delete!(a.auto_nullable); @test !exists_a("auto_nullable")
+    a = dd_create_a("setvalue"); delete!(a.setvalue); @test get(DdA; pk = a.pk).setvalue.pk == DEFAULT
+    a = dd_create_a("setnull"); delete!(a.setnull); @test get(DdA; pk = a.pk).setnull === nothing
+    a = dd_create_a("setdefault"); delete!(a.setdefault); @test get(DdA; pk = a.pk).setdefault.pk == DEFAULT
+    a = dd_create_a("setdefault_none"); delete!(a.setdefault_none); @test get(DdA; pk = a.pk).setdefault_none === nothing
+    a = dd_create_a("cascade"); delete!(a.cascade); @test !exists_a("cascade")
+    # PROTECT: refused, with the objects in the way; through a cascade too
+    a = dd_create_a("protect")
+    err = tr(() -> delete!(a.protect))
+    @test err isa Juango.ProtectedError && [x.pk for x in err.protected_objects] == [a.pk]
+    b = create(DdB; protect = a.protect)
+    err = tr(() -> delete!(a.protect))
+    @test err isa Juango.ProtectedError && exists(filter(DdR; pk = a.protect_id))
+    delete!(b)
+    pp = create(DdP); r = a.protect; r.p = pp; save!(r)
+    err = tr(() -> delete!(pp))
+    @test err isa Juango.ProtectedError && exists(filter(DdP; pk = pp.pk)) && exists_a("protect")
+    delete!(get(DdA; name = "protect"))
+    # DO_NOTHING: no query for the relation
+    bs = create(DdBase)
+    sqls = String[]
+    Juango.execute_wrapper((exec, sql, ps, ctx) -> (push!(sqls, sql); exec(sql, ps))) do
+        delete!(bs)
+    end
+    @test !any(s -> occursin("dd_reltobase", s), sqls) && count(objects(DdBase)) == 0
+    # multi-table children: cascades up and down
+    child = create(DdRChild); delete!(child); @test !exists(filter(DdR; pk = child.pk))
+    child = create(DdRChild); delete!(get(DdR; pk = child.pk)); @test !exists(filter(DdRChild; pk = child.pk))
+    a = dd_create_a("child"); cid = a.child_id; delete!(a.child)
+    @test !exists_a("child") && !exists(filter(DdR; pk = cid))
+    a = dd_create_a("child2"); cid = a.child_id; delete!(get(DdR; pk = cid))
+    @test !exists_a("child2") && !exists(filter(DdRChild; pk = cid))
+    a = dd_create_a("child_setnull"); cid = a.child_setnull_id; delete!(a.child_setnull)
+    @test !exists(filter(DdR; pk = cid)) && get(DdA; pk = a.pk).child_setnull === nothing
+    a = dd_create_a("child_setnull2"); cid = a.child_setnull_id; delete!(get(DdR; pk = cid))
+    @test !exists(filter(DdRChild; pk = cid)) && get(DdA; pk = a.pk).child_setnull === nothing
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    exists_a(n) = exists(filter(DdA; name = n))
+    # RESTRICT: refused unless the rows in the way go too
+    a = dd_create_a("restrict")
+    err = tr(() -> delete!(a.restrict))
+    @test err isa Juango.RestrictedError && [x.pk for x in err.restricted_objects] == [a.pk]
+    b3 = create(DdB3; restrict = a.restrict)
+    @test tr(() -> delete!(a.restrict)) isa Juango.RestrictedError
+    delete!(b3)
+    pp = create(DdP); r = a.restrict; r.p = pp; save!(r)
+    @test tr(() -> delete!(pp)) isa Juango.RestrictedError
+    c = a.cascade; c.p = pp; save!(c)                     # also referenced through a cascade: can go
+    delete!(pp)
+    @test !exists_a("restrict") && !exists(filter(DdR; pk = a.restrict_id))
+    a = dd_create_a("restrict2"); pp = create(DdP); r = a.restrict; r.p = pp; save!(r); a.cascade_p = pp; save!(a)
+    delete!(pp)
+    @test !exists_a("restrict2") && !exists(filter(DdR; pk = a.restrict_id))
+    # test_restrict_path_cascade_indirect_diamond
+    top = create(DdDeleteTop); b1 = create(DdB1; delete_top = top); b2 = create(DdB2; delete_top = top)
+    bottom = create(DdDeleteBottom; b1 = b1, b2 = b2)
+    err = tr(() -> delete!(b1))
+    @test err isa Juango.RestrictedError && [x.pk for x in err.restricted_objects] == [bottom.pk]
+    @test exists(objects(DdDeleteTop)) && exists(objects(DdB1)) && exists(objects(DdB2)) && exists(objects(DdDeleteBottom))
+    delete!(top)
+    @test !exists(objects(DdDeleteTop)) && !exists(objects(DdB1)) && !exists(objects(DdB2)) && !exists(objects(DdDeleteBottom))
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    # DeletionTests: test_sliced_queryset, test_pk_none, test_m2m, test_bulk, test_instance_update
+    @test tr(() -> delete!(objects(DdM)[1:1])) isa Exception
+    @test tr(() -> delete!(DdM())) isa Exception
+    m = create(DdM); r = create(DdR); add!(m.m2m, r)
+    delete!(r)
+    @test isempty(collect(m.m2m)) && count(objects(through(DdM, :m2m))) == 0
+    r = create(DdR); add!(m.m2m, r); delete!(m)
+    @test count(objects(through(DdM, :m2m))) == 0 && exists(filter(DdR; pk = r.pk))
+    s = create(DdP); for _ in 1:3; create(DdR; p = s); end
+    @test delete!(filter(DdR; p = s)) == 3
+    a = dd_create_a("update"); rr = a.setnull; delete!(rr)
+    @test rr.pk === nothing                                    # (Django sets the deleted object's pk to None)
+    @test delete!(filter(DdM; pk = -1)) == 0
+  end
+end

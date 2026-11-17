@@ -569,8 +569,9 @@ Base.@nospecializeinfer function delete_composite!(@nospecialize(T::Type), keys:
 end
 
 "Delete all matching rows (with `on_delete` handling for related objects). Returns the count."
+# (a sliced queryset is refused, as Django: "Cannot use 'limit' or 'offset' with delete()")
 Base.@nospecializeinfer Base.delete!(@nospecialize(qs::QuerySet)) =
-    in_db(() -> atomic(() -> delete_rows!(model_of(qs), row_keys(qs))), qs, true)
+    (assert_unsliced(qs, "delete"); in_db(() -> atomic(() -> delete_rows!(model_of(qs), row_keys(qs))), qs, true))
 
 Base.show(io::IO, qs::QuerySet{T}) where {T} = print(io, "<QuerySet{", nameof(T), "}>")
 Base.@nospecializeinfer function Base.show(io::IO, ::MIME"text/plain", @nospecialize(qs::QuerySet))
