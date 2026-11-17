@@ -812,8 +812,17 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
             end
         end
     end
+    seen = Set{String}()            # the paths prefetched so far (as their objects are named: to_attr for a last step)
     for p in qs.prefetch
+        # Prefetch("houses"; queryset) after "houses__rooms" would replace the houses the rooms were put on:
+        # Django refuses it ("already seen with a different queryset")
+        p.queryset !== nothing && p.to_attr === nothing && p.path in seen &&
+            throw(ArgumentError("'$(p.path)' lookup was already seen with a different queryset: you may need to adjust the ordering of your lookups"))
         do_prefetch!(objs, p)
+        segs = split(p.path, "__")
+        for i in 1:length(segs)
+            push!(seen, join(i == length(segs) && p.to_attr !== nothing ? vcat(segs[1:end-1], [string(p.to_attr)]) : segs[1:i], "__"))
+        end
     end
     remember_siblings!(objs)
     objs

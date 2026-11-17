@@ -18,8 +18,12 @@ function port_block(f)
     finally
         IS_MYSQL && Juango.execute("SET FOREIGN_KEY_CHECKS = 0")     # rows that refer to rows of their own table (Tag.parent)
         try
-            for T in reverse(PORT_MODELS)
-                Juango.execute("DELETE FROM " * Juango.qname(Juango.modelmeta(T).table))
+            # in one transaction: PostgreSQL's foreign keys are deferred, so tables that refer to each other
+            # (House.main_room, Room.house) can be emptied in any order
+            atomic() do
+                for T in reverse(PORT_MODELS)
+                    Juango.execute("DELETE FROM " * Juango.qname(Juango.modelmeta(T).table))
+                end
             end
         finally
             IS_MYSQL && Juango.execute("SET FOREIGN_KEY_CHECKS = 1")
@@ -3105,5 +3109,79 @@ end
     lists, n = nq(() -> [names(a.favorite_authors) for a in prefetch_related(objects(DpAuthor), :favorite_authors)])
     @test lists == [["Anne"], [], [], []] && n == 2
     @test names(a2.favors_me) == ["Charlotte"]
+  end
+end
+
+@model struct DpHouse
+    name = CharField(max_length = 50)
+    address = CharField(max_length = 255)
+    owner = ForeignKey(:DpPerson; on_delete = :SET_NULL, null = true, related_name = :house_set)
+    main_room = OneToOneField(:DpRoom; on_delete = :SET_NULL, null = true, related_name = :main_room_of)
+    Meta(table = "dp_house", ordering = ["id"])
+end
+@model struct DpRoom
+    name = CharField(max_length = 50)
+    house = ForeignKey(DpHouse; on_delete = :CASCADE, related_name = :rooms)
+    Meta(table = "dp_room", ordering = ["id"])
+end
+@model struct DpPerson
+    name = CharField(max_length = 50)
+    houses = ManyToManyField(DpHouse; related_name = :occupants)
+    Meta(table = "dp_person", ordering = ["id"])
+end
+redirect_stdout(devnull) do
+    ms = [DpPerson, DpHouse, DpRoom, through(DpPerson, :houses)]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django prefetch_related: CustomPrefetchTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    joe, mary = create(DpPerson; name = "Joe"), create(DpPerson; name = "Mary")
+    houses = DpHouse[]
+    for (i, (n, a, owner)) in enumerate((("House 1", "123 Main St", joe), ("House 2", "45 Side St", joe), ("House 3", "6 Downing St", mary), ("house 4", "7 Regents St", mary)))
+        h = create(DpHouse; name = n, address = a, owner = owner)
+        rs = [create(DpRoom; name = r, house = h) for r in ("Dining room", "Lounge", "Kitchen")]
+        h.main_room = rs[1]; save!(h); push!(houses, h)
+        add!(owner.houses, h)
+    end
+    hn(xs) = [h.name for h in xs]
+    # test_m2m / test_reverse_m2m: Prefetch(...) and to_attr give the same as the plain lookup, in as many queries
+    plain, n1 = nq(() -> [hn(p.houses) for p in prefetch_related(objects(DpPerson), :houses)])
+    viap, n2 = nq(() -> [hn(p.houses) for p in prefetch_related(objects(DpPerson), Prefetch("houses"))])
+    lst, n3 = nq(() -> [hn(p.houses_lst) for p in prefetch_related(objects(DpPerson), Prefetch("houses"; to_attr = :houses_lst))])
+    @test plain == viap == lst == [["House 1", "House 2"], ["House 3", "house 4"]] && n1 == n2 == n3 == 2
+    occ, n = nq(() -> [[p.name for p in h.occupants_lst] for h in prefetch_related(objects(DpHouse), Prefetch("occupants"; to_attr = :occupants_lst))])
+    @test occ == [["Joe"], ["Joe"], ["Mary"], ["Mary"]] && n == 2
+    # test_m2m_through_fk: a key, then a many-to-many
+    occ, n = nq(() -> [[p.name for p in r.house.occupants] for r in prefetch_related(objects(DpRoom), Prefetch("house__occupants"))])
+    @test length(occ) == 12 && occ[1] == ["Joe"] && n == 3
+    # test_custom_qs: a filtered queryset under to_attr
+    lst2, n = nq(() -> collect(prefetch_related(objects(DpPerson), Prefetch("houses"; queryset = filter(DpHouse; pk__in = [houses[1].pk, houses[3].pk]), to_attr = :houses_lst))))
+    @test n == 2 && hn(lst2[1].houses_lst) == ["House 1"] && hn(lst2[2].houses_lst) == ["House 3"]
+    # flattened: houses__rooms with to_attr on the last step
+    lst2, n = nq(() -> [[length(h.rooms_lst) for h in p.houses] for p in prefetch_related(objects(DpPerson), Prefetch("houses__rooms"; queryset = objects(DpRoom), to_attr = :rooms_lst))])
+    @test lst2 == [[3, 3], [3, 3]] && n == 3
+    # inner select_related in the Prefetch queryset: no query for the owner
+    owners, n = nq(() -> [[h.owner.name for h in p.houses] for p in prefetch_related(objects(DpPerson), Prefetch("houses"; queryset = select_related(objects(DpHouse), :owner)))])
+    @test owners == [["Joe", "Joe"], ["Mary", "Mary"]] && n == 2
+    # inner prefetch, and a lookup through a to_attr list
+    inner = prefetch_related(objects(DpHouse), Prefetch("rooms"; queryset = filter(DpRoom; pk__in = [houses[1].main_room_id, houses[1].main_room_id + 1]), to_attr = :rooms_lst))
+    lst2, n = nq(() -> collect(prefetch_related(objects(DpPerson), Prefetch("houses"; queryset = filter(inner; pk = houses[1].pk), to_attr = :houses_lst),
+                                                Prefetch("houses_lst__rooms_lst__main_room_of"))))
+    @test n == 4 && length(lst2[1].houses_lst[1].rooms_lst) == 2 && lst2[1].houses_lst[1].rooms_lst[1].main_room_of.pk == houses[1].pk && isempty(lst2[2].houses_lst)
+    # a forward key with a select_related queryset, and with to_attr; one that matches nothing
+    on, n = nq(() -> [r.house.owner.name for r in prefetch_related(objects(DpRoom), Prefetch("house"; queryset = select_related(objects(DpHouse), :owner)))])
+    @test length(on) == 12 && n == 2
+    on, n = nq(() -> [r.house_attr.owner.name for r in prefetch_related(objects(DpRoom), Prefetch("house"; queryset = select_related(objects(DpHouse), :owner), to_attr = :house_attr))])
+    @test length(on) == 12 && n == 2
+    room = first(prefetch_related(objects(DpRoom), Prefetch("house"; queryset = filter(DpHouse; address = "DoesNotExist"), to_attr = :house_attr)))
+    @test room.house_attr === nothing
+    # test_ambiguous: a lookup already prefetched, again with another queryset, is refused
+    @test tr(() -> collect(prefetch_related(objects(DpPerson), "houses__rooms", Prefetch("houses"; queryset = objects(DpHouse))))) isa ArgumentError
+    @test tr(() -> collect(prefetch_related(objects(DpPerson), "houses_lst__rooms", Prefetch("houses"; queryset = objects(DpHouse), to_attr = :houses_lst)))) isa Exception
+    @test length(collect(prefetch_related(objects(DpPerson), "houses__rooms", "houses"))) == 2
+    @test length(collect(prefetch_related(objects(DpPerson), "houses__rooms", Prefetch("houses"; queryset = objects(DpHouse), to_attr = :houses_lst)))) == 2
   end
 end
