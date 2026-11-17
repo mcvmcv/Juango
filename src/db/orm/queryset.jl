@@ -922,6 +922,22 @@ Base.@nospecializeinfer function cached_level(@nospecialize(objs::Vector), name:
     out
 end
 
+"""
+The rows a prefetch loads: `qs` filtered by `q` (the owners' keys), with `annotations`. A sliced
+`qs` (`Prefetch(:authors; queryset = authors[2:end])`) is sliced per owner, as Django 4.2: each row
+is numbered within its owner (`owner`, a lookup path) by `qs`'s ordering, and the slice keeps those
+numbers. The number is left in the rows as `juango_prefetch_rn` (`prefetch_strip!` removes it).
+"""
+Base.@nospecializeinfer function prefetch_rows(@nospecialize(qs::QuerySet), owner, q::Q; annotations...)
+    sliced = qs.limit !== nothing || qs.offset != 0
+    sliced || return isempty(annotations) ? filter(qs, q) : annotate(filter(qs, q); annotations...)
+    base = chain(qs; limit = nothing, offset = 0)
+    w = Window(RowNumber(); partition_by = [F(string(owner))], order_by = order_cleared(qs) ? Any[] : default_order(qs))
+    out = filter(annotate(filter(base, q); annotations..., juango_prefetch_rn = w); juango_prefetch_rn__gt = qs.offset)
+    qs.limit === nothing ? out : filter(out; juango_prefetch_rn__lte = qs.offset + qs.limit)
+end
+prefetch_strip!(rows) = (foreach(r -> delete!((getfield(r, :_data)::Dict{Symbol,Any}), :juango_prefetch_rn), rows); rows)
+
 "Load relation `name` for all `objs` with one query; return the related objects."
 Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), name::Symbol, @nospecialize(qs), to_attr)
     isempty(objs) && return Any[]
@@ -967,7 +983,7 @@ Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), na
     rel === nothing && throw(LookupError("prefetch_related: '$name' is not a relation of $T"))
     rn, M, rf = rel
     ids = [target_value(rf, o) for o in objs]
-    rows = fetch(filter(something(qs, objects(M)), Q(Symbol(attname(rf), "__in") => ids)))
+    rows = prefetch_strip!(fetch(prefetch_rows(something(qs, objects(M)), attname(rf), Q(Symbol(attname(rf), "__in") => ids))))
     groups = Dict{Any,Vector{M}}()
     owner_of = Dict{Any,Any}(target_value(rf, o) => o for o in objs)
     for r in rows
@@ -975,7 +991,8 @@ Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), na
         push!(get!(() -> M[], groups, k), r)
         # each related row points back at its owner (bio.author: no query), as Django sets it
         o = get(owner_of, k, nothing)
-        o === nothing || ((getfield(r, :_cache)::Dict{Symbol,Any})[rf.name] = o)
+        # (unless the row's own queryset prefetched it: Prefetch(:rooms; queryset = prefetch_related(rooms, :house)))
+        o === nothing || haskey((getfield(r, :_cache)::Dict{Symbol,Any}), rf.name) || ((getfield(r, :_cache)::Dict{Symbol,Any})[rf.name] = o)
     end
     for o in objs
         (getfield(o, :_cache)::Dict{Symbol,Any})[something(to_attr, rn)] = PrefetchedList(get(groups, target_value(rf, o), M[]))

@@ -4610,3 +4610,52 @@ end
     @test n == 2
   end
 end
+
+@testset "django prefetch_related: NestedPrefetchTests, PrefetchLimitTests, Ticket19607/21410" begin
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    names(qs) = [x.name for x in qs]
+    # NestedPrefetchTests: a prefetch back to the parent is kept, not overwritten by the owner
+    house = create(DpHouse; name = "Big house", address = "123 Main St"); room = create(DpRoom; name = "Kitchen", house = house)
+    qs = prefetch_related(Juango.only(objects(DpHouse), :name),
+                          Prefetch(:rooms; queryset = prefetch_related(objects(DpRoom), Prefetch(:house; queryset = Juango.only(objects(DpHouse), :address)))))
+    h, n = nq(() -> first(qs)); @test n == 3
+    r, n = nq(() -> first(h.rooms).house.address); @test r == "123 Main St" && n == 0
+    # Ticket19607 / 21410: a key and a reverse set from the same rows; a key and an m2m
+    b1, b2, b3 = create(DpBook; title = "Poems"), create(DpBook; title = "Jane Eyre"), create(DpBook; title = "Wuthering Heights")
+    a1, a2, a3 = create(DpAuthor; name = "Charlotte", first_book = b1), create(DpAuthor; name = "Anne", first_book = b1), create(DpAuthor; name = "Emily", first_book = b2)
+    @test length(collect(prefetch_related(objects(DpAuthor), :first_book, :first_book__first_time_authors))) == 3
+    @test length(collect(prefetch_related(objects(DpAuthor), :first_book, :books))) == 3
+    add!(b1.authors, a1, a2, a3); add!(b2.authors, a1, a3); add!(b3.authors, a2)
+    # PrefetchLimitTests: a sliced queryset limits each object's related rows, not the whole query
+    authors = objects(DpAuthor)                   # Meta ordering: id
+    books, n = nq(() -> collect(prefetch_related(objects(DpBook), Prefetch(:authors; queryset = authors),
+                                                 Prefetch(:authors; queryset = authors[2:end], to_attr = :authors_sliced))))
+    @test n == 3
+    for b in books
+        @test [x.pk for x in b.authors_sliced] == [x.pk for x in collect(b.authors)[2:end]]
+    end
+    bq = order_by(objects(DpBook), "title")
+    auths, n = nq(() -> collect(prefetch_related(objects(DpAuthor), Prefetch(:books; queryset = bq),
+                                                 Prefetch(:books; queryset = bq[2:2], to_attr = :books_sliced))))
+    @test n == 3
+    for a in auths
+        all_ = collect(a.books)
+        @test [x.pk for x in a.books_sliced] == [x.pk for x in all_[2:min(2, length(all_))]]
+    end
+    aq = order_by(objects(DpAuthor), "-name")
+    books, n = nq(() -> collect(prefetch_related(objects(DpBook), Prefetch(:first_time_authors; queryset = aq),
+                                                 Prefetch(:first_time_authors; queryset = aq[2:end], to_attr = :fta_sliced))))
+    @test n == 3
+    for b in books
+        @test [x.pk for x in b.fta_sliced] == [x.pk for x in collect(b.first_time_authors)[2:end]]
+    end
+    books = collect(prefetch_related(objects(DpBook), Prefetch(:authors; queryset = reverse(authors)),
+                                     Prefetch(:authors; queryset = reverse(authors)[2:end], to_attr = :authors_sliced)))
+    for b in books
+        @test [x.pk for x in b.authors_sliced] == [x.pk for x in collect(b.authors)[2:end]]
+    end
+    books = collect(prefetch_related(objects(DpBook), Prefetch(:authors; queryset = order_by(authors)[1:1], to_attr = :authors_sliced)))
+    @test all(b -> length(b.authors_sliced) == min(1, count(b.authors)), books)
+  end
+end

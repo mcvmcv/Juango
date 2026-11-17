@@ -318,7 +318,7 @@ function prefetch_m2m!(objs::Vector, name, f::Field, forward::Bool, qs, to_attr)
     # one query, as Django: the related rows joined to the through table, each with the owner it's linked to
     step1, step2 = m2m_path(f, !forward)
     path = fk_to_field(mine) === nothing ? Symbol(step1, "__", step2) : Symbol(step1, "__", step2, "__id")
-    targets = fetch(annotate(filter(something(qs, objects(Other)), Q(Symbol(path, "__in") => ids)); __prefetch_owner = F(string(path))))
+    targets = prefetch_strip!(fetch(prefetch_rows(something(qs, objects(Other)), path, Q(Symbol(path, "__in") => ids); __prefetch_owner = F(string(path)))))
     groups = Dict{Any,Vector{Other}}()
     for t in targets
         mid = pop!((getfield(t, :_data)::Dict{Symbol,Any}), :__prefetch_owner, nothing)
