@@ -17,6 +17,15 @@ Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, 
     T = typeof(obj)
     only = update_fields === nothing ? nothing : update_field_set(T, update_fields)
     only !== nothing && isempty(only) && return obj
+    # an object loaded with only()/defer() saves the fields it has (loaded or set since), as Django's
+    # save(update_fields = <loaded fields>): tables with none of them aren't written
+    if only === nothing && (getfield(obj, :_data)::Dict{Symbol,Any})[:id] !== nothing && !is_composite(T)
+        data_ = getfield(obj, :_data)::Dict{Symbol,Any}
+        if any(f -> !haskey(data_, attname(f)), all_fields(T))
+            only = Set{Symbol}(attname(f) for f in all_fields(T) if haskey(data_, attname(f)))
+            isempty(only) && return obj
+        end
+    end
     if only !== nothing && touch_auto_now          # updated_at is stamped with the listed fields
         foreach(f -> f.auto_now && f.generated === nothing && push!(only, attname(f)), all_fields(T))
     end
@@ -174,10 +183,12 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
     if only !== nothing
         # only the tables with a listed field; the row must be there
         tables = [M for M in chain_ if any(f -> attname(f) in only, modelmeta(M).fields)]
-        atomic(() -> foreach(M -> update_columns!(M, data, only), tables))
+        # one table: one UPDATE, no transaction around it (as Django)
+        length(tables) == 1 ? update_columns!(tables[1], data, only) :
+            atomic(() -> foreach(M -> update_columns!(M, data, only), tables); savepoint = false)
     else
         length(chain_) == 1 ? save_table!(chain_[1], data, true, fresh) :
-            atomic(() -> foreach(M -> save_table!(M, data, M === chain_[1], fresh), chain_))
+            atomic(() -> foreach(M -> save_table!(M, data, M === chain_[1], fresh), chain_); savepoint = false)
     end
     refresh_computed!(obj)
     refresh_expression_fields!(obj, exprs)

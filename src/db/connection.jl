@@ -876,9 +876,22 @@ connection for the current task; other tasks don't see its changes until it comm
 `durable = true` refuses to run inside another atomic block (Django 3.2), so when it returns
 the work is committed, not just part of an outer transaction that may still roll back. (The
 transactions `rollback_after` opens for tests don't count.)
+
+`savepoint = false` (Django's `atomic(savepoint=False)`): inside another atomic block, run `f`
+without a savepoint of its own. An exception from it marks the enclosing block for rollback
+(`set_rollback!`), so that block can't commit part of `f`'s work. Outside one it's an ordinary
+transaction.
 """
-function atomic(f; db = nothing, durable::Bool = false)
-    db === nothing || return with_db(() -> atomic(f; durable = durable), db)
+function atomic(f; db = nothing, durable::Bool = false, savepoint::Bool = true)
+    db === nothing || return with_db(() -> atomic(f; durable = durable, savepoint = savepoint), db)
+    if !savepoint && !durable && commit_holder().depth > 0
+        return try
+            f()
+        catch
+            set_rollback!(true)
+            rethrow()
+        end
+    end
     st0 = db_state()
     b = st0.backend
     supports_pooling(b) || return lock(DB_LOCK) do         # (the depth is shared: check it holding the lock)

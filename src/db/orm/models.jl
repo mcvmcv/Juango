@@ -134,8 +134,9 @@ function findfield(meta::ModelMeta, name::Symbol)
     for f in meta.fields
         (f.name === name || attname(f) === name) && return f
     end
-    (meta.parent === nothing || meta.proxy) && return nothing
-    findfield(modelmeta(meta.parent), name)      # multi-table inheritance: the parent's fields too
+    meta.parent === nothing && return nothing
+    # multi-table inheritance: the parent's fields too (a proxy of a multi-table child reaches them through it)
+    findfield(modelmeta(meta.parent), name)
 end
 
 "The model that owns `T`'s table (a proxy's concrete model, else `T`)."

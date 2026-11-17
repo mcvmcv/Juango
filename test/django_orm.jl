@@ -3841,3 +3841,146 @@ dc_names(qs) = [x.name for x in qs]
     @test Set(values_list(objects(DcFieldsWithDbColumns), :rank, :name)) == Set([(1, "c"), (2, "d")])
   end
 end
+
+# --- tests/update_only_fields -----------------------------------------------------------------------------
+@model struct DyAccount
+    num = IntegerField()
+    Meta(table = "dy_account")
+end
+@model struct DyPerson
+    name = CharField(max_length = 20)
+    gender = CharField(max_length = 1, choices = [("M", "Male"), ("F", "Female")])
+    pid = IntegerField(null = true, default = nothing)
+    Meta(table = "dy_person")
+end
+@model struct DyProfile
+    name = CharField(max_length = 200)
+    salary = FloatField(default = 1000.0)
+    Meta(table = "dy_profile")
+end
+@model struct DyEmployee <: DyPerson
+    employee_num = IntegerField(default = 0)
+    profile = ForeignKey(DyProfile; on_delete = :SET_NULL, null = true, related_name = :profiles)
+    accounts = ManyToManyField(DyAccount; related_name = :employees, blank = true)
+    Meta(table = "dy_employee")
+end
+@model struct DyProxyEmployee <: DyEmployee
+    Meta(proxy = true)
+end
+redirect_stdout(devnull) do
+    ms = [DyAccount, DyPerson, DyProfile, DyEmployee, through(DyEmployee, :accounts)]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django update_only_fields: UpdateOnlyFieldsTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)[2]
+    # test_update_fields_basic
+    s = create(DyPerson; name = "Sara", gender = "F")
+    s.gender = "M"; s.name = "Ian"; save!(s; update_fields = [:name])
+    s = get(DyPerson; pk = s.pk); @test (s.gender, s.name) == ("F", "Ian")
+    # deferred and only(): saving writes the loaded fields and those set since
+    s = create(DyPerson; name = "Sara", gender = "F", pid = 22)
+    s1 = get(Juango.defer(objects(DyPerson), :gender, :pid); pk = s.pk)
+    s1.name = "Emily"; s1.gender = "M"
+    @test nq(() -> save!(s1)) == 1
+    s2 = get(DyPerson; pk = s1.pk); @test (s2.name, s2.gender, s2.pid) == ("Emily", "M", 22)
+    s = create(DyPerson; name = "Sara", gender = "F")
+    s1 = get(Juango.only(objects(DyPerson), :name); pk = s.pk); s1.name = "Emily"; s1.gender = "M"
+    @test nq(() -> save!(s1)) == 1
+    s2 = get(DyPerson; pk = s1.pk); @test (s2.name, s2.gender) == ("Emily", "M")
+    s = create(DyPerson; name = "Sara", gender = "F", pid = 22)
+    s1 = get(Juango.only(objects(DyPerson), :name); pk = s.pk); s1.name = "Emily"; s1.gender = "M"
+    save!(s1; update_fields = [:pid])
+    s2 = get(DyPerson; pk = s1.pk); @test (s2.name, s2.gender, s2.pid) == ("Sara", "F", 22)
+    s1 = get(Juango.only(objects(DyPerson), :name); pk = s.pk)
+    @test nq(() -> save!(s1)) == 1
+    # signals receive update_fields; an empty list saves nothing and sends nothing
+    p = create(DyPerson; name = "Sara", gender = "F")
+    pre, post = Any[], Any[]
+    rpre(sender; update_fields = nothing, kw...) = push!(pre, update_fields)
+    rpost(sender; update_fields = nothing, kw...) = push!(post, update_fields)
+    connect!(pre_save, rpre; sender = DyPerson); connect!(post_save, rpost; sender = DyPerson)
+    try
+        save!(p; update_fields = [:name])
+        @test length(pre) == 1 && collect(pre[1]) == [:name] && length(post) == 1 && collect(post[1]) == [:name]
+        empty!(pre); empty!(post)
+        @test nq(() -> save!(p; update_fields = Symbol[])) == 0
+        @test isempty(pre) && isempty(post)
+    finally
+        disconnect!(pre_save, rpre; sender = DyPerson); disconnect!(post_save, rpost; sender = DyPerson)
+    end
+    # refused: unknown fields, a bare string, the primary key
+    @test tr(() -> save!(p; update_fields = [:first_name])) isa Exception
+    @test tr(() -> save!(p; update_fields = "name")) isa Exception
+    @test tr(() -> save!(p; update_fields = [:id])) isa Exception
+    # a row deleted meanwhile
+    delete!(filter(DyPerson; pk = p.pk))
+    err = tr(() -> save!(p; update_fields = [:name]))
+    @test err isa Exception && occursin("affect any rows", sprint(showerror, err))
+    # an expression: written when listed, then the value read back
+    obj = create(DyPerson; name = "Valerie", gender = "F", pid = 42)
+    e = F(:pid) + 1
+    obj.pid = e; save!(obj; update_fields = Set([:gender]))
+    @test obj.pid === e
+    save!(obj; update_fields = Set([:pid]))
+    @test obj.pid == 43 && get(DyPerson; pk = obj.pk).pid == 43
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)[2]
+    boss = create(DyProfile; name = "Boss", salary = 3000); recep = create(DyProfile; name = "Receptionist", salary = 1000)
+    # multi-table inheritance with only()
+    e1 = create(DyEmployee; name = "Sara", gender = "F", employee_num = 1, profile = boss)
+    e1 = get(Juango.only(objects(DyEmployee), :name); pk = e1.pk); e1.name = "Linda"
+    @test nq(() -> save!(e1)) == 1 && get(DyEmployee; pk = e1.pk).name == "Linda"
+    e1 = get(Juango.only(objects(DyEmployee), :profile); pk = e1.pk); e1.profile = recep
+    @test nq(() -> save!(e1)) == 1 && get(DyEmployee; pk = e1.pk).profile_id == recep.pk
+    e1.profile_id = boss.pk
+    @test nq(() -> save!(e1)) == 1 && get(DyEmployee; pk = e1.pk).profile_id == boss.pk
+    # select_related + only: the related object saves what was loaded of it
+    e1 = get(select_related(Juango.only(objects(DyEmployee), :profile__salary), :profile); pk = e1.pk)
+    boss.name = "Clerk"; boss.salary = 1000; save!(boss)
+    @test nq(() -> save!(e1.profile)) == 1
+    rp = get(DyProfile; pk = boss.pk); @test (rp.name, rp.salary) == ("Clerk", 3000.0)
+    # a many-to-many field is refused in update_fields
+    a1, a2 = create(DyAccount; num = 1), create(DyAccount; num = 2); set!(e1.accounts, [a1, a2])
+    @test tr(() -> save!(e1; update_fields = [:accounts])) isa Exception
+    # parent and child fields
+    for E in (DyEmployee, DyProxyEmployee)
+        x = create(E; name = "Sara", gender = "F", employee_num = 1, profile = boss)
+        x.name = "Ian"; x.gender = "M"; save!(x; update_fields = [:name])
+        x2 = get(E; pk = x.pk); @test (x2.name, x2.gender, x2.profile_id) == ("Ian", "F", boss.pk)
+        x2.profile = recep; x2.name = "Sara"; save!(x2; update_fields = [:profile])
+        x3 = get(E; pk = x.pk); @test (x3.name, x3.profile_id) == ("Ian", recep.pk)
+        x3.profile = boss
+        @test nq(() -> save!(x3; update_fields = [:profile_id])) == 1
+        @test get(E; pk = x.pk).profile_id == boss.pk
+        @test tr(() -> save!(x3; update_fields = [:id])) isa Exception
+    end
+    # test_num_queries_inheritance: one UPDATE per table written
+    s = create(DyEmployee; name = "Sara", gender = "F")
+    s.employee_num = 1; s.name = "Emily"
+    @test nq(() -> save!(s; update_fields = [:employee_num])) == 1
+    s = get(DyEmployee; pk = s.pk); @test (s.employee_num, s.name) == (1, "Sara")
+    s.employee_num = 2; s.name = "Emily"
+    @test nq(() -> save!(s; update_fields = [:name])) == 1
+    s = get(DyEmployee; pk = s.pk); @test (s.name, s.employee_num) == ("Emily", 1)
+    # (two tables: inside a transaction, as Django's test runs, no savepoint around the two UPDATEs)
+    atomic() do
+        @test nq(() -> save!(s; update_fields = [:name, :employee_num])) == 2
+    end
+    # atomic(savepoint = false): an error inside marks the enclosing block for rollback
+    atomic() do
+        try
+            atomic(savepoint = false) do
+                update!(filter(DyEmployee; pk = s.pk); employee_num = 99); error("x")
+            end
+        catch
+        end
+        @test Juango.get_rollback()
+    end
+    @test get(DyEmployee; pk = s.pk).employee_num != 99
+  end
+end

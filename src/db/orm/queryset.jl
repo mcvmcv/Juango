@@ -410,7 +410,7 @@ Base.@nospecializeinfer function where_clause(c::SQLCompiler, @nospecialize(qs::
 end
 
 "Joins and aliased columns for `select_related`; returns (path, model, alias) per related object."
-function related_columns!(c::SQLCompiler, paths)
+function related_columns!(c::SQLCompiler, paths, deferred = Symbol[])
     out = Tuple{Vector{Symbol},Any,String}[]
     cols = String[]
     for path in sort(paths; by = length)
@@ -433,7 +433,9 @@ function related_columns!(c::SQLCompiler, paths)
             any(x -> x[1] == sub, out) && continue
             push!(out, (sub, M, alias))
             push!(cols, "$(qcol(alias, "id")) AS $(qname(alias * "__id"))")
+            pre = join(string.(sub), "__") * "__"
             for g in modelmeta(M).fields
+                Symbol(pre, g.name) in deferred && continue          # only(:profile__salary)
                 push!(cols, "$(qcol(alias, column(g))) AS $(qname(alias * "__" * column(g)))")
             end
             # a model that extends another table: join its parents for the inherited fields
@@ -441,6 +443,7 @@ function related_columns!(c::SQLCompiler, paths)
             while (P = table_parent(A)) !== nothing
                 palias = join!(c, palias, (palias, :__parent), modelmeta(P).table, "id", "id"; left = left)
                 for g in modelmeta(P).fields
+                    Symbol(pre, g.name) in deferred && continue
                     push!(cols, "$(qcol(palias, column(g))) AS $(qname(alias * "__" * column(g)))")
                 end
                 A = P
@@ -541,12 +544,13 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
                 alias = join!(c, alias, (alias, :__parent), modelmeta(P).table, "id", "id"; left = false)
                 pt = modelmeta(P).table
                 for g in modelmeta(P).fields
+                    g.name in qs.deferred && continue
                     push!(sel, "$(qcol(alias, column(g))) AS $(qname("__" * pt * "__" * column(g)))")
                 end
                 A = P
             end
         end
-        related, rcols = related_columns!(c, qs.related)
+        related, rcols = related_columns!(c, qs.related, qs.deferred)
         append!(sel, rcols)
         push!(group, pk_select(c.base, T))
         append!(group, [qcol(a, "id") for (_, _, a) in related])
@@ -746,7 +750,9 @@ Base.@nospecializeinfer function from_prefixed_row(@nospecialize(T::Type), row::
     data = Dict{Symbol,Any}(:id => pk_value(T, id))
     sizehint!(data, length(plan) + 1)
     for (f, key, att) in plan                    # inherited fields too (joined from the parent tables)
-        data[att] = from_db(f, get(row, key, nothing))
+        v = get(row, key, NOTFOUND)
+        v === NOTFOUND && continue               # deferred (only(:rel__field)): loaded on first access
+        data[att] = from_db(f, v)
     end
     T(data, Dict{Symbol,Any}())
 end
@@ -1063,11 +1069,23 @@ Base.@nospecializeinfer Base.last(@nospecialize(T::Type{<:Model})) = last(object
 
 # --- only/defer, distinct, latest/earliest, in_bulk, dates, raw, explain -----------------------
 
+"""
+Check the names given to only/defer: the model's fields, inherited ones included, or a related
+model's (`:profile__salary`, for select_related).
+"""
 function check_deferrable(T, names)
-    own = Set(f.name for f in modelmeta(concrete_model(T)).fields)
     for n in names
         n in (:id, :pk) && throw(ArgumentError("the primary key can't be deferred"))
-        n in own || throw(LookupError("$(nameof(T)) has no field '$n' that can be deferred"))
+        M = T
+        parts = split(string(n), "__")
+        for (i, p) in enumerate(parts)
+            f = findfirst(g -> g.name === Symbol(p), all_fields(M))
+            f === nothing && throw(LookupError("$(nameof(M)) has no field '$p' that can be deferred"))
+            g = all_fields(M)[f]
+            i < length(parts) || break
+            g.kind in (:fk, :o2o) || throw(LookupError("$(nameof(M)).$p isn't a relation (in $n)"))
+            M = related_model(g)
+        end
     end
 end
 
@@ -1097,7 +1115,21 @@ function Base.only(@nospecialize(qs::QuerySet), field::Union{Symbol,AbstractStri
     T = model_of(qs)
     keep = Symbol[Symbol(field); Symbol.(collect(fields))]
     check_deferrable(T, keep)
-    chain(qs; deferred = Symbol[f.name for f in modelmeta(concrete_model(T)).fields if !(f.name in keep)])
+    # only(:profile__salary): the profile key is kept (for the join), and of the profile only salary
+    mine = Set{Symbol}(Symbol(first(split(string(k), "__"))) for k in keep)
+    deferred = Symbol[f.name for f in all_fields(T) if !(f.name in mine)]
+    for k in keep
+        parts = split(string(k), "__")
+        length(parts) > 1 || continue
+        for i in 1:length(parts)-1
+            M = T
+            for p in parts[1:i]; M = related_model(all_fields(M)[findfirst(g -> g.name === Symbol(p), all_fields(M))]); end
+            pre = join(parts[1:i], "__")
+            kept = Set{String}(split(string(x), "__")[i+1] for x in keep if startswith(string(x), pre * "__"))
+            append!(deferred, [Symbol(pre, "__", g.name) for g in all_fields(M) if !(string(g.name) in kept)])
+        end
+    end
+    chain(qs; deferred = unique!(deferred))
 end
 Base.only(@nospecialize(T::Type{<:Model}), field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...) =
     only(objects(T), field, fields...)
