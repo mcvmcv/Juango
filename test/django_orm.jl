@@ -4232,3 +4232,197 @@ end
     create(DzToy; name = "test"); delete!(objects(DzToy)); @test !exists(objects(DzToy))
   end
 end
+
+# --- tests/select_related_regress -------------------------------------------------------------------------
+@model struct DwBuilding
+    name = CharField(max_length = 10)
+    Meta(table = "dw_building")
+end
+@model struct DwDevice
+    building = ForeignKey(DwBuilding; on_delete = :CASCADE, related_name = :device_set)
+    name = CharField(max_length = 10)
+    Meta(table = "dw_device")
+end
+@model struct DwPort
+    device = ForeignKey(DwDevice; on_delete = :CASCADE, related_name = :port_set)
+    port_number = CharField(max_length = 10)
+    Meta(table = "dw_port")
+end
+Base.string(p::DwPort) = string(p.device.name, "/", p.port_number)
+@model struct DwConnection
+    start = ForeignKey(DwPort; on_delete = :CASCADE, related_name = :connection_start, unique = true)
+    finish = ForeignKey(DwPort; on_delete = :CASCADE, related_name = :connection_end, unique = true)   # (Django's end: a Julia keyword)
+    Meta(table = "dw_connection")
+end
+@model struct DwTUser
+    name = CharField(max_length = 200)
+    Meta(table = "dw_tuser")
+end
+@model struct DwPerson
+    user = ForeignKey(DwTUser; on_delete = :CASCADE, unique = true, related_name = :persons)
+    Meta(table = "dw_person")
+end
+@model struct DwOrganizer
+    person = ForeignKey(DwPerson; on_delete = :CASCADE, related_name = :organizers)
+    Meta(table = "dw_organizer")
+end
+@model struct DwStudent
+    person = ForeignKey(DwPerson; on_delete = :CASCADE, related_name = :students)
+    Meta(table = "dw_student")
+end
+@model struct DwClass
+    org = ForeignKey(DwOrganizer; on_delete = :CASCADE, related_name = :classes)
+    Meta(table = "dw_class")
+end
+@model struct DwEnrollment
+    std = ForeignKey(DwStudent; on_delete = :CASCADE, related_name = :enrollments)
+    cls = ForeignKey(DwClass; on_delete = :CASCADE, related_name = :enrollments)
+    Meta(table = "dw_enrollment")
+end
+@model struct DwCountry
+    name = CharField(max_length = 50)
+    Meta(table = "dw_country")
+end
+@model struct DwState
+    name = CharField(max_length = 50)
+    country = ForeignKey(DwCountry; on_delete = :CASCADE, related_name = :states)
+    Meta(table = "dw_state")
+end
+@model struct DwClientStatus
+    name = CharField(max_length = 50)
+    Meta(table = "dw_clientstatus")
+end
+@model struct DwClient
+    name = CharField(max_length = 50)
+    state = ForeignKey(DwState; on_delete = :SET_NULL, null = true, related_name = :clients)
+    status = ForeignKey(DwClientStatus; on_delete = :CASCADE, related_name = :clients)
+    Meta(table = "dw_client")
+end
+@model struct DwSpecialClient <: DwClient
+    value = IntegerField()
+    Meta(table = "dw_specialclient")
+end
+@model struct DwParent
+    name = CharField(max_length = 10)
+    Meta(table = "dw_parent")
+end
+@model struct DwChild <: DwParent
+    value = IntegerField()
+    Meta(table = "dw_child")
+end
+@model struct DwItem
+    name = CharField(max_length = 10)
+    child = ForeignKey(DwChild; on_delete = :SET_NULL, null = true, related_name = :items)
+    Meta(table = "dw_item")
+end
+@model struct DwFowl
+    name = CharField(max_length = 10)
+    Meta(table = "dw_fowl")
+end
+@model struct DwHen <: DwFowl
+    Meta(table = "dw_hen")
+end
+@model struct DwChick <: DwFowl
+    mother = ForeignKey(DwHen; on_delete = :CASCADE, related_name = :chicks)
+    Meta(table = "dw_chick")
+end
+@model struct DwA
+    name = CharField(max_length = 10)
+    lots_of_text = TextField()
+    a_field = CharField(max_length = 10)
+    Meta(table = "dw_a")
+end
+@model struct DwB
+    name = CharField(max_length = 10)
+    lots_of_text = TextField()
+    b_field = CharField(max_length = 10)
+    Meta(table = "dw_b")
+end
+@model struct DwC
+    name = CharField(max_length = 10)
+    lots_of_text = TextField()
+    c_a = ForeignKey(DwA; on_delete = :CASCADE, related_name = :cs)
+    c_b = ForeignKey(DwB; on_delete = :CASCADE, related_name = :cs)
+    is_published = BooleanField(default = false)
+    Meta(table = "dw_c")
+end
+redirect_stdout(devnull) do
+    ms = [DwBuilding, DwDevice, DwPort, DwConnection, DwTUser, DwPerson, DwOrganizer, DwStudent, DwClass, DwEnrollment,
+          DwCountry, DwState, DwClientStatus, DwClient, DwSpecialClient, DwParent, DwChild, DwItem, DwFowl, DwHen, DwChick, DwA, DwB, DwC]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django select_related_regress" begin
+  port_block() do
+    nq(f) = Juango.count_queries(f)[2]
+    # test_regression_7110: two paths to the same tables get their own joins, and no more
+    b = create(DwBuilding; name = "101")
+    d1, d2, d3 = create(DwDevice; name = "router", building = b), create(DwDevice; name = "switch", building = b), create(DwDevice; name = "server", building = b)
+    p1, p2, p3 = create(DwPort; port_number = "4", device = d1), create(DwPort; port_number = "7", device = d2), create(DwPort; port_number = "1", device = d3)
+    c1, c2 = create(DwConnection; start = p1, finish = p2), create(DwConnection; start = p2, finish = p3)
+    qs = order_by(filter(DwConnection; start__device__building = b, finish__device__building = b), "id")
+    @test [(c.id, string(c.start), string(c.finish)) for c in qs] == [(c1.id, "router/4", "switch/7"), (c2.id, "switch/7", "server/1")]
+    qs = order_by(select_related(filter(DwConnection; start__device__building = b, finish__device__building = b),
+                                 :start__device__building, :finish__device__building), "id")
+    @test [(c.id, string(c.start), string(c.finish)) for c in qs] == [(c1.id, "router/4", "switch/7"), (c2.id, "switch/7", "server/1")]
+    @test count(" JOIN ", first(Juango.select_sql(qs))) == 6
+    # test_regression_8106
+    us = create(DwTUser; name = "std"); usp = create(DwPerson; user = us)
+    uo = create(DwTUser; name = "org"); uop = create(DwPerson; user = uo)
+    s = create(DwStudent; person = usp); o = create(DwOrganizer; person = uop); c = create(DwClass; org = o)
+    create(DwEnrollment; std = s, cls = c)
+    e = first(select_related(objects(DwEnrollment), :std, :cls))
+    @test e.std.person.user.name == "std" && e.cls.org.person.user.name == "org"
+    # test_regression_8036: an empty first relation doesn't shift the columns of the next
+    create(DwCountry; name = "Australia"); active = create(DwClientStatus; name = "active")
+    client = create(DwClient; name = "client", status = active)
+    for paths in ((:state, :status), (:state,), (:state__country,), (:state__country, :status), (:status,))
+        @test first(select_related(objects(DwClient), paths...)).status.pk == active.pk
+    end
+    # test_regression_22508: through a reverse relation, the related objects come with the row
+    port = get(select_related(first(objects(DwDevice)).port_set, :device__building))
+    @test nq(() -> port.device.building) == 0
+  end
+  port_block() do
+    nq(f) = Juango.count_queries(f)[2]
+    # test_multi_table_inheritance
+    c1 = create(DwChild; name = "child1", value = 42)
+    i1 = create(DwItem; name = "item1", child = c1); i2 = create(DwItem; name = "item2")
+    items = collect(order_by(select_related(objects(DwItem), :child), "name"))
+    @test [x.pk for x in items] == [i1.pk, i2.pk] && items[1].child.value == 42 && items[1].child.name == "child1" && items[2].child === nothing
+    # test_regression_12851: deferred fields with select_related
+    australia = create(DwCountry; name = "Australia"); active = create(DwClientStatus; name = "active")
+    wa = create(DwState; name = "Western Australia", country = australia)
+    create(DwClient; name = "Brian Burke", state = wa, status = active)
+    burke = get(Juango.defer(select_related(objects(DwClient), :state), :state__name); name = "Brian Burke")
+    @test burke.name == "Brian Burke" && burke.state.name == "Western Australia"
+    create(DwSpecialClient; name = "Troy Buswell", state = wa, status = active, value = 42)
+    for qs in (Juango.defer(select_related(objects(DwSpecialClient), :state), :state__name),
+               Juango.defer(select_related(objects(DwSpecialClient), :state), :value, :state__name),
+               Juango.only(select_related(objects(DwSpecialClient), :state), :name, :state))
+        troy = get(qs; name = "Troy Buswell")
+        @test troy.name == "Troy Buswell" && troy.value == 42 && troy.state.name == "Western Australia"
+    end
+    # test_null_join_promotion: an INNER JOIN when the filter excludes nulls, a LEFT JOIN otherwise
+    bob = create(DwClient; name = "Bob", status = active); jack = create(DwClient; name = "Jack", status = active, state = wa)
+    qs = select_related(filter(DwClient; state = wa), :state)
+    @test [x.pk for x in qs] == [jack.pk]
+    @test_broken !occursin("LEFT", first(Juango.select_sql(qs)))   # Django makes it an INNER JOIN (the filter excludes nulls); same rows
+    qs = order_by(select_related(filter(DwClient; name__in = ["Bob", "Jack"]), :state), "name")
+    rows = collect(qs)
+    @test [x.pk for x in rows] == [bob.pk, jack.pk] && rows[1].state === nothing && rows[2].state.pk == wa.pk
+    @test occursin("LEFT", first(Juango.select_sql(qs)))
+    # test_regression_19870: a key to a multi-table child, with and without select_related
+    hen = create(DwHen; name = "Hen"); create(DwChick; name = "Chick", mother = hen)
+    @test first(objects(DwChick)).mother.name == "Hen" && first(select_related(objects(DwChick), :mother)).mother.name == "Hen"
+    # test_regression_10733: only() across two select_related relations, all loaded in one query
+    a = create(DwA; name = "a", lots_of_text = "lots_of_text_a", a_field = "a_field")
+    b = create(DwB; name = "b", lots_of_text = "lots_of_text_b", b_field = "b_field")
+    c = create(DwC; name = "c", lots_of_text = "lots_of_text_c", is_published = true, c_a = a, c_b = b)
+    results = select_related(Juango.only(objects(DwC), :name, :lots_of_text, :c_a, :c_b, :c_b__lots_of_text, :c_a__name, :c_b__name), :c_a, :c_b)
+    @test [x.pk for x in results] == [c.pk]
+    qc = first(results)
+    @test nq(() -> (qc.name, qc.lots_of_text, qc.c_b.lots_of_text, qc.c_a.name, qc.c_b.name)) == 0
+    @test (qc.name, qc.lots_of_text, qc.c_b.lots_of_text, qc.c_a.name, qc.c_b.name) == ("c", "lots_of_text_c", "lots_of_text_b", "a", "b")
+  end
+end
