@@ -179,6 +179,13 @@ model's natural primary key (`primary_key = true`, #221). `nothing` for an id.
 """
 fk_to_field(f::Field) = getfield(f, :to_field) !== nothing ? getfield(f, :to_field) :
     f.kind === :fk && (R = related_model(f); natural_pk(R)) ? pk_fields(related_model(f))[1].name : nothing
+"`child.parent = x`: `x` must be the related model (or a proxy, parent or child of it), as Django checks."
+function check_related_assignment(f::Field, @nospecialize(T), @nospecialize(v::Model))
+    R = related_model(f)
+    a, b = concrete_model(R), concrete_model(typeof(v))
+    (a === b || a in lineage(b) || b in lineage(a)) ||
+        throw(ArgumentError("cannot assign $(repr(v)): \"$(nameof(T)).$(f.name)\" must be a \"$(nameof(R))\" instance"))
+end
 "The related model's field a foreign key stores: its id, or its `to_field` (#220)."
 target_name(f::Field) = something(fk_to_field(f), :id)
 "The related table's column a foreign key refers to (\"id\", or the `to_field`'s column)."
@@ -605,13 +612,16 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
     end
     for (rn, M, rf) in reverse_relations(T)
         rn === s || continue
-        qs = chain(filter(objects(M), Q(attname(rf) => target_value(rf, m))); db = instance_db(m))
+        # an unsaved object has no related rows (it used to match rows whose key is NULL); add! asks for a save
+        base = target_value(rf, m) === nothing ? none(M) : filter(objects(M), Q(attname(rf) => target_value(rf, m)))
+        qs = chain(base; db = instance_db(m),
+                   owner = rf.one_to_one ? nothing : ReverseFKOwner(rf, M, m, rn))
         if rf.one_to_one
             pre isa PrefetchedList && (note_eager_use(T, s); return isempty(pre.items) ? nothing : pre.items[1])
             note_lazy_load(T, s, :fk, m)
             return first(qs)
         end
-        pre isa PrefetchedList && (note_eager_use(T, s); return chain(qs; cache = pre.items))
+        pre isa PrefetchedList && (note_eager_use(T, s); return chain(qs; cache = pre.items, owner = qs.owner))
         note_lazy_load(T, s, :reverse, m)
         return qs
     end
@@ -646,7 +656,9 @@ Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::S
             data[attname(f)] = nothing
             delete!((getfield(m, :_cache)::Dict{Symbol,Any}), s)
         elseif v isa Model
-            data[attname(f)] = target_value(f, v)
+            check_related_assignment(f, typeof(m), v)
+            # an unsaved object's key isn't known yet (a to_field may hold a value it will change): taken at save
+            data[attname(f)] = (getfield(v, :_data)::Dict{Symbol,Any})[:id] === nothing ? nothing : target_value(f, v)
             (getfield(m, :_cache)::Dict{Symbol,Any})[s] = v
         else
             data[attname(f)] = v
@@ -658,6 +670,12 @@ Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::S
             "$(typeof(m)) has no field '$s' (for a value that isn't saved use Juango.instance_cache(obj)[:$s] = v; " *
             "for a computed attribute define Juango.tattr!(::$(nameof(typeof(m))), ::Val{:$s}, v))"))
         return v
+    end
+    # parent.bestchild_id = x: a cached bestchild for another key is dropped (as Django), so it isn't saved back
+    if f !== nothing && f.kind === :fk && s === attname(f)
+        cache = (getfield(m, :_cache)::Dict{Symbol,Any})
+        c = get(cache, f.name, nothing)
+        (c isa Model && (v === nothing || target_value(f, c) != v)) && delete!(cache, f.name)
     end
     data[s] = f === nothing ? v : coerce_value(f, v)
 end

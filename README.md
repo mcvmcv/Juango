@@ -363,6 +363,19 @@ end
 - **`BinaryField`** holds raw bytes: `BYTEA`, `LONGBLOB` or `BLOB`. It isn't editable in forms, and fixtures carry it as base64.
 - **`FilePathField`** stores a path. Forms offer the matching files (or folders, with `allow_folders = true`) under `path` as a select, and refuse any other value.
 
+#### The other side of a foreign key
+
+`author.posts` (the `related_name`, or `post_set`) is a queryset of the author's posts, and changes the relation as Django's related manager does:
+
+```julia
+create(author.posts; title = "Hello")       # a Post whose author is `author`
+add!(author.posts, p1, p2)                  # point their author at `author` (one UPDATE; bulk = false saves each)
+set!(author.posts, [p1])                    # with a nullable key the others are set to NULL; without one they stay
+remove!(author.posts, p2); clear!(author.posts)    # a nullable key only (else delete them, or give them another author)
+```
+
+After `prefetch_related(objects(Author), :posts)`, a change through `author.posts` drops the prefetched rows, so the next access sees it. An unsaved object's reverse relation has no rows. An object assigned to a foreign key must be of the related model (or a proxy, parent or child of it), and one that is still unsaved when its owner is saved stops the save, as in Django; saved by then, its key is taken at that moment.
+
 #### Many-to-many
 
 ```julia
@@ -372,6 +385,7 @@ end
 end
 
 add!(post.tags, julia, web)      # objects or ids; existing links are skipped
+create(post.tags; name = "new")  # a Tag, added to the post's tags
 remove!(post.tags, web)
 set!(post.tags, [julia, db])
 clear!(post.tags)

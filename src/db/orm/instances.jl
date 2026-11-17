@@ -126,9 +126,31 @@ Base.@nospecializeinfer function check_relations_db(@nospecialize(obj::Model))
     end
 end
 
+"""
+Before a save, the keys of related objects assigned while they were unsaved: one saved since gives its key
+now (Child(parent = p); save!(p); save!(child)), one still unsaved refuses the save, as Django ("save()
+prohibited to prevent data loss due to unsaved related object"), instead of writing NULL.
+"""
+Base.@nospecializeinfer function sync_related_keys!(@nospecialize(obj::Model), only)
+    cache = (getfield(obj, :_cache)::Dict{Symbol,Any})
+    isempty(cache) && return
+    data = (getfield(obj, :_data)::Dict{Symbol,Any})
+    for f in all_fields(typeof(obj))
+        f.kind === :fk || continue
+        (only === nothing || attname(f) in only) || continue
+        rel = get(cache, f.name, nothing)
+        rel isa Model || continue
+        get(data, attname(f), nothing) === nothing || continue          # (a key given directly stands)
+        (getfield(rel, :_data)::Dict{Symbol,Any})[:id] === nothing &&
+            throw(ArgumentError("save!() prohibited to prevent data loss due to unsaved related object '$(f.name)'"))
+        data[attname(f)] = target_value(f, rel)
+    end
+end
+
 Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Union{Nothing,Set{Symbol}} = nothing)
     T = typeof(obj)
     data = (getfield(obj, :_data)::Dict{Symbol,Any})
+    sync_related_keys!(obj, only)
     ts = timezone_now()
     for f in all_fields(T)
         a = attname(f)

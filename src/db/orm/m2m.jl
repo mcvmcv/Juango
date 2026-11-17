@@ -55,7 +55,8 @@ end
 Add objects (or ids) to a many-to-many relation. Already related objects are skipped.
 `through_defaults` fills extra fields of a custom `through` model.
 """
-function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}())
+function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}(), bulk::Bool = true)
+    qs.owner isa ReverseFKOwner && return rev_add!(qs, objs...; bulk = bulk)
     o = m2m_owner(qs)
     ids = unique(objid.(collect(objs)))
     isempty(ids) && return qs
@@ -82,7 +83,8 @@ function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}())
 end
 
 "Remove objects (or ids) from a many-to-many relation."
-function remove!(qs::QuerySet, objs...)
+function remove!(qs::QuerySet, objs...; bulk::Bool = true)
+    qs.owner isa ReverseFKOwner && return rev_remove!(qs, objs...; bulk = bulk)
     o = m2m_owner(qs)
     ids = objid.(collect(objs))
     isempty(ids) && return qs
@@ -94,7 +96,8 @@ function remove!(qs::QuerySet, objs...)
 end
 
 "Remove every object from a many-to-many relation."
-function clear!(qs::QuerySet)
+function clear!(qs::QuerySet; bulk::Bool = true)
+    qs.owner isa ReverseFKOwner && return rev_clear!(qs; bulk = bulk)
     o = m2m_owner(qs)
     m2m_signal(o, :pre_clear, nothing)
     delete!(filter(base_objects(o.through), Q(idkey(o.mine) => o.id)))
@@ -104,7 +107,8 @@ function clear!(qs::QuerySet)
 end
 
 "Make a many-to-many relation contain exactly `objs`."
-function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}())
+function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}(), bulk::Bool = true)
+    qs.owner isa ReverseFKOwner && return rev_set!(qs, objs; bulk = bulk)
     o = m2m_owner(qs)
     want = unique(objid.(collect(objs)))
     atomic() do
@@ -114,6 +118,124 @@ function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}())
         add!(qs, setdiff(want, have)...; through_defaults = through_defaults)
     end
     qs
+end
+
+# --- reverse foreign keys: reporter.article as a related manager -------------------------------------------
+
+"Context carried by a reverse foreign key's queryset (`reporter.article`): the key and the object it points at."
+struct ReverseFKOwner
+    fk::Field        # Article.reporter
+    model::Type      # Article
+    instance::Any    # the reporter
+    name::Symbol     # the relation's name on the instance (:article): its prefetched rows are dropped by a change
+end
+"After a change through a relation, its prefetched rows are stale: the next access queries (as Django)."
+rev_changed!(o::ReverseFKOwner) = (delete!((getfield(o.instance, :_cache)::Dict{Symbol,Any}), o.name); nothing)
+
+function rev_check(o::ReverseFKOwner, @nospecialize(obj))
+    obj isa Model && check_model_type(o.model, obj) isa Model ||
+        throw(ArgumentError("'$(nameof(o.model))' instance expected, got $(repr(obj))"))
+    obj
+end
+function rev_nullable(o::ReverseFKOwner, what)
+    o.fk.null || throw(ArgumentError("$what: $(nameof(o.model)).$(o.fk.name) isn't nullable, so its objects can't be removed " *
+                                     "from $(nameof(typeof(o.instance))) (delete them, or give them another)"))
+end
+
+"""
+    add!(reporter.article, a1, a2; bulk = true)
+
+Point the objects' foreign key at the owner (Django's `RelatedManager.add`): one UPDATE, or with
+`bulk = false` a `save!` of each (the way to add unsaved objects).
+"""
+function rev_add!(qs::QuerySet, objs...; bulk::Bool = true)
+    o = qs.owner::ReverseFKOwner
+    foreach(x -> rev_check(o, x), objs)
+    isempty(objs) && return qs
+    v = target_value(o.fk, o.instance)
+    v === nothing && throw(ArgumentError("save the $(nameof(typeof(o.instance))) before adding objects to its $(o.fk.name) relation"))
+    if bulk
+        any(x -> x.pk === nothing, objs) &&
+            throw(ArgumentError("$(repr(first(x for x in objs if x.pk === nothing))) isn't saved: use bulk = false or save it first"))
+        update!(filter(base_objects(o.model); pk__in = [x.pk for x in objs]); attname(o.fk) => v)
+        foreach(x -> setproperty!(x, o.fk.name, o.instance), objs)
+    else
+        atomic() do
+            foreach(x -> (setproperty!(x, o.fk.name, o.instance); save!(x)), objs)
+        end
+    end
+    rev_changed!(o)
+    qs
+end
+"`remove!(reporter.article, a)`: set the objects' foreign key to NULL (a nullable key only), as Django."
+function rev_remove!(qs::QuerySet, objs...; bulk::Bool = true)
+    o = qs.owner::ReverseFKOwner
+    rev_nullable(o, "remove!")
+    foreach(x -> rev_check(o, x), objs)
+    isempty(objs) && return qs
+    v = target_value(o.fk, o.instance)
+    for x in objs
+        field_data(x, attname(o.fk)) == v || throw(DoesNotExist(o.model, "$(repr(x)) is not related to $(repr(o.instance))"))
+    end
+    if bulk
+        update!(filter(base_objects(o.model); pk__in = [x.pk for x in objs]); attname(o.fk) => nothing)
+        foreach(x -> setproperty!(x, o.fk.name, nothing), objs)
+    else
+        atomic(() -> foreach(x -> (setproperty!(x, o.fk.name, nothing); save!(x)), objs))
+    end
+    rev_changed!(o)
+    qs
+end
+"`clear!(reporter.article)`: set every related object's foreign key to NULL (a nullable key only)."
+function rev_clear!(qs::QuerySet; bulk::Bool = true)
+    o = qs.owner::ReverseFKOwner
+    rev_nullable(o, "clear!")
+    rel = filter(base_objects(o.model), Q(attname(o.fk) => target_value(o.fk, o.instance)))
+    bulk ? update!(rel; attname(o.fk) => nothing) : atomic(() -> foreach(x -> (setproperty!(x, o.fk.name, nothing); save!(x)), fetch(rel)))
+    rev_changed!(o)
+    qs
+end
+"""
+    set!(reporter.article, [a1, a2])
+
+Make the relation contain these objects: the others are removed when the key is nullable (else they
+stay, as Django can't take them away), and the new ones added.
+"""
+function rev_set!(qs::QuerySet, objs; bulk::Bool = true)
+    o = qs.owner::ReverseFKOwner
+    want = collect(objs)
+    foreach(x -> rev_check(o, x), want)
+    atomic() do
+        if o.fk.null
+            keep = Set(x.pk for x in want)
+            gone = [x for x in fetch(filter(base_objects(o.model), Q(attname(o.fk) => target_value(o.fk, o.instance)))) if !(x.pk in keep)]
+            isempty(gone) || rev_remove!(qs, gone...; bulk = bulk)
+        end
+        v = target_value(o.fk, o.instance)
+        new = [x for x in want if x.pk === nothing || field_data(x, attname(o.fk)) != v]
+        isempty(new) || rev_add!(qs, new...; bulk = bulk)
+    end
+    qs
+end
+
+"""
+    create(reporter.article; headline = "...")      # an Article whose reporter is `reporter`
+    create(post.tags; name = "julia")               # a Tag, added to the post's tags
+
+A new object in a relation (Django's `RelatedManager.create`).
+"""
+function create(qs::QuerySet; kw...)
+    if qs.owner isa ReverseFKOwner
+        o = qs.owner::ReverseFKOwner
+        obj = create(o.model; kw..., (o.fk.name => o.instance,)...)
+        rev_changed!(o)
+        return obj
+    elseif qs.owner isa M2MOwner
+        obj = create(model_of(qs); kw...)
+        add!(qs, obj)
+        return obj
+    end
+    throw(ArgumentError("create(qs; ...) needs a relation such as reporter.article or post.tags; use create(Model; ...)"))
 end
 
 function prefetch_m2m!(objs::Vector, name, f::Field, forward::Bool, qs, to_attr)

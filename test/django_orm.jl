@@ -2306,3 +2306,194 @@ end
     @test [x.pk for x in order_by(exclude(objects(DqIndividual), Q(alive = false), Q(related_individual__isnull = true)), "pk")] == [i1.pk, i2.pk, i3.pk]
   end
 end
+
+# --- tests/many_to_one ------------------------------------------------------------------------------------
+@model struct DmReporter
+    first_name = CharField(max_length = 30)
+    last_name = CharField(max_length = 30)
+    email = EmailField(blank = true)
+    Meta(table = "dm_reporter")
+end
+Base.show(io::IO, r::DmReporter) = print(io, r.first_name, " ", r.last_name)
+@model struct DmArticle
+    headline = CharField(max_length = 100)
+    pub_date = DateField()
+    reporter = ForeignKey(DmReporter; on_delete = :CASCADE, related_name = :article)
+    Meta(table = "dm_article", ordering = ["headline"])
+end
+@model struct DmChild
+    name = CharField(max_length = 20)
+    parent = ForeignKey(:DmParent; on_delete = :CASCADE, related_name = :child)
+    Meta(table = "dm_child")
+end
+@model struct DmParent
+    name = CharField(max_length = 20, unique = true)
+    bestchild = ForeignKey(DmChild; on_delete = :SET_NULL, null = true, related_name = :favored_by)
+    Meta(table = "dm_parent")
+end
+@model struct DmChildNullableParent
+    parent = ForeignKey(DmParent; on_delete = :CASCADE, null = true, related_name = :childnullableparent)
+    Meta(table = "dm_childnullableparent")
+end
+@model struct DmToFieldChild
+    parent = ForeignKey(DmParent; on_delete = :CASCADE, to_field = :name, related_name = :to_field_children)
+    Meta(table = "dm_tofieldchild")
+end
+@model struct DmCategory
+    name = CharField(max_length = 20)
+    Meta(table = "dm_category")
+end
+@model struct DmRecord
+    category = ForeignKey(DmCategory; on_delete = :CASCADE, related_name = :record)
+    Meta(table = "dm_record")
+end
+@model struct DmRelation
+    left = ForeignKey(DmRecord; on_delete = :CASCADE, related_name = :left_set)
+    right = ForeignKey(DmRecord; on_delete = :CASCADE, related_name = :right_set)
+    Meta(table = "dm_relation")
+end
+redirect_stdout(devnull) do
+    ms = [DmReporter, DmArticle, DmParent, DmChild, DmChildNullableParent, DmToFieldChild, DmCategory, DmRecord, DmRelation]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django many_to_one: ManyToOneTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    hl(qs) = [x.headline for x in qs]
+    r = create(DmReporter; first_name = "John", last_name = "Smith", email = "john@example.com")
+    r2 = create(DmReporter; first_name = "Paul", last_name = "Jones", email = "paul@example.com")
+    a = create(DmArticle; headline = "This is a test", pub_date = Date(2005, 7, 27), reporter = r)
+    # test_get, test_create: by object, by id, by id in text
+    @test a.reporter.id == r.id && (a.reporter.first_name, a.reporter.last_name) == ("John", "Smith")
+    a3 = create(DmArticle; headline = "Third article", pub_date = Date(2005, 7, 27), reporter_id = r.id)
+    @test a3.reporter.id == r.id
+    a4 = create(DmArticle; headline = "Fourth article", pub_date = Date(2005, 7, 27), reporter_id = string(r.id))
+    @test repr(get(DmArticle; id = a4.id).reporter) == "John Smith"
+    delete!(a3); delete!(a4)
+    # test_add: create through the reverse relation; add! (bulk, or saving each); the wrong model refused
+    new_article = create(r.article; headline = "John's second story", pub_date = Date(2005, 7, 29))
+    @test new_article.reporter.id == r.id
+    new_article2 = DmArticle(headline = "Paul's story", pub_date = Date(2006, 1, 17))
+    @test tr(() -> add!(r.article, new_article2)) isa ArgumentError                  # unsaved: use bulk = false
+    add!(r.article, new_article2; bulk = false)
+    @test new_article2.reporter.id == r.id && hl(r.article) == ["John's second story", "Paul's story", "This is a test"]
+    add!(r2.article, new_article2)                                                   # moves
+    @test get(DmArticle; id = new_article2.id).reporter_id == r2.id && hl(r2.article) == ["Paul's story"]
+    @test tr(() -> add!(r.article, r2)) isa ArgumentError
+    @test hl(r.article) == ["John's second story", "This is a test"]
+    # test_set, test_assign: a non-nullable key can't be taken away, so set! only adds
+    new_article2.reporter = r; save!(new_article2)
+    @test hl(r.article) == ["John's second story", "Paul's story", "This is a test"] && isempty(collect(r2.article))
+    set!(r2.article, [new_article, new_article2])
+    @test hl(r.article) == ["This is a test"] && hl(r2.article) == ["John's second story", "Paul's story"]
+    set!(r.article, [new_article])
+    @test hl(r.article) == ["John's second story", "This is a test"] && hl(r2.article) == ["Paul's story"]
+    @test tr(() -> remove!(r.article, new_article)) isa ArgumentError && tr(() -> clear!(r.article)) isa ArgumentError
+    # test_selects
+    @test hl(filter(r.article; headline__startswith = "This")) == ["This is a test"] && count(r.article) == 2 && count(r2.article) == 1
+    @test hl(filter(DmArticle; reporter__first_name__exact = "John")) == ["John's second story", "This is a test"]
+    @test hl(filter(DmArticle; reporter__first_name__exact = "John", reporter__last_name__exact = "Smith")) == ["John's second story", "This is a test"]
+    for q in (filter(DmArticle; reporter__id__exact = r.id), filter(DmArticle; reporter__pk = r.id), filter(DmArticle; reporter = r.id), filter(DmArticle; reporter = r))
+        @test hl(q) == ["John's second story", "This is a test"]
+    end
+    @test hl(distinct(filter(DmArticle; reporter__in = [r.id, r2.id]))) == hl(distinct(filter(DmArticle; reporter__in = [r, r2]))) == ["John's second story", "Paul's story", "This is a test"]
+    @test hl(distinct(filter(DmArticle; reporter__in = values(filter(DmReporter; first_name = "John"), :pk)))) == ["John's second story", "This is a test"]
+    # test_joined_sql: one join for two conditions on the same relation
+    @test length(collect(eachmatch(r"INNER JOIN", first(Juango.select_sql(filter(DmArticle; reporter__first_name__exact = "John", reporter__last_name__exact = "Smith")))))) == 1
+    # test_reverse_selects
+    js = ["John"]
+    fn(qs) = [x.first_name for x in qs]
+    @test fn(filter(DmReporter; article__id__exact = a.id)) == js && fn(filter(DmReporter; article__pk = a.id)) == js
+    @test fn(filter(DmReporter; article = a.id)) == js && fn(filter(DmReporter; article = a)) == js
+    @test fn(distinct(filter(DmReporter; article__in = [a.id, new_article.id]))) == js && fn(distinct(filter(DmReporter; article__in = [a, new_article]))) == js
+    @test fn(distinct(filter(DmReporter; article__in = Any[a.id, new_article]))) == js
+    @test fn(distinct(filter(DmReporter; article__reporter__first_name__startswith = "John"))) == js
+    @test fn(distinct(filter(DmReporter; article__reporter__exact = r))) == js && fn(distinct(filter(DmReporter; article__reporter = r))) == js
+    @test collect(values(order_by(distinct(filter(DmArticle; reporter = r))), :reporter__first_name, :reporter__last_name)) ==
+          [Dict(:reporter__first_name => "John", :reporter__last_name => "Smith")]
+    # test_explicit_fk: get_or_create and get with the key's id
+    a5, created = get_or_create(DmArticle; headline = "John's second test", pub_date = Date(2011, 5, 7), reporter_id = r.id)
+    @test created && a5.reporter.id == r.id && hl(filter(DmArticle; reporter_id__exact = r.id)) == ["John's second story", "John's second test", "This is a test"]
+    @test tr(() -> get(DmArticle; reporter_id = r.id)) isa Exception
+    # test_delete: cascades, and deleting through a join
+    delete!(r2)
+    @test hl(objects(DmArticle)) == ["John's second story", "John's second test", "This is a test"] && fn(objects(DmReporter)) == js
+    delete!(filter(DmReporter; article__headline__startswith = "This"))
+    @test isempty(collect(objects(DmReporter))) && isempty(collect(objects(DmArticle)))
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    # test_assign_fk_id_value / test_assign_fk_id_none: the cached object follows the key
+    parent = create(DmParent; name = "jeff")
+    child1 = create(DmChild; name = "frank", parent = parent); child2 = create(DmChild; name = "randy", parent = parent)
+    parent.bestchild = child1; save!(parent)
+    parent.bestchild_id = child2.pk; save!(parent)
+    @test parent.bestchild_id == child2.pk && parent.bestchild.name == "randy"
+    parent.bestchild_id = nothing; save!(parent)
+    @test parent.bestchild_id === nothing && parent.bestchild === nothing
+    # nullable reverse keys: remove!, clear! and set! take objects away
+    p = create(DmParent; name = "p")
+    c1, c2 = create(DmChildNullableParent; parent = p), create(DmChildNullableParent; parent = p)
+    remove!(p.childnullableparent, c1)
+    @test c1.parent_id === nothing && get(DmChildNullableParent; id = c1.id).parent_id === nothing && count(p.childnullableparent) == 1
+    @test tr(() -> remove!(p.childnullableparent, c1)) isa Juango.DoesNotExist          # not related any more
+    set!(p.childnullableparent, [c1])
+    @test [x.id for x in p.childnullableparent] == [c1.id] && get(DmChildNullableParent; id = c2.id).parent_id === nothing
+    clear!(p.childnullableparent)
+    @test count(p.childnullableparent) == 0
+    # a to_field relation through its reverse manager
+    t = create(p.to_field_children)
+    @test t.parent_id == "p" && [x.id for x in p.to_field_children] == [t.id]
+    # test_multiple_foreignkeys: two keys to the same model
+    c = create(DmCategory; name = "First"); rec1, rec2 = create(DmRecord; category = c), create(DmRecord; category = c)
+    create(DmRelation; left = rec1, right = rec2)
+    @test count(filter(DmRelation; left__category__name = "First")) == 1 && count(filter(DmRelation; right__category__name = "First")) == 1
+    @test count(filter(DmRecord; left_set__right__category__name = "First")) == 1
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    # test_fk_assignment_and_related_object_cache
+    p = create(DmParent; name = "Parent"); c = create(DmChild; name = "Child", parent = p)
+    c = get(DmChild; name = "Child"); pp = c.parent
+    @test c.parent === pp                                                     # cached
+    p2 = create(DmParent; name = "Parent 2"); c.parent = p2
+    @test c.parent === p2
+    @test tr(() -> (c.parent = create(DmCategory; name = "x"))) isa ArgumentError   # the wrong model can't be assigned
+    @test tr(() -> create(DmChild; name = "xyzzy", parent = nothing)) isa Exception # NOT NULL in the database
+    @test DmChild(parent = p).parent === p
+    @test tr(() -> create(DmChild; name = "u", parent = DmParent(name = "unsaved"))) isa ArgumentError     # unsaved related object
+    @test tr(() -> create(DmToFieldChild; parent = DmParent())) isa ArgumentError
+    c3 = DmChild(name = "z", parent_id = p.id)
+    @test c3.parent !== p && c3.parent.id == p.id
+    # test_save_parent_after_assign / test_save_nullable_fk_after_parent(_with_to_field): the key is taken at save
+    cat = DmCategory(name = "cats"); rec = DmRecord(category = cat); save!(cat); save!(rec)
+    @test rec.category_id == cat.id && get(DmRecord; id = rec.id).category_id == cat.id
+    par = DmParent(name = "later"); ch = DmChildNullableParent(parent = par); save!(par); save!(ch)
+    @test get(DmChildNullableParent; id = ch.id).parent_id == par.id
+    par2 = DmParent(name = "jeff"); tf = DmToFieldChild(parent = par2); save!(par2); save!(tf)
+    @test get(DmToFieldChild; id = tf.id).parent_id == "jeff"
+    # test_relation_unsaved: an unsaved object's reverse relation has no rows (not those with a NULL key)
+    create(DmChildNullableParent)
+    @test count(DmParent(name = "nobody").childnullableparent) == 0
+    # test_*_after_prefetch: a change through a prefetched relation shows at once
+    pf = create(DmParent; name = "pf"); n1 = create(DmChildNullableParent; parent = pf); n2 = create(DmChildNullableParent)
+    loaded = get(prefetch_related(objects(DmParent), :childnullableparent); name = "pf")
+    @test length(collect(loaded.childnullableparent)) == 1
+    add!(loaded.childnullableparent, n2); @test count(loaded.childnullableparent) == 2
+    remove!(loaded.childnullableparent, n2); @test count(loaded.childnullableparent) == 1
+    create(loaded.childnullableparent); @test length(collect(loaded.childnullableparent)) == 2
+    clear!(loaded.childnullableparent); @test isempty(collect(loaded.childnullableparent))
+    # test_add_remove_set_by_pk_raises: objects, not keys
+    @test tr(() -> add!(pf.childnullableparent, n1.pk)) isa ArgumentError && tr(() -> set!(pf.childnullableparent, [n1.pk])) isa ArgumentError
+    # test_cached_relation_invalidated_on_save
+    r1, r2 = create(DmReporter; first_name = "A", last_name = "a"), create(DmReporter; first_name = "B", last_name = "b")
+    art = create(DmArticle; headline = "h", pub_date = Date(2020, 1, 1), reporter = r1)
+    @test art.reporter.first_name == "A"
+    art.reporter_id = r2.pk; save!(art)
+    @test art.reporter.first_name == "B"
+    # test_cached_foreign_key_with_to_field_not_cleared_by_save
+    pa = create(DmParent; name = "a"); tfc = create(DmToFieldChild; parent = pa)
+    @test Juango.count_queries(() -> tfc.parent === pa)[2] == 0
+  end
+end
