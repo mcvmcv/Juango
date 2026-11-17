@@ -54,7 +54,7 @@ function m2m_obj_id(o, @nospecialize(x))
     check_key_value(R, nothing, x)
 end
 "After a change, the relation's prefetched rows are stale: the next access queries (as Django)."
-m2m_changed!(o) = (delete!((getfield(o.instance, :_cache)::Dict{Symbol,Any}), o.name); nothing)
+m2m_changed!(o) = forget_prefetched!(o.instance, o.name)
 Base.@nospecializeinfer objid(@nospecialize(x::Model)) = (x.id === nothing && throw(ArgumentError("cannot relate an unsaved $(typeof(x))")); x.id)
 objid(x) = x
 
@@ -173,7 +173,7 @@ struct ReverseFKOwner
     name::Symbol     # the relation's name on the instance (:article): its prefetched rows are dropped by a change
 end
 "After a change through a relation, its prefetched rows are stale: the next access queries (as Django)."
-rev_changed!(o::ReverseFKOwner) = (delete!((getfield(o.instance, :_cache)::Dict{Symbol,Any}), o.name); nothing)
+rev_changed!(o::ReverseFKOwner) = forget_prefetched!(o.instance, o.name)
 
 function rev_check(o::ReverseFKOwner, @nospecialize(obj))
     obj isa Model && check_model_type(o.model, obj) isa Model ||

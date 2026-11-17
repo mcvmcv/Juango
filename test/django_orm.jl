@@ -4808,3 +4808,74 @@ end
     r, n = nq(() -> [t.tag for t in b.tags]); @test r == ["django"] && n == 0
   end
 end
+
+@model struct DpAuthorWithAgeChild <: DpAuthorWithAge
+    Meta(table = "dp_authorwithagechild")
+end
+@model struct DpQualification
+    name = CharField(max_length = 10)
+    Meta(table = "dp_qualification", ordering = ["id"])
+end
+@model struct DpTeacher
+    name = CharField(max_length = 50)
+    qualifications = ManyToManyField(DpQualification; related_name = :teachers)
+    Meta(table = "dp_teacher", ordering = ["id"])
+end
+# Django's TeacherManager: the default queryset prefetches the qualifications
+Juango.default_queryset(::Type{DpTeacher}) = prefetch_related(base_objects(DpTeacher), :qualifications)
+dp_teacher_str(t) = string(t.name, " (", join([q.name for q in t.qualifications], ", "), ")")
+@model struct DpDepartment
+    name = CharField(max_length = 50)
+    teachers = ManyToManyField(DpTeacher; related_name = :departments)
+    Meta(table = "dp_department", ordering = ["id"])
+end
+redirect_stdout(devnull) do
+    ms = [DpAuthorWithAgeChild, DpQualification, DpTeacher, through(DpTeacher, :qualifications), DpDepartment, through(DpDepartment, :teachers)]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django prefetch_related: DefaultManagerTests, PrefetchRelatedMTICacheTests" begin
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    # DefaultManagerTests: prefetched teachers come through Teacher's default queryset, with its prefetch
+    q1, q2, q3, q4 = (create(DpQualification; name = n) for n in ("BA", "BSci", "MA", "PhD"))
+    t1, t2, t3 = create(DpTeacher; name = "Mr Cleese"), create(DpTeacher; name = "Mr Idle"), create(DpTeacher; name = "Mr Chapman")
+    add!(t1.qualifications, q1, q2, q3, q4); add!(t2.qualifications, q1); add!(t3.qualifications, q2)
+    d1, d2 = create(DpDepartment; name = "English"), create(DpDepartment; name = "Physics")
+    add!(d1.teachers, t1, t2); add!(d2.teachers, t1, t3)
+    r, n = nq(() -> join(["$(d.name) department: $(join([dp_teacher_str(t) for t in d.teachers], ", "))\n" for d in prefetch_related(objects(DpDepartment), :teachers)]))
+    @test r == "English department: Mr Cleese (BA, BSci, MA, PhD), Mr Idle (BA)\nPhysics department: Mr Cleese (BA, BSci, MA, PhD), Mr Chapman (BSci)\n"
+    @test n == 3
+  end
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    pks(qs) = Set(x.pk for x in qs)
+    book = create(DpBook; title = "Book1")
+    r1, r2, r3, r4 = (create(DpAuthor; name = "related$i", first_book = book) for i in 1:4)
+    child = create(DpAuthorWithAgeChild; name = "child", age = 31, first_book = book)
+    m2m_child = create(DpAuthorWithAgeChild; name = "m2m_child", age = 31, first_book = book)
+    set!(m2m_child.favorite_authors, [r1, r2, r3])
+    # what the parent prefetched is there on the children select_related loaded
+    res, n = nq(() -> (rs = collect(filter(prefetch_related(select_related(objects(DpAuthor), :dpauthorwithage), :first_book); pk = child.pk));
+                      (length(rs), rs[1].dpauthorwithage.first_book.pk)))
+    @test res == (1, book.pk)
+    @test n == 2
+    res, n = nq(() -> (rs = collect(filter(prefetch_related(select_related(objects(DpAuthor), :dpauthorwithage, :dpauthorwithage__dpauthorwithagechild), :first_book); pk = child.pk));
+                      rs[1].dpauthorwithage.dpauthorwithagechild.first_book.pk))
+    @test res == book.pk
+    @test n == 2
+    res, n = nq(() -> (rs = collect(filter(prefetch_related(select_related(objects(DpAuthor), :dpauthorwithage), :favorite_authors); pk = m2m_child.pk));
+                      pks(rs[1].dpauthorwithage.favorite_authors)))
+    @test res == Set([r1.pk, r2.pk, r3.pk])
+    @test n == 2
+    res, n = nq(() -> (rs = collect(filter(prefetch_related(select_related(objects(DpAuthor), :dpauthorwithage, :dpauthorwithage__dpauthorwithagechild), :favorite_authors); pk = m2m_child.pk));
+                      pks(rs[1].dpauthorwithage.dpauthorwithagechild.favorite_authors)))
+    @test res == Set([r1.pk, r2.pk, r3.pk])
+    @test n == 2
+    # add! through the child: the parent's prefetched list shows it too
+    gp = get(prefetch_related(select_related(objects(DpAuthor), :dpauthorwithage), :favorite_authors); pk = m2m_child.pk)
+    @test pks(gp.favorite_authors) == pks(gp.dpauthorwithage.favorite_authors) == Set([r1.pk, r2.pk, r3.pk])
+    add!(gp.dpauthorwithage.favorite_authors, r4)
+    @test pks(gp.favorite_authors) == pks(gp.dpauthorwithage.favorite_authors) == Set([r1.pk, r2.pk, r3.pk, r4.pk])
+  end
+end

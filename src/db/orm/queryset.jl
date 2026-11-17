@@ -126,6 +126,8 @@ function select_related(@nospecialize(qs::QuerySet), paths...)
                 M = related_model(f)
                 continue
             end
+            C = mti_child(M, s)                   # a multi-table child's link (place.restaurant)
+            C === nothing || (M = C; continue)
             r = reverse_one_to_one(M, s)          # the other side of a OneToOneField: at most one row
             r === nothing && throw(LookupError("select_related: '$s' is not a foreign key or reverse one-to-one of $M " *
                                                "(use prefetch_related for other reverse relations)"))
@@ -418,7 +420,12 @@ function related_columns!(c::SQLCompiler, paths, deferred = Symbol[])
         left = false
         for (i, s) in enumerate(path)
             f = findfield(modelmeta(M), s)
-            if f === nothing                      # reverse one-to-one: LEFT JOIN other.fk = this.id
+            C = f === nothing ? mti_child(M, s) : nothing
+            if C !== nothing                      # a multi-table child: LEFT JOIN child.id = this.id
+                left = true
+                alias = join!(c, alias, (alias, s, :child), modelmeta(C).table, "id", "id"; left = true)
+                M = C
+            elseif f === nothing                  # reverse one-to-one: LEFT JOIN other.fk = this.id
                 _, R, rf = reverse_one_to_one(M, s)
                 left = true
                 alias = join!(c, alias, (alias, s, :rev), modelmeta(R).table, column(rf), target_column(rf); left = true)
@@ -819,6 +826,7 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
         end
     end
     run_prefetches!(objs, qs.prefetch)
+    isempty(qs.related) || isempty(qs.prefetch) || share_with_children!(objs)
     remember_siblings!(objs)
     objs
 end
@@ -1371,6 +1379,49 @@ function explain_here(qs::QuerySet)
         end
     end
     join(lines, "\n")
+end
+
+"The multi-table child of `T` whose link is `name` (`place.restaurant`), or `nothing`."
+Base.@nospecializeinfer function mti_child(@nospecialize(T::Type), name)
+    for C in child_models(concrete_model(T))
+        string(child_accessor(C)) == string(name) && return C
+    end
+    nothing
+end
+
+"""
+After prefetching: a multi-table child loaded with its parent (select_related(:restaurant)) shares
+the relations prefetched on the parent (restaurant.city, restaurant.tags: no query), as Django 5.
+They're one family: changing a relation through one (add!, remove!) clears it on all of them.
+"""
+Base.@nospecializeinfer function share_with_children!(@nospecialize(objs::Vector))
+    for o in objs
+        cache = getfield(o, :_cache)::Dict{Symbol,Any}
+        for C in child_models(concrete_model(typeof(o)))
+            c = get(cache, child_accessor(C), nothing)
+            c isa PrefetchedList && (c = isempty(c.items) ? nothing : c.items[1])
+            c isa Model || continue
+            ccache = getfield(c, :_cache)::Dict{Symbol,Any}
+            for (k, v) in cache
+                (startswith(string(k), "__") || mti_child(typeof(o), k) !== nothing || haskey(ccache, k)) && continue
+                ccache[k] = v
+            end
+            family = get!(() -> Any[o], cache, :__mti_family)
+            any(x -> x === c, family) || push!(family, c)
+            ccache[:__mti_family] = family
+            share_with_children!(Any[c])
+        end
+    end
+    objs
+end
+"Forget a relation's prefetched rows on `m` and on the parent and children loaded with it."
+Base.@nospecializeinfer function forget_prefetched!(@nospecialize(m::Model), name::Symbol)
+    cache = getfield(m, :_cache)::Dict{Symbol,Any}
+    for x in get(cache, :__mti_family, Any[m])
+        delete!((getfield(x, :_cache)::Dict{Symbol,Any}), name)
+    end
+    delete!(cache, name)
+    nothing
 end
 
 "The reverse side of a OneToOneField pointing at `T` named `name`: `(name, model, field)`, or nothing."

@@ -672,7 +672,9 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
     end
     for C in child_models(T)
         child_accessor(C) === s || continue
-        pre === NOTFOUND || return pre                  # prefetch_related(:child): the child, or nothing
+        # prefetch_related(:child) or select_related(:child): the child, or nothing
+        pre isa PrefetchedList && return isempty(pre.items) ? nothing : pre.items[1]
+        pre === NOTFOUND || return pre
         return first(filter(base_objects(C); id = data[:id]))
     end
     if table_parent(T) !== nothing && s === parent_accessor(T)
