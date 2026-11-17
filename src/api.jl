@@ -139,7 +139,7 @@ public render_form, TemplateFormRenderer, JuangoTemplates, MustacheTemplates, en
 # models, files, querysets
 public uuid4, FieldFile, FileSystemStorage, InMemoryStorage, storages, default_storage, save_file, delete_file, image_size,
        register_lookup, register_transform, deferred_fields, PoolTimeout, pool_status,
-       get_for_model, model_class, natural_key, get_by_natural_key, manager, default_queryset,
+       get_for_model, get_for_id, model_class, natural_key, get_by_natural_key, manager, default_queryset,
        DatabaseBackend, register_backend!, execute, db_for_read, db_for_write, allow_migrate, allow_relation
 # migrations and database tools
 public showmigrations, sqlmigrate, squashmigrations, optimizemigration, flush!, inspectdb, dbshell_cmd,

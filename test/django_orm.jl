@@ -4714,3 +4714,97 @@ end
     @test r == [["Candide"], String[]]
   end
 end
+
+@model struct DpTaggedItem
+    tag = SlugField(default = "")
+    content_type = ForeignKey(ContentType; on_delete = :CASCADE, related_name = :taggeditem_set2)
+    object_id = PositiveIntegerField()
+    content_object = GenericForeignKey(:content_type, :object_id)
+    created_by_ct = ForeignKey(ContentType; on_delete = :SET_NULL, null = true, related_name = :taggeditem_set3)
+    created_by_fkey = PositiveIntegerField(null = true)
+    created_by = GenericForeignKey(:created_by_ct, :created_by_fkey)
+    favorite_ct = ForeignKey(ContentType; on_delete = :SET_NULL, null = true, related_name = :taggeditem_set4)
+    favorite_fkey = CharField(max_length = 64, null = true)
+    favorite = GenericForeignKey(:favorite_ct, :favorite_fkey)
+    Meta(table = "dp_taggeditem", ordering = ["id"])
+end
+@model struct DpBookmark
+    url = URLField(default = "")
+    tags = GenericRelation(:DpTaggedItem)
+    favorite_tags = GenericRelation(:DpTaggedItem; content_type_field = :favorite_ct, object_id_field = :favorite_fkey)
+    Meta(table = "dp_bookmark", ordering = ["id"])
+end
+@model struct DpComment
+    comment = TextField()
+    content_type = ForeignKey(ContentType; on_delete = :CASCADE, null = true, related_name = :dp_comments)
+    object_pk = TextField()
+    content_object = GenericForeignKey(:content_type, :object_pk)
+    Meta(table = "dp_comment", ordering = ["id"])
+end
+redirect_stdout(devnull) do
+    ms = [DpTaggedItem, DpBookmark, DpComment]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django prefetch_related: GenericRelationTests" begin
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    b1, b2, b3 = create(DpBook; title = "Winnie the Pooh"), create(DpBook; title = "Do you like green eggs and spam?"), create(DpBook; title = "Three Men In A Boat")
+    r1, r2, r3 = create(DpReader; name = "me"), create(DpReader; name = "you"), create(DpReader; name = "someone")
+    add!(b1.read_by, r1, r2); add!(b2.read_by, r2); add!(b3.read_by, r3)
+    # test_prefetch_GFK: one query per content type
+    create(DpTaggedItem; tag = "awesome", content_object = b1); create(DpTaggedItem; tag = "great", content_object = r1)
+    create(DpTaggedItem; tag = "outstanding", content_object = b2); create(DpTaggedItem; tag = "amazing", content_object = r3)
+    r, n = nq(() -> [t.content_object.pk for t in prefetch_related(objects(DpTaggedItem), :content_object)])
+    @test r == [b1.pk, r1.pk, b2.pk, r3.pk]
+    @test n == 3
+    # a text object key; a key to a multi-table child
+    create(DpComment; comment = "awesome", content_object = b1)
+    r, n = nq(() -> [c.content_object.pk for c in prefetch_related(objects(DpComment), :content_object)])
+    @test r == [b1.pk]
+    @test n == 2
+    bwy = create(DpBookWithYear; title = "Poems", published_year = 2019)
+    delete!(objects(DpComment)); create(DpComment; comment = "awesome", content_object = bwy)
+    @test [c.content_object.pk for c in prefetch_related(objects(DpComment), :content_object)] == [bwy.pk]
+    @test typeof(first(prefetch_related(objects(DpComment), :content_object)).content_object) === DpBookWithYear
+    # test_traverse_GFK: through the generic key to an m2m
+    delete!(objects(DpTaggedItem))
+    for o in (b1, b2, b3, r1, r2); create(DpTaggedItem; tag = "awesome", content_object = o); end
+    ct = get_for_model(DpBook)
+    r, n = nq(() -> Set(x.name for t in prefetch_related(filter(DpTaggedItem; content_type = ct, tag = "awesome"), :content_object__read_by)
+                              for x in t.content_object.read_by))
+    @test r == Set(["me", "you", "someone"])
+    @test n == 3
+    # test_nullable_GFK
+    delete!(objects(DpTaggedItem))
+    create(DpTaggedItem; tag = "awesome", content_object = b1, created_by = r1)
+    create(DpTaggedItem; tag = "great", content_object = b2); create(DpTaggedItem; tag = "rubbish", content_object = b3)
+    r, n = nq(() -> [t.created_by === nothing ? nothing : t.created_by.pk for t in prefetch_related(objects(DpTaggedItem), :created_by)])
+    @test r == [r1.pk, nothing, nothing]
+    @test n == 2
+    # test_deleted_GFK: a generic key to a row that's gone gives nothing
+    delete!(objects(DpTaggedItem))
+    create(DpTaggedItem; tag = "awesome", content_object = b2)
+    t1 = create(DpTaggedItem; tag = "awesome", content_object = b3)
+    b3pk = b3.pk; delete!(filter(DpBook; pk = b3pk))        # (a queryset delete: the tag's generic key is left dangling)
+    r, n = nq(() -> [(t.object_id, t.content_object === nothing ? nothing : t.content_object.pk)
+                     for t in prefetch_related(filter(DpTaggedItem; tag = "awesome"), :content_object)])
+    @test r == [(b2.pk, b2.pk), (b3pk, nothing)]
+    @test n == 2
+  end
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    # generic relations: prefetched, two of them to one model (one with a text key), a custom queryset
+    bm = create(DpBookmark; url = "http://www.djangoproject.com/")
+    create(DpTaggedItem; content_object = bm, tag = "django"); create(DpTaggedItem; content_object = bm, tag = "python", favorite = bm)
+    r, n = nq(() -> sort([t.tag for b in prefetch_related(objects(DpBookmark), :tags) for t in b.tags]))
+    @test r == ["django", "python"]
+    @test n == 2
+    b, n = nq(() -> first(prefetch_related(filter(DpBookmark; pk = bm.pk), :tags, :favorite_tags)))
+    @test n == 3
+    r, n = nq(() -> (sort([t.tag for t in b.tags]), [t.tag for t in b.favorite_tags])); @test r == (["django", "python"], ["python"]) && n == 0
+    b, n = nq(() -> get(prefetch_related(objects(DpBookmark), Prefetch(:tags; queryset = filter(DpTaggedItem; tag = "django")))))
+    @test n == 2
+    r, n = nq(() -> [t.tag for t in b.tags]); @test r == ["django"] && n == 0
+  end
+end

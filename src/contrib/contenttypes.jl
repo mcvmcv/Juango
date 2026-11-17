@@ -44,6 +44,42 @@ Base.@nospecializeinfer function get_for_model(@nospecialize(T::Type))
 end
 Base.@nospecializeinfer get_for_model(@nospecialize(obj::Model)) = get_for_model(typeof(obj))
 
+"A prefetched generic key whose row is gone (for the key it was prefetched with)."
+struct GenericGone
+    key::Tuple{Any,String}
+end
+
+"""
+    get_for_id(id) -> ContentType
+
+A content type by its id, cached like `get_for_model`'s (Django's `ContentType.objects.get_for_id`):
+following generic keys doesn't query the content types again.
+"""
+function get_for_id(id)
+    a = current_alias()
+    ct = lock(CT_LOCK) do
+        for ((al, _), c) in CT_CACHE
+            al == a && c.id == id && return c
+        end
+        nothing
+    end
+    ct === nothing || return ct
+    ct = get(base_objects(ContentType); id = id)
+    M = model_class(ct)
+    M === nothing || lock(() -> get!(CT_CACHE, (a, M), ct), CT_LOCK)
+    ct
+end
+
+"""
+A generic key's stored value as the target model's key: an object id kept in a text column
+(`object_pk = TextField()`, as Django's comments framework does) is parsed for an integer or UUID key.
+"""
+Base.@nospecializeinfer function generic_key(@nospecialize(M::Type), v)
+    v isa AbstractString || return v
+    k = pk_kind(M)
+    k === :uuid ? something(tryparse(UUID, v), v) : natural_pk(M) ? v : something(tryparse(Int, v), v)
+end
+
 "The model class a content type stands for, or `nothing` if it no longer exists."
 function model_class(ct::ContentType)
     for T in MODEL_LIST
@@ -92,11 +128,12 @@ Base.@nospecializeinfer function get_generic(@nospecialize(m::Model), f::Field)
     data, cache = (getfield(m, :_data)::Dict{Symbol,Any}), (getfield(m, :_cache)::Dict{Symbol,Any})
     ctid, oid = data[Symbol(ctf, :_id)], data[fkf]
     (ctid === nothing || oid === nothing) && return nothing
-    c = get(cache, f.name, nothing)
-    (c !== nothing && c.id == oid && get_for_model(c).id == ctid) && return c
-    M = model_class(get(base_objects(ContentType); id = ctid))
+    c = get(cache, f.name, NOTFOUND)
+    c isa GenericGone && c.key == (ctid, string(oid)) && return nothing     # prefetched: the row it points at is gone
+    (c isa Model && string(c.id) == string(oid) && get_for_model(c).id == ctid) && return c
+    M = model_class(get_for_id(ctid))
     M === nothing && return nothing
-    obj = first(filter(base_objects(M); id = oid))
+    obj = first(filter(base_objects(M); id = generic_key(M, oid)))
     obj === nothing || (cache[f.name] = obj)
     obj
 end
@@ -111,7 +148,7 @@ Base.@nospecializeinfer function set_generic!(@nospecialize(m::Model), f::Field,
     else
         v.id === nothing && throw(ArgumentError("save the $(typeof(v)) before pointing a generic relation at it"))
         data[Symbol(ctf, :_id)] = get_for_model(v).id
-        data[fkf] = v.id
+        data[fkf] = getfield_meta(typeof(m), fkf).kind in STRING_KINDS ? string(v.id) : v.id   # (a text key column)
         (getfield(m, :_cache)::Dict{Symbol,Any})[f.name] = v
     end
     v
@@ -120,7 +157,8 @@ end
 Base.@nospecializeinfer function generic_queryset(@nospecialize(m::Model), f::Field)
     ctf, fkf = f.through
     M = related_model(f)
-    filter(objects(M), Q(Symbol(ctf, :_id) => get_for_model(m).id), Q(fkf => (getfield(m, :_data)::Dict{Symbol,Any})[:id]))
+    id = (getfield(m, :_data)::Dict{Symbol,Any})[:id]
+    filter(objects(M), Q(Symbol(ctf, :_id) => get_for_model(m).id), Q(fkf => getfield_meta(M, fkf).kind in STRING_KINDS ? string(id) : id))
 end
 
 function prefetch_generic_fk!(objs::Vector, f::Field)
@@ -133,18 +171,22 @@ function prefetch_generic_fk!(objs::Vector, f::Field)
     end
     found = Dict{Tuple{Any,Any},Any}()
     out = Any[]
+    # one query per content type (the content types themselves come from the cache); keys compared as
+    # strings, so an id kept in a text column matches
     for (ctid, ids) in bytype
-        M = model_class(get(base_objects(ContentType); id = ctid))
+        M = model_class(get_for_id(ctid))
         M === nothing && continue
-        for r in filter(base_objects(M); id__in = unique(ids))
-            found[(ctid, r.id)] = r
+        for r in filter(base_objects(M); id__in = unique([generic_key(M, i) for i in ids]))
+            found[(ctid, string(r.id))] = r
             push!(out, r)
         end
     end
     for o in objs
         d = (getfield(o, :_data)::Dict{Symbol,Any})
-        r = get(found, (d[Symbol(ctf, :_id)], d[fkf]), nothing)
-        r === nothing || ((getfield(o, :_cache)::Dict{Symbol,Any})[f.name] = r)
+        (d[Symbol(ctf, :_id)] === nothing || d[fkf] === nothing) && continue
+        # (a key to a row that's gone is remembered too, so reading it doesn't query again)
+        key = (d[Symbol(ctf, :_id)], string(d[fkf]))
+        (getfield(o, :_cache)::Dict{Symbol,Any})[f.name] = get(found, key, GenericGone(key))
     end
     out
 end
@@ -153,14 +195,16 @@ function prefetch_generic_relation!(objs::Vector, f::Field, qs, to_attr)
     ctf, fkf = f.through
     M = related_model(f)
     T = typeof(first(objs))
+    # the object key column may be text (favorite_fkey = CharField): compare as the column holds it
+    textkey = getfield_meta(M, fkf).kind in STRING_KINDS
     rows = fetch(filter(something(qs, objects(M)), Q(Symbol(ctf, :_id) => get_for_model(T).id),
-                        Q(Symbol(fkf, "__in") => [o.id for o in objs])))
-    groups = Dict{Any,Vector{M}}()
+                        Q(Symbol(fkf, "__in") => [textkey ? string(o.id) : o.id for o in objs])))
+    groups = Dict{String,Vector{M}}()
     for r in rows
-        push!(get!(() -> M[], groups, (getfield(r, :_data)::Dict{Symbol,Any})[fkf]), r)
+        push!(get!(() -> M[], groups, string((getfield(r, :_data)::Dict{Symbol,Any})[fkf])), r)
     end
     for o in objs
-        (getfield(o, :_cache)::Dict{Symbol,Any})[something(to_attr, f.name)] = PrefetchedList(get(groups, o.id, M[]))
+        (getfield(o, :_cache)::Dict{Symbol,Any})[something(to_attr, f.name)] = PrefetchedList(get(groups, string(o.id), M[]))
     end
     rows
 end
