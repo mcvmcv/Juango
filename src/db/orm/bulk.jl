@@ -341,6 +341,7 @@ Does not call `save!` or send signals. `auto_now` fields (`updated_at`) are set 
 unless the call sets them itself or passes `touch_auto_now = false` (Django leaves them alone).
 """
 function update!(qs::QuerySet; touch_auto_now::Bool = true, kw...)
+    assert_unsliced(qs, "update")          # Django: "Cannot update a query once a slice has been taken."
     vals = touch_auto_now && !isempty(kw) ? with_auto_now(model_of(qs), kw) : kw
     in_db(qs, true) do
         T = model_of(qs)
@@ -381,11 +382,14 @@ Base.@nospecializeinfer function update_here!(@nospecialize(qs::QuerySet); kw...
         return n
     end
     c = SQLCompiler(T)
+    for (k, a) in qs.annotations; c.annotations[Symbol(k)] = a; end      # update!(annotate(qs; a = F(:value)); other = F(:a))
     for (k, v) in kw
         f = getfield_meta(T, k)
         if v isa Expression
             sql, p = compile_expr(c, v)
-            isempty(c.joins) || throw(ArgumentError("update!: expressions can only use the model's own fields"))
+            isempty(c.joins) || throw(ArgumentError("update!: expressions can only use the model's own fields (joined field references are not permitted)"))
+            (c.uses_aggregate || contains_aggregate(v)) &&
+                throw(ArgumentError("update!: aggregate functions are not allowed in an update ($k = $(repr(v)))"))
             push!(sets, qname(column(f)) * " = " * sql)
             append!(ps, p)
         else

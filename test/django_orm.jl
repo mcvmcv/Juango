@@ -3353,3 +3353,113 @@ end
     @test delete!(filter(DdM; pk = -1)) == 0
   end
 end
+
+# --- tests/update -----------------------------------------------------------------------------------------
+@model struct DuDataPoint
+    name = CharField(max_length = 20)
+    value = CharField(max_length = 20)
+    another_value = CharField(max_length = 20, blank = true)
+    is_active = BooleanField(default = true)
+    Meta(table = "du_datapoint")
+end
+@model struct DuRelatedPoint
+    name = CharField(max_length = 20)
+    data = ForeignKey(DuDataPoint; on_delete = :CASCADE, related_name = :relatedpoint)
+    Meta(table = "du_relatedpoint")
+end
+@model struct DuA
+    x = IntegerField(default = 10)
+    Meta(table = "du_a")
+end
+@model struct DuB
+    a = ForeignKey(DuA; on_delete = :CASCADE, related_name = :b_set)
+    y = IntegerField(default = 10)
+    Meta(table = "du_b")
+end
+@model struct DuC
+    y = IntegerField(default = 10)
+    Meta(table = "du_c")
+end
+@model struct DuD <: DuC
+    a = ForeignKey(DuA; on_delete = :CASCADE, related_name = :d_set)
+    Meta(table = "du_d")
+end
+@model struct DuFoo
+    target = CharField(max_length = 10, unique = true)
+    Meta(table = "du_foo")
+end
+@model struct DuBar
+    foo = ForeignKey(DuFoo; on_delete = :CASCADE, to_field = :target, related_name = :bar)
+    o2o_foo = OneToOneField(DuFoo; on_delete = :CASCADE, null = true, related_name = :o2o_bar)
+    m2m_foo = ManyToManyField(DuFoo; related_name = :m2m_foo)
+    x = IntegerField(default = 0)
+    Meta(table = "du_bar")
+end
+redirect_stdout(devnull) do
+    ms = [DuDataPoint, DuRelatedPoint, DuA, DuB, DuC, DuD, DuFoo, DuBar, through(DuBar, :m2m_foo)]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django update: SimpleTest, AdvancedTests" begin
+  port_block() do
+    a1, a2 = create(DuA), create(DuA)
+    bulk_create([DuB(a = a1) for _ in 1:20])
+    for _ in 1:20; create(DuD; a = a1); end
+    # through a reverse relation, and a multi-table child (the update reaches the parent's table)
+    @test update!(a1.b_set; y = 100) == 20 && count(filter(DuB; y = 100)) == 20
+    @test update!(a2.b_set; y = 100) == 0
+    @test update!(a1.d_set; y = 100) == 20 && count(filter(DuD; y = 100)) == 20
+    @test update!(a2.d_set; y = 100) == 0
+    # test_foreign_key_update_with_id
+    @test update!(a1.d_set; a_id = a2.id) == 20 && count(a2.d_set) == 20
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    d0 = create(DuDataPoint; name = "d0", value = "apple"); d2 = create(DuDataPoint; name = "d2", value = "banana")
+    d3 = create(DuDataPoint; name = "d3", value = "banana", is_active = false)
+    r1 = create(DuRelatedPoint; name = "r1", data = d3)
+    @test update!(filter(DuDataPoint; value = "apple"); name = "d1") == 1 && [x.pk for x in filter(DuDataPoint; value = "apple")] == [d0.pk]
+    @test update!(filter(DuDataPoint; value = "banana"); value = "pineapple") == 2 && get(DuDataPoint; name = "d2").value == "pineapple"
+    @test update!(filter(DuRelatedPoint; name = "r1"); data = d0) == 1 && [x.pk for x in filter(DuRelatedPoint; data__name = "d1")] == [r1.pk]
+    @test update!(filter(DuDataPoint; value = "apple"); value = "fruit", another_value = "peach") == 1
+    @test (get(DuDataPoint; pk = d0.pk).value, get(DuDataPoint; pk = d0.pk).another_value) == ("fruit", "peach")
+    @test update!(objects(DuDataPoint); value = "thing") == 3 && collect(distinct(values(objects(DuDataPoint), :value))) == [Dict(:value => "thing")]
+    # test_update_slice_fail
+    @test tr(() -> update!(objects(DuDataPoint)[1:2]; another_value = "x")) isa Exception
+    # test_update_respects_to_field
+    a_foo, b_foo = create(DuFoo; target = "aaa"), create(DuFoo; target = "bbb")
+    bar = create(DuBar; foo = a_foo)
+    @test bar.foo_id == "aaa"
+    update!(filter(DuBar; pk = bar.pk); foo = b_foo)
+    @test get(DuBar; pk = bar.pk).foo_id == "bbb"
+    # updating a relation that isn't a column is refused
+    @test tr(() -> update!(objects(DuBar); m2m_foo = "whatever")) isa Exception
+    @test tr(() -> update!(objects(DuFoo); m2m_foo = "whatever")) isa Exception
+    @test tr(() -> update!(objects(DuFoo); bar = "whatever")) isa Exception
+    @test tr(() -> update!(objects(DuFoo); o2o_bar = "whatever")) isa Exception
+    # test_update_annotated_queryset, test_update_annotated_multi_table_queryset
+    @test update!(annotate(objects(DuDataPoint); alias_ = F(:value)); another_value = "foo") == 3
+    update!(objects(DuDataPoint); value = "apple"); update!(filter(DuDataPoint; name = "d2"); value = "banana")
+    @test update!(filter(annotate(objects(DuDataPoint); alias_ = F(:value)); alias_ = "apple"); another_value = "foo") == 2
+    @test update!(annotate(objects(DuDataPoint); alias_ = F(:value)); another_value = F(:alias_)) == 3
+    @test get(DuDataPoint; name = "d2").another_value == "banana"
+    @test tr(() -> update!(annotate(objects(DuDataPoint); mx = Max(:value)); another_value = F(:mx))) isa Exception
+    @test update!(annotate(objects(DuDataPoint); related_count = Count(:relatedpoint)); value = "Foo") == 3
+    @test update!(filter(annotate(objects(DuDataPoint); related_count = Count(:relatedpoint)); related_count = 1); value = "Bar") == 1
+    @test tr(() -> update!(annotate(objects(DuRelatedPoint); mx = Max(:data__value)); name = F(:mx))) isa Exception
+    @test tr(() -> update!(annotate(objects(DuRelatedPoint); new_name = F(:data__name)); name = F(:new_name))) isa Exception
+    # test_update_ordered_by_*: the ordering doesn't matter to an UPDATE
+    foo = create(DuFoo; target = "test"); delete!(objects(DuBar)); create(DuBar; foo = foo)
+    # (Django refuses ordering by an aggregate here; Juango leaves an update's ordering out, so it's harmless)
+    update!(order_by(objects(DuBar), "-x"); x = 4); @test get(objects(DuBar)).x == 4
+    # test_update_values_annotation
+    update!(values(filter(DuRelatedPoint; data__is_active = true), :id); data = d2)
+    @test get(DuRelatedPoint; pk = r1.pk).data_id == d2.pk
+    # test_update_negated_f, test_update_negated_f_conditional_annotation, test_updating_non_conditional_field
+    update!(objects(DuDataPoint); is_active = ~F(:is_active))
+    @test Set(values_list(objects(DuDataPoint), :name, :is_active)) == Set([("d1", false), ("d2", false), ("d3", true)])
+    update!(annotate(objects(DuDataPoint); is_d2 = Case(When(name = "d2"; then = true); default = false)); is_active = ~F(:is_d2))
+    @test Set(values_list(objects(DuDataPoint), :name, :is_active)) == Set([("d1", true), ("d2", false), ("d3", true)])
+    @test tr(() -> update!(objects(DuDataPoint); is_active = ~F(:name))) isa ArgumentError
+  end
+end

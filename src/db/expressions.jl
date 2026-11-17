@@ -267,6 +267,12 @@ Base.:~(e::Union{F,Value,Func,Case,Subquery}) = NegatedExpr(e)
 Base.:~(e::NegatedExpr) = e.expr
 Base.:!(e::NegatedExpr) = e.expr
 function compile_expr(c::SQLCompiler, e::NegatedExpr)
+    # ~F(:name) on a text field: Django's "Cannot negate non-conditional expressions" (SQLite would compute NOT 'd0')
+    if e.expr isa F
+        of = try output_field(c.T, e.expr) catch; nothing end
+        of === nothing || of.kind === :bool ||
+            throw(ArgumentError("~F(:$(e.expr.name)): only a boolean can be negated, not a $(of.kind) field"))
+    end
     sql, ps = compile_expr(c, e.expr)
     "(NOT $(boolean_operand(backend(), sql)))", ps
 end
