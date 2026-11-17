@@ -8,16 +8,18 @@ struct M2MOwner
     id::Any
     forward::Bool    # changed from the side that declares the ManyToManyField
     symmetrical::Bool  # also keep the mirrored rows (other -> instance)
+    instance::Any    # the object whose relation it is (its prefetched rows are dropped by a change)
+    name::Symbol     # the relation's name on it
 end
 
-Base.@nospecializeinfer function m2m_queryset(@nospecialize(m::Model), f::Field, forward::Bool)
+Base.@nospecializeinfer function m2m_queryset(@nospecialize(m::Model), f::Field, forward::Bool, name::Symbol = f.name)
     src, dst = through_fks(f)
     mine, other = forward ? (src, dst) : (dst, src)
     Other = related_model(other)
     id = (getfield(m, :_data)::Dict{Symbol,Any})[:id]
     step1, step2 = m2m_path(f, !forward)      # from the other model back to this instance
     qs = filter(objects(Other), Q(Symbol(step1, "__", step2) => id))
-    chain(qs; owner = M2MOwner(through_model(f), mine, other, id, forward, f.symmetrical), db = instance_db(m))
+    chain(qs; owner = M2MOwner(through_model(f), mine, other, id, forward, f.symmetrical, m, name), db = instance_db(m))
 end
 
 function m2m_owner(qs::QuerySet)
@@ -30,6 +32,28 @@ end
 idkey(f::Field) = Symbol(f.name, "__id")
 idkeys(f::Field) = Symbol(f.name, "__id__in")
 stored_value(f::Field, id) = fk_to_field(f) === nothing ? id : getproperty(get(base_objects(related_model(f)); id = id), fk_to_field(f))
+"""
+An object (or key) added to, removed from or set on a many-to-many relation, as the related id: an
+object must be of the related model (Django's TypeError), a key a number for an automatic id, and with
+a to_field through model the key may be that field's value (`add!(article.authors, "jean")`).
+"""
+function m2m_obj_id(o, @nospecialize(x))
+    R = related_model(o.other)
+    if x isa Model
+        check_model_type(R, x)
+        x.id === nothing && throw(ArgumentError("cannot relate an unsaved $(typeof(x))"))
+        return x.id
+    end
+    tf = fk_to_field(o.other)
+    if tf !== nothing && !natural_pk(R)
+        id = first(values_list(filter(base_objects(R), Q(tf => x)), :id; flat = true))
+        id === nothing && throw(DoesNotExist(R, "$tf=$(repr(x))"))
+        return id
+    end
+    check_key_value(R, nothing, x)
+end
+"After a change, the relation's prefetched rows are stale: the next access queries (as Django)."
+m2m_changed!(o) = (delete!((getfield(o.instance, :_cache)::Dict{Symbol,Any}), o.name); nothing)
 Base.@nospecializeinfer objid(@nospecialize(x::Model)) = (x.id === nothing && throw(ArgumentError("cannot relate an unsaved $(typeof(x))")); x.id)
 objid(x) = x
 
@@ -58,8 +82,11 @@ Add objects (or ids) to a many-to-many relation. Already related objects are ski
 function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}(), bulk::Bool = true)
     qs.owner isa ReverseFKOwner && return rev_add!(qs, objs...; bulk = bulk)
     o = m2m_owner(qs)
-    ids = unique(objid.(collect(objs)))
-    isempty(ids) && return qs
+    m2m_add_ids!(o, unique(Any[m2m_obj_id(o, x) for x in objs]), through_defaults)
+    qs
+end
+function m2m_add_ids!(o, ids, through_defaults)
+    isempty(ids) && return
     atomic() do
         have = Set(values_list(filter(base_objects(o.through), Q(idkey(o.mine) => o.id), Q(idkeys(o.other) => ids)),
                                idkey(o.other); flat = true))
@@ -79,20 +106,23 @@ function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}(), bulk
         end
         m2m_signal(o, :post_add, new)
     end
-    qs
+    m2m_changed!(o)
 end
 
 "Remove objects (or ids) from a many-to-many relation."
 function remove!(qs::QuerySet, objs...; bulk::Bool = true)
     qs.owner isa ReverseFKOwner && return rev_remove!(qs, objs...; bulk = bulk)
     o = m2m_owner(qs)
-    ids = objid.(collect(objs))
-    isempty(ids) && return qs
+    m2m_remove_ids!(o, Any[m2m_obj_id(o, x) for x in objs])
+    qs
+end
+function m2m_remove_ids!(o, ids)
+    isempty(ids) && return
     m2m_signal(o, :pre_remove, ids)
     delete!(filter(base_objects(o.through), Q(idkey(o.mine) => o.id), Q(idkeys(o.other) => ids)))
     o.symmetrical && delete!(filter(base_objects(o.through), Q(idkey(o.other) => o.id), Q(idkeys(o.mine) => ids)))
     m2m_signal(o, :post_remove, ids)
-    qs
+    m2m_changed!(o)
 end
 
 "Remove every object from a many-to-many relation."
@@ -103,19 +133,25 @@ function clear!(qs::QuerySet; bulk::Bool = true)
     delete!(filter(base_objects(o.through), Q(idkey(o.mine) => o.id)))
     o.symmetrical && delete!(filter(base_objects(o.through), Q(idkey(o.other) => o.id)))
     m2m_signal(o, :post_clear, nothing)
+    m2m_changed!(o)
     qs
 end
 
-"Make a many-to-many relation contain exactly `objs`."
-function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}(), bulk::Bool = true)
-    qs.owner isa ReverseFKOwner && return rev_set!(qs, objs; bulk = bulk)
+"""
+    set!(post.tags, objs; clear = false)
+
+Make the relation contain exactly `objs`: only the differences are written, or with `clear = true` every
+link is removed and the new ones added (Django's `set(clear=True)`).
+"""
+function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}(), bulk::Bool = true, clear::Bool = false)
+    qs.owner isa ReverseFKOwner && return rev_set!(qs, objs; bulk = bulk, clear = clear)
     o = m2m_owner(qs)
-    want = unique(objid.(collect(objs)))
+    want = unique(Any[m2m_obj_id(o, x) for x in collect(objs)])
+    clear && return atomic(() -> (clear!(qs); m2m_add_ids!(o, want, through_defaults); qs))
     atomic() do
         have = collect(values_list(filter(base_objects(o.through), Q(idkey(o.mine) => o.id)), idkey(o.other); flat = true))
-        gone = setdiff(have, want)
-        isempty(gone) || remove!(qs, gone...)
-        add!(qs, setdiff(want, have)...; through_defaults = through_defaults)
+        m2m_remove_ids!(o, setdiff(have, want))
+        m2m_add_ids!(o, setdiff(want, have), through_defaults)
     end
     qs
 end
@@ -201,10 +237,11 @@ end
 Make the relation contain these objects: the others are removed when the key is nullable (else they
 stay, as Django can't take them away), and the new ones added.
 """
-function rev_set!(qs::QuerySet, objs; bulk::Bool = true)
+function rev_set!(qs::QuerySet, objs; bulk::Bool = true, clear::Bool = false)
     o = qs.owner::ReverseFKOwner
     want = collect(objs)
     foreach(x -> rev_check(o, x), want)
+    clear && o.fk.null && return atomic(() -> (rev_clear!(qs; bulk = bulk); isempty(want) || rev_add!(qs, want...; bulk = bulk); qs))
     atomic() do
         if o.fk.null
             keep = Set(x.pk for x in want)
@@ -233,7 +270,7 @@ function create(qs::QuerySet; kw...)
     elseif qs.owner isa M2MOwner
         obj = create(model_of(qs); kw...)
         add!(qs, obj)
-        return obj
+        return obj   # (add! dropped the prefetched rows)
     end
     throw(ArgumentError("create(qs; ...) needs a relation such as reporter.article or post.tags; use create(Model; ...)"))
 end

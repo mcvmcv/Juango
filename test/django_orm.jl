@@ -2497,3 +2497,115 @@ end
     @test Juango.count_queries(() -> tfc.parent === pa)[2] == 0
   end
 end
+
+# --- tests/many_to_many -----------------------------------------------------------------------------------
+@model struct DnPublication
+    title = CharField(max_length = 30)
+    Meta(table = "dn_publication", ordering = ["title"])
+end
+@model struct DnUser
+    username = CharField(max_length = 20, unique = true)
+    Meta(table = "dn_user")
+end
+@model struct DnUserArticle
+    user = ForeignKey(DnUser; on_delete = :CASCADE, to_field = :username, related_name = :userarticle)
+    article = ForeignKey(:DnArticle; on_delete = :CASCADE, related_name = :userarticle)
+    Meta(table = "dn_userarticle")
+end
+@model struct DnArticle
+    headline = CharField(max_length = 100)
+    publications = ManyToManyField(DnPublication; related_name = :article)
+    authors = ManyToManyField(DnUser; through = DnUserArticle, related_name = :article)
+    Meta(table = "dn_article", ordering = ["headline"])
+end
+redirect_stdout(devnull) do
+    ms = [DnPublication, DnUser, DnArticle, through(DnArticle, :publications), DnUserArticle]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django many_to_many: ManyToManyTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    tt(qs) = [x.title for x in qs]; hl(qs) = [x.headline for x in qs]
+    p1, p2, p3, p4 = (create(DnPublication; title = t) for t in ("The Python Journal", "Science News", "Science Weekly", "Highlights for Children"))
+    a1 = create(DnArticle; headline = "Django lets you build web apps easily"); add!(a1.publications, p1)
+    a2 = create(DnArticle; headline = "NASA uses Python"); add!(a2.publications, p1, p2, p3, p4)
+    a3 = create(DnArticle; headline = "NASA finds intelligent life on Earth"); add!(a3.publications, p2)
+    a4 = create(DnArticle; headline = "Oxygen-free diet works wonders"); add!(a4.publications, p2)
+    # test_add: objects, twice is fine, the wrong model refused, create through the relation
+    a6 = create(DnArticle; headline = "ESA uses Python")
+    add!(a6.publications, p1, p2); add!(a6.publications, p3); add!(a6.publications, p3)
+    @test tt(a6.publications) == ["Science News", "Science Weekly", "The Python Journal"]
+    @test tr(() -> add!(a6.publications, a1)) isa ArgumentError
+    p5 = create(a6.publications; title = "Highlights for Adults")
+    @test tt(a6.publications) == ["Highlights for Adults", "Science News", "Science Weekly", "The Python Journal"]
+    delete!(a6); delete!(p5)
+    # test_add_remove_set_by_pk, test_add_remove_invalid_type
+    a5 = create(DnArticle; headline = "Django lets you create web apps easily")
+    add!(a5.publications, p1.pk); @test tt(a5.publications) == ["The Python Journal"]
+    set!(a5.publications, [p2.pk]); @test tt(a5.publications) == ["Science News"]
+    remove!(a5.publications, p2.pk); @test isempty(collect(a5.publications))
+    @test tr(() -> add!(a1.publications, "invalid")) isa ArgumentError && tr(() -> remove!(a1.publications, "invalid")) isa ArgumentError
+    # test_add_remove_set_by_to_field: the through model's key stores the username
+    u1, u2 = create(DnUser; username = "Jean"), create(DnUser; username = "Joe")
+    add!(a5.authors, "Jean"); @test [u.username for u in a5.authors] == ["Jean"]
+    set!(a5.authors, ["Joe"]); @test [u.username for u in a5.authors] == ["Joe"]
+    remove!(a5.authors, "Joe"); @test isempty(collect(a5.authors))
+    add!(a5.authors, u1); @test only(collect(objects(DnUserArticle))).user_id == "Jean"
+    delete!(a5)
+    # test_reverse_add, test_related_sets
+    a7 = create(DnArticle; headline = "NASA finds intelligent life on Mars")
+    add!(p2.article, a7)
+    @test hl(p2.article) == ["NASA finds intelligent life on Earth", "NASA finds intelligent life on Mars", "NASA uses Python", "Oxygen-free diet works wonders"]
+    @test tt(a7.publications) == ["Science News"]
+    a8 = create(p2.article; headline = "Carbon-free diet works wonders")
+    @test hl(p2.article)[1] == "Carbon-free diet works wonders" && tt(a8.publications) == ["Science News"]
+    delete!(a7); delete!(a8)
+    @test tt(a2.publications) == ["Highlights for Children", "Science News", "Science Weekly", "The Python Journal"]
+    @test hl(p1.article) == ["Django lets you build web apps easily", "NASA uses Python"]
+    # test_selects, test_reverse_selects
+    for q in (filter(DnArticle; publications__id__exact = p1.id), filter(DnArticle; publications__pk = p1.id), filter(DnArticle; publications = p1.id), filter(DnArticle; publications = p1))
+        @test hl(q) == ["Django lets you build web apps easily", "NASA uses Python"]
+    end
+    @test hl(distinct(filter(DnArticle; publications__title__startswith = "Science"))) == ["NASA finds intelligent life on Earth", "NASA uses Python", "Oxygen-free diet works wonders"]
+    @test count(distinct(filter(DnArticle; publications__title__startswith = "Science"))) == 3
+    @test length(hl(distinct(filter(DnArticle; publications__in = [p1.id, p2])))) == 4 && length(hl(distinct(filter(DnArticle; publications__in = [p1, p2])))) == 4
+    @test hl(exclude(objects(DnArticle); publications = p2)) == ["Django lets you build web apps easily"]
+    @test tt(filter(DnPublication; article = a1)) == ["The Python Journal"] && tt(filter(DnPublication; article__pk = a1.id)) == ["The Python Journal"]
+    @test tt(distinct(filter(DnPublication; article__in = [a1.id, a2]))) == ["Highlights for Children", "Science News", "Science Weekly", "The Python Journal"]
+    # test_remove, test_set (with and without clear), test_assign_ids, test_clear
+    remove!(a4.publications, p2)
+    @test hl(p2.article) == ["NASA finds intelligent life on Earth", "NASA uses Python"] && isempty(collect(a4.publications))
+    remove!(p2.article, a3); @test hl(p2.article) == ["NASA uses Python"] && isempty(collect(a3.publications))
+    for clr in (false, true)
+        set!(p2.article, [a4, a3]; clear = clr)
+        @test hl(p2.article) == ["NASA finds intelligent life on Earth", "Oxygen-free diet works wonders"] && tt(a4.publications) == ["Science News"]
+        set!(a4.publications, [p3.id]; clear = clr)
+        @test hl(p2.article) == ["NASA finds intelligent life on Earth"] && tt(a4.publications) == ["Science Weekly"]
+        set!(p2.article, []; clear = clr); set!(a4.publications, []; clear = clr)
+        @test isempty(collect(p2.article)) && isempty(collect(a4.publications))
+    end
+    # test_assign_forward / test_assign_reverse: direct assignment refused
+    @test tr(() -> (a1.publications = [p1, p2])) isa ArgumentError
+    # test_forward_assign_with_queryset: the queryset is read before the set changes it
+    set!(a1.publications, [p1, p2])
+    set!(a1.publications, filter(a1.publications; title = "The Python Journal"))
+    @test count(a1.publications) == 1
+    # test_*_after_prefetch: a change through a prefetched relation shows at once
+    set!(a4.publications, [p2])
+    pa4 = get(prefetch_related(objects(DnArticle), :publications); id = a4.id)
+    @test tt(pa4.publications) == ["Science News"]
+    add!(pa4.publications, p1); @test count(pa4.publications) == 2
+    remove!(pa4.publications, p1); @test tt(pa4.publications) == ["Science News"]
+    pp = create(pa4.publications; title = "Django beats"); @test Set(tt(pa4.publications)) == Set(["Science News", "Django beats"])
+    clear!(pa4.publications); @test isempty(collect(pa4.publications))
+    delete!(pp)
+    # test_delete, test_bulk_delete: links go with the rows
+    delete!(p1)
+    @test isempty(collect(a1.publications)) && tt(objects(DnPublication)) == ["Highlights for Children", "Science News", "Science Weekly"]
+    delete!(filter(DnPublication; title__startswith = "Science"))
+    @test tt(a2.publications) == ["Highlights for Children"]
+    delete!(filter(DnArticle; headline__startswith = "NASA"))
+    @test isempty(collect(p4.article))
+  end
+end

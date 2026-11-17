@@ -387,13 +387,14 @@ end
 add!(post.tags, julia, web)      # objects or ids; existing links are skipped
 create(post.tags; name = "new")  # a Tag, added to the post's tags
 remove!(post.tags, web)
-set!(post.tags, [julia, db])
+set!(post.tags, [julia, db])     # only the differences are written; clear = true removes all first
 clear!(post.tags)
 post.tags                        # QuerySet{Tag};   tag.posts is QuerySet{Post}
 filter(Post; tags__name="julia")                  # lookups in both directions
 prefetch_related(objects(Post), :tags)            # 2 extra queries for any number of posts
 ```
 
+- **What can be added.** Objects of the related model (or their keys, or with a `to_field` through model that field's value, `add!(article.authors, "jean")`); an object of another model or a key that isn't one is refused, as in Django. `post.tags = [...]` is an error: use `set!`. A change drops the relation's prefetched rows.
 - **Reverse names.** The reverse side is `tag.post_set` (or `related_name`) on an object, and `post` in lookups (`filter(Tag; post__title = "x")`, `Count(:post)`), or `related_query_name` when given; the same holds for foreign keys. A many-to-many to `USER_MODEL` names its join column `user_id`.
 - **Join table.** Juango creates a join table (`post_tags`, unique per pair) that migrations manage like any other table. Deleting either side removes its links. `through(Post, :tags)` is its model (Django's `Post.tags.through`), with foreign keys `post` and `tag` (`from_post`/`to_post` for a relation to the same model): query it, `bulk_create` links, or connect `m2m_changed` with it as the sender.
 - **Custom intermediate model.** Use `through=:Membership` for one with extra fields, and fill those fields with `add!(club.members, ann; through_defaults=Dict(:role => "chair"))`.

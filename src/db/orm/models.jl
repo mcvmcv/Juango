@@ -605,7 +605,7 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
     end
     mm = find_m2m(T, string(s))
     if mm !== nothing
-        qs = m2m_queryset(m, mm[2], mm[3])
+        qs = m2m_queryset(m, mm[2], mm[3], s)
         pre isa PrefetchedList && (note_eager_use(T, s); return chain(qs; cache = pre.items, owner = qs.owner))
         note_lazy_load(T, s, :reverse, m)
         return qs
@@ -671,6 +671,8 @@ Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::S
             "for a computed attribute define Juango.tattr!(::$(nameof(typeof(m))), ::Val{:$s}, v))"))
         return v
     end
+    f !== nothing && f.kind === :m2m &&
+        throw(ArgumentError("direct assignment to the many-to-many set '$s' is prohibited: use set!(obj.$s, ...) instead"))
     # parent.bestchild_id = x: a cached bestchild for another key is dropped (as Django), so it isn't saved back
     if f !== nothing && f.kind === :fk && s === attname(f)
         cache = (getfield(m, :_cache)::Dict{Symbol,Any})
