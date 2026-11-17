@@ -18,7 +18,8 @@ Base.@nospecializeinfer function m2m_queryset(@nospecialize(m::Model), f::Field,
     Other = related_model(other)
     id = (getfield(m, :_data)::Dict{Symbol,Any})[:id]
     step1, step2 = m2m_path(f, !forward)      # from the other model back to this instance
-    qs = filter(objects(Other), Q(Symbol(step1, "__", step2) => id))
+    # (a to_field through key holds another field than the id: compared through the related id then)
+    qs = filter(objects(Other), Q((fk_to_field(mine) === nothing ? Symbol(step1, "__", step2) : Symbol(step1, "__", step2, "__id")) => id))
     chain(qs; owner = M2MOwner(through_model(f), mine, other, id, forward, f.symmetrical, m, name), db = instance_db(m))
 end
 
@@ -87,6 +88,8 @@ function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}(), bulk
 end
 function m2m_add_ids!(o, ids, through_defaults)
     isempty(ids) && return
+    # a callable default is called once for the call, every new link getting the same value (as Django)
+    through_defaults = Dict{Symbol,Any}(Symbol(k) => (v isa Function ? v() : v) for (k, v) in pairs(through_defaults))
     atomic() do
         have = Set(values_list(filter(base_objects(o.through), Q(idkey(o.mine) => o.id), Q(idkeys(o.other) => ids)),
                                idkey(o.other); flat = true))
@@ -261,7 +264,7 @@ end
 
 A new object in a relation (Django's `RelatedManager.create`).
 """
-function create(qs::QuerySet; kw...)
+function create(qs::QuerySet; through_defaults = Dict{Symbol,Any}(), kw...)
     if qs.owner isa ReverseFKOwner
         o = qs.owner::ReverseFKOwner
         obj = create(o.model; kw..., (o.fk.name => o.instance,)...)
@@ -269,10 +272,36 @@ function create(qs::QuerySet; kw...)
         return obj
     elseif qs.owner isa M2MOwner
         obj = create(model_of(qs); kw...)
-        add!(qs, obj)
+        add!(qs, obj; through_defaults = through_defaults)
         return obj   # (add! dropped the prefetched rows)
     end
     throw(ArgumentError("create(qs; ...) needs a relation such as reporter.article or post.tags; use create(Model; ...)"))
+end
+
+"""
+    get_or_create(group.members; name = "Ann", through_defaults = Dict(:role => "chair"))
+    update_or_create(reporter.article; headline = "x", defaults = Dict(:pub_date => d))
+
+Through a relation: the object is looked for among the related ones; one made is added to the relation.
+"""
+function get_or_create(qs::QuerySet; defaults = Dict{Symbol,Any}(), through_defaults = Dict{Symbol,Any}(), kw...)
+    qs.owner isa Union{M2MOwner,ReverseFKOwner} || throw(ArgumentError("get_or_create(qs; ...) needs a relation such as group.members; use get_or_create(Model; ...)"))
+    atomic() do
+        o = first(filter(qs; kw...))
+        o === nothing || return (o, false)
+        (create(qs; through_defaults = through_defaults, kw..., pairs_of(defaults)...), true)
+    end
+end
+function update_or_create(qs::QuerySet; defaults = Dict{Symbol,Any}(), through_defaults = Dict{Symbol,Any}(), kw...)
+    qs.owner isa Union{M2MOwner,ReverseFKOwner} || throw(ArgumentError("update_or_create(qs; ...) needs a relation such as group.members; use update_or_create(Model; ...)"))
+    atomic() do
+        o = first(filter(qs; kw...))
+        o === nothing && return (create(qs; through_defaults = through_defaults, kw..., pairs_of(defaults)...), true)
+        for (k, v) in pairs_of(defaults)
+            setproperty!(o, Symbol(k), v)
+        end
+        (save!(o), false)
+    end
 end
 
 function prefetch_m2m!(objs::Vector, name, f::Field, forward::Bool, qs, to_attr)
@@ -280,7 +309,7 @@ function prefetch_m2m!(objs::Vector, name, f::Field, forward::Bool, qs, to_attr)
     mine, other = forward ? (src, dst) : (dst, src)
     Other = related_model(other)
     ids = [o.id for o in objs]
-    pairs_ = collect(values_list(filter(base_objects(through_model(f)), Q(Symbol(attname(mine), "__in") => ids)), attname(mine), attname(other)))
+    pairs_ = collect(values_list(filter(base_objects(through_model(f)), Q(idkeys(mine) => ids)), idkey(mine), idkey(other)))
     owners_of = Dict{Any,Vector{Any}}()
     for (mid, oid) in pairs_
         push!(get!(() -> Any[], owners_of, oid), mid)

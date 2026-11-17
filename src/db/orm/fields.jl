@@ -62,6 +62,7 @@ mutable struct Field
     db_column::Union{Nothing,String}      # the column's name when it isn't the attribute's (Django's db_column, #212)
     to_field::Union{Nothing,Symbol}       # ForeignKey: the related model's unique field it stores (default: its id, #220)
     primary_key::Bool                     # the model's primary key, instead of an automatic id (#221)
+    through_fields::Union{Nothing,Tuple{Symbol,Symbol}}   # ManyToManyField: the through model's keys to the owner and the target
     att::Symbol         # attname for the name in `attfor` (see `attname`)
     col::String         # string(att): the column name
     attfor::Symbol      # the name `att` and `col` were worked out for
@@ -239,7 +240,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                unique_for_year = nothing, template_name = nothing, related_query_name = nothing, error_messages = nothing,
                min_value = nothing, max_value = nothing, step_size = nothing, min_length = nothing,
                input_formats = nothing, localize::Bool = false, db_collation = nothing, db_column = nothing, to_field = nothing,
-               primary_key::Bool = false)
+               primary_key::Bool = false, through_fields = nothing)
     required === nothing || (blank = !required)
     # form fields: the date formats to accept, and numbers typed in the language's format ("1.234,5")
     if input_formats !== nothing || localize
@@ -271,7 +272,8 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           error_messages === nothing ? nothing : Dict{String,String}(string(k) => string(v) for (k, v) in error_messages),
           db_collation === nothing ? nothing : string(db_collation), db_column === nothing ? nothing : string(db_column),
           to_field === nothing || to_field in (:id, :pk, "id", "pk") ? nothing : Symbol(to_field),
-          primary_key, field_att(kind, :_), string(field_att(kind, :_)), :_)
+          primary_key, through_fields === nothing ? nothing : (Symbol(through_fields[1]), Symbol(through_fields[2])),
+          field_att(kind, :_), string(field_att(kind, :_)), :_)
 end
 
 """
@@ -470,6 +472,9 @@ The other side gets `tag.post_set` (or `related_name`).
 A relation of a model to itself (`friends = ManyToManyField(:self)`) is symmetrical: when
 `a` is a friend of `b`, `b` is a friend of `a` (adding or removing either way changes both).
 Pass `symmetrical = false` for one-way relations such as "follows".
+
+A `through` model with more than one foreign key to the same model (an invitation's inviter and
+invitee) needs `through_fields = (:event, :invitee)`: its keys to this model and to the related one.
 """
 function ManyToManyField(to; symmetrical = nothing, kw...)
     sym = something(symmetrical, to === :self)

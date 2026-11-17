@@ -351,7 +351,17 @@ end
 "The two foreign keys of a many-to-many's intermediate model: (to the owner, to the target)."
 function through_fks(f::Field)
     Th, owner, target = through_model(f), f.model, related_model(f)
+    if f.through_fields !== nothing           # through_fields = (:event, :invitee): which keys, as Django's
+        return getfield_meta(Th, f.through_fields[1]), getfield_meta(Th, f.through_fields[2])
+    end
     fks = [g for g in modelmeta(Th).fields if g.kind === :fk]
+    # two keys to the same side (an inviter and an invitee) are ambiguous: Django refuses them without through_fields
+    if owner !== target && (count(g -> related_model(g) === target, fks) > 1 || count(g -> related_model(g) === owner, fks) > 1)
+        error("$(nameof(owner)).$(f.name): $(nameof(Th)) has more than one foreign key to $(nameof(count(g -> related_model(g) === target, fks) > 1 ? target : owner)); " *
+              "say which with through_fields = (:to_$(lowercase(string(nameof(owner)))), :to_$(lowercase(string(nameof(target)))))")
+    end
+    owner === target && f.through !== nothing && count(g -> related_model(g) === owner, fks) > 2 &&
+        error("$(nameof(owner)).$(f.name): $(nameof(Th)) has more than two foreign keys to $(nameof(owner)); say which with through_fields = (:source, :target)")
     if owner === target
         length(fks) >= 2 || error("$(nameof(Th)) needs two foreign keys to $(nameof(owner))")
         return fks[1], fks[2]

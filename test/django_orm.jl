@@ -2770,3 +2770,167 @@ end
     @test Juango.count_queries(() -> pz.restaurant === rz)[2] == 0
   end
 end
+
+# --- tests/m2m_through ------------------------------------------------------------------------------------
+@model struct DtPerson
+    name = CharField(max_length = 128)
+    Meta(table = "dt_person", ordering = ["name"])
+end
+@model struct DtGroup
+    name = CharField(max_length = 128)
+    members = ManyToManyField(DtPerson; through = :DtMembership, related_name = :group_set)
+    nodefaultsnonulls = ManyToManyField(DtPerson; through = :DtTestNoDefaultsOrNulls, related_name = :testnodefaultsnonulls)
+    Meta(table = "dt_group", ordering = ["name"])
+end
+@model struct DtMembership
+    person = ForeignKey(DtPerson; on_delete = :CASCADE, related_name = :membership_set)
+    group = ForeignKey(DtGroup; on_delete = :CASCADE, related_name = :membership_set)
+    date_joined = DateTimeField(default = now)
+    invite_reason = CharField(max_length = 64, null = true)
+    Meta(table = "dt_membership", ordering = ["date_joined", "invite_reason", "group"])
+end
+@model struct DtTestNoDefaultsOrNulls
+    person = ForeignKey(DtPerson; on_delete = :CASCADE, related_name = :testnodefaultsornulls_set)
+    group = ForeignKey(DtGroup; on_delete = :CASCADE, related_name = :testnodefaultsornulls_set)
+    nodefaultnonull = IntegerField()
+    Meta(table = "dt_testnodefaultsornulls")
+end
+@model struct DtEvent
+    title = CharField(max_length = 50)
+    invitees = ManyToManyField(DtPerson; through = :DtInvitation, through_fields = (:event, :invitee), related_name = :events_invited)
+    Meta(table = "dt_event")
+end
+@model struct DtInvitation
+    event = ForeignKey(DtEvent; on_delete = :CASCADE, related_name = :invitations)
+    inviter = ForeignKey(DtPerson; on_delete = :CASCADE, related_name = :invitations_sent)
+    invitee = ForeignKey(DtPerson; on_delete = :CASCADE, related_name = :invitations)
+    Meta(table = "dt_invitation")
+end
+@model struct DtEmployee
+    name = CharField(max_length = 5)
+    subordinates = ManyToManyField(:self; through = :DtRelationship, through_fields = (:source, :target), symmetrical = false, related_name = :superiors)
+    Meta(table = "dt_employee", ordering = ["pk"])
+end
+@model struct DtRelationship
+    another = ForeignKey(DtEmployee; on_delete = :SET_NULL, null = true, related_name = :rel_another_set)
+    target = ForeignKey(DtEmployee; on_delete = :CASCADE, related_name = :rel_target_set)
+    source = ForeignKey(DtEmployee; on_delete = :CASCADE, related_name = :rel_source_set)
+    Meta(table = "dt_relationship")
+end
+@model struct DtIngredient
+    iname = CharField(max_length = 20, unique = true)
+    Meta(table = "dt_ingredient", ordering = ["iname"])
+end
+@model struct DtRecipe
+    rname = CharField(max_length = 20, unique = true)
+    ingredients = ManyToManyField(DtIngredient; through = :DtRecipeIngredient, related_name = :recipes)
+    Meta(table = "dt_recipe", ordering = ["rname"])
+end
+@model struct DtRecipeIngredient
+    ingredient = ForeignKey(DtIngredient; on_delete = :CASCADE, to_field = :iname, related_name = :recipeingredient)
+    recipe = ForeignKey(DtRecipe; on_delete = :CASCADE, to_field = :rname, related_name = :recipeingredient)
+    Meta(table = "dt_recipeingredient")
+end
+redirect_stdout(devnull) do
+    ms = [DtPerson, DtGroup, DtMembership, DtTestNoDefaultsOrNulls, DtEvent, DtInvitation, DtEmployee, DtRelationship,
+          DtIngredient, DtRecipe, DtRecipeIngredient]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django m2m_through: M2mThroughTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nm(qs) = [x.name for x in qs]
+    bob, jim, jane = (create(DtPerson; name = n) for n in ("Bob", "Jim", "Jane"))
+    rock, roll = create(DtGroup; name = "Rock"), create(DtGroup; name = "Roll")
+    # test_retrieve_intermediate_items, test_get_on_intermediate_model, test_filter_on_intermediate_model
+    m1 = create(DtMembership; person = jim, group = rock); m2 = create(DtMembership; person = jane, group = rock)
+    @test nm(rock.members) == ["Jane", "Jim"]
+    @test get(DtMembership; person = jane, group = rock).pk == m2.pk && [m.pk for m in filter(DtMembership; group = rock)] == [m1.pk, m2.pk]
+    clear!(rock.members); @test isempty(collect(rock.members))
+    # test_add_on_m2m_with_intermediate_model (and a callable default, called once)
+    add!(rock.members, bob; through_defaults = Dict(:invite_reason => "He is good."))
+    @test nm(rock.members) == ["Bob"] && get(rock.membership_set).invite_reason == "He is good."
+    calls = Ref(0)
+    add!(roll.members, bob, jane; through_defaults = Dict(:invite_reason => () -> (calls[] += 1; "They were good at $(calls[])")))
+    @test calls[] == 1 && count(filter(roll.membership_set; invite_reason__startswith = "They were good at ")) == 2
+    set!(roll.members, [bob, jane, jim]; through_defaults = Dict(:invite_reason => () -> "Why not?"))
+    @test count(filter(roll.membership_set; invite_reason = "Why not?")) == 1
+    clear!(rock.members); clear!(roll.members)
+    # value required in the through model
+    add!(rock.nodefaultsnonulls, jim; through_defaults = Dict(:nodefaultnonull => 1))
+    @test get(rock.testnodefaultsornulls_set).nodefaultnonull == 1
+    clear!(rock.nodefaultsnonulls)
+    @test tr(() -> add!(rock.nodefaultsnonulls, jim)) isa Exception
+    set!(rock.nodefaultsnonulls, [jim]; through_defaults = Dict(:nodefaultnonull => 1))
+    set!(rock.nodefaultsnonulls, [jim]; through_defaults = Dict(:nodefaultnonull => 2))
+    @test get(rock.testnodefaultsornulls_set).nodefaultnonull == 1
+    set!(rock.nodefaultsnonulls, [jim]; through_defaults = Dict(:nodefaultnonull => 2), clear = true)
+    @test get(rock.testnodefaultsornulls_set).nodefaultnonull == 2
+    clear!(rock.nodefaultsnonulls)
+    # create, get_or_create, update_or_create through the relation, with through_defaults
+    annie = create(rock.members; name = "Annie", through_defaults = Dict(:invite_reason => "She was just awesome."))
+    @test nm(rock.members) == ["Annie"] && get(rock.membership_set).invite_reason == "She was just awesome."
+    t, made = get_or_create(rock.nodefaultsnonulls; name = "Test", through_defaults = Dict(:nodefaultnonull => 1))
+    @test made && get(rock.testnodefaultsornulls_set).nodefaultnonull == 1
+    @test get_or_create(rock.nodefaultsnonulls; name = "Test")[2] == false
+    @test tr(() -> get_or_create(roll.nodefaultsnonulls; name = "Test2")) isa Exception
+    u, made = update_or_create(roll.nodefaultsnonulls; name = "Test3", through_defaults = Dict(:nodefaultnonull => 3))
+    @test made && get(roll.testnodefaultsornulls_set).nodefaultnonull == 3
+    clear!(rock.members); clear!(rock.nodefaultsnonulls); clear!(roll.nodefaultsnonulls)
+    # test_remove_on_m2m_with_intermediate_model(_multiple): every link to the object goes
+    create(DtMembership; person = jim, group = rock, invite_reason = "1"); create(DtMembership; person = jim, group = rock, invite_reason = "2")
+    @test nm(rock.members) == ["Jim"]                                  # (Juango returns each object once)
+    remove!(rock.members, jim); @test isempty(collect(rock.members))
+    # test_set_on_m2m_with_intermediate_model, the reverse side
+    set!(rock.members, collect(filter(DtPerson; name__in = ["Bob", "Jim"])))
+    @test nm(rock.members) == ["Bob", "Jim"]
+    add!(bob.group_set, roll); @test nm(bob.group_set) == ["Rock", "Roll"]
+    funk = create(bob.group_set; name = "Funk"); @test nm(bob.group_set) == ["Funk", "Rock", "Roll"]
+    remove!(bob.group_set, rock); set!(bob.group_set, [rock, roll]); @test nm(bob.group_set) == ["Rock", "Roll"]
+    clear!(bob.group_set); @test isempty(collect(bob.group_set))
+    # test_query_model_by_attribute_name_of_related_model and friends
+    clear!(rock.members)
+    for (p, g) in ((jim, rock), (jane, rock), (bob, roll), (jim, roll), (jane, roll)); create(DtMembership; person = p, group = g); end
+    @test nm(filter(DtGroup; members__name = "Bob")) == ["Roll"]
+    @test nm(filter(DtPerson; group_set__name = "Rock")) == ["Jane", "Jim"]
+    @test nm(filter(DtGroup; membership_set__invite_reason = nothing, members__name = "Jane")) == ["Rock", "Roll"]
+  end
+  port_block() do
+    # through_fields: the invitee, not the inviter
+    tr(f) = try f() catch err; err end
+    jim, jane = create(DtPerson; name = "Jim"), create(DtPerson; name = "Jane")
+    ev = create(DtEvent; title = "Rockwhale 2014")
+    create(DtInvitation; event = ev, inviter = jim, invitee = jane)
+    @test [p.name for p in ev.invitees] == ["Jane"] && [e.title for e in jane.events_invited] == ["Rockwhale 2014"]
+    @test isempty(collect(jim.events_invited))
+    # self-referential through_fields: source -> target
+    tony, chris, dan = (create(DtEmployee; name = n) for n in ("Tony", "Chris", "Dan"))
+    create(DtRelationship; source = tony, target = chris, another = dan)
+    @test [e.name for e in tony.subordinates] == ["Chris"] && isempty(collect(chris.subordinates)) && [e.name for e in chris.superiors] == ["Tony"]
+    # an ambiguous through model without through_fields is refused (Django: a check error)
+    @eval @model struct DtBadEvent
+        invitees = ManyToManyField(DtPerson; through = :DtBadInvitation, related_name = :bad_events)
+        Meta(table = "dt_badevent")
+    end
+    @eval @model struct DtBadInvitation
+        event = ForeignKey(DtBadEvent; on_delete = :CASCADE, related_name = :bad_invitations)
+        a = ForeignKey(DtPerson; on_delete = :CASCADE, related_name = :bad_a)
+        b = ForeignKey(DtPerson; on_delete = :CASCADE, related_name = :bad_b)
+        Meta(table = "dt_badinvitation")
+    end
+    @test tr(() -> Juango.through_fks(Juango.getfield_meta(DtBadEvent, :invitees))) isa Exception
+    foreach(Juango.unregister_model!, [DtBadEvent, DtBadInvitation])
+  end
+  port_block() do
+    # a through model whose keys use to_field (Recipe/Ingredient)
+    pea, potato, tomato = (create(DtIngredient; iname = n) for n in ("pea", "potato", "tomato"))
+    curry = create(DtRecipe; rname = "curry")
+    add!(curry.ingredients, pea, potato)
+    @test [i.iname for i in curry.ingredients] == ["pea", "potato"] && [r.rname for r in pea.recipes] == ["curry"]
+    @test Set(r.ingredient_id for r in objects(DtRecipeIngredient)) == Set(["pea", "potato"])
+    remove!(curry.ingredients, pea); set!(curry.ingredients, [tomato, potato])
+    @test [i.iname for i in curry.ingredients] == ["potato", "tomato"]
+    @test [i.iname for i in get(prefetch_related(objects(DtRecipe), :ingredients); rname = "curry").ingredients] == ["potato", "tomato"]
+  end
+end
