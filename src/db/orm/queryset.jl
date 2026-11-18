@@ -734,21 +734,21 @@ end
 
 "The `FOR UPDATE ...` clause of `select_for_update` (nothing on SQLite, which locks the whole database)."
 function for_update_sql(b::DatabaseBackend, opts, c, related)
-    occursin("SQLite", vendor(b)) && return ""
-    s = " FOR UPDATE"
+    no_key = get(opts, :no_key, false)
     if !isempty(opts.of)
-        b isa PostgresBackend || throw(ArgumentError("select_for_update(of = ...) is only supported on PostgreSQL"))
-        aliases = String[]
-        for name in opts.of
-            name = string(name)
-            if name == "self"
-                push!(aliases, qname(c.base))
-            else
-                i = findfirst(r -> join(string.(r[1]), "__") == name, related)
-                i === nothing && throw(ArgumentError("select_for_update(of = ...): '$name' is not 'self' or a select_related path"))
-                push!(aliases, qname(related[i][3]))
-            end
-        end
+        # names that aren't 'self' or a followed relation are refused (on every database, as Django)
+        paths = [join(string.(r[1]), "__") for r in related]
+        bad = [string(n) for n in opts.of if string(n) != "self" && !(string(n) in paths)]
+        isempty(bad) || throw(LookupError("Invalid field name(s) given in select_for_update(of=(...)): $(join(bad, ", ")). " *
+                                         "Only relational fields followed in the query are allowed. Choices are: $(join(vcat("self", paths), ", "))."))
+    end
+    occursin("SQLite", vendor(b)) && return ""
+    no_key && !(b isa PostgresBackend) && throw(NotSupportedError("FOR NO KEY UPDATE is not supported on this database backend."))
+    s = no_key ? " FOR NO KEY UPDATE" : " FOR UPDATE"
+    if !isempty(opts.of)
+        b isa PostgresBackend || throw(NotSupportedError("FOR UPDATE OF is not supported on this database backend."))
+        aliases = String[string(n) == "self" ? qname(c.base) : qname(related[findfirst(r -> join(string.(r[1]), "__") == string(n), related)][3])
+                         for n in opts.of]
         s *= " OF " * join(aliases, ", ")
     end
     opts.nowait && (s *= " NOWAIT")
@@ -835,7 +835,7 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
     T = model_of(qs)
     qs.cache === nothing || return Vector{T}(qs.cache)
     qs.for_update === nothing || in_atomic() ||
-        throw(TransactionManagementError("select_for_update() must be evaluated inside atomic()"))
+        throw(TransactionManagementError("select_for_update cannot be used outside of a transaction."))
     qs.values_fields === nothing || return fetch_values(qs)
     qs.isnone && return T[]
     sql, ps, _, related = build_select(qs)

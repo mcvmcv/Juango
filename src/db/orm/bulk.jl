@@ -5,6 +5,12 @@ struct TransactionManagementError <: Exception
 end
 Base.showerror(io::IO, e::TransactionManagementError) = print(io, "TransactionManagementError: ", e.msg)
 
+"A feature the database doesn't have (Django's `NotSupportedError`): `select_for_update(no_key = true)` on MySQL."
+struct NotSupportedError <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::NotSupportedError) = print(io, "NotSupportedError: ", e.msg)
+
 "Prepare objects for a bulk insert as `save!` would: timestamps, UUID keys, uploaded files."
 function prepare_for_insert!(objs, T)
     ts = timezone_now()
@@ -249,17 +255,18 @@ function Base.iterate(it::QuerySetIterator, st = (Any[], 1, 0, false))
 end
 
 """
-    select_for_update(qs; nowait = false, skip_locked = false, of = ())
+    select_for_update(qs; nowait = false, skip_locked = false, of = (), no_key = false)
 
 Lock the selected rows until the end of the transaction (`SELECT ... FOR UPDATE`). Must be
 evaluated inside `atomic()`. `nowait` fails instead of waiting for a lock, `skip_locked`
 leaves locked rows out, and `of = ("self", "author")` (PostgreSQL) locks only those tables
-of a `select_related` query. SQLite locks the whole database for a write transaction, so
-there it only checks for the transaction.
+of a `select_related` query; `no_key` (PostgreSQL) takes the weaker `FOR NO KEY UPDATE` lock,
+which doesn't block rows referring to the locked ones. SQLite locks the whole database for a
+write transaction, so there it only checks for the transaction.
 """
-function select_for_update(qs::QuerySet; nowait = false, skip_locked = false, of = ())
-    nowait && skip_locked && throw(ArgumentError("select_for_update: nowait and skip_locked can't both be set"))
-    chain(qs; for_update = (nowait = nowait, skip_locked = skip_locked, of = collect(of)))
+function select_for_update(qs::QuerySet; nowait = false, skip_locked = false, of = (), no_key = false)
+    nowait && skip_locked && throw(ArgumentError("The nowait option cannot be used with skip_locked."))
+    chain(qs; for_update = (nowait = nowait, skip_locked = skip_locked, of = collect(of), no_key = no_key))
 end
 Base.@nospecializeinfer select_for_update(@nospecialize(T::Type{<:Model}); kw...) = select_for_update(objects(T); kw...)
 

@@ -7625,3 +7625,81 @@ end
   end
 end
 
+# --- tests/select_for_update ------------------------------------------------------------------------------
+@model struct DsfCountry
+    name = CharField(max_length = 30)
+    Meta(table = "dsf_country")
+end
+@model struct DsfCity
+    name = CharField(max_length = 30)
+    country = ForeignKey(DsfCountry; on_delete = :CASCADE, related_name = :cities)
+    Meta(table = "dsf_city")
+end
+@model struct DsfPerson
+    name = CharField(max_length = 30)
+    born = ForeignKey(DsfCity; on_delete = :CASCADE, related_name = :born_people)
+    died = ForeignKey(DsfCity; on_delete = :CASCADE, related_name = :died_people)
+    Meta(table = "dsf_person")
+end
+@model struct DsfPersonProfile
+    person = OneToOneField(DsfPerson; on_delete = :CASCADE, related_name = :profile)
+    Meta(table = "dsf_personprofile")
+end
+redirect_stdout(devnull) do
+    ms = [DsfCountry, DsfCity, DsfPerson, DsfPersonProfile]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django select_for_update" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    c1, c2 = create(DsfCountry; name = "Belgium"), create(DsfCountry; name = "France")
+    city1, city2 = create(DsfCity; name = "Liberchies", country = c1), create(DsfCity; name = "Samois-sur-Seine", country = c2)
+    person = create(DsfPerson; name = "Reinhardt", born = city1, died = city2)
+    profile = create(DsfPersonProfile; person = person)
+    # the SQL each variant runs (none on SQLite, which locks the whole database)
+    function sqls(f)
+        seen = String[]
+        Juango.execute_wrapper((ex, sql, ps, ctx) -> (push!(seen, sql); ex(sql, ps))) do
+            atomic(f)
+        end
+        seen
+    end
+    has(seen, s) = any(q -> occursin(s, q), seen)
+    if IS_POSTGRES || IS_MYSQL
+        @test has(sqls(() -> collect(select_for_update(objects(DsfPerson)))), "FOR UPDATE")
+        @test has(sqls(() -> collect(select_for_update(objects(DsfPerson); nowait = true))), "FOR UPDATE NOWAIT")
+        @test has(sqls(() -> collect(select_for_update(objects(DsfPerson); skip_locked = true))), "FOR UPDATE SKIP LOCKED")
+    end
+    if IS_POSTGRES
+        @test has(sqls(() -> collect(select_for_update(objects(DsfPerson); no_key = true))), "FOR NO KEY UPDATE")
+        @test has(sqls(() -> collect(select_for_update(select_related(objects(DsfPerson), "born__country"); of = ("self", "born__country")))), "FOR UPDATE OF")
+        # a reverse one-to-one may be locked when NULLs are excluded
+        atomic() do
+            p = get(select_for_update(exclude(select_related(objects(DsfPerson), :profile); profile = nothing); of = ("profile",)))
+            @test p.profile == profile
+        end
+    elseif IS_MYSQL
+        e = tr(() -> atomic(() -> get(select_for_update(objects(DsfPerson); no_key = true))))
+        @test e isa NotSupportedError && occursin("FOR NO KEY UPDATE is not supported on this database backend.", e.msg)
+    end
+    @test tr(() -> select_for_update(objects(DsfPerson); nowait = true, skip_locked = true)) isa ArgumentError
+    # names in of that aren't followed relations are refused, with the choices
+    for of in (("nonexistent",), ("name",), ("born__nonexistent",), ("born__name",), ("born__nonexistent", "born__name"))
+        e = tr(() -> atomic(() -> get(select_for_update(select_related(objects(DsfPerson), "born__country"); of = of))))
+        @test e isa Juango.LookupError &&
+              occursin("Invalid field name(s) given in select_for_update(of=(...)): $(join(of, ", ")). Only relational fields followed in the query are allowed. Choices are: self, born, born__country.", e.msg)
+    end
+    for name in ("born__country", "died", "died__country")
+        e = tr(() -> atomic(() -> get(select_for_update(exclude(select_related(objects(DsfPerson), :born, :profile); profile = nothing); of = (name,)))))
+        @test e isa Juango.LookupError && occursin("Choices are: self, born, profile.", e.msg)
+    end
+    # only inside a transaction, checked when it runs
+    people = select_for_update(objects(DsfPerson))
+    e = tr(() -> collect(people))
+    @test e isa Juango.TransactionManagementError && e.msg == "select_for_update cannot be used outside of a transaction."
+    # with a slice
+    other = create(DsfPerson; name = "Grappeli", born = city1, died = city2)
+    atomic(() -> @test collect(select_for_update(order_by(objects(DsfPerson), :pk))[2:2]) == [other])
+  end
+end
