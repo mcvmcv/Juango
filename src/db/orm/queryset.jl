@@ -1230,6 +1230,10 @@ function check_deferrable(T, names)
                 M = C                                         # through a multi-table child link (select_related)
                 continue
             end
+            if f === nothing && i < length(parts) && (r = reverse_one_to_one(M, p)) !== nothing
+                M = r[2]                                      # through a reverse one-to-one (select_related)
+                continue
+            end
             f === nothing && throw(LookupError("$(nameof(M)) has no field '$p' that can be deferred"))
             g = all_fields(M)[f]
             i < length(parts) || break
@@ -1249,7 +1253,7 @@ function defer(@nospecialize(qs::QuerySet), fields...)
     qs.values_fields === nothing || throw(ArgumentError("defer() can't follow values() or values_list()"))
     T = model_of(qs)
     fields == (nothing,) && return chain(qs; deferred = Symbol[], immediate = nothing)
-    names = deferrable_names(T, fields)
+    names = ignore_unloadable(T, deferrable_names(T, fields))
     check_deferrable(T, names)
     qs.immediate === nothing && return chain(qs; deferred = unique(vcat(qs.deferred, names)))
     # after only(): those names leave the set to load; if none is left, only these are deferred (as Django)
@@ -1273,6 +1277,17 @@ function deferrable_names(T, fields)
     out
 end
 
+"Names that aren't columns of the rows (a many-to-many, a reverse relation) are left out of only/defer, as Django."
+function ignore_unloadable(T, names)
+    filter(names) do n
+        occursin("__", string(n)) && return true
+        n === :id && return true
+        any(g -> g.name === n, all_fields(T)) && return true
+        (find_m2m_query(T, string(n)) !== nothing || find_reverse(T, string(n)) !== nothing) && return false
+        true                                          # (anything else: refused by check_deferrable)
+    end
+end
+
 "The queryset loading only `keep` (and the key): every other field deferred, through relations too."
 function immediate_loading(@nospecialize(qs::QuerySet), T, keep::Vector{Symbol})
     isempty(keep) && return chain(qs; immediate = Symbol[], deferred = Symbol[])     # (nothing left: everything loads)
@@ -1286,7 +1301,8 @@ function immediate_loading(@nospecialize(qs::QuerySet), T, keep::Vector{Symbol})
             M = T
             for p in parts[1:i]
                 j = findfirst(g -> g.name === Symbol(p), all_fields(M))
-                M = j === nothing ? mti_child(M, p) : related_model(all_fields(M)[j])
+                M = j !== nothing ? related_model(all_fields(M)[j]) :
+                    (C = mti_child(M, p)) !== nothing ? C : reverse_one_to_one(M, p)[2]
             end
             pre = join(parts[1:i], "__")
             kept = Set{String}(split(string(x), "__")[i+1] for x in keep if startswith(string(x), pre * "__"))
@@ -1306,7 +1322,7 @@ a later `only` replaces an earlier one, as Django.
 function Base.only(@nospecialize(qs::QuerySet), field::Union{Symbol,AbstractString,Nothing}, fields::Union{Symbol,AbstractString,Nothing}...)
     qs.values_fields === nothing || throw(ArgumentError("only() can't follow values() or values_list()"))
     T = model_of(qs)
-    keep = deferrable_names(T, (field, fields...))
+    keep = ignore_unloadable(T, deferrable_names(T, (field, fields...)))
     check_deferrable(T, filter(n -> n !== :id, keep))
     qs.immediate === nothing && (keep = setdiff(keep, qs.deferred))
     immediate_loading(qs, T, keep)

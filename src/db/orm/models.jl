@@ -590,7 +590,7 @@ Base.@nospecializeinfer function field_data(@nospecialize(m::Model), a::Symbol)
     data = (getfield(m, :_data)::Dict{Symbol,Any})
     v = get(data, a, NOTFOUND)
     v === NOTFOUND || return v
-    load_deferred!(m)
+    load_deferred!(m)              # (all the deferred fields, in one query: Django loads one at a time)
     data[a]
 end
 

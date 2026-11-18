@@ -6468,3 +6468,173 @@ end
     o = get(Juango.only(objects(DdfBigChild), :other); name = "b1"); @test delayed(o) == 3 && o.name == "b1" && o.value == "foo" && o.other == "bar"
   end
 end
+
+# --- tests/defer_regress ----------------------------------------------------------------------------------
+@model struct DdrItem
+    name = CharField(max_length = 15, default = "")
+    text = TextField(default = "xyzzy")
+    value = IntegerField()
+    other_value = IntegerField(default = 0)
+    source = OneToOneField(:self; related_name = :destination, on_delete = :CASCADE, null = true)
+    Meta(table = "ddr_item")
+end
+@model struct DdrRelatedItem
+    item = ForeignKey(DdrItem; on_delete = :CASCADE, related_name = :relateditems)
+    Meta(table = "ddr_relateditem")
+end
+@model struct DdrProxyRelated <: DdrRelatedItem
+    Meta(proxy = true)
+end
+@model struct DdrChild
+    name = CharField(max_length = 10)
+    value = IntegerField()
+    Meta(table = "ddr_child")
+end
+@model struct DdrLeaf
+    name = CharField(max_length = 10, default = "")
+    child = ForeignKey(DdrChild; on_delete = :CASCADE, related_name = :leaves)
+    second_child = ForeignKey(DdrChild; on_delete = :SET_NULL, related_name = :other, null = true)
+    value = IntegerField(default = 42)
+    Meta(table = "ddr_leaf")
+end
+@model struct DdrProxy <: DdrItem
+    Meta(proxy = true)
+end
+@model struct DdrSimpleItem
+    name = CharField(max_length = 15)
+    value = IntegerField()
+    Meta(table = "ddr_simpleitem")
+end
+@model struct DdrFeature
+    item = ForeignKey(DdrSimpleItem; on_delete = :CASCADE, related_name = :feature)
+    Meta(table = "ddr_feature")
+end
+@model struct DdrSpecialFeature
+    feature = ForeignKey(DdrFeature; on_delete = :CASCADE, related_name = :specials)
+    Meta(table = "ddr_specialfeature")
+end
+@model struct DdrOneToOneItem
+    item = OneToOneField(DdrItem; on_delete = :CASCADE, related_name = :one_to_one_item)
+    name = CharField(max_length = 15)
+    Meta(table = "ddr_onetooneitem")
+end
+@model struct DdrItemAndSimpleItem
+    item = ForeignKey(DdrItem; on_delete = :CASCADE, related_name = :pairs)
+    simple = ForeignKey(DdrSimpleItem; on_delete = :CASCADE, related_name = :pairs)
+    Meta(table = "ddr_itemandsimpleitem")
+end
+@model struct DdrProfile
+    profile1 = CharField(max_length = 255, default = "profile1")
+    Meta(table = "ddr_profile")
+end
+@model struct DdrLocation
+    location1 = CharField(max_length = 255, default = "location1")
+    Meta(table = "ddr_location")
+end
+@model struct DdrRequest
+    profile = ForeignKey(DdrProfile; on_delete = :SET_NULL, null = true, blank = true, related_name = :requests)
+    location = ForeignKey(DdrLocation; on_delete = :CASCADE, related_name = :requests)
+    items = ManyToManyField(DdrItem; related_name = :request)
+    request1 = CharField(default = "request1", max_length = 255)
+    request2 = CharField(default = "request2", max_length = 255)
+    Meta(table = "ddr_request")
+end
+@model struct DdrBase
+    text = TextField()
+    Meta(table = "ddr_base")
+end
+@model struct DdrDerived <: DdrBase
+    other_text = TextField()
+    Meta(table = "ddr_derived")
+end
+redirect_stdout(devnull) do
+    ms = [DdrItem, DdrRelatedItem, DdrChild, DdrLeaf, DdrSimpleItem, DdrFeature, DdrSpecialFeature, DdrOneToOneItem,
+          DdrItemAndSimpleItem, DdrProfile, DdrLocation, DdrRequest, through(DdrRequest, :items), DdrBase, DdrDerived]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django defer_regress: DeferRegressionTest" begin
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    D(q...) = Juango.defer(q...); O(q...) = Juango.only(q...)
+    # deferred fields load on first access (Juango loads them all in that one query; Django one at a time)
+    create(DdrItem; name = "first", value = 42)
+    obj = get(O(objects(DdrItem), :name, :other_value); name = "first")
+    r, n = nq(() -> (obj.name, obj.other_value)); @test r == ("first", 0) && n == 0
+    r, n = nq(() -> obj.value); @test r == 42 && n == 1
+    r, n = nq(() -> obj.text); @test r == "xyzzy" && n == 0    # (Django: 1, then 0)
+    i = create(DdrItem; name = "no I'm first", value = 37)
+    items = collect(order_by(O(objects(DdrItem), :value), "-value")); @test items[1].name == "first" && items[2].name == "no I'm first"
+    create(DdrRelatedItem; item = i); r = get(D(objects(DdrRelatedItem), :item)); @test r.item_id == i.id && r.item == i
+    c1, c2 = create(DdrChild; name = "c1", value = 42), create(DdrChild; name = "c2", value = 37)
+    create(DdrLeaf; name = "l1", child = c1, second_child = c2)
+    @test first(select_related(O(objects(DdrLeaf), :name, :child), :child)).child.name == "c1"
+    @test [l.name for l in O(select_related(objects(DdrLeaf), :child, :second_child), :child__name, :second_child__name)] == ["l1"]
+    @test get_for_model(first(objects(DdrItem))) === get_for_model(first(D(objects(DdrItem), :name))) === get_for_model(first(O(objects(DdrItem), :name)))
+    res = first(select_related(O(objects(DdrLeaf), :name, :child, :second_child), :child, :second_child)); @test res.child.name == "c1" && res.second_child.name == "c2"
+    res = first(select_related(O(objects(DdrLeaf), :name, :child, :second_child, :child__name, :second_child__name), :child, :second_child))
+    @test res.child.name == "c1" && res.second_child.name == "c2"
+    @test collect(D(annotate(objects(DdrSimpleItem); n = Count(:feature)), :name)) isa Vector && collect(O(annotate(objects(DdrSimpleItem); n = Count(:feature)), :name)) isa Vector
+  end
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    D(q...) = Juango.defer(q...); O(q...) = Juango.only(q...)
+    # select_related to a multi-table child with the parent's field deferred, in one query
+    d = create(DdrDerived; text = "foo", other_text = "bar")
+    r, n = nq(() -> (o = first(D(select_related(objects(DdrBase), :ddrderived), :text)); (o.ddrderived isa DdrDerived, o.ddrderived.other_text, haskey(getfield(o, :_data), :text))))
+    @test r == (true, "bar", false) && n == 1
+    # only/defer on a proxy
+    p = create(DdrProxy; name = "proxy", value = 42)
+    dp = get(O(objects(DdrProxy), :other_value); pk = p.pk); @test dp.name == "proxy" && dp.value == 42
+    dp = get(D(objects(DdrProxy), :name, :text, :value); pk = p.pk); @test dp.name == "proxy" && dp.value == 42
+    # a reverse one-to-one with defer and select_related
+    item = create(DdrItem; name = "first", value = 42); o2o = create(DdrOneToOneItem; item = item, name = "second")
+    @test length(collect(D(objects(DdrItem), :one_to_one_item__name))) == 2 && length(collect(select_related(objects(DdrItem), :one_to_one_item))) == 2
+    @test length(collect(D(select_related(objects(DdrItem), :one_to_one_item), :one_to_one_item__name))) == 2
+    i, n = nq(() -> (x = get(select_related(objects(DdrItem), :one_to_one_item); pk = item.pk); (x.one_to_one_item.pk, x.one_to_one_item.name)))
+    @test i == (o2o.pk, "second") && n == 1
+    x = get(D(select_related(objects(DdrItem), :one_to_one_item), :value, :one_to_one_item__name); pk = item.pk)
+    r, n = nq(() -> (x.one_to_one_item.pk, x.name)); @test r == (o2o.pk, "first") && n == 0
+    r, n = nq(() -> x.one_to_one_item.name); @test r == "second" && n == 1
+    r, n = nq(() -> x.value); @test r == 42 && n == 1
+    # defer a key with select_related of another; save it
+    item2 = create(DdrItem; name = "second", value = 42); simple = create(DdrSimpleItem; name = "simple", value = 23)
+    create(DdrItemAndSimpleItem; item = item, simple = simple)
+    obj = get(select_related(D(objects(DdrItemAndSimpleItem), :item), :simple)); @test obj.item == item && obj.item_id == item.id
+    obj.item = item2; save!(obj)
+    obj = get(select_related(D(objects(DdrItemAndSimpleItem), :item), :simple)); @test obj.item == item2
+    # a proxy's only() through select_related
+    create(DdrRelatedItem; item = item)
+    obj = first(O(select_related(objects(DdrProxyRelated), :item), :item__name))
+    r, n = nq(() -> obj.item.name); @test r == "first" && n == 0
+    r, n = nq(() -> obj.item.value); @test r == 42 && n == 1
+  end
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    D(q...) = Juango.defer(q...); O(q...) = Juango.only(q...)
+    # only() two relations deep; with annotations and select_related
+    si = create(DdrSimpleItem; name = "first", value = 47); f = create(DdrFeature; item = si); create(DdrSpecialFeature; feature = f)
+    @test length(collect(select_related(O(objects(DdrFeature), :item__name), :item))) == 1
+    @test length(collect(select_related(O(objects(DdrSpecialFeature), :feature__item__name), :feature__item))) == 1
+    loc = create(DdrLocation); create(DdrRequest; location = loc)
+    base = select_related(annotate(objects(DdrRequest); n = Count(:items)), :profile, :location)
+    @test length(collect(O(base, :profile, :location))) == 1 && length(collect(O(base, :profile__profile1, :location__location1))) == 1
+    @test length(collect(D(base, :request1, :request2))) == 1
+    # two keys to one model, each with its own deferred field
+    child, second = create(DdrChild; name = "Child", value = 42), create(DdrChild; name = "Second", value = 64)
+    create(DdrLeaf; child = child, second_child = second)
+    leaf, n = nq(() -> get(D(select_related(objects(DdrLeaf), :child, :second_child), :child__name, :second_child__value))); @test n == 1
+    @test Set(Juango.deferred_fields(leaf.child)) == Set([:name]) && Set(Juango.deferred_fields(leaf.second_child)) == Set([:value])
+    r, n = nq(() -> (leaf.child.value, leaf.second_child.name)); @test r == (42, "Second") && n == 0
+    r, n = nq(() -> leaf.child.name); @test r == "Child" && n == 1
+    r, n = nq(() -> leaf.second_child.value); @test r == 64 && n == 1
+    # many-to-many names in only/defer are ignored
+    req = first(objects(DdrRequest))
+    r, n = nq(() -> get(D(objects(DdrRequest), :items))); @test r == req && n == 1
+    r, n = nq(() -> get(O(objects(DdrRequest), :items))); @test r == req && n == 1
+    it = create(DdrItem; value = 1); add!(req.items, it)
+    r, n = nq(() -> get(D(filter(DdrItem; value = 1), :request))); @test r == it && n == 1
+    r, n = nq(() -> get(O(filter(DdrItem; value = 1), :request))); @test r == it && n == 1
+  end
+end
+
