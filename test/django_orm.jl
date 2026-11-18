@@ -7422,3 +7422,97 @@ end
   end
 end
 
+# --- tests/contenttypes_tests -----------------------------------------------------------------------------
+@model struct DctQuestion
+    text = CharField(max_length = 200)
+    answer_set = GenericRelation(:DctAnswer)
+    Meta(table = "dct_question")
+end
+@model struct DctAnswer
+    text = CharField(max_length = 200)
+    content_type = ForeignKey(ContentType; on_delete = :CASCADE)
+    object_id = PositiveIntegerField()
+    question = GenericForeignKey()
+    Meta(table = "dct_answer")
+end
+@model struct DctPost
+    title = CharField(max_length = 200)
+    content_type = ForeignKey(ContentType; on_delete = :CASCADE, null = true)
+    object_id = PositiveIntegerField(null = true)
+    parent = GenericForeignKey()
+    children = GenericRelation(:DctPost)
+    Meta(table = "dct_post")
+end
+@model struct DctConcreteModel
+    name = CharField(max_length = 10)
+    Meta(table = "dct_concretemodel")
+end
+@model struct DctProxyModel <: DctConcreteModel
+    Meta(proxy = true)
+end
+@model struct DctSite
+    domain = CharField(max_length = 100)
+    Meta(table = "dct_site", app_label = "contenttypes_tests")
+end
+redirect_stdout(devnull) do
+    ms = [DctQuestion, DctAnswer, DctPost, DctConcreteModel, DctSite]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django contenttypes_tests: the content type cache, names and generic keys" begin
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    tr(f) = try f() catch err; err end
+    # the cache: by model, id and natural key, queried once; cleared, queried again
+    clear_contenttype_cache!()
+    get_for_model(ContentType); ct, n = nq(() -> get_for_model(ContentType)); @test n == 0
+    @test nq(() -> get_for_id(ct.id))[2] == 0
+    @test nq(() -> Juango.get_by_natural_key(ContentType, ct.app_label, ct.model))[2] == 0
+    clear_contenttype_cache!(); @test nq(() -> get_for_model(ContentType))[2] == 1
+    clear_contenttype_cache!(); @test nq(() -> Juango.get_by_natural_key(ContentType, ct.app_label, ct.model))[2] == 1
+    @test nq(() -> Juango.get_by_natural_key(ContentType, ct.app_label, ct.model))[2] == 0
+    # several at once; proxies share the concrete model's content type unless asked
+    cts = get_for_models(ContentType, DctProxyModel, DctConcreteModel)
+    @test cts[ContentType] == get_for_model(ContentType) && cts[DctProxyModel] == get_for_model(DctConcreteModel)
+    cc = get_for_model(DctConcreteModel)
+    @test cc == get_for_model(DctProxyModel) && cc == get_for_model(DctConcreteModel; for_concrete_model = false)
+    pc = get_for_model(DctProxyModel; for_concrete_model = false); @test pc != cc
+    @test get_for_models(DctConcreteModel, DctProxyModel; for_concrete_models = false)[DctProxyModel] == pc
+    # (deferred objects are of the model's own type, so the same)
+    create(DctConcreteModel; name = "Concrete")
+    @test get_for_model(get(only(objects(DctConcreteModel), :pk))) == cc && get_for_model(get(only(objects(DctProxyModel), :pk)); for_concrete_model = false) == pc
+    # a content type whose model is gone: shown, no model class, fetched by id
+    old = create(ContentType; app_label = "contenttypes", model = "OldModel")
+    @test sprint(show, old) == "contenttypes | OldModel" && Juango.model_class(old) === nothing
+    @test Juango.model_class(get_for_id(old.pk)) === nothing
+    # a stale one named like a model of another app doesn't confuse get_for_models
+    create(ContentType; app_label = "contenttypes", model = "dctsite"); clear_contenttype_cache!()
+    @test get_for_models(ContentType, DctSite)[DctSite] == get_for_model(DctSite)
+    # names
+    site = get_for_model(DctSite)
+    @test content_type_name(site) == "dct site" && app_labeled_name(site) == "Contenttypes_Tests | dct site"
+    @test content_type_name(ContentType(app_label = "contenttypes_tests", model = "unknown")) == "unknown"
+    @test app_labeled_name(ContentType(app_label = "contenttypes_tests", model = "unknown")) == "contenttypes_tests | unknown"
+    # a generic key to a deleted object: nothing, with one query, remembered
+    q = create(DctQuestion; text = "Who?"); post = create(DctPost; title = "Answer", parent = q); qpk = q.pk
+    delete!(objects(DctQuestion)); post = get(DctPost; pk = post.pk)
+    _, n = nq(() -> (@test post.object_id == qpk; @test post.parent === nothing; @test post.parent === nothing)); @test n == 1
+    # refresh! forgets the generic key's object, unless other fields are named
+    q = create(DctQuestion; text = "What is your name?"); a = create(DctAnswer; text = "Answer", question = q)
+    old_e = a.question; refresh!(a); @test a.question !== old_e
+    old_q = a.question; refresh!(a; fields = [:text]); @test a.question === old_q
+    refresh!(a; fields = [:question]); @test a.question !== old_q && a.question == old_q
+    a2 = get(defer(objects(DctAnswer), :text); pk = a.pk); old_q = a2.question; refresh!(a2); @test a2.question !== old_q
+    # loading a deferred field keeps the generic key's object
+    for qs in (defer(objects(DctAnswer), :text), only(objects(DctAnswer), :content_type, :object_id))
+        obj = get(qs; pk = a.pk)
+        @test nq(() -> obj.question)[2] == 1
+        obj.text; @test nq(() -> obj.question)[2] == 0
+    end
+    # a generic prefetch takes one queryset per content type
+    a3 = get(DctAnswer; pk = a.pk)
+    e = tr(() -> prefetch_related_objects([a3], GenericPrefetch(:question, [objects(DctQuestion), filter(DctQuestion; text__startswith = "test")])))
+    @test e isa ArgumentError && occursin("Only one queryset is allowed for each content type.", sprint(showerror, e))
+  end
+end
+

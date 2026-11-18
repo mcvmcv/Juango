@@ -39,7 +39,9 @@ Base.@nospecializeinfer function get_for_model(@nospecialize(T::Type); for_concr
     ct = lock(() -> get(CT_CACHE, key, nothing), CT_LOCK)
     ct === nothing || return ct
     m = modelmeta(C)
-    ct = first(get_or_create(ContentType; app_label = m.app, model = lowercase(m.name)))
+    # one query when it exists (a transaction around get_or_create only when it has to be made)
+    ct = first(filter(base_objects(ContentType); app_label = m.app, model = lowercase(m.name)))
+    ct === nothing && (ct = first(get_or_create(ContentType; app_label = m.app, model = lowercase(m.name))))
     lock(() -> get!(CT_CACHE, key, ct), CT_LOCK)
 end
 Base.@nospecializeinfer get_for_model(@nospecialize(obj::Model); for_concrete_model::Bool = true) =
@@ -74,6 +76,49 @@ function get_for_id(id)
     M = model_class(ct)
     M === nothing || lock(() -> get!(CT_CACHE, (a, M), ct), CT_LOCK)
     ct
+end
+
+"""
+    get_for_models(Models...; for_concrete_models = true) -> Dict{Type,ContentType}
+
+The content types of several models at once, cached as `get_for_model`'s (Django's
+`ContentType.objects.get_for_models`).
+"""
+get_for_models(Ts::Type...; for_concrete_models::Bool = true) =
+    Dict{Type,ContentType}(T => get_for_model(T; for_concrete_model = for_concrete_models) for T in Ts)
+
+"A content type by its app label and model name, cached (Django's `ContentType.objects.get_by_natural_key`)."
+function get_by_natural_key(::Type{ContentType}, app_label::AbstractString, model::AbstractString)
+    a = current_alias()
+    ct = lock(CT_LOCK) do
+        for ((al, _), c) in CT_CACHE
+            al == a && c.app_label == app_label && c.model == model && return c
+        end
+        nothing
+    end
+    ct === nothing || return ct
+    ct = get(base_objects(ContentType); app_label = app_label, model = model)
+    M = model_class(ct)
+    M === nothing || lock(() -> get!(CT_CACHE, (a, M), ct), CT_LOCK)
+    ct
+end
+natural_key(ct::ContentType) = (ct.app_label, ct.model)
+
+"Forget the cached content types (Django's `ContentType.objects.clear_cache()`): the next lookups query again."
+clear_contenttype_cache!() = (lock(() -> empty!(CT_CACHE), CT_LOCK); nothing)
+
+"A content type's model's verbose name, or the stored model name if that model is gone (Django's `ContentType.name`)."
+function content_type_name(ct::ContentType)
+    M = model_class(ct)
+    M === nothing ? ct.model : string(modelmeta(M).verbose_name)
+end
+
+"`\"<app's verbose name> | <model's verbose name>\"`, or the stored labels if the model is gone (Django's `app_labeled_name`)."
+function app_labeled_name(ct::ContentType)
+    M = model_class(ct)
+    M === nothing && return string(ct.app_label, " | ", ct.model)
+    a = get(APP_DEFS, ct.app_label, nothing)
+    string(a === nothing ? titlecase(ct.app_label) : a.verbose_name, " | ", modelmeta(M).verbose_name)
 end
 
 """
@@ -177,7 +222,8 @@ Base.@nospecializeinfer function get_generic(@nospecialize(m::Model), f::Field)
     M = model_class(get_for_id(ctid))
     M === nothing && return nothing
     obj = first(filter(base_objects(M); id = generic_key(M, oid)))
-    obj === nothing || (cache[f.name] = obj)
+    # (a row that's gone is remembered too: asking again doesn't query, as Django)
+    cache[f.name] = obj === nothing ? GenericGone((ctid, string(oid))) : obj
     obj
 end
 
@@ -304,7 +350,13 @@ end
 Prefetch a GenericForeignKey with a queryset for each model it may point at (Django 5's
 GenericPrefetch); models without one are loaded whole.
 """
-GenericPrefetch(path, querysets) = Prefetch(string(path), GenericQuerysets(collect(querysets)), nothing)
+function GenericPrefetch(path, querysets)
+    qs = collect(querysets)
+    # one queryset per content type (as Django)
+    cts = [concrete_model(model_of(q)) for q in qs]          # (no query: compared by model)
+    allunique(cts) || throw(ArgumentError("Only one queryset is allowed for each content type."))
+    Prefetch(string(path), GenericQuerysets(qs), nothing)
+end
 struct GenericQuerysets
     querysets::Vector
 end
