@@ -60,7 +60,8 @@ function validation_error(v::EmailValidator, x)
     m === nothing && return bad
     domain = lowercase(m[2])
     domain in v.allowlist && return nothing
-    occursin(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$"i, domain) ||
+    # (labels may be any script's letters; the top-level one is letters or punycode, as Django's DomainNameValidator)
+    occursin(r"^(?:[a-z0-9\u00a1-\uffff](?:[a-z0-9\u00a1-\uffff-]{0,61}[a-z0-9\u00a1-\uffff])?\.)+(?:[a-z\u00a1-\uffff-]{2,63}|xn--[a-z0-9]{1,59})$"i, domain) ||
         occursin(r"^\[[0-9a-f:.]+\]$"i, domain) || return bad
     occursin(r"^[\w!#$%&'*+/=?^`{|}~.-]+$", m[1]) && !startswith(m[1], ".") && !endswith(m[1], ".") && !occursin("..", m[1]) ? nothing : bad
 end
@@ -82,7 +83,7 @@ function validation_error(v::URLValidator, x)
     s = string(x)
     bad = (v.code, msg_or(v, gettext("Enter a valid URL.")))
     (length(s) > 2048 || occursin(r"\s", s)) && return bad
-    m = match(r"^([a-z][a-z0-9+.-]*)://(?:[^\s:@/]+(?::[^\s:@/]*)?@)?(\[[0-9a-f:.]+\]|[^\s:/?#]+)(?::(\d{1,5}))?(?:[/?#]\S*)?$"i, s)
+    m = match(r"^([a-z][a-z0-9+.-]*)://(?:[^\s:@/?#]+(?::[^\s:@/?#]*)?@)?(\[[0-9a-f:.]+\]|[^\s:/?#\[\]]+)(?::(\d{1,5}))?(?:[/?#]\S*)?$"i, s)
     m === nothing && return bad
     lowercase(m[1]) in v.schemes || return bad
     host = lowercase(m[2])

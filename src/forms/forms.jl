@@ -94,10 +94,18 @@ Base.@nospecializeinfer ModelMultipleChoiceField(@nospecialize(qs); to_field_nam
 Choices whose cleaned value is converted with `coerce` (`TypedChoiceField(["1" => "One"]; coerce = x -> parse(Int, x))`),
 and the multiple-select versions.
 """
-TypedChoiceField(choices; coerce = identity, empty_value = "", kw...) =
-    Field(:typedchoice; choices = choices, related = (coerce = coerce, empty_value = empty_value), kw...)
+TypedChoiceField(choices; coerce = identity, empty_value = "", any_value::Bool = false, kw...) =
+    Field(:typedchoice; choices = choices, related = any_value ? (coerce = coerce, empty_value = empty_value, any_value = true) :
+                                                                 (coerce = coerce, empty_value = empty_value), kw...)
 TypedMultipleChoiceField(choices; coerce = identity, kw...) = Field(:multichoice; choices = choices, related = (coerce = coerce,), kw...)
 MultipleChoiceField(choices; kw...) = TypedMultipleChoiceField(choices; kw...)
+"""
+    ChoiceField(choices; kw...)   or   ChoiceField(; choices, kw...)
+
+One of `choices` (pairs, tuples, a Dict, groups, or a function returning them), cleaned to its
+value as text, as Django's `ChoiceField`.
+"""
+ChoiceField(c = nothing; choices = Any[], kw...) = TypedChoiceField(c === nothing ? choices : c; kw...)
 """
     NullBooleanField(; kw...)
 
@@ -107,15 +115,16 @@ Yes, no or unknown (`true`, `false`, `nothing`), as Django's, shown as a select 
 NullBooleanField(; kw...) =
     TypedChoiceField(["unknown" => gettext_lazy("Unknown"), "true" => gettext_lazy("Yes"), "false" => gettext_lazy("No")];
                      coerce = v -> v in ("true", "True", "1", "2") ? true : v in ("false", "False", "0", "3") ? false : nothing,
-                     empty_value = nothing, blank = true, kw...)
+                     empty_value = nothing, any_value = true, blank = true, kw...)
 
 """
     RegexField(regex; max_length = nothing, error_message = "Enter a valid value.", kw...)
 
-A text field whose value must match `regex`.
+A text field whose value must match `regex`. As Django's, the value isn't stripped of
+surrounding whitespace unless `strip = true`.
 """
-RegexField(rx; max_length = nothing, error_message = nothing, validators = Any[], kw...) =
-    Field(:char; max_length = max_length,
+RegexField(rx; max_length = nothing, error_message = nothing, validators = Any[], strip::Bool = false, kw...) =
+    Field(:char; max_length = max_length, strip = strip,
           validators = vcat(Any[v -> occursin(rx isa Regex ? rx : Regex(string(rx)), string(v)) ||
                                      something(error_message, gettext("Enter a valid value."))], collect(Any, validators)), kw...)
 
@@ -232,6 +241,7 @@ html_id(f::Form, fld::Field) = "id_" * html_name(f, fld)
 
 function raw_value(f::Form, fld::Field)
     f.data === nothing && return nothing
+    form_option(fld, :disabled) && return initial_for(f, fld)      # (a disabled field keeps its initial value, as Django)
     fld.kind === :multi && return multi_raw(f, fld)
     if fld.widget isa SelectDateWidget                 # three selects: name_year, name_month, name_day
         n = html_name(f, fld)
@@ -249,6 +259,28 @@ function raw_list(d::AbstractDict, k)
     v isa AbstractVector ? collect(v) : [v]
 end
 
+"A validator's limit as an HTML attribute (min=\"0.5\", max=\"10\")."
+limit_attr(x) = string(x)
+
+"A URL typed without a scheme (\"example.com\", \"//example.com\") gets https, as Django's form `URLField`."
+function assume_url_scheme(s)
+    s = String(s)
+    occursin(r"^[A-Za-z][A-Za-z0-9+.\-]*:", s) && return s
+    startswith(s, "//") ? "https:" * s : "https://" * s
+end
+
+const ISO_INPUT_FORMATS = ["%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S",
+                           "%Y-%m-%d %H:%M", "%Y-%m-%d"]
+
+"A whole number as a form takes one, as Django: \"５０\" (other scripts' digits), \"1.0\" and \"1.\" too."
+function parse_form_int(s)
+    s = Base.Unicode.normalize(String(s), :NFKC)
+    v = tryparse(Int, s)
+    v === nothing || return v
+    m = match(r"^([+-]?\d+)\.0*$", s)
+    m === nothing ? nothing : tryparse(Int, m[1])
+end
+
 "Convert submitted text into a typed value. Returns `(value, error_or_nothing)`."
 function to_julia(fld::Field, raw)
     k = fld.kind
@@ -260,7 +292,15 @@ function to_julia(fld::Field, raw)
             for v in vals
                 v in keys_ || return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v))
             end
-            return Any[fld.related.coerce(v) for v in vals], nothing
+            out = Any[]
+            for v in vals              # (a value coerce can't convert is an invalid choice, as Django's)
+                cv = try fld.related.coerce(v) catch e
+                    e isa Union{ArgumentError,InexactError,MethodError} || rethrow()
+                    return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v))
+                end
+                push!(out, cv)
+            end
+            return out, nothing
         end
         s = fld.related
         objs = Dict(choice_key(s, o) => o for o in choice_queryset(s))
@@ -282,27 +322,34 @@ function to_julia(fld::Field, raw)
         length(objs) == length(unique(ids)) || return nothing, gettext("Select a valid choice. One of the selected values is not one of the available choices.")
         return objs, nothing
     end
-    if k === :bool
-        return (raw !== nothing && lowercase(string(raw)) in ("on", "true", "1", "yes")), nothing
+    if k === :bool          # as Django: "false", "0" and empty are false, any other value true
+        return !(raw === nothing || raw === false || lowercase(strip(string(raw))) in ("", "false", "0")), nothing
     end
-    s = raw === nothing ? "" : (widget_kind(fld.widget) === :password ? string(raw) : strip(string(raw)))
+    s = raw === nothing ? "" : (widget_kind(fld.widget) === :password || !form_option(fld, :strip) ? string(raw) : strip(string(raw)))
     k === :typedchoice && isempty(s) && return fld.related.empty_value, nothing     # not coerced, as in Django
-    isempty(s) && return ((k in STRING_KINDS || k === :filepath) && !fld.null ? "" : nothing), nothing
+    ev = form_option(fld, :empty_value)
+    isempty(s) && ev !== NO_DEFAULT && return ev, nothing
+    isempty(s) && return ((k in STRING_KINDS || k in (:filepath, :combo)) && !fld.null ? "" : nothing), nothing
+    k in STRING_KINDS && occursin('\0', s) && return nothing, gettext("Null characters are not allowed.")
     opts = fld.related isa NamedTuple && haskey(fld.related, :localize) ? fld.related : nothing
     opts !== nothing && opts.localize && k in (INT_KINDS..., :float, :decimal) && (s = parse_localized_number(s))
     if k in STRING_KINDS
+        k === :url && return assume_url_scheme(s), nothing
         return String(s), nothing
     elseif k in INT_KINDS
-        v = tryparse(Int, s)
+        v = parse_form_int(s)
         return v, v === nothing ? gettext("Enter a whole number.") : nothing
     elseif k === :float
-        v = tryparse(Float64, s)
-        return v, v === nothing ? gettext("Enter a number.") : nothing
+        v = tryparse(Float64, Base.Unicode.normalize(String(s), :NFKC))
+        (v === nothing || !isfinite(v)) && return nothing, gettext("Enter a number.")
+        return v, nothing
     elseif k === :decimal
         v = tryparse(Decimal, s)
         return v, v === nothing ? gettext("Enter a number.") : nothing
     elseif k === :datetime
         v = parse_input_datetime(s, :datetime; formats = opts === nothing ? nothing : opts.input_formats)
+        # ISO 8601 is taken whatever the input formats, as Django's DateTimeField
+        v === nothing && opts !== nothing && opts.input_formats !== nothing && (v = parse_input_datetime(s, :datetime; formats = ISO_INPUT_FORMATS))
         v === nothing || return (settings.USE_TZ ? make_aware(v) : v), nothing      # typed in the current time zone
         return nothing, gettext("Enter a valid date/time.")
     elseif k === :date
@@ -316,8 +363,7 @@ function to_julia(fld::Field, raw)
             return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
         return String(s), nothing
     elseif k === :time
-        v = opts !== nothing && opts.input_formats !== nothing ? parse_input_datetime(s, :time; formats = opts.input_formats) : nothing
-        v === nothing && (v = parse_time(s))
+        v = opts !== nothing && opts.input_formats !== nothing ? parse_input_datetime(s, :time; formats = opts.input_formats) : parse_time(s)
         return v, v === nothing ? gettext("Enter a valid time.") : nothing
     elseif k === :duration
         us = try parse_duration_us(s) catch; nothing end
@@ -341,8 +387,9 @@ function to_julia(fld::Field, raw)
         catch e
             return nothing, e isa ArgumentError && startswith(e.msg, "Expected") ? e.msg : gettext("Enter a valid geometry (WKT or GeoJSON).")
         end
-    elseif k === :uuid
+    elseif k === :uuid             # (with or without hyphens, as Django's)
         v = tryparse(UUID, s)
+        v === nothing && length(s) == 32 && all(isxdigit, s) && (v = UUID(parse(UInt128, s; base = 16)))
         return v, v === nothing ? gettext("Enter a valid UUID.") : nothing
     elseif k in RANGE_KINDS
         parts = strip.(split(s, ','))
@@ -360,9 +407,15 @@ function to_julia(fld::Field, raw)
               first(filter(choice_queryset(sp), Q(sp.to_field_name => s)))
         return obj, obj === nothing ? gettext("Select a valid choice. That choice is not one of the available choices.") : nothing
     elseif k === :typedchoice
-        any(c -> string(c.first) == s, field_choices(fld)) ||
+        # (NullBooleanField takes any value: one it doesn't know is unknown)
+        haskey(fld.related, :any_value) || any(c -> string(c.first) == s, field_choices(fld)) ||
             return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
-        return fld.related.coerce(String(s)), nothing
+        # a value coerce can't convert is an invalid choice, as Django's
+        cv = try fld.related.coerce(String(s)) catch e
+            e isa Union{ArgumentError,InexactError,MethodError} || rethrow()
+            return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
+        end
+        return cv, nothing
     elseif k === :combo
         v = String(s)
         for sub in fld.related
@@ -385,6 +438,59 @@ function to_julia(fld::Field, raw)
 end
 
 """
+    clean(field, value) -> cleaned value
+
+Clean one value as a form would for `field` (Django's `Field.clean`): convert it from what a
+browser submits and run the field's checks and validators, or throw a `ValidationError` with
+the messages.
+
+    clean(IntegerField(max_value = 10), "7")    # 7
+    clean(EmailField(), "x")                     # ValidationError: Enter a valid email address.
+
+A file field takes an `UploadedFile` (or nothing), and the stored file's name as `initial`.
+"""
+function clean(fld::Field, value, initial = nothing)
+    fld.kind in FILE_KINDS && return clean_file_value(fld, value, initial)
+    listy = fld.kind in MULTI_KINDS || fld.kind === :multi
+    listy && value == "" && (value = nothing)
+    listy && !(value isa Union{Nothing,AbstractVector,Tuple}) &&
+        throw(ValidationError([field_message(fld, "invalid_list", gettext("Enter a list of values."))]))
+    typed = typed_form_value(fld, value)
+    v, err = typed === nothing ? to_julia(fld, value) : (typed, nothing)
+    err === nothing || throw(ValidationError(err isa AbstractVector ? err : [field_message(fld, "invalid", err)]))
+    errs = fld.kind in MULTI_KINDS ? (isempty(v) && !fld.blank ? [field_message(fld, "required", gettext("This field is required."))] :
+                                      validator_errors(fld, v)) :
+           validate_field(fld, v isa Model ? v.id : v)
+    isempty(errs) || throw(ValidationError(errs))
+    v
+end
+
+function clean_file_value(fld::Field, value, initial)
+    nofile = gettext("No file was submitted. Check the encoding type on the form.")
+    if (value isa UploadedFile && isempty(value.name)) || (value isa AbstractString && !isempty(value))
+        throw(ValidationError([field_message(fld, "missing", nofile)]))
+    end
+    form = Form([:f => fld]; data = Dict{String,Any}(), files = value isa Union{UploadedFile,AbstractVector} ? Dict{String,Any}("f" => value) : Dict{String,Any}(),
+                initial = initial === nothing || initial == "" ? Dict{Symbol,Any}() : Dict{Symbol,Any}(:f => initial))
+    v, errs = clean_file_field(form, form.fields[1])
+    isempty(errs) || throw(ValidationError(errs))
+    v
+end
+
+# a date, time or duration given as one (not as text): taken as it is, as Django's fields do
+function typed_form_value(fld::Field, v)
+    k = fld.kind
+    k === :date && v isa Union{Date,DateTime} && return Date(v)
+    k === :datetime && v isa DateTime && return v
+    k === :datetime && v isa Date && return DateTime(v)
+    k === :time && v isa Dates.Time && return v
+    k === :duration && v isa Union{Dates.Period,Dates.CompoundPeriod} && return duration_from_us(duration_us(v))
+    k === :duration && v isa Integer && !(v isa Bool) && return duration_from_us(Int64(v) * 1_000_000)     # (seconds)
+    k === :json && v !== nothing && !(v isa AbstractString) && return v          # (already decoded)
+    nothing
+end
+
+"""
     is_valid(form) -> Bool
 
 Validate bound data; populates `form.cleaned_data` and `form.errors`.
@@ -403,7 +509,7 @@ function is_valid(f::Form)
         end
         v, err = to_julia(fld, raw_value(f, fld))
         if err !== nothing
-            add_error!(f, fld.name, field_message(fld, "invalid", err))
+            err isa AbstractVector ? foreach(e -> add_error!(f, fld.name, e), err) : add_error!(f, fld.name, field_message(fld, "invalid", err))
             continue
         end
         errs = fld.kind in MULTI_KINDS ? (isempty(v) && !fld.blank ? [field_message(fld, "required", gettext("This field is required."))] :
@@ -651,7 +757,7 @@ Base.length(f::Form) = length(f.fields)
 
 function display_value(bf::BoundField)
     f, fld = bf.form, bf.field
-    if f.data !== nothing
+    if f.data !== nothing && !form_option(fld, :disabled)      # (a disabled field shows its initial value)
         return raw_value(f, fld)
     end
     v = get(f.initial, fld.name, nothing)
@@ -667,6 +773,8 @@ function display_value(bf::BoundField)
     v isa Model && return v.id
     v isa TimeZones.ZonedDateTime && (v = make_naive(v))          # shown in the current time zone
     v isa DateTime && return Dates.format(v, "yyyy-mm-ddTHH:MM")
+    v isa Duration && return duration_string(v; serial = true)      # 01:00:00, as Django's prepare_value
+    v isa Bool && widget_kind(fld.widget) === :hidden && return v ? "True" : "False"
     v
 end
 
@@ -704,9 +812,12 @@ function select_date_html(bf::BoundField)
     end
     parts = Dict("day" => sel("day", [(i, i) for i in 1:31], d), "month" => sel("month", [(i, months[i]) for i in 1:12], m),
                  "year" => sel("year", [(yy, yy) for yy in w.years], y))
-    order = startswith(lowercase(get_language()), "en") ? ("month", "day", "year") : ("day", "month", "year")
-    join((parts[p] for p in order), "")
+    join((parts[p] for p in select_date_order()), "")
 end
+select_date_order() = startswith(lowercase(get_language()), "en") ? ("month", "day", "year") : ("day", "month", "year")
+"The id a field's label points at: a SelectDateWidget's first select, as Django's `id_for_label`."
+label_id(bf::BoundField) = bf.field.widget isa SelectDateWidget ? html_id(bf.form, bf.field) * "_" * first(select_date_order()) :
+                                                                 html_id(bf.form, bf.field)
 
 function widget_html(bf::BoundField)
     f, fld = bf.form, bf.field
@@ -717,7 +828,8 @@ function widget_html(bf::BoundField)
     name, id = escape_html(html_name(f, fld)), escape_html(html_id(f, fld))
     val = display_value(bf)
     req = !fld.blank && fld.kind !== :bool && f.use_required_attribute ? " required" : ""
-    attrs = " name=\"$name\" id=\"$id\"$req" * widget_attrs(fld.widget)
+    dis = form_option(fld, :disabled) ? " disabled" : ""
+    attrs = " name=\"$name\" id=\"$id\"$dis$req" * widget_attrs(fld.widget)
     haskey(f.errors, fld.name) && (attrs *= " aria-invalid=\"true\"")
     if fld.kind === :bool
         checked = f.data !== nothing ? (val !== nothing && lowercase(string(val)) in ("on", "true", "1", "yes")) : truthy(val)
@@ -774,10 +886,14 @@ function widget_html(bf::BoundField)
         end
         print(io, "</select>")
         return String(take!(io))
-    elseif fld.kind === :fk || fld.choices !== nothing || fld.kind === :filepath
+    elseif (fld.kind === :fk || fld.choices !== nothing || fld.kind === :filepath) && widget_kind(fld.widget) !== :hidden
         groups = fld.kind === :fk ? [(nothing, Pair{Any,Any}[target_value(fld, o) => string(o) for o in objects(related_model(fld))])] :
                  fld.kind === :filepath ? [(nothing, filepath_choices(fld))] : choice_groups(fld)
         io = IOBuffer()
+        # a required select without an empty first choice has no `required` (Django's Select.use_required_attribute):
+        # its first choice is always selected
+        firsts = [k for (_, opts) in groups for (k, _) in opts]
+        !(fld.blank || fld.kind === :fk) && !isempty(firsts) && string(firsts[1]) != "" && (attrs = replace(attrs, " required" => ""; count = 1))
         print(io, "<select$attrs>")
         (fld.blank || fld.kind === :fk) && print(io, "<option value=\"\">---------</option>")
         for (glabel, opts) in groups
@@ -794,11 +910,28 @@ function widget_html(bf::BoundField)
         return "<textarea$attrs cols=\"40\" rows=\"10\">" * escape_html(display_string(val)) * "</textarea>"
     end
     t = input_type(fld)
+    t == "hidden" && (attrs = replace(attrs, " required" => ""; count = 1))       # (a hidden input is never required, as Django's)
+    # a localized number is typed as text in the language's format, as Django's
+    localized = t == "number" && fld.related isa NamedTuple && get(fld.related, :localize, false)
+    localized && (t = "text")
     extra = fld.max_length !== nothing && t in ("text", "email", "url", "password") ? " maxlength=\"$(fld.max_length)\"" : ""
-    t == "number" && fld.kind === :float && (extra *= " step=\"any\"")
+    # the limits the validators set (min_length, min_value, max_value, step_size), as Django's widget_attrs
+    lims = Dict{Symbol,String}()
+    for v in fld.validators
+        v isa MinLengthValidator && (lims[:minlength] = string(v.limit))
+        v isa MinValueValidator && (lims[:min] = limit_attr(v.limit))
+        v isa MaxValueValidator && (lims[:max] = limit_attr(v.limit))
+        v isa StepValueValidator && (lims[:step] = limit_attr(v.limit))
+    end
+    t in ("text", "email", "url", "password", "search", "tel") && haskey(lims, :minlength) && !localized &&
+        (extra *= " minlength=\"$(lims[:minlength])\"")
+    if t == "number"
+        step = haskey(lims, :step) ? lims[:step] : fld.kind === :float ? "any" : fld.kind === :decimal ? decimal_step(fld.decimal_places) : nothing
+        step === nothing || (extra *= " step=\"$step\"")
+        haskey(lims, :min) ? (extra *= " min=\"$(lims[:min])\"") : is_positive_kind(fld.kind) && (extra *= " min=\"0\"")    # seconds too
+        haskey(lims, :max) && (extra *= " max=\"$(lims[:max])\"")
+    end
     t == "time" && (extra *= " step=\"1\"")
-    t == "number" && is_positive_kind(fld.kind) && (extra *= " min=\"0\"")                  # seconds too
-    t == "number" && fld.kind === :decimal && (extra *= " step=\"" * decimal_step(fld.decimal_places) * "\"")
     v = (t == "password" || val === nothing) ? "" : " value=\"" * escape_html(display_string(val)) * "\""
     "<input type=\"$t\"$attrs$extra$v>"
 end
@@ -1042,7 +1175,7 @@ A `<legend>` with the field's label, for a radio or checkbox group in a `<fields
 """
 legend_tag(bf::BoundField) = "<legend>" * escape_html(string(label(bf.field))) * "</legend>"
 
-label_tag(bf::BoundField) = "<label for=\"" * escape_html(html_id(bf.form, bf.field)) * "\">" *
+label_tag(bf::BoundField) = "<label for=\"" * escape_html(label_id(bf)) * "\">" *
                             escape_html(label(bf.field)) * ":</label>"
 
 function field_row(bf::BoundField; tag = "p")
@@ -1103,7 +1236,7 @@ function tattr(bf::BoundField, ::Val{S}) where {S}
     S === :errors_html && return SafeString(errors_html(get(bf.form.errors, bf.field.name, String[])))
     S === :errors && return get(bf.form.errors, bf.field.name, String[])
     S === :name && return string(bf.field.name)        # the field's own name (Django's); html_name is the prefixed one
-    S === :id_for_label && return html_id(bf.form, bf.field)
+    S === :id_for_label && return label_id(bf)
     S === :value && return display_value(bf)
     S === :help_text && return bf.field.help_text
     S === :widget && return SafeString(widget_html(bf))

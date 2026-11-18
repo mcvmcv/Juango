@@ -262,8 +262,9 @@ end
     @test !is_valid(f) && f.errors[:when] == ["This field is required."]
     f = MediaForm(Dict("name" => "Ann", "when_0" => "2024-05-01", "when_1" => "10:00", "code_0" => "abc", "code_1" => "x"))
     @test !is_valid(f) && f.errors[:code] == ["Enter a whole number."]
+    # (a SplitDateTimeField's missing part names it, as Django's: its parts' "incomplete" messages)
     f = MediaForm(Dict("name" => "Ann", "when_0" => "2024-05-01", "when_1" => ""))
-    @test !is_valid(f) && f.errors[:when] == ["Enter a complete value."]
+    @test !is_valid(f) && f.errors[:when] == ["Enter a valid time."]
     # an unbound form shows the initial value split into parts
     f = MediaForm(; initial = Dict(:when => DateTime(2024, 1, 2, 3, 4), :code => "xy-9"))
     html = string(as_p(f))

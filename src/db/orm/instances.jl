@@ -473,6 +473,14 @@ const URL_RE = r"^https?://[^\s/$.?#].[^\s]*$"i
 An IP address in its normal form (`2001:DB8::0:1` → `2001:db8::1`), or a one-element tuple
 holding Django's error message.
 """
+# eight groups of up to four hex digits (the last two may be a dotted IPv4 address), or fewer with one "::"
+function ipv6_shape(t)
+    gs = split(t, ':')
+    v4 = occursin('.', gs[end])
+    all(g -> isempty(g) || (length(g) <= 4 && all(isxdigit, g)), v4 ? gs[1:end-1] : gs) || return false
+    n = count(!isempty, v4 ? gs[1:end-1] : gs) + (v4 ? 2 : 0)
+    occursin("::", t) ? count("::", t) == 1 && n <= 7 : n == 8
+end
 function clean_ip(s::AbstractString, protocol = "both", unpack_ipv4 = false)
     p = lowercase(string(protocol))
     msg = p == "ipv4" ? gettext("Enter a valid IPv4 address.") : p == "ipv6" ? gettext("Enter a valid IPv6 address.") :
@@ -480,10 +488,13 @@ function clean_ip(s::AbstractString, protocol = "both", unpack_ipv4 = false)
     t = strip(s)
     # IPv4 must be a full dotted quad (the parser also takes the BSD shorthand "1.2.3")
     occursin(':', t) || occursin(r"^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$", t) || return (msg,)
+    # text with a colon that isn't an IPv6 address gets Django's own message
+    bad6 = occursin(':', t) && p != "ipv4" ? (gettext("This is not a valid IPv6 address."),) : (msg,)
+    occursin(':', t) && !ipv6_shape(t) && return bad6
     ip = try
         parse(Sockets.IPAddr, t)
     catch
-        return (msg,)
+        return bad6
     end
     ip isa Sockets.IPv4 && p == "ipv6" && return (msg,)
     ip isa Sockets.IPv6 && p == "ipv4" && return (msg,)
@@ -501,7 +512,8 @@ function auto_now_value(f::Field, ts)
 end
 
 "The `step` of a number input for a decimal with `places` digits after the point (\"0.01\")."
-decimal_step(places) = places === nothing ? "any" : places == 0 ? "1" : "0." * "0"^(places - 1) * "1"
+# (written as Python writes Decimal(1).scaleb(-places), as Django's: 0.01, then 1e-7 from seven places)
+decimal_step(places) = places === nothing ? "any" : places == 0 ? "1" : places <= 6 ? "0." * "0"^(places - 1) * "1" : "1e-$places"
 
 """
 Run per-field validation on a cleaned (typed) value; returns a vector of messages.
@@ -531,14 +543,15 @@ function validate_field(f::Field, v)
         push!(errs, field_message(f, "max_length", gettext("Ensure this value has at most %(max)d characters (it has %(len)d)."),
                                   Dict("max" => f.max_length, "len" => length(v), "limit_value" => f.max_length, "show_value" => length(v))))
     end
-    f.kind === :email && !occursin(EMAIL_RE, string(v)) && push!(errs, field_message(f, "invalid", gettext("Enter a valid email address.")))
+    f.kind === :email && validation_error(EmailValidator(), string(v)) !== nothing &&
+        push!(errs, field_message(f, "invalid", gettext("Enter a valid email address.")))
     if f.kind === :slug
         uni = f.related isa NamedTuple && get(f.related, :allow_unicode, false)
         occursin(uni ? UNICODE_SLUG_RE : SLUG_RE, string(v)) ||
             push!(errs, field_message(f, "invalid", uni ? gettext("Enter a valid “slug” consisting of Unicode letters, numbers, underscores, or hyphens.") :
                                                          gettext("Enter a valid “slug” consisting of letters, numbers, underscores or hyphens.")))
     end
-    f.kind === :url && !occursin(URL_RE, string(v)) && push!(errs, field_message(f, "invalid", gettext("Enter a valid URL.")))
+    f.kind === :url && validation_error(URLValidator(), string(v)) !== nothing && push!(errs, field_message(f, "invalid", gettext("Enter a valid URL.")))
     if f.kind === :decimal
         r = validation_error(DecimalValidator(f.max_digits, f.decimal_places), v)
         r === nothing || push!(errs, field_message(f, r[1], r[2]))
@@ -548,7 +561,7 @@ function validate_field(f::Field, v)
         v < lo && push!(errs, field_message(f, "min_value", gettext("Ensure this value is greater than or equal to %(limit_value)s."), Dict("limit_value" => lo)))
         v > hi && push!(errs, field_message(f, "max_value", gettext("Ensure this value is less than or equal to %(limit_value)s."), Dict("limit_value" => hi)))
     end
-    cs = field_choices(f)
+    cs = f.kind === :typedchoice ? nothing : field_choices(f)    # (a typed choice was checked before it was coerced)
     if cs !== nothing && !any(c -> value_eq(c.first, v) || string(c.first) == string(v), cs)
         push!(errs, field_message(f, "invalid_choice", gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v)))
     end

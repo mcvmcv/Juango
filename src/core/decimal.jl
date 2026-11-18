@@ -105,6 +105,11 @@ function (::Type{T})(d::Decimal) where {T<:Integer}
     T(d.q >= 0 ? d.c * big(10)^d.q : div(d.c, big(10)^(-d.q)))
 end
 Base.Rational{T}(d::Decimal) where {T} = Rational{T}(d.q >= 0 ? d.c * big(10)^d.q // 1 : d.c // big(10)^(-d.q))
+# exact, on the coefficients brought to the same exponent (a StepValueValidator's step_size = dec"0.3")
+function Base.rem(x::Decimal, y::Decimal)
+    q = min(x.q, y.q)
+    Decimal(rem(x.c * big(10)^(x.q - q), y.c * big(10)^(y.q - q)), q, Val(:raw))
+end
 Base.float(d::Decimal) = Float64(d)
 
 Base.zero(::Type{Decimal}) = Decimal(0)

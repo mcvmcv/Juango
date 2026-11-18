@@ -238,6 +238,9 @@ Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields:
         f.name = name
         f.model = T
         name in (:id, :pk) && error("$T: '$name' is reserved for the automatic primary key")
+        # (a form's DecimalField may leave these out; a column needs both, as Django's check fields.E130/E132)
+        f.kind === :decimal && (f.max_digits === nothing || f.decimal_places === nothing) &&
+            throw(ArgumentError("$T.$name: a model's DecimalField needs max_digits and decimal_places"))
         # related_name = "attached_%(class)s_set" (an abstract model's field): this model's name and app filled in
         for k in (:related_name, :related_query_name)
             v = getfield(f, k)

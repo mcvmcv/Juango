@@ -407,7 +407,7 @@ function input_formats(kind::Symbol)
 end
 
 const STRFTIME_CODES = Dict('Y' => "yyyy", 'm' => "mm", 'd' => "dd", 'y' => "yy", 'H' => "HH", 'M' => "MM", 'S' => "SS",
-                            'f' => "s", 'b' => "u", 'B' => "U")
+                            'f' => "s", 'b' => "u", 'B' => "U", 'I' => "I", 'p' => "p")
 const STRFTIME_CACHE = Dict{String,Union{Nothing,DateFormat}}()
 
 "A strftime format (Django's input formats: \"%d.%m.%Y\") as a Julia `DateFormat`; `nothing` if it has directives Julia can't parse."
@@ -441,11 +441,13 @@ year is in 1969-2068, as Python's.
 """
 function parse_input_datetime(s::AbstractString, kind::Symbol; formats = nothing)
     T = kind === :date ? Date : kind === :time ? Dates.Time : DateTime
-    fmts = formats === nothing ? input_formats(kind) : vcat(collect(formats), input_formats(kind))
+    fmts = formats === nothing ? input_formats(kind) : collect(formats)      # (given formats replace the language's, as Django's)
+    # runs of spaces as one, and fractions of a second to milliseconds (all a DateTime keeps), as strptime reads them
+    s = replace(replace(String(s), r"\s+" => " "), r"(:\d\d\.\d{1,3})\d+" => s"\1")
     for f in fmts
         df = f isa DateFormat ? f : strftime_dateformat(string(f))
         df === nothing && continue
-        v = tryparse(kind === :datetime && !(occursin('H', string(df)) ) ? Date : T, s, df)
+        v = tryparse(kind === :datetime && !occursin('H', string(df)) && !occursin('I', string(df)) ? Date : T, s, df)
         v === nothing && continue
         v isa Date && kind === :datetime && (v = DateTime(v))
         f isa AbstractString && occursin("%Y", f) && !(v isa Dates.Time) && Dates.year(v) < 1000 && continue   # %Y: four digits

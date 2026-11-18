@@ -64,6 +64,7 @@ mutable struct Field
     primary_key::Bool                     # the model's primary key, instead of an automatic id (#221)
     through_fields::Union{Nothing,Tuple{Symbol,Symbol}}   # ManyToManyField: the through model's keys to the owner and the target
     db_constraint::Bool                   # ForeignKey: create the FOREIGN KEY constraint (false: the relation without one)
+    form::Any                             # form fields: (strip, empty_value, disabled) when any isn't the default, else nothing
     att::Symbol         # attname for the name in `attfor` (see `attname`)
     col::String         # string(att): the column name
     attfor::Symbol      # the name `att` and `col` were worked out for
@@ -203,6 +204,7 @@ choice_pair(c::Choice) = c.value => c.label
 choice_pair(c::Pair) = c.first => c.second
 choice_pair(c::Tuple{Any,Any}) = c[1] => c[2]                 # ("a", "A"), as Django's
 choice_pair(c) = c => string(c)
+is_group(c::Tuple{Any,Any}) = is_group(choice_pair(c))      # ("Group", (("1", "One"), ...))
 is_group(c) = c isa Pair && (c.second isa AbstractVector || c.second isa AbstractDict || c.second isa Tuple) && !(c.second isa AbstractString)
 
 normchoices(::Nothing) = nothing
@@ -211,7 +213,7 @@ normchoices(f::Function) = f                                   # called when the
 # a Dict, as Django's choices = {"Group 1": {1: "First"}, 0: "Other"}: its pairs, groups' too
 normchoices(cs::AbstractDict) = normchoices(Any[k => (v isa AbstractDict ? collect(Pair{Any,Any}, v) : v) for (k, v) in cs])
 normchoices(cs) = any(is_group, cs) ?
-    Any[is_group(c) ? ChoiceGroup(c.first, Pair{Any,Any}[choice_pair(x) for x in c.second]) : choice_pair(c) for c in cs] :
+    Any[is_group(c) ? (p = choice_pair(c); ChoiceGroup(p.first, Pair{Any,Any}[choice_pair(x) for x in p.second])) : choice_pair(c) for c in cs] :
     Pair{Any,Any}[choice_pair(c) for c in cs]
 
 """
@@ -267,7 +269,8 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                unique_for_year = nothing, template_name = nothing, related_query_name = nothing, error_messages = nothing,
                min_value = nothing, max_value = nothing, step_size = nothing, min_length = nothing,
                input_formats = nothing, localize::Bool = false, db_collation = nothing, db_column = nothing, to_field = nothing,
-               primary_key::Bool = false, through_fields = nothing, db_constraint::Bool = true)
+               primary_key::Bool = false, through_fields = nothing, db_constraint::Bool = true,
+               strip::Bool = true, empty_value = NO_DEFAULT, disabled::Bool = false)
     required === nothing || (blank = !required)
     # form fields: the date formats to accept, and numbers typed in the language's format ("1.234,5")
     if input_formats !== nothing || localize
@@ -300,8 +303,11 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           db_collation === nothing ? nothing : string(db_collation), db_column === nothing ? nothing : string(db_column),
           to_field === nothing || to_field in (:id, :pk, "id", "pk") ? nothing : Symbol(to_field),
           primary_key, through_fields === nothing ? nothing : (Symbol(through_fields[1]), Symbol(through_fields[2])),
-          db_constraint, field_att(kind, :_), string(field_att(kind, :_)), :_)
+          db_constraint, strip && empty_value === NO_DEFAULT && !disabled ? nothing : (strip = strip, empty_value = empty_value, disabled = disabled),
+          field_att(kind, :_), string(field_att(kind, :_)), :_)
 end
+"A form field's option (`:strip`, `:empty_value` or `:disabled`), or its default."
+form_option(f::Field, k::Symbol) = f.form === nothing ? (k === :strip ? true : k === :disabled ? false : NO_DEFAULT) : getfield(f.form, k)
 
 """
     GeneratedField(; expression, output_field, db_persist = true)
@@ -384,9 +390,12 @@ point: `NUMERIC(max_digits, decimal_places)` in the database. Values are `Decima
 `decimal_places` when saved and loaded (`price = DecimalField(max_digits = 10, decimal_places = 2)`
 holds `dec"19.99"`).
 """
-function DecimalField(; max_digits::Integer, decimal_places::Integer, kw...)
-    (max_digits >= 1 && decimal_places >= 0) || throw(ArgumentError("DecimalField needs max_digits >= 1 and decimal_places >= 0"))
-    decimal_places <= max_digits || throw(ArgumentError("DecimalField: decimal_places ($decimal_places) can't exceed max_digits ($max_digits)"))
+function DecimalField(; max_digits::Union{Nothing,Integer} = nothing, decimal_places::Union{Nothing,Integer} = nothing, kw...)
+    # (a form field may leave either out, as Django's; a model's column needs both)
+    (max_digits === nothing || max_digits >= 1) && (decimal_places === nothing || decimal_places >= 0) ||
+        throw(ArgumentError("DecimalField needs max_digits >= 1 and decimal_places >= 0"))
+    max_digits === nothing || decimal_places === nothing || decimal_places <= max_digits ||
+        throw(ArgumentError("DecimalField: decimal_places ($decimal_places) can't exceed max_digits ($max_digits)"))
     Field(:decimal; max_digits = max_digits, decimal_places = decimal_places, kw...)
 end
 # a nullable one starts as NULL, as Django's (a non-nullable one as false, which Django leaves to the form)

@@ -158,7 +158,10 @@ end
 
 
 "A date and a time input making one `DateTime` (aware in the current time zone with `USE_TZ`)."
-SplitDateTimeField(; kw...) = MultiValueField([DateField(), Field(:char; max_length = 8, widget = Widget(:time))];
+SplitDateTimeField(; kw...) = MultiValueField([DateField(error_messages = Dict("incomplete" => gettext("Enter a valid date."))),
+                                                 Field(:char; max_length = 8, widget = Widget(:time),
+                                                       validators = Any[t -> parse_time(t) !== nothing || gettext("Enter a valid time.")],
+                                                       error_messages = Dict("incomplete" => gettext("Enter a valid time.")))];
     compress = vs -> begin
         d, t = vs
         tm = parse_time(t)
@@ -172,20 +175,29 @@ SplitDateTimeField(; kw...) = MultiValueField([DateField(), Field(:char; max_len
 multi_raw(f::Form, fld::Field) = f.data === nothing ? nothing :
     [get(f.data, html_name(f, fld) * "_$(i - 1)", nothing) for i in eachindex(fld.related.fields)]
 
-"Clean a multi-value field's parts and compress them: `(value, error_or_nothing)`."
+"""
+Clean a multi-value field's parts and compress them: `(value, error_or_nothing)`. As Django's
+`MultiValueField`, every part's error is reported (the error is then a vector of messages), and a
+required part left empty is "incomplete" (its field's `error_messages["incomplete"]`).
+"""
 function clean_multi(fld::Field, raws)
     spec = fld.related
     raws === nothing && (raws = fill(nothing, length(spec.fields)))
+    raws = Any[i <= length(raws) ? raws[i] : nothing for i in eachindex(spec.fields)]
     all(r -> r === nothing || isempty(strip(string(r))), raws) && return nothing, nothing
-    vals = Any[]
+    vals, errs = Any[], String[]
     for (sub, r) in zip(spec.fields, raws)
         v, err = to_julia(sub, r)
-        err === nothing || return nothing, err
-        (v === nothing || v == "") && return nothing, gettext("Enter a complete value.")
-        errs = validate_field(sub, v)
-        isempty(errs) || return nothing, first(errs)
-        push!(vals, v)
+        if err !== nothing
+            push!(errs, field_message(sub, "invalid", err))
+        elseif v === nothing || v == ""
+            push!(errs, field_message(sub, "incomplete", field_message(fld, "incomplete", gettext("Enter a complete value."))))
+        else
+            e = validate_field(sub, v)
+            isempty(e) ? push!(vals, v) : push!(errs, first(e))
+        end
     end
+    isempty(errs) || return nothing, (length(errs) == 1 ? errs[1] : unique(errs))
     try
         spec.compress(vals), nothing
     catch e

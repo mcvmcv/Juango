@@ -1481,7 +1481,9 @@ end
 
 @testset "DecimalField" begin
     @test_throws ArgumentError DecimalField(max_digits = 3, decimal_places = 4)
-    @test_throws UndefKeywordError DecimalField(max_digits = 3)
+    # a form field may leave decimal_places out, a model's may not
+    @test DecimalField(max_digits = 3).decimal_places === nothing
+    @test_throws ArgumentError Juango.register_model!(Ledger, [:amount => DecimalField(max_digits = 3)], (table = "x",))
     f = Juango.getfield_meta(Ledger, :amount)
     c = Juango.column_state(f)
     @test c.kind === :decimal && c.max_digits == 8 && c.decimal_places == 2
@@ -1584,7 +1586,7 @@ end
     bad = ModelForm(Shift; fields = [:name, :starts, :length], data = Dict("name" => "x", "starts" => "25:00", "length" => "soon"))
     @test !is_valid(bad) && bad.errors[:starts] == ["Enter a valid time."] && bad.errors[:length] == ["Enter a valid duration."]
     @test occursin("type=\"time\"", Juango.widget_html(ModelForm(Shift; fields = [:starts])[:starts]))
-    @test occursin("value=\"8:30:00\"", Juango.widget_html(ModelForm(Shift; instance = s, fields = [:length])[:length]))
+    @test occursin("value=\"08:30:00\"", Juango.widget_html(ModelForm(Shift; instance = s, fields = [:length])[:length]))   # (Django's duration_string)
     js = Juango.serialize(:json, filter(Shift; name = "early"))
     @test occursin("\"starts\":\"06:30:00\"", js) && occursin("\"length\":\"08:30:00\"", js)
     back = only(Juango.deserialize(:json, js)).object
