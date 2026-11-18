@@ -12,14 +12,14 @@ struct M2MOwner
     name::Symbol     # the relation's name on it
 end
 
-Base.@nospecializeinfer function m2m_queryset(@nospecialize(m::Model), f::Field, forward::Bool, name::Symbol = f.name)
+Base.@nospecializeinfer function m2m_queryset(@nospecialize(m::Model), f::Field, forward::Bool, name::Symbol = f.name; base = nothing)
     src, dst = through_fks(f)
     mine, other = forward ? (src, dst) : (dst, src)
     Other = related_model(other)
     id = (getfield(m, :_data)::Dict{Symbol,Any})[:id]
     step1, step2 = m2m_path(f, !forward)      # from the other model back to this instance
     # (a to_field through key holds another field than the id: compared through the related id then)
-    qs = filter(objects(Other), Q((fk_to_field(mine) === nothing ? Symbol(step1, "__", step2) : Symbol(step1, "__", step2, "__id")) => id))
+    qs = filter(something(base, objects(Other)), Q((fk_to_field(mine) === nothing ? Symbol(step1, "__", step2) : Symbol(step1, "__", step2, "__id")) => id))
     chain(qs; owner = M2MOwner(through_model(f), mine, other, id, forward, f.symmetrical, m, name), db = instance_db(m))
 end
 
@@ -249,7 +249,8 @@ end
 function rev_clear!(qs::QuerySet; bulk::Bool = true)
     o = qs.owner::ReverseFKOwner
     rev_nullable(o, "clear!")
-    rel = filter(base_objects(o.model), Q(attname(o.fk) => target_value(o.fk, o.instance)))
+    # the rows this relation's queryset sees (its manager's, as Django: clear!(book.readers(manager = :boring)))
+    rel = chain(qs; owner = nothing, cache = nothing)
     bulk ? update!(rel; attname(o.fk) => nothing) : atomic(() -> foreach(x -> (setproperty!(x, o.fk.name, nothing); save!(x)), fetch(rel)))
     rev_changed!(o)
     qs
@@ -335,6 +336,32 @@ function update_or_create(qs::QuerySet; defaults = Dict{Symbol,Any}(), create_de
             (save!(o), false)
         end
     end
+end
+
+"""
+    book.authors(manager = :fun_people)
+    book.favorite_books(manager = :boring_people)
+
+The relation through another of the related model's managers (`Juango.manager(::Type{M}, ::Val{name})`)
+instead of its default queryset, as Django's `book.authors(manager="fun_people")`. It is still the
+relation: add!, create and the rest work on it.
+"""
+function (qs::QuerySet)(; manager::Union{Symbol,AbstractString})
+    o = qs.owner
+    T = model_of(qs)
+    base = objects(T, Symbol(manager))
+    rel = if o isa ReverseFKOwner
+        filter(base, Q(attname(o.fk) => target_value(o.fk, o.instance)))
+    elseif o isa M2MOwner
+        mm = find_m2m(typeof(o.instance), string(o.name))
+        mm === nothing && throw(ArgumentError("$(o.name) is not a many-to-many relation of $(typeof(o.instance))"))
+        return m2m_queryset(o.instance, mm[2], mm[3], o.name; base = base)
+    elseif o isa GenericOwner
+        filter(base, (Q(p) for p in gen_target(o))...)
+    else
+        throw(ArgumentError("qs(manager = ...) is for a relation's queryset (book.authors, publisher.books)"))
+    end
+    chain(rel; owner = o, db = qs.db)
 end
 
 function prefetch_m2m!(objs::Vector, name, f::Field, forward::Bool, qs, to_attr)

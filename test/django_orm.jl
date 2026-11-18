@@ -6286,3 +6286,101 @@ end
   end
 end
 
+# --- tests/custom_managers --------------------------------------------------------------------------------
+@model struct DcmBook
+    title = CharField(max_length = 50, default = "")
+    author = CharField(max_length = 30, default = "")
+    is_published = BooleanField(default = false)
+    authors = ManyToManyField(:DcmPerson; related_name = :books)
+    fun_authors = ManyToManyField(:DcmFunPerson; related_name = :books)
+    favorite_things = GenericRelation(:DcmPerson; content_type_field = :favorite_thing_type, object_id_field = :favorite_thing_id)
+    fun_people_favorite_things = GenericRelation(:DcmFunPerson; content_type_field = :favorite_thing_type, object_id_field = :favorite_thing_id)
+    Meta(table = "dcm_book")
+end
+Juango.manager(::Type{DcmBook}, ::Val{:published_objects}) = filter(base_objects(DcmBook); is_published = true)
+@model struct DcmPerson
+    first_name = CharField(max_length = 30)
+    last_name = CharField(max_length = 30)
+    fun = BooleanField(default = false)
+    favorite_book = ForeignKey(DcmBook; on_delete = :SET_NULL, null = true, related_name = :favorite_books)
+    favorite_thing_type = ForeignKey(ContentType; on_delete = :SET_NULL, null = true, related_name = :dcm_people)
+    favorite_thing_id = IntegerField(null = true)
+    favorite_thing = GenericForeignKey(:favorite_thing_type, :favorite_thing_id)
+    Meta(table = "dcm_person")
+end
+Juango.manager(::Type{DcmPerson}, ::Val{:fun_people}) = filter(base_objects(DcmPerson); fun = true)
+Juango.manager(::Type{DcmPerson}, ::Val{:boring_people}) = filter(base_objects(DcmPerson); fun = false)
+@model struct DcmFunPerson
+    first_name = CharField(max_length = 30)
+    last_name = CharField(max_length = 30)
+    fun = BooleanField(default = true)
+    favorite_book = ForeignKey(DcmBook; on_delete = :SET_NULL, null = true, related_name = :fun_people_favorite_books)
+    favorite_thing_type = ForeignKey(ContentType; on_delete = :SET_NULL, null = true, related_name = :dcm_funpeople)
+    favorite_thing_id = IntegerField(null = true)
+    favorite_thing = GenericForeignKey(:favorite_thing_type, :favorite_thing_id)
+    Meta(table = "dcm_funperson")
+end
+Juango.default_queryset(::Type{DcmFunPerson}) = filter(base_objects(DcmFunPerson); fun = true)
+@model struct DcmRelatedModel
+    name = CharField(max_length = 50)
+    Meta(table = "dcm_relatedmodel")
+end
+@model struct DcmRestrictedModel
+    name = CharField(max_length = 50)
+    is_public = BooleanField(default = false)
+    related = ForeignKey(DcmRelatedModel; on_delete = :CASCADE, related_name = :restricted)
+    Meta(table = "dcm_restrictedmodel")
+end
+Juango.default_queryset(::Type{DcmRestrictedModel}) = filter(base_objects(DcmRestrictedModel); is_public = true)
+@model struct DcmOneToOneRestrictedModel
+    name = CharField(max_length = 50)
+    is_public = BooleanField(default = false)
+    related = OneToOneField(DcmRelatedModel; on_delete = :CASCADE, related_name = :o2o_restricted)
+    Meta(table = "dcm_onetoonerestrictedmodel")
+end
+Juango.default_queryset(::Type{DcmOneToOneRestrictedModel}) = filter(base_objects(DcmOneToOneRestrictedModel); is_public = true)
+redirect_stdout(devnull) do
+    ms = [DcmBook, DcmPerson, DcmFunPerson, through(DcmBook, :authors), through(DcmBook, :fun_authors), DcmRelatedModel,
+          DcmRestrictedModel, DcmOneToOneRestrictedModel]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django custom_managers" begin
+  port_block() do
+    fn(qs) = sort([p.first_name for p in qs])
+    b1 = create(DcmBook; title = "How to program", author = "Rodney Dangerfield", is_published = true)
+    create(DcmBook; title = "How to be smart", author = "Albert Einstein", is_published = false)
+    @test [b.title for b in objects(DcmBook, :published_objects)] == ["How to program"]
+    # a reverse key, a generic relation, an m2m: the related model's default queryset, or another manager
+    create(DcmPerson; first_name = "Bugs", last_name = "Bunny", fun = true, favorite_book = b1, favorite_thing = b1)
+    create(DcmPerson; first_name = "Droopy", last_name = "Dog", fun = false, favorite_book = b1, favorite_thing = b1)
+    create(DcmFunPerson; first_name = "Bugs", last_name = "Bunny", fun = true, favorite_book = b1, favorite_thing = b1)
+    create(DcmFunPerson; first_name = "Droopy", last_name = "Dog", fun = false, favorite_book = b1, favorite_thing = b1)
+    @test fn(b1.favorite_books) == ["Bugs", "Droopy"] && fn(b1.fun_people_favorite_books) == ["Bugs"]
+    @test fn(b1.favorite_books(manager = :boring_people)) == ["Droopy"] && fn(b1.favorite_books(manager = "fun_people")) == ["Bugs"]
+    @test fn(b1.favorite_things) == ["Bugs", "Droopy"] && fn(b1.fun_people_favorite_things) == ["Bugs"]
+    @test fn(b1.favorite_things(manager = :boring_people)) == ["Droopy"] && fn(b1.favorite_things(manager = :fun_people)) == ["Bugs"]
+    for p in objects(DcmPerson); add!(b1.authors, p); end
+    for p in base_objects(DcmFunPerson); add!(b1.fun_authors, p); end
+    @test fn(b1.authors) == ["Bugs", "Droopy"] && fn(b1.fun_authors) == ["Bugs"]
+    @test fn(b1.authors(manager = :boring_people)) == ["Droopy"] && fn(b1.authors(manager = :fun_people)) == ["Bugs"]
+    # removing through a relation's manager touches only what it sees
+    clear!(b1.favorite_books(manager = :boring_people))
+    @test fn(b1.favorite_books) == ["Bugs"] && count(filter(DcmPerson; favorite_book = nothing)) == 1
+    remove!(b1.authors(manager = :fun_people), get(DcmPerson; first_name = "Bugs"))
+    @test fn(b1.authors) == ["Droopy"]
+  end
+  port_block() do
+    # CustomManagersRegressTestCase: rows the default queryset hides are saved, refreshed and deleted with their owner
+    related = create(DcmRelatedModel; name = "xyzzy")
+    obj = create(DcmRestrictedModel; name = "hidden", related = related)
+    obj.name = "still hidden"; save!(obj); @test count(base_objects(DcmRestrictedModel)) == 1 && count(objects(DcmRestrictedModel)) == 0
+    book = create(DcmBook; is_published = false); update!(filter(base_objects(DcmBook); pk = book.pk); title = "Hi")
+    refresh!(book); @test book.title == "Hi"
+    for (n, pub) in (("one", true), ("two", false), ("three", false)); create(DcmRestrictedModel; name = n, is_public = pub, related = related); end
+    delete!(get(DcmRelatedModel; name = "xyzzy")); @test count(base_objects(DcmRestrictedModel)) == 0
+    r2 = create(DcmRelatedModel; name = "xyzzy"); create(DcmOneToOneRestrictedModel; name = "foo", is_public = false, related = r2)
+    delete!(get(DcmRelatedModel; name = "xyzzy")); @test count(base_objects(DcmOneToOneRestrictedModel)) == 0
+  end
+end
+

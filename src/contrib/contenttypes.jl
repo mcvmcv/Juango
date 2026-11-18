@@ -263,7 +263,7 @@ end
 "`clear!(animal.tags)`: delete every related object."
 function gen_clear!(qs::QuerySet; bulk::Bool = true)
     o = qs.owner::GenericOwner
-    rel = filter(base_objects(o.model), (Q(p) for p in gen_target(o))...)
+    rel = chain(qs; owner = nothing, cache = nothing)             # (what this relation's queryset sees, as Django)
     bulk ? delete!(rel) : atomic(() -> foreach(delete!, fetch(rel)))
     gen_changed!(o)
     qs
