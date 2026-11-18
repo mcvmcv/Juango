@@ -611,3 +611,154 @@ dff_complex(; kw...) = MultiValueField([CharField(max_length = nothing), Multipl
     @test has_changed(g(merge(same, Dict("field1_2_0" => "2009-04-25", "field1_2_1" => "11:44:00")); initial = "some text,JP,2007-04-25 06:24:00"))
     @test has_changed(g(same))
 end
+
+# ---- Django's forms_tests/tests/test_forms.py (FormsTestCase). Juango renders dates as type="date" inputs
+# (Django: type="text"); expectations say so where it shows.
+
+# assertHTMLEqual: tags with their attributes in any order, text with whitespace collapsed
+function html_tokens(h)
+    out = Any[]
+    for m in eachmatch(r"<[^>]+>|[^<]+", String(h))
+        t = m.match
+        if startswith(t, "<")
+            mm = match(r"^<(/?)([\w-]+)(.*?)/?>$"s, t)
+            mm === nothing && (push!(out, t); continue)
+            attrs = Set(x.match for x in eachmatch(r"[\w:-]+(?:=\"[^\"]*\")?", mm[3]))
+            push!(out, (mm[1] * lowercase(mm[2]), attrs))
+        else
+            s = strip(replace(t, r"\s+" => " "))
+            isempty(s) || push!(out, s)
+        end
+    end
+    out
+end
+html_eq(a, b) = html_tokens(string(a)) == html_tokens(string(b))
+w(bf) = Juango.widget_html(bf)
+
+@form DftPerson begin
+    first_name = CharField(max_length = nothing)
+    last_name = CharField(max_length = nothing)
+    birthday = DateField()
+end
+@form DftPersonNew begin
+    first_name = CharField(max_length = nothing, widget = Widget(attrs = Dict("id" => "first_name_id")))
+    last_name = CharField(max_length = nothing)
+    birthday = DateField()
+end
+
+@testset "django forms_tests: test_forms (bound and unbound forms, rendering, auto_id)" begin
+    p = DftPerson(Dict("first_name" => "John", "last_name" => "Lennon", "birthday" => "1940-10-9"))
+    @test p.data !== nothing && is_valid(p) && isempty(p.errors)
+    @test p.cleaned_data[:first_name] == "John" && p.cleaned_data[:last_name] == "Lennon" && p.cleaned_data[:birthday] == Date(1940, 10, 9)
+    @test html_eq(w(p[:first_name]), "<input type=\"text\" name=\"first_name\" value=\"John\" id=\"id_first_name\" required>")
+    @test html_eq(w(p[:birthday]), "<input type=\"date\" name=\"birthday\" value=\"1940-10-9\" id=\"id_birthday\" required>")
+    e = try p[:nonexistentfield] catch e; e end
+    @test e isa KeyError && e.key == "Key 'nonexistentfield' not found in 'DftPerson'. Choices are: birthday, first_name, last_name."
+    @test [[bf.label, bf.data] for bf in p] == [["First name", "John"], ["Last name", "Lennon"], ["Birthday", "1940-10-9"]]
+    @test html_eq(as_div(p),
+        "<div><label for=\"id_first_name\">First name:</label><input type=\"text\" name=\"first_name\" value=\"John\" required id=\"id_first_name\"></div>" *
+        "<div><label for=\"id_last_name\">Last name:</label><input type=\"text\" name=\"last_name\" value=\"Lennon\" required id=\"id_last_name\"></div>" *
+        "<div><label for=\"id_birthday\">Birthday:</label><input type=\"date\" name=\"birthday\" value=\"1940-10-9\" required id=\"id_birthday\"></div>")
+
+    # an empty dict is bound: every field is required
+    p = DftPerson(Dict{String,Any}())
+    @test p.data !== nothing && !is_valid(p) && isempty(p.cleaned_data)
+    @test p.errors[:first_name] == ["This field is required."] && p.errors[:birthday] == ["This field is required."]
+    err(n) = "<ul class=\"errorlist\" id=\"id_$(n)_error\"><li>This field is required.</li></ul>"
+    inp(n, t = "text") = "<input type=\"$t\" name=\"$n\" aria-invalid=\"true\" required id=\"id_$n\" aria-describedby=\"id_$(n)_error\">"
+    lab(n, l) = "<label for=\"id_$n\">$l:</label>"
+    fs = [("first_name", "First name", "text"), ("last_name", "Last name", "text"), ("birthday", "Birthday", "date")]
+    @test html_eq(as_div(p), join(["<div>" * lab(n, l) * err(n) * inp(n, t) * "</div>" for (n, l, t) in fs]))
+    @test html_eq(as_table(p), join(["<tr><th>" * lab(n, l) * "</th><td>" * err(n) * inp(n, t) * "</td></tr>" for (n, l, t) in fs]))
+    @test html_eq(as_ul(p), join(["<li>" * err(n) * lab(n, l) * inp(n, t) * "</li>" for (n, l, t) in fs]))
+    @test html_eq(as_p(p), join([err(n) * "<p>" * lab(n, l) * inp(n, t) * "</p>" for (n, l, t) in fs]))
+
+    # unbound: no errors, not valid
+    p = DftPerson()
+    @test p.data === nothing && isempty(p.errors) && !is_valid(p)
+    plain(n, t = "text") = "<input type=\"$t\" name=\"$n\" id=\"id_$n\" required>"
+    @test html_eq(as_div(p), join(["<div>" * lab(n, l) * plain(n, t) * "</div>" for (n, l, t) in fs]))
+    @test html_eq(as_table(p), join(["<tr><th>" * lab(n, l) * "</th><td>" * plain(n, t) * "</td></tr>" for (n, l, t) in fs]))
+    @test html_eq(as_ul(p), join(["<li>" * lab(n, l) * plain(n, t) * "</li>" for (n, l, t) in fs]))
+    @test html_eq(as_p(p), join(["<p>" * lab(n, l) * plain(n, t) * "</p>" for (n, l, t) in fs]))
+
+    # unicode values; a partly filled form
+    p = DftPerson(Dict("first_name" => "John", "last_name" => "ŠĐĆŽćžšđ", "birthday" => "1940-10-9"))
+    @test occursin("value=\"ŠĐĆŽćžšđ\"", as_table(p).s)
+    p = DftPerson(Dict("last_name" => "Lennon"))
+    @test !is_valid(p) && p.errors == Dict(:birthday => ["This field is required."], :first_name => ["This field is required."])
+    @test p.cleaned_data == Dict(:last_name => "Lennon") && p[:first_name].errors == ["This field is required."]
+    @test html_eq(p[:first_name].errors_html, "<ul class=\"errorlist\" id=\"id_first_name_error\"><li>This field is required.</li></ul>")
+
+    # cleaned_data has only the form's fields; optional ones are there, empty
+    p = DftPerson(Dict("first_name" => "John", "last_name" => "Lennon", "birthday" => "1940-10-9", "extra1" => "hello", "extra2" => "hello"))
+    @test is_valid(p) && Set(keys(p.cleaned_data)) == Set([:first_name, :last_name, :birthday])
+    f = Form([:first_name => CharField(max_length = nothing), :last_name => CharField(max_length = nothing),
+              :nick_name => CharField(max_length = nothing, required = false)]; data = Dict("first_name" => "John", "last_name" => "Lennon"))
+    @test is_valid(f) && f.cleaned_data[:nick_name] == ""
+    f = Form([:first_name => CharField(max_length = nothing), :last_name => CharField(max_length = nothing),
+              :birth_date => DateField(required = false)]; data = Dict("first_name" => "John", "last_name" => "Lennon"))
+    @test is_valid(f) && f.cleaned_data[:birth_date] === nothing
+
+    # auto_id: a format, true (the name), false (no ids, no <label>)
+    p = DftPerson(; auto_id = "%s_id")
+    @test html_eq(as_ul(p), join(["<li><label for=\"$(n)_id\">$l:</label><input type=\"$t\" name=\"$n\" id=\"$(n)_id\" required></li>" for (n, l, t) in fs]))
+    p = DftPerson(; auto_id = true)
+    @test html_eq(as_ul(p), join(["<li><label for=\"$n\">$l:</label><input type=\"$t\" name=\"$n\" id=\"$n\" required></li>" for (n, l, t) in fs]))
+    p = DftPerson(; auto_id = false)
+    @test html_eq(as_ul(p), join(["<li>$l: <input type=\"$t\" name=\"$n\" required></li>" for (n, l, t) in fs]))
+    # an id on the widget: used whatever auto_id says
+    p = DftPersonNew(; auto_id = false)
+    @test html_eq(as_ul(p), "<li><label for=\"first_name_id\">First name:</label><input type=\"text\" id=\"first_name_id\" name=\"first_name\" required></li>" *
+                            "<li>Last name: <input type=\"text\" name=\"last_name\" required></li><li>Birthday: <input type=\"date\" name=\"birthday\" required></li>")
+    p = DftPersonNew(; auto_id = true)
+    @test html_eq(as_ul(p), "<li><label for=\"first_name_id\">First name:</label><input type=\"text\" id=\"first_name_id\" name=\"first_name\" required></li>" *
+                            "<li><label for=\"last_name\">Last name:</label><input type=\"text\" name=\"last_name\" id=\"last_name\" required></li>" *
+                            "<li><label for=\"birthday\">Birthday:</label><input type=\"date\" name=\"birthday\" id=\"birthday\" required></li>")
+end
+
+@testset "django forms_tests: test_forms (help text, hidden fields)" begin
+    reg(; data = nothing, kw...) = Form([:username => CharField(max_length = 10, help_text = "e.g., user@example.com"),
+                                         :password => CharField(max_length = nothing, widget = :password, help_text = "Wählen Sie mit Bedacht.")];
+                                        data = data, kw...)
+    p = reg(; auto_id = false)
+    @test html_eq(as_ul(p), "<li>Username: <input type=\"text\" name=\"username\" maxlength=\"10\" required><span class=\"helptext\">e.g., user@example.com</span></li>" *
+                            "<li>Password: <input type=\"password\" name=\"password\" required><span class=\"helptext\">Wählen Sie mit Bedacht.</span></li>")
+    @test html_eq(as_p(p), "<p>Username: <input type=\"text\" name=\"username\" maxlength=\"10\" required><span class=\"helptext\">e.g., user@example.com</span></p>" *
+                           "<p>Password: <input type=\"password\" name=\"password\" required><span class=\"helptext\">Wählen Sie mit Bedacht.</span></p>")
+    @test html_eq(as_table(p), "<tr><th>Username:</th><td><input type=\"text\" name=\"username\" maxlength=\"10\" required><br><span class=\"helptext\">e.g., user@example.com</span></td></tr>" *
+                               "<tr><th>Password:</th><td><input type=\"password\" name=\"password\" required><br><span class=\"helptext\">Wählen Sie mit Bedacht.</span></td></tr>")
+    @test html_eq(as_div(p), "<div>Username: <div class=\"helptext\">e.g., user@example.com</div><input type=\"text\" name=\"username\" maxlength=\"10\" required></div>" *
+                             "<div>Password: <div class=\"helptext\">Wählen Sie mit Bedacht.</div><input type=\"password\" name=\"password\" required></div>")
+    p = reg(; data = Dict("username" => "foo"), auto_id = false)
+    @test html_eq(as_ul(p), "<li>Username: <input type=\"text\" name=\"username\" value=\"foo\" maxlength=\"10\" required><span class=\"helptext\">e.g., user@example.com</span></li>" *
+                            "<li><ul class=\"errorlist\"><li>This field is required.</li></ul>Password: <input type=\"password\" name=\"password\" aria-invalid=\"true\" required>" *
+                            "<span class=\"helptext\">Wählen Sie mit Bedacht.</span></li>")
+    # with ids: the help text's id, and aria-describedby (unless the widget sets its own)
+    p = Form([:username => CharField(max_length = 255, help_text = "e.g., user@example.com", widget = Widget(attrs = Dict("aria-describedby" => "custom-description"))),
+              :password => CharField(max_length = nothing, widget = :password, help_text = "Wählen Sie mit Bedacht.")])
+    @test html_eq(as_div(p), "<div><label for=\"id_username\">Username:</label><div class=\"helptext\" id=\"id_username_helptext\">e.g., user@example.com</div>" *
+                             "<input type=\"text\" name=\"username\" maxlength=\"255\" required aria-describedby=\"custom-description\" id=\"id_username\"></div>" *
+                             "<div><label for=\"id_password\">Password:</label><div class=\"helptext\" id=\"id_password_helptext\">Wählen Sie mit Bedacht.</div>" *
+                             "<input type=\"password\" name=\"password\" required aria-describedby=\"id_password_helptext\" id=\"id_password\"></div>")
+    @test html_eq(as_p(p), "<p><label for=\"id_username\">Username:</label><input type=\"text\" name=\"username\" maxlength=\"255\" required aria-describedby=\"custom-description\" id=\"id_username\">" *
+                           "<span class=\"helptext\" id=\"id_username_helptext\">e.g., user@example.com</span></p>" *
+                           "<p><label for=\"id_password\">Password:</label><input type=\"password\" name=\"password\" required aria-describedby=\"id_password_helptext\" id=\"id_password\">" *
+                           "<span class=\"helptext\" id=\"id_password_helptext\">Wählen Sie mit Bedacht.</span></p>")
+    # help text and errors together
+    p = Form([:color => CharField(max_length = nothing, help_text = "Pick one.")]; data = Dict("color" => ""))
+    is_valid(p)
+    @test occursin("aria-describedby=\"id_color_helptext id_color_error\"", as_div(p).s)
+    # hidden fields: no help text, inside the last row
+    p = Form([:username => CharField(max_length = 10, help_text = "e.g., user@example.com"), :password => CharField(max_length = nothing, widget = :password),
+              :next => CharField(max_length = nothing, widget = :hidden, default = "/", help_text = "Redirect destination")]; auto_id = false)
+    @test html_eq(as_ul(p), "<li>Username: <input type=\"text\" name=\"username\" maxlength=\"10\" required><span class=\"helptext\">e.g., user@example.com</span></li>" *
+                            "<li>Password: <input type=\"password\" name=\"password\" required><input type=\"hidden\" name=\"next\" value=\"/\"></li>")
+    # a hidden field's errors are the form's, at the top
+    p = Form([:first_name => CharField(max_length = nothing), :last_name => CharField(max_length = nothing, widget = :hidden)];
+             data = Dict("first_name" => "John"))
+    @test !is_valid(p)
+    @test html_eq(as_ul(p), "<li><ul class=\"errorlist nonfield\"><li>(Hidden field last_name) This field is required.</li></ul></li>" *
+                            "<li><label for=\"id_first_name\">First name:</label><input id=\"id_first_name\" name=\"first_name\" type=\"text\" value=\"John\" required>" *
+                            "<input id=\"id_last_name\" name=\"last_name\" type=\"hidden\"></li>")
+end

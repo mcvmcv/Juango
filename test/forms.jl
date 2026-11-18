@@ -276,11 +276,12 @@ end
     is_valid(f)
     override_settings(FORM_RENDERER = TemplateFormRenderer()) do
         out = string(tr("{{ form }}", Dict("form" => f)))
-        @test occursin("<div><ul class=\"errorlist\"><li>This field is required.</li></ul><label for=\"id_name\">", out)
+        # (as Django's div.html: the label, help text, errors, then the input)
+        @test occursin("<div><label for=\"id_name\">Name:</label><ul class=\"errorlist\" id=\"id_name_error\"><li>This field is required.</li></ul>", out)
         @test count("<div>", out) == length(f.fields)
     end
     out = string(render_form(f; template = "juango/forms/p.html"))
-    @test occursin("<p><label for=\"id_name\">", out) && occursin("<ul class=\"errorlist\">", out)
+    @test occursin("<p><label for=\"id_name\">", out) && occursin("<ul class=\"errorlist\" id=\"id_name_error\">", out)
     @test string(tr("{{ form }}", Dict("form" => f))) == string(as_p(f))      # the default stays as_p
 end
 

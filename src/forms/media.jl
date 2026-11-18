@@ -94,7 +94,7 @@ function merged_widget_attrs(w)
     d
 end
 widget_attrs(w) = join([isempty(v) && k in BOOLEAN_HTML_ATTRS ? " $(escape_html(k))" : " $(escape_html(k))=\"$(escape_html(v))\""
-                        for (k, v) in sort!(collect(merged_widget_attrs(w)))])
+                        for (k, v) in sort!(collect(merged_widget_attrs(w))) if !(k in ("id", "type"))])     # (id and type are the input's own)
 const BOOLEAN_HTML_ATTRS = ("autofocus", "disabled", "readonly", "required", "multiple", "hidden", "novalidate", "checked", "selected")
 
 "The media of a form: its own, then each field's widget's."
@@ -237,7 +237,8 @@ function multi_widget_html(bf::BoundField)
         v = vals === nothing || i > length(vals) || vals[i] === nothing ? "" :
             " value=\"" * escape_html(vals[i] isa Date ? string(vals[i]) : display_string(vals[i])) * "\""
         req = fld.blank || !f.use_required_attribute ? "" : " required"
-        push!(parts, "<input type=\"$t\" name=\"$(escape_html(name))\" id=\"$(escape_html(html_id(f, fld) * "_$(i - 1)"))\"$req$v$(widget_attrs(sub.widget))>")
+        id = html_id(f, fld)
+        push!(parts, "<input type=\"$t\" name=\"$(escape_html(name))\"" * (isempty(id) ? "" : id_attr(id * "_$(i - 1)")) * "$req$v$(widget_attrs(sub.widget))>")
     end
     join(parts, " ")
 end
