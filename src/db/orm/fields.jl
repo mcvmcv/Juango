@@ -270,7 +270,8 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                min_value = nothing, max_value = nothing, step_size = nothing, min_length = nothing,
                input_formats = nothing, localize::Bool = false, db_collation = nothing, db_column = nothing, to_field = nothing,
                primary_key::Bool = false, through_fields = nothing, db_constraint::Bool = true,
-               strip::Bool = true, empty_value = NO_DEFAULT, disabled::Bool = false)
+               strip::Bool = true, empty_value = NO_DEFAULT, disabled::Bool = false, label_suffix = nothing, initial = NO_DEFAULT)
+    initial === NO_DEFAULT || (default = initial)          # (a form field's initial value, Django's name for it)
     required === nothing || (blank = !required)
     # form fields: the date formats to accept, and numbers typed in the language's format ("1.234,5")
     if input_formats !== nothing || localize
@@ -289,6 +290,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
     disabled && (fopts[:disabled] = true)
     label isa SafeString && (fopts[:safe_label] = true)          # (a label marked safe is shown as HTML, as Django's mark_safe)
     label isa AbstractString && isempty(label) && (fopts[:no_label] = true)      # (label = "": none at all, as Django's)
+    label_suffix === nothing || (fopts[:label_suffix] = string(label_suffix))
     label === nothing || (verbose_name = label isa SafeString ? label.s : string(label))
     if auto_now || auto_now_add
         editable = false
@@ -312,8 +314,8 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           db_constraint, isempty(fopts) ? nothing : fopts,
           field_att(kind, :_), string(field_att(kind, :_)), :_)
 end
-"A form field's option (`:strip`, `:empty_value`, `:disabled`, `:safe_label`, `:no_label`), or its default."
-form_option(f::Field, k::Symbol) = (d = k === :strip ? true : k === :empty_value ? NO_DEFAULT : false;
+"A form field's option (`:strip`, `:empty_value`, `:disabled`, `:safe_label`, `:no_label`, `:label_suffix`), or its default."
+form_option(f::Field, k::Symbol) = (d = k === :strip ? true : k === :empty_value ? NO_DEFAULT : k === :label_suffix ? nothing : false;
                                     f.form === nothing ? d : get(f.form, k, d))
 
 """

@@ -1037,3 +1037,52 @@ end
     @test html_eq(as_ul(noname()), "<li><input id=\"id_username\" type=\"text\" name=\"username\" maxlength=\"10\" required></li>" *
                                    "<li><label for=\"id_password\">Password:</label><input type=\"password\" name=\"password\" id=\"id_password\" required></li>")
 end
+
+@testset "django forms_tests: test_forms (label suffix, initial data, changed data, values)" begin
+    fav(; kw...) = Form([:color => CharField(max_length = nothing, label = "Favorite color?"), :animal => CharField(max_length = nothing, label = "Favorite animal"),
+                         :answer => CharField(max_length = nothing, label = "Secret answer", label_suffix = " =")]; auto_id = false, kw...)
+    li(l, n) = "<li>$l <input type=\"text\" name=\"$n\" required></li>"
+    @test html_eq(as_ul(fav()), li("Favorite color?", "color") * li("Favorite animal:", "animal") * li("Secret answer =", "answer"))
+    @test html_eq(as_ul(fav(; label_suffix = "?")), li("Favorite color?", "color") * li("Favorite animal?", "animal") * li("Secret answer =", "answer"))
+    @test html_eq(as_ul(fav(; label_suffix = "")), li("Favorite color?", "color") * li("Favorite animal", "animal") * li("Secret answer =", "answer"))
+    @test html_eq(as_ul(fav(; label_suffix = "→")), li("Favorite color?", "color") * li("Favorite animal→", "animal") * li("Secret answer =", "answer"))
+
+    # initial data shows only on an unbound form, and is no fallback for missing data
+    reg(data = nothing; uinit = Juango.NO_DEFAULT, kw...) = Form([:username => CharField(max_length = 10, initial = uinit),
+                                                                  :password => CharField(max_length = nothing, widget = :password)]; data = data, auto_id = false, kw...)
+    pw = "<li>Password: <input type=\"password\" name=\"password\" required></li>"
+    req_errs = "<li><ul class=\"errorlist\"><li>This field is required.</li></ul>Username: <input type=\"text\" name=\"username\" maxlength=\"10\" aria-invalid=\"true\" required></li>" *
+               "<li><ul class=\"errorlist\"><li>This field is required.</li></ul>Password: <input type=\"password\" name=\"password\" aria-invalid=\"true\" required></li>"
+    @test html_eq(as_ul(reg(; uinit = "django")), "<li>Username: <input type=\"text\" name=\"username\" value=\"django\" maxlength=\"10\" required></li>" * pw)
+    @test html_eq(as_ul(reg(Dict{String,Any}(); uinit = "django")), req_errs)
+    @test html_eq(as_ul(reg(Dict("username" => ""); uinit = "django")), req_errs)
+    @test html_eq(as_ul(reg(Dict("username" => "foo"); uinit = "django")),
+                  "<li>Username: <input type=\"text\" name=\"username\" value=\"foo\" maxlength=\"10\" required></li>" *
+                  "<li><ul class=\"errorlist\"><li>This field is required.</li></ul>Password: <input type=\"password\" name=\"password\" aria-invalid=\"true\" required></li>")
+    p = reg(Dict("password" => "secret"); uinit = "django")
+    @test !is_valid(p) && p.errors[:username] == ["This field is required."]
+    # initial given to the form: the same, and it beats the field's
+    @test html_eq(as_ul(reg(; initial = Dict(:username => "stephane"))), "<li>Username: <input type=\"text\" name=\"username\" value=\"stephane\" maxlength=\"10\" required></li>" * pw)
+    @test html_eq(as_ul(reg(Dict{String,Any}(); initial = Dict(:username => "django"))), req_errs)
+    @test html_eq(as_ul(reg(; uinit = "django", initial = Dict(:username => "babik"))), "<li>Username: <input type=\"text\" name=\"username\" value=\"babik\" maxlength=\"10\" required></li>" * pw)
+    # a function as the initial value is called
+    opts = MultipleChoiceField([("f", "foo"), ("b", "bar"), ("w", "whiz")])
+    p = Form([:username => CharField(max_length = 10), :options => opts]; auto_id = false,
+             initial = Dict(:username => () -> "django", :options => () -> ["f", "b"]))
+    @test html_eq(as_ul(p), "<li>Username: <input type=\"text\" name=\"username\" value=\"django\" maxlength=\"10\" required></li>" *
+                            "<li>Options: <select multiple name=\"options\" required><option value=\"f\" selected>foo</option><option value=\"b\" selected>bar</option>" *
+                            "<option value=\"w\">whiz</option></select></li>")
+
+    # changed data: compared with the initial values
+    p = Form([:first_name => CharField(max_length = nothing, initial = "Hans"), :last_name => CharField(max_length = nothing, initial = "Greatel"),
+              :birthday => DateField(initial = Date(1974, 8, 16))]; data = Dict("first_name" => "Hans", "last_name" => "Scrmbl", "birthday" => "1974-08-16"))
+    @test is_valid(p) && changed_fields(p) == [:last_name]
+
+    # a bound field's value: the data, else (unbound) the initial
+    reg2(data = nothing) = Form([:username => CharField(max_length = 10, initial = "djangonaut"), :password => CharField(max_length = nothing, widget = :password)]; data = data)
+    @test reg2(Dict("password" => "foo"))[:username].value === nothing && reg2()[:username].value == "djangonaut"
+    @test reg2(Dict("password" => "foo"))[:password].value == "foo" && reg2()[:password].value === nothing
+    # a disabled field's (function) initial value, with or without data
+    pf(data = nothing) = Form([:name => CharField(max_length = nothing, initial = () -> "John Doe", disabled = true)]; data = data)
+    @test pf()[:name].value == "John Doe" && pf(Dict{String,Any}())[:name].value == "John Doe"
+end

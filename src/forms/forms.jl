@@ -35,6 +35,7 @@ mutable struct Form
     media::Any            # Media (formsextra.jl): the form's own CSS and JavaScript
     use_required_attribute::Bool   # false: no HTML `required` (the browser won't block a partly filled formset)
     auto_id::Any          # the inputs' ids: "id_%s" (the default), a format with %s, true (the name), or false (no ids)
+    label_suffix::Union{Nothing,String}   # after each label: nothing for a colon (unless the label ends in punctuation)
 end
 
 """
@@ -45,7 +46,7 @@ end
 """
 function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
               name = "Form", model = nothing, instance = nothing, files = nothing, media = nothing,
-              use_required_attribute::Bool = true, field_order = nothing, auto_id = "id_%s")
+              use_required_attribute::Bool = true, field_order = nothing, auto_id = "id_%s", label_suffix = nothing)
     fs = Field[]
     for (n, f) in fields
         f = deepcopy(f)
@@ -54,7 +55,7 @@ function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), pref
     end
     form = Form(string(name), fs, data, Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(initial)),
                 Dict{Symbol,Vector{String}}(), Dict{Symbol,Any}(), model, instance, string(prefix), false, clean, files,
-                media === nothing ? Media() : media, use_required_attribute, auto_id)
+                media === nothing ? Media() : media, use_required_attribute, auto_id, label_suffix === nothing ? nothing : string(label_suffix))
     field_order === nothing || order_fields!(form, field_order)
     form
 end
@@ -665,6 +666,7 @@ has_error(f::Form, field = nothing) = !isempty(get(ensure_validated(f).errors, f
 "The value a field starts with: the form's initial data, else the field's default."
 function initial_for(f::Form, fld::Field)
     v = get(f.initial, fld.name, nothing)
+    v isa Function && (v = v())
     v === nothing && !(fld.default isa NoDefault) && (v = fld.default isa Function || fld.default isa Type ? fld.default() : fld.default)
     v
 end
@@ -826,6 +828,7 @@ function display_value(bf::BoundField)
         return raw_value(f, fld)
     end
     v = get(f.initial, fld.name, nothing)
+    v isa Function && (v = v())          # (a function as the initial value is called, as Django's)
     v === nothing && (v = fld.default isa NoDefault ? nothing : (fld.default isa Function ? fld.default() : fld.default))
     fld.kind === :m2m && return v === nothing ? Any[] : collect(v)
     fld.kind === :modelmultichoice && return v === nothing ? Any[] : [x isa Model ? choice_key(fld.related, x) : string(x) for x in v]
@@ -1006,7 +1009,7 @@ function widget_html(bf::BoundField)
         haskey(lims, :max) && (extra *= " max=\"$(lims[:max])\"")
     end
     t == "time" && (extra *= " step=\"1\"")
-    v = (t == "password" || val === nothing) ? "" : " value=\"" * escape_html(display_string(val)) * "\""
+    v = (t == "password" || val === nothing || val == "") ? "" : " value=\"" * escape_html(display_string(val)) * "\""
     "<input type=\"$t\"$attrs$extra$v>"
 end
 
@@ -1252,9 +1255,9 @@ legend_tag(bf::BoundField) = "<legend>" * escape_html(string(label(bf.field))) *
 
 # (a radio or checkbox group's label points at no one input, as Django's)
 label_tag(bf::BoundField) = form_option(bf.field, :no_label) ? "" :
-                            isempty(html_id(bf.form, bf.field)) ? label_text(bf.field) :
-                            uses_fieldset(bf.field) ? "<label>" * label_text(bf.field) * "</label>" :
-                            "<label for=\"" * escape_html(label_id(bf)) * "\">" * label_text(bf.field) * "</label>"
+                            isempty(html_id(bf.form, bf.field)) ? label_text(bf.field, bf.form) :
+                            uses_fieldset(bf.field) ? "<label>" * label_text(bf.field, bf.form) * "</label>" :
+                            "<label for=\"" * escape_html(label_id(bf)) * "\">" * label_text(bf.field, bf.form) * "</label>"
 """
 The field rendered with another kind of widget, without the widget's own attributes (Django's
 `BoundField.as_text()`, `as_textarea()`, `as_hidden()`; `{{ form.name.as_hidden }}` in templates).
@@ -1278,8 +1281,16 @@ end
 
 "A field's label as HTML: escaped, unless it was given as a `SafeString`."
 label_html(fld::Field) = form_option(fld, :safe_label) ? label(fld) : escape_html(label(fld))
-"The label with the form's suffix: a colon, unless it ends in punctuation already (as Django's)."
-label_text(fld::Field) = (l = label_html(fld); isempty(l) || last(rstrip(l)) in (':', '?', '.', '!') ? l : l * ":")
+"""
+The label with its suffix, as Django's: the field's `label_suffix`, else the form's, else a colon;
+none when the label ends in punctuation already.
+"""
+function label_text(fld::Field, f = nothing)
+    l = label_html(fld)
+    sfx = form_option(fld, :label_suffix)
+    sfx === nothing && f !== nothing && (sfx = f.label_suffix)
+    isempty(l) || last(rstrip(l)) in (':', '?', '.', '!') ? l : l * escape_html(something(sfx, ":"))
+end
 
 "Whether a field's inputs are a group, shown in a `<fieldset>` (radios, checkboxes, a multi-value field)."
 uses_fieldset(fld::Field) = widget_type(fld) in ("radioselect", "checkboxselectmultiple", "multi")
@@ -1310,7 +1321,7 @@ function field_row(bf::BoundField; tag = "p")
     errs = field_errors_html(bf)
     if tag == "div"            # Django's div.html: label (a group's legend), help text, errors, then the widget
         if uses_fieldset(fld)
-            lg = form_option(fld, :no_label) ? "" : isempty(html_id(bf.form, fld)) ? label_text(fld) : "<legend>" * label_text(fld) * "</legend>"
+            lg = form_option(fld, :no_label) ? "" : isempty(html_id(bf.form, fld)) ? label_text(fld, bf.form) : "<legend>" * label_text(fld, bf.form) * "</legend>"
             return "<div><fieldset>" * lg * help_html(bf, "div") * errs * widget_html(bf) * "</fieldset></div>"
         end
         return "<div>" * label_tag(bf) * help_html(bf, "div") * errs * widget_html(bf) * "</div>"
