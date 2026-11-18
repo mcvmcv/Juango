@@ -442,7 +442,7 @@ end
     FS = formset_factory((d; prefix, initial) -> Form([:qty => IntegerField()]; data = d, prefix = prefix, initial = initial); extra = 1)
     @test !occursin(" required", as_p(first(FS())).s)                # formsets: none, as Django
     bf = Form([:size => CharField(choices = ["s" => "Small"], widget = :radio, label = "Size")])[:size]
-    @test legend_tag(bf) == "<legend>Size</legend>"
+    @test legend_tag(bf) == "<legend>Size:</legend>"
 end
 
 @testset "model formsets with a custom row form; set_field! (#156)" begin

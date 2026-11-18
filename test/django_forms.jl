@@ -1134,3 +1134,271 @@ end
     f = Form([:token => CharField(max_length = nothing, widget = :hidden), :artist => CharField(max_length = nothing), :name => CharField(max_length = nothing)])
     @test [bf.name for bf in hidden_fields(f)] == ["token"] && [bf.name for bf in visible_fields(f)] == ["artist", "name"]
 end
+
+@testset "django forms_tests: test_forms (file fields)" begin
+    ff(; kw...) = Form([:file1 => FileField()]; auto_id = false, kw...)
+    row(inner) = "<tr><th>File1:</th><td>$inner</td></tr>"
+    @test html_eq(as_table(ff()), row("<input type=\"file\" name=\"file1\" required>"))
+    @test html_eq(as_table(ff(; data = Dict{String,Any}(), files = Dict{String,Any}())),
+                  row("<ul class=\"errorlist\"><li>This field is required.</li></ul><input type=\"file\" name=\"file1\" aria-invalid=\"true\" required>"))
+    @test html_eq(as_table(ff(; data = Dict{String,Any}(), files = Dict{String,Any}("file1" => UploadedFile("name", "")))),
+                  row("<ul class=\"errorlist\"><li>The submitted file is empty.</li></ul><input type=\"file\" name=\"file1\" aria-invalid=\"true\" required>"))
+    @test html_eq(as_table(ff(; data = Dict{String,Any}(), files = Dict{String,Any}("file1" => "something that is not a file"))),
+                  row("<ul class=\"errorlist\"><li>No file was submitted. Check the encoding type on the form.</li></ul>" *
+                      "<input type=\"file\" name=\"file1\" aria-invalid=\"true\" required>"))
+    f = ff(; data = Dict{String,Any}(), files = Dict{String,Any}("file1" => UploadedFile("name", "some content")))
+    @test html_eq(as_table(f), row("<input type=\"file\" name=\"file1\" required>")) && is_valid(f)
+    f = ff(; data = Dict{String,Any}(), files = Dict{String,Any}("file1" => UploadedFile("我隻氣墊船裝滿晒鱔.txt", "मेरी मँडराने वाली नाव सर्पमीनों से भरी ह")))
+    @test html_eq(as_table(f), row("<input type=\"file\" name=\"file1\" required>"))
+    # with a file there already, the input isn't required
+    @test html_eq(as_table(ff(; initial = Dict(:file1 => "resume.txt"))), row("<input type=\"file\" name=\"file1\">"))
+    # a function as a file field's initial value, kept when no file is sent
+    f = Form([:file1 => FileField(initial = () -> "resume.txt")]; data = Dict{String,Any}())
+    @test is_valid(f) && isempty(f.errors) && f.cleaned_data[:file1] == "resume.txt"
+end
+
+@testset "django forms_tests: test_forms (hidden initial, CSS classes, label_tag)" begin
+    # show_hidden_initial: a hidden input with the initial value, with its own id
+    @test html_eq(as_table(Form([:field1 => CharField(max_length = 50, show_hidden_initial = true)])),
+                  "<tr><th><label for=\"id_field1\">Field1:</label></th><td><input id=\"id_field1\" type=\"text\" name=\"field1\" maxlength=\"50\" required>" *
+                  "<input type=\"hidden\" name=\"initial-field1\" id=\"initial-id_field1\"></td></tr>")
+    # ...and changed_fields compares the data with it, not with the form's initial
+    hf(d) = Form([:f => CharField(max_length = nothing, initial = "a", show_hidden_initial = true)]; data = d)
+    @test changed_fields(hf(Dict("f" => "b", "initial-f" => "b"))) == Symbol[]
+    @test changed_fields(hf(Dict("f" => "a", "initial-f" => "b"))) == [:f]
+
+    # error_css_class and required_css_class on the rows (sorted, as Django's css_classes) and labels
+    person() = (p = Form([:name => CharField(max_length = nothing), :is_cool => NullBooleanField(),
+                          :email => EmailField(max_length = 320, blank = true), :age => IntegerField()]; data = Dict{String,Any}());
+                p.error_css_class = "error"; p.required_css_class = "required"; p)
+    sel = "<select name=\"is_cool\" id=\"id_is_cool\"><option value=\"unknown\" selected>Unknown</option><option value=\"true\">Yes</option><option value=\"false\">No</option></select>"
+    nm_err = "<ul class=\"errorlist\" id=\"id_name_error\"><li>This field is required.</li></ul>"
+    age_err = "<ul class=\"errorlist\" id=\"id_age_error\"><li>This field is required.</li></ul>"
+    nm = "<input type=\"text\" name=\"name\" id=\"id_name\" aria-invalid=\"true\" required aria-describedby=\"id_name_error\">"
+    age = "<input type=\"number\" name=\"age\" id=\"id_age\" aria-invalid=\"true\" required aria-describedby=\"id_age_error\">"
+    em = "<input type=\"email\" name=\"email\" id=\"id_email\" maxlength=\"320\">"
+    lbl(id, t; req = true) = "<label" * (req ? " class=\"required\"" : "") * " for=\"id_$id\">$t:</label>"
+    # (Django's NullBooleanField is required, though it accepts no answer; Juango's isn't)
+    cool_req = Juango.Form([:x => NullBooleanField()])[:x].field.blank ? "" : " class=\"required\""
+    cool_lbl = "<label$cool_req for=\"id_is_cool\">Is cool:</label>"
+    @test html_eq(as_ul(person()), "<li class=\"error required\">" * nm_err * lbl("name", "Name") * nm * "</li>" *
+                                   "<li$cool_req>" * cool_lbl * sel * "</li><li>" * lbl("email", "Email"; req = false) * em * "</li>" *
+                                   "<li class=\"error required\">" * age_err * lbl("age", "Age") * age * "</li>")
+    @test html_eq(as_p(person()), nm_err * "<p class=\"error required\">" * lbl("name", "Name") * nm * "</p>" *
+                                  "<p$cool_req>" * cool_lbl * sel * "</p><p>" * lbl("email", "Email"; req = false) * em * "</p>" *
+                                  age_err * "<p class=\"error required\">" * lbl("age", "Age") * age * "</p>")
+    @test html_eq(as_table(person()), "<tr class=\"error required\"><th>" * lbl("name", "Name") * "</th><td>" * nm_err * nm * "</td></tr>" *
+                                      "<tr$cool_req><th>" * cool_lbl * "</th><td>" * sel * "</td></tr>" *
+                                      "<tr><th>" * lbl("email", "Email"; req = false) * "</th><td>" * em * "</td></tr>" *
+                                      "<tr class=\"error required\"><th>" * lbl("age", "Age") * "</th><td>" * age_err * age * "</td></tr>")
+    @test html_eq(as_div(person()), "<div class=\"error required\">" * lbl("name", "Name") * nm_err * nm * "</div>" *
+                                    "<div$cool_req>" * cool_lbl * sel * "</div><div>" * lbl("email", "Email"; req = false) * em * "</div>" *
+                                    "<div class=\"error required\">" * lbl("age", "Age") * age_err * age * "</div>")
+
+    # the required class on label_tag and legend_tag, after any class given
+    f = Form([:field => CharField(max_length = 10), :field2 => IntegerField(blank = true)]; data = Dict("field" => "test"), required_css_class = "required")
+    @test html_eq(label_tag(f[:field]), "<label for=\"id_field\" class=\"required\">Field:</label>")
+    @test html_eq(legend_tag(f[:field]), "<legend class=\"required\">Field:</legend>")
+    attrs = Dict("class" => "foo")
+    @test html_eq(label_tag(f[:field]; attrs = attrs), "<label for=\"id_field\" class=\"foo required\">Field:</label>")
+    @test html_eq(legend_tag(f[:field]; attrs = attrs), "<legend class=\"foo required\">Field:</legend>")
+    @test html_eq(legend_tag(f[:field]; attrs = attrs), "<legend class=\"foo required\">Field:</legend>") && attrs == Dict("class" => "foo")
+    @test html_eq(label_tag(f[:field2]), "<label for=\"id_field2\">Field2:</label>") && html_eq(legend_tag(f[:field2]), "<legend>Field2:</legend>")
+
+    # hidden split date-times: no label
+    @test html_eq(as_ul(Form([:happened_at => SplitDateTimeField(widget = SplitHiddenDateTimeWidget())])),
+                  "<input type=\"hidden\" name=\"happened_at_0\" id=\"id_happened_at_0\"><input type=\"hidden\" name=\"happened_at_1\" id=\"id_happened_at_1\">")
+
+    # label_tag's contents (escaped unless safe), attrs and label_suffix
+    bf = Form([:field => CharField(max_length = nothing)])[:field]
+    for (args, kw, lab, leg) in [((), (;), "<label for=\"id_field\">Field:</label>", "<legend>Field:</legend>"),
+                                 (("custom",), (;), "<label for=\"id_field\">custom:</label>", "<legend>custom:</legend>"),
+                                 (("custom&",), (;), "<label for=\"id_field\">custom&amp;:</label>", "<legend>custom&amp;:</legend>"),
+                                 ((Juango.SafeString("custom&"),), (;), "<label for=\"id_field\">custom&:</label>", "<legend>custom&:</legend>"),
+                                 ((), (attrs = Dict("class" => "pretty"),), "<label for=\"id_field\" class=\"pretty\">Field:</label>", "<legend class=\"pretty\">Field:</legend>")]
+        @test html_eq(label_tag(bf, args...; kw...), lab) && html_eq(legend_tag(bf, args...; kw...), leg)
+    end
+    # no id: just the text
+    bf = Form([:field => CharField(max_length = nothing)]; auto_id = "")[:field]
+    @test label_tag(bf) == "Field:" && legend_tag(bf) == "Field:" && label_tag(bf, "Custom&") == "Custom&amp;:" && legend_tag(bf, "Custom&") == "Custom&amp;:"
+    # an empty label
+    bf = Form([:field => CharField(max_length = nothing, label = "")])[:field]
+    @test html_eq(label_tag(bf), "<label for=\"id_field\"></label>") && html_eq(legend_tag(bf), "<legend></legend>")
+    @test Juango.label_id(bf) == "id_field"
+    # the widget's own id
+    f = Form([:field => CharField(max_length = nothing, widget = Widget(attrs = Dict("id" => "myCustomID")))])
+    @test Juango.label_id(f[:field]) == "myCustomID"
+    # widget_type
+    f = Form([:first_name => CharField(max_length = nothing), :birthday => SplitDateTimeField(widget = SplitHiddenDateTimeWidget())])
+    @test Juango.widget_type(f[:first_name].field) == "text" && Juango.widget_type(f[:birthday].field) == "splithiddendatetime"
+    # css_classes
+    bf = Form([:first_name => CharField(max_length = nothing)])[:first_name]
+    @test css_classes(bf) == "" && css_classes(bf; extra_classes = "") == "" && css_classes(bf; extra_classes = "test") == "test" &&
+          css_classes(bf; extra_classes = "test test") == "test"
+    # the bound field's label_suffix beats the form's
+    bf = Form([:field => CharField(max_length = nothing)]; label_suffix = "!")[:field]
+    @test html_eq(label_tag(bf; label_suffix = "\$"), "<label for=\"id_field\">Field\$</label>") && html_eq(legend_tag(bf; label_suffix = "\$"), "<legend>Field\$</legend>")
+end
+
+@testset "django forms_tests: test_forms (multi-value fields in forms)" begin
+    # the field's own validators run on the compressed value; each part's errors are collected
+    name_field() = MultiValueField([CharField(label = "First name", max_length = 10), CharField(label = "Last name", max_length = 10)];
+                                   compress = vs -> join(vs, " "), decompress = v -> split(v, " "),
+                                   validators = [v -> v == "bad value" ? "bad value not allowed" : true])
+    nf(a, b) = Form([:name => name_field()]; data = Dict("name_0" => a, "name_1" => b))
+    f = nf("bad", "value")
+    @test !is_valid(f) && f.errors == Dict(:name => ["bad value not allowed"])
+    f = nf("should be overly", "long for the field names")
+    @test !is_valid(f) && f.errors == Dict(:name => ["Ensure this value has at most 10 characters (it has 16).",
+                                                     "Ensure this value has at most 10 characters (it has 24).",])
+    f = nf("fname", "lname")
+    @test is_valid(f) && f.cleaned_data == Dict(:name => "fname lname")
+    # copying the field copies its parts
+    c = name_field(); c2 = deepcopy(c)
+    @test c2.related.fields !== c.related.fields && c2.related.fields[1] !== c.related.fields[1]
+    # an initial value that isn't valid doesn't break has_changed
+    da = MultiValueField([DateField(label = "Date"), IntegerField(label = "Age")]; compress = identity, decompress = identity)
+    f = Form([:date_age => da]; data = Dict("date_age_0" => "1998-12-06", "date_age_1" => "16"), initial = Dict(:date_age => ["200-10-10", 14]))
+    @test has_changed(f)
+
+    # optional parts: required, not required, and require_all_fields = false
+    phone(; kw...) = MultiValueField([CharField(max_length = nothing, label = "Country Code", validators = [RegexValidator(r"^\+[0-9]{1,2}$"; message = "Enter a valid country code.")]),
+                                      CharField(max_length = nothing, label = "Phone Number"),
+                                      CharField(max_length = nothing, label = "Extension", error_messages = Dict("incomplete" => "Enter an extension.")),
+                                      CharField(max_length = nothing, label = "Label", required = false, help_text = "E.g. home, work.")];
+                                     compress = vs -> isempty(vs) ? nothing : "$(vs[1]).$(vs[2]) ext. $(vs[3]) (label: $(vs[4]))", decompress = identity, kw...)
+    home = ["+61", "287654321", "123", "Home"]
+    f = phone()
+    @test all(v -> clean_errors(f, v) == ["This field is required."], Any["", nothing, String[], ["+61"], ["+61", "287654321", "123"]])
+    @test Juango.clean(f, home) == "+61.287654321 ext. 123 (label: Home)"
+    @test clean_errors(f, ["61", "287654321", "123", "Home"]) == ["Enter a valid country code."]
+    f = phone(; required = false)
+    @test all(v -> Juango.clean(f, v) === nothing, Any["", nothing, String[]])
+    @test Juango.clean(f, ["+61"]) == "+61. ext.  (label: )"
+    @test Juango.clean(f, ["+61", "287654321", "123"]) == "+61.287654321 ext. 123 (label: )"
+    @test Juango.clean(f, home) == "+61.287654321 ext. 123 (label: Home)"
+    @test clean_errors(f, ["61", "287654321", "123", "Home"]) == ["Enter a valid country code."]
+    f = phone(; require_all_fields = false)
+    @test all(v -> clean_errors(f, v) == ["This field is required."], Any["", nothing, String[]])
+    @test clean_errors(f, ["+61"]) == ["Enter a complete value.", "Enter an extension."]     # (Django's test checks only the first)
+    @test Juango.clean(f, ["+61", "287654321", "123"]) == "+61.287654321 ext. 123 (label: )"
+    @test clean_errors(f, ["", "", "", "Home"]) == ["Enter a complete value.", "Enter an extension."]
+    @test clean_errors(f, ["61", "287654321", "123", "Home"]) == ["Enter a valid country code."]
+    f = phone(; required = false, require_all_fields = false)
+    @test all(v -> Juango.clean(f, v) === nothing, Any["", nothing, String[]])
+    @test clean_errors(f, ["+61"]) == ["Enter a complete value.", "Enter an extension."]     # (Django's test checks only the first)
+    @test Juango.clean(f, ["+61", "287654321", "123"]) == "+61.287654321 ext. 123 (label: )"
+    @test clean_errors(f, ["", "", "", "Home"]) == ["Enter a complete value.", "Enter an extension."]
+    @test clean_errors(f, ["61", "287654321", "123", "Home"]) == ["Enter a valid country code."]
+
+    # rendering: a part is required only when the field needs it
+    ph(; kw...) = MultiValueField([CharField(max_length = nothing), CharField(max_length = nothing, required = false)];
+                                  compress = identity, decompress = v -> [nothing, nothing], kw...)
+    f = Form([:phone1 => ph(), :phone2 => ph(; required = false), :phone3 => ph(; require_all_fields = false),
+              :phone4 => ph(; required = false, require_all_fields = false)]; auto_id = false)
+    @test html_eq(as_p(f), "<p>Phone1:<input type=\"text\" name=\"phone1_0\" required><input type=\"text\" name=\"phone1_1\" required></p>" *
+                           "<p>Phone2:<input type=\"text\" name=\"phone2_0\"><input type=\"text\" name=\"phone2_1\"></p>" *
+                           "<p>Phone3:<input type=\"text\" name=\"phone3_0\" required><input type=\"text\" name=\"phone3_1\"></p>" *
+                           "<p>Phone4:<input type=\"text\" name=\"phone4_0\"><input type=\"text\" name=\"phone4_1\"></p>")
+end
+
+# clean_<field> raising for a hidden field and a visible one, with characters to escape
+@form DftEscaping begin
+    hidden = CharField(max_length = nothing, widget = :hidden, required = false)
+    visible = CharField(max_length = nothing)
+end
+Juango.clean_field(::Form, ::Val{:DftEscaping}, ::Val{:hidden}, v) = throw(Juango.ValidationError("Foo & \"bar\"!"))
+Juango.clean_field(::Form, ::Val{:DftEscaping}, ::Val{:visible}, v) = throw(Juango.ValidationError("Foo & \"bar\"!"))
+
+@testset "django forms_tests: test_forms (error lists, repr, clean's data, aria_describedby)" begin
+    # (ErrorDict/ErrorList as_text, as_ul and error codes: Juango's errors are plain messages, #234)
+    # a hidden field's errors: the nonfield class, at the top
+    p = Form([:first_name => CharField(max_length = nothing), :last_name => CharField(max_length = nothing, widget = :hidden)]; data = Dict("first_name" => "John"))
+    top = "<ul class=\"errorlist nonfield\"><li>(Hidden field last_name) This field is required.</li></ul>"
+    fn = "<input id=\"id_first_name\" name=\"first_name\" type=\"text\" value=\"John\" required>"
+    ln = "<input id=\"id_last_name\" name=\"last_name\" type=\"hidden\">"
+    lab = "<label for=\"id_first_name\">First name:</label>"
+    @test html_eq(as_ul(p), "<li>" * top * "</li><li>" * lab * fn * ln * "</li>")
+    @test html_eq(as_p(p), top * "<p>" * lab * fn * ln * "</p>")
+    @test html_eq(as_table(p), "<tr><td colspan=\"2\">" * top * "</td></tr><tr><th>" * lab * "</th><td>" * fn * ln * "</td></tr>")
+    @test html_eq(as_div(p), top * "<div>" * lab * fn * ln * "</div>")
+    # the form's own errors: the nonfield class
+    p = Form([:first_name => CharField(max_length = nothing), :last_name => CharField(max_length = nothing)];
+             data = Dict("first_name" => "John", "last_name" => "Lennon"), clean = f -> throw(Juango.ValidationError("Generic validation error")))
+    top = "<ul class=\"errorlist nonfield\"><li>Generic validation error</li></ul>"
+    rows(tag) = "<$tag>" * lab * fn * "</$tag><$tag><label for=\"id_last_name\">Last name:</label>" *
+                "<input id=\"id_last_name\" name=\"last_name\" type=\"text\" value=\"Lennon\" required></$tag>"
+    @test html_eq(as_ul(p), "<li>" * top * "</li>" * rows("li")) && html_eq(as_p(p), top * rows("p")) && html_eq(as_div(p), top * rows("div"))
+    @test non_field_errors(p) == ["Generic validation error"]
+    # error messages are escaped
+    f = DftEscaping(Dict("hidden" => "a", "visible" => "b"))
+    is_valid(f)
+    @test html_eq(as_ul(f), "<li><ul class=\"errorlist nonfield\"><li>(Hidden field hidden) Foo &amp; &quot;bar&quot;!</li></ul></li>" *
+                            "<li><ul class=\"errorlist\" id=\"id_visible_error\"><li>Foo &amp; &quot;bar&quot;!</li></ul>" *
+                            "<label for=\"id_visible\">Visible:</label> <input type=\"text\" name=\"visible\" aria-invalid=\"true\" value=\"b\" " *
+                            "id=\"id_visible\" required aria-describedby=\"id_visible_error\"><input type=\"hidden\" name=\"hidden\" value=\"a\" id=\"id_hidden\"></li>") ||
+          html_eq(replace(as_ul(f).s, "&#34;" => "&quot;"), "<li><ul class=\"errorlist nonfield\"><li>(Hidden field hidden) Foo &amp; &quot;bar&quot;!</li></ul></li>" *
+                            "<li><ul class=\"errorlist\" id=\"id_visible_error\"><li>Foo &amp; &quot;bar&quot;!</li></ul>" *
+                            "<label for=\"id_visible\">Visible:</label> <input type=\"text\" name=\"visible\" aria-invalid=\"true\" value=\"b\" " *
+                            "id=\"id_visible\" required aria-describedby=\"id_visible_error\"><input type=\"hidden\" name=\"hidden\" value=\"a\" id=\"id_hidden\"></li>")
+
+    # repr: whether it's valid is Unknown until validated, and showing it doesn't validate
+    @test repr(DftPerson()) == "<DftPerson bound=False, valid=Unknown, fields=(first_name;last_name;birthday)>"
+    p = DftPerson(Dict("first_name" => "John", "last_name" => "Lennon", "birthday" => "1940-10-9"))
+    @test repr(p) == "<DftPerson bound=True, valid=Unknown, fields=(first_name;last_name;birthday)>"
+    is_valid(p)
+    @test repr(p) == "<DftPerson bound=True, valid=True, fields=(first_name;last_name;birthday)>"
+    p = DftPerson(Dict("first_name" => "John", "last_name" => "Lennon", "birthday" => "fakedate"))
+    repr(p)
+    @test isempty(p.cleaned_data) && !p.validated
+    @test !is_valid(p) && repr(p) == "<DftPerson bound=True, valid=False, fields=(first_name;last_name;birthday)>"
+    @test p.cleaned_data == Dict(:first_name => "John", :last_name => "Lennon")
+
+    # clean may change cleaned_data, or return a new dict that replaces it
+    uf(clean) = Form([:username => CharField(max_length = 10), :password => CharField(max_length = nothing, widget = :password)];
+                     data = Dict("username" => "SirRobin", "password" => "blue"), clean = clean)
+    f = uf(function (f)
+        d = f.cleaned_data
+        isempty(f.errors) && (d[:username] = lowercase(d[:username]))
+        d
+    end)
+    @test is_valid(f) && f.cleaned_data[:username] == "sirrobin"
+    f = uf(f -> (f.cleaned_data[:username] = lowercase(f.cleaned_data[:username]); nothing))
+    @test is_valid(f) && f.cleaned_data[:username] == "sirrobin"
+    f = uf(f -> Dict(:username => lowercase(f.cleaned_data[:username]), :password => "this_is_not_a_secret"))
+    @test is_valid(f) && f.cleaned_data[:username] == "sirrobin"
+
+    # multipart: a file or image field
+    @test !is_multipart(Form([:username => CharField(max_length = nothing)]))
+    @test is_multipart(Form([:username => CharField(max_length = nothing), :file => FileField()]))
+    @test is_multipart(Form([:image => ImageField()]))
+    # only hidden fields, with errors
+    f = Form([:data => IntegerField(widget = :hidden)]; data = Dict{String,Any}())
+    top = "<ul class=\"errorlist nonfield\"><li>(Hidden field data) This field is required.</li></ul>"
+    @test html_eq(as_p(f), top * "<p> <input type=\"hidden\" name=\"data\" id=\"id_data\"></p>")
+    @test html_eq(as_table(f), "<tr><td colspan=\"2\">" * top * "</td></tr><tr><td colspan=\"2\"><input type=\"hidden\" name=\"data\" id=\"id_data\"></td></tr>") ||
+          html_eq(as_table(f), "<tr><td colspan=\"2\">" * top * "<input type=\"hidden\" name=\"data\" id=\"id_data\"></td></tr>")
+    # a field named data
+    f = Form([:data => CharField(max_length = 10)]; data = Dict("data" => "xyzzy"))
+    @test is_valid(f) && f.cleaned_data == Dict(:data => "xyzzy")
+    # copying a field copies its error messages
+    c = CharField(max_length = nothing, error_messages = Dict("invalid" => "Form custom error message."))
+    @test deepcopy(c).error_messages !== c.error_messages
+    # labels: no new line; attributes not localized
+    bf = DftPerson()[:first_name]
+    @test label_tag(bf) == "<label for=\"id_first_name\">First name:</label>" && legend_tag(bf) == "<legend>First name:</legend>"
+    @test html_eq(label_tag(bf; attrs = Dict("number" => 9999)), "<label number=\"9999\" for=\"id_first_name\">First name:</label>")
+    @test html_eq(legend_tag(bf; attrs = Dict("number" => 9999)), "<legend number=\"9999\">First name:</legend>")
+    # a removed field is gone
+    f = Form([:name => CharField(max_length = 10)]; data = Dict("name" => "abcde"))
+    collect(f)
+    delete_field!(f, :name)
+    @test_throws KeyError f[:name]
+
+    # aria_describedby: the help text's id; "" without one (or with no id, or hidden); nothing when the widget sets its own
+    @test aria_describedby(Form([:name => CharField(max_length = nothing, help_text = "Some help text")]; data = Dict("name" => "MyName"))[:name]) == "id_name_helptext"
+    @test aria_describedby(Form([:name => CharField(max_length = nothing, help_text = "Some help text")]; auto_id = nothing)[:name]) == ""
+    @test aria_describedby(Form([:name => CharField(max_length = nothing, help_text = "Some help text", widget = :hidden)])[:name]) == ""
+    @test aria_describedby(Form([:name => CharField(max_length = nothing, widget = Widget(attrs = Dict("aria-describedby" => "my-id")))]; data = Dict("name" => "MyName"))[:name]) === nothing
+    @test aria_describedby(Form([:name => CharField(max_length = nothing)])[:name]) == ""
+end

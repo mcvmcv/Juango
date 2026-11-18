@@ -186,6 +186,9 @@ multi_parts(d, name, fld::Field) =
          sub.kind === :multi ? multi_parts(d, n, sub) : sub.kind in MULTI_KINDS ? raw_list(d, n) : get(d, n, nothing))
         for i in eachindex(fld.related.fields)]
 
+"An empty part's value: what its field cleans nothing to (\"\" for text, as Django's)."
+empty_part(sub::Field) = (r = to_julia(sub, nothing); r[2] === nothing ? r[1] : nothing)
+
 """
 Clean a multi-value field's parts and compress them: `(value, error_or_nothing)`. As Django's
 `MultiValueField`, every part's error is reported (the error is then a vector of messages), and a
@@ -201,12 +204,12 @@ function clean_multi(fld::Field, raws)
         if r === nothing || (r isa AbstractString && isempty(strip(r))) || (r isa Union{AbstractVector,Tuple} && isempty(r))
             if spec.require_all
                 fld.blank || return nothing, [field_message(fld, "required", gettext("This field is required."))]
-                push!(vals, nothing)
+                push!(vals, empty_part(sub))
             elseif !sub.blank
                 m = field_message(sub, "incomplete", field_message(fld, "incomplete", gettext("Enter a complete value.")))
                 m in errs || push!(errs, m)
             else
-                push!(vals, nothing)
+                push!(vals, empty_part(sub))
             end
             continue
         end
@@ -236,7 +239,8 @@ function multi_widget_html(bf::BoundField)
         t = fld.widget isa MultiWidget && fld.widget.hidden ? "hidden" : widget_kind(sub.widget) === :time ? "time" : input_type(sub)
         v = vals === nothing || i > length(vals) || vals[i] === nothing ? "" :
             " value=\"" * escape_html(vals[i] isa Date ? string(vals[i]) : display_string(vals[i])) * "\""
-        req = fld.blank || !f.use_required_attribute ? "" : " required"
+        # (a hidden input is never required; with require_all_fields = false, each part as its own field says, as Django's)
+        req = fld.blank || !f.use_required_attribute || t == "hidden" || (!spec.require_all && sub.blank) ? "" : " required"
         id = html_id(f, fld)
         push!(parts, "<input type=\"$t\" name=\"$(escape_html(name))\"" * (isempty(id) ? "" : id_attr(id * "_$(i - 1)")) * "$req$v$(widget_attrs(sub.widget))>")
     end

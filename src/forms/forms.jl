@@ -37,6 +37,8 @@ mutable struct Form
     auto_id::Any          # the inputs' ids: "id_%s" (the default), a format with %s, true (the name), or false (no ids)
     label_suffix::Union{Nothing,String}   # after each label: nothing for a colon (unless the label ends in punctuation)
     empty_permitted::Bool                 # an unchanged form is valid (with no cleaned data), as a formset's extra forms
+    error_css_class::Union{Nothing,String}      # a class on the rows (and labels) of fields with errors, as Django's
+    required_css_class::Union{Nothing,String}   # a class on the rows and labels of required fields
 end
 
 """
@@ -48,7 +50,7 @@ end
 function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
               name = "Form", model = nothing, instance = nothing, files = nothing, media = nothing,
               use_required_attribute::Bool = true, field_order = nothing, auto_id = "id_%s", label_suffix = nothing,
-              empty_permitted::Bool = false)
+              empty_permitted::Bool = false, error_css_class = nothing, required_css_class = nothing)
     empty_permitted && use_required_attribute &&
         throw(ArgumentError("The empty_permitted and use_required_attribute arguments may not both be True."))
     fs = Field[]
@@ -60,7 +62,8 @@ function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), pref
     form = Form(string(name), fs, data, Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(initial)),
                 Dict{Symbol,Vector{String}}(), Dict{Symbol,Any}(), model, instance, string(prefix), false, clean, files,
                 media === nothing ? Media() : media, use_required_attribute, auto_id, label_suffix === nothing ? nothing : string(label_suffix),
-                empty_permitted)
+                empty_permitted, error_css_class === nothing ? nothing : string(error_css_class),
+                required_css_class === nothing ? nothing : string(required_css_class))
     field_order === nothing || order_fields!(form, field_order)
     form
 end
@@ -260,8 +263,12 @@ Base.@nospecializeinfer function ModelForm(@nospecialize(T::Type{<:Model}); data
          model = T, instance = instance, files = files)
 end
 
-Base.show(io::IO, f::Form) = print(io, "<", f.name, " bound=", f.data !== nothing, " fields=(",
-                                   join(string.(getfield.(f.fields, :name)), ", "), ")>")
+# (as Django's repr: whether it's valid is Unknown until it's validated; showing it doesn't validate)
+Base.show(io::IO, f::Form) = print(io, "<", f.name, " bound=", f.data !== nothing ? "True" : "False", ", valid=",
+                                   !f.validated ? "Unknown" : isempty(f.errors) ? "True" : "False", ", fields=(",
+                                   join(string.(getfield.(f.fields, :name)), ";"), ")>")
+"Whether the form has a file input, so needs `enctype=\"multipart/form-data\"` (Django's `is_multipart()`)."
+is_multipart(f::Form) = any(x -> x.kind in FILE_KINDS, f.fields)
 
 html_name(f::Form, fld::Field) = isempty(f.prefix) ? string(fld.name) : f.prefix * "-" * string(fld.name)
 """
@@ -623,7 +630,9 @@ end
 "A form's `clean` function (or its `clean_form` method); a `ValidationError` it throws becomes form errors."
 function form_clean_hook(f::Form, fn = f.clean)
     try
-        fn(f)
+        r = fn(f)
+        # (a dict returned replaces the cleaned data, as Django's clean())
+        r isa AbstractDict && r !== f.cleaned_data && (f.cleaned_data = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in r))
     catch e
         e isa ValidationError || rethrow()
         names = Set(fld.name for fld in f.fields)
@@ -715,6 +724,10 @@ file_cleared(f::Form, fld::Field) = f.data !== nothing && haskey(f.data, html_na
 function clean_file_field(f::Form, fld::Field)
     is_multiple_file(fld) && return clean_multiple_files(f, fld)
     up = file_upload(f, fld)
+    if up === nothing && f.files !== nothing && (x = get(f.files, html_name(f, fld), nothing)) !== nothing &&
+       !(x isa UploadedFile || x isa AbstractVector) && !(x isa AbstractString && isempty(x))
+        return nothing, [field_message(fld, "missing", gettext("No file was submitted. Check the encoding type on the form."))]
+    end
     current = initial_for(f, fld)
     v = up !== nothing ? up : file_cleared(f, fld) ? nothing : current
     errs = String[]
@@ -767,6 +780,11 @@ function changed_fields(f::Form)
         end
         v, err = to_julia(fld, raw_value(f, fld))
         init = initial_for(f, fld)
+        if form_option(fld, :show_hidden_initial)       # (the initial value the page was rendered with)
+            iv, ierr = to_julia(fld, get(f.data, "initial-" * html_name(f, fld), nothing))
+            ierr !== nothing && (push!(out, fld.name); continue)
+            init = iv
+        end
         fld.kind === :bool && (init = truthy(init))
         fld.kind === :m2m && init === nothing && (init = Any[])
         (err !== nothing || !isequal(normalized(v), normalized(init))) && push!(out, fld.name)
@@ -902,7 +920,20 @@ select_date_order() = startswith(lowercase(get_language()), "en") ? ("month", "d
 label_id(bf::BoundField) = bf.field.widget isa SelectDateWidget ? html_id(bf.form, bf.field) * "_" * first(select_date_order()) :
                                                                  html_id(bf.form, bf.field)
 
-function widget_html(bf::BoundField)
+"""
+The field's widget, with a hidden input holding its initial value after it when the field has
+`show_hidden_initial = true` (`initial-<name>`, compared with the data for `changed_fields`, as Django's).
+"""
+widget_html(bf::BoundField) = form_option(bf.field, :show_hidden_initial) ? input_html(bf) * initial_hidden_html(bf) : input_html(bf)
+function initial_hidden_html(bf::BoundField)
+    f, fld = bf.form, bf.field
+    v = initial_for(f, fld)
+    id = html_id(f, fld)
+    "<input type=\"hidden\" name=\"initial-" * escape_html(html_name(f, fld)) * "\"" *
+        (v === nothing || v == "" ? "" : " value=\"" * escape_html(string(v isa Model ? v.pk : v)) * "\"") *
+        (isempty(id) ? "" : id_attr("initial-" * id)) * ">"
+end
+function input_html(bf::BoundField)
     f, fld = bf.form, bf.field
     fld.kind === :multi && return multi_widget_html(bf)
     widget_kind(fld.widget) === :hidden && fld.kind in MULTI_KINDS && return multiple_hidden_html(bf)
@@ -930,15 +961,18 @@ function widget_html(bf::BoundField)
         opt = cur === nothing ? "" : "<option value=\"$(escape_html(string(cur.id)))\" selected>$(escape_html(string(cur)))</option>"
         return "<select$attrs data-autocomplete=\"$(modelmeta(R).app)/$(model_name(R))\"><option value=\"\">---------</option>$opt</select>"
     elseif fld.kind in FILE_KINDS
-        cur = get(f.initial, fld.name, nothing)
+        cur = initial_for(f, fld)
         io = IOBuffer()
         if cur isa FieldFile && !isempty(cur)
             print(io, "Currently: <a href=\"", escape_html(cur.url), "\">", escape_html(cur.name), "</a>")
             fld.blank && print(io, " <label><input type=\"checkbox\" name=\"$name-clear\" id=\"$id-clear\"> Clear</label>")
             print(io, "<br>Change: ")
         end
-        r = (!fld.blank && !(cur isa FieldFile) && f.use_required_attribute) ? " required" : ""
-        print(io, "<input type=\"file\" name=\"$name\" id=\"$id\"$r", is_multiple_file(fld) ? " multiple" : "",
+        # (with a file already there the input may be left empty, so it isn't required, as Django's)
+        has_file = !(cur === nothing || cur == "" || (cur isa FieldFile && isempty(cur)))
+        a = replace(attrs, " required" => ""; count = 1)
+        r = (!fld.blank && !has_file && f.use_required_attribute) ? " required" : ""
+        print(io, "<input type=\"file\"", a, r, is_multiple_file(fld) ? " multiple" : "",
               fld.kind === :image ? " accept=\"image/*\"" : "", ">")
         return String(take!(io))
     elseif fld.kind === :geometry
@@ -1039,6 +1073,7 @@ Django's name for the widget a field renders with (`BoundField.widget_type`): "t
 """
 function widget_type(fld::Field)
     wk = widget_kind(fld.widget)
+    fld.widget isa MultiWidget && fld.widget.hidden && return "splithiddendatetime"
     wk === :multi && return "multi"
     wk === :radio && return "radioselect"
     wk === :checkboxes && return "checkboxselectmultiple"
@@ -1266,13 +1301,53 @@ errors_as_json(form::Form) = JSON.json(errors_json_data(form))
 A `<legend>` with the field's label, for a radio or checkbox group in a `<fieldset>` (Django 4.1's
 `BoundField.legend_tag`); `label_tag` is for single inputs.
 """
-legend_tag(bf::BoundField) = "<legend>" * escape_html(string(label(bf.field))) * "</legend>"
+legend_tag(bf::BoundField, contents = nothing; attrs = nothing, label_suffix = nothing) =
+    label_tag(bf, contents; attrs = attrs, label_suffix = label_suffix, tag = "legend")
 
-# (a radio or checkbox group's label points at no one input, as Django's)
-label_tag(bf::BoundField) = form_option(bf.field, :no_label) ? "" :
-                            isempty(html_id(bf.form, bf.field)) ? label_text(bf.field, bf.form) :
-                            uses_fieldset(bf.field) ? "<label>" * label_text(bf.field, bf.form) * "</label>" :
-                            "<label for=\"" * escape_html(label_id(bf)) * "\">" * label_text(bf.field, bf.form) * "</label>"
+"""
+    label_tag(bf, contents=nothing; attrs=nothing, label_suffix=nothing)
+
+The field's `<label>` (Django's `BoundField.label_tag`): `contents` replaces the label text (escaped
+unless a `SafeString`), `attrs` adds attributes, `label_suffix` replaces the form's and field's
+suffix. With no id (`auto_id = false`) just the text; a required field's label gets the form's
+`required_css_class`.
+"""
+function label_tag(bf::BoundField, contents = nothing; attrs = nothing, label_suffix = nothing, tag = "label")
+    f, fld = bf.form, bf.field
+    txt = contents === nothing ? (form_option(fld, :no_label) ? "" : label_html(fld)) : contents isa SafeString ? contents.s : escape_html(string(contents))
+    sfx = label_suffix !== nothing ? string(label_suffix) : something(form_option(fld, :label_suffix), f.label_suffix, ":")
+    isempty(txt) || last(rstrip(txt)) in (':', '?', '.', '!') || (txt *= escape_html(sfx))
+    id = html_id(f, fld)
+    isempty(id) && return txt
+    a = Dict{String,Any}(string(k) => v for (k, v) in pairs_of(something(attrs, Dict())))
+    if !fld.blank && f.required_css_class !== nothing
+        a["class"] = haskey(a, "class") ? string(a["class"], " ", f.required_css_class) : f.required_css_class
+    end
+    # (a radio or checkbox group's label points at no one input, as Django's)
+    forattr = tag == "label" && !uses_fieldset(fld) ? " for=\"" * escape_html(label_id(bf)) * "\"" : ""
+    "<$tag" * forattr * join(" " * escape_html(k) * "=\"" * escape_html(string(v)) * "\"" for (k, v) in sort!(collect(a); by = first)) *
+        ">" * txt * "</$tag>"
+end
+"A row's label: none for a field with `label = \"\"` (Django's templates show `label_tag` only for a label)."
+row_label(bf::BoundField) = form_option(bf.field, :no_label) ? "" : label_tag(bf)
+
+"""
+    css_classes(bf; extra_classes="")
+
+The classes of the field's row (Django's `BoundField.css_classes`): `extra_classes`, then the form's
+`error_css_class` if the field has errors and its `required_css_class` if it's required.
+"""
+function css_classes(bf::BoundField; extra_classes = "")
+    cs = String[]
+    for c in split(string(extra_classes))
+        c in cs || push!(cs, c)
+    end
+    f = bf.form
+    f.error_css_class !== nothing && haskey(f.errors, bf.field.name) && push!(cs, f.error_css_class)
+    f.required_css_class !== nothing && !bf.field.blank && push!(cs, f.required_css_class)
+    join(cs, " ")
+end
+row_class(bf::BoundField) = (c = css_classes(bf); isempty(c) ? "" : " class=\"" * escape_html(c) * "\"")
 """
 The field rendered with another kind of widget, without the widget's own attributes (Django's
 `BoundField.as_text()`, `as_textarea()`, `as_hidden()`; `{{ form.name.as_hidden }}` in templates).
@@ -1296,16 +1371,6 @@ end
 
 "A field's label as HTML: escaped, unless it was given as a `SafeString`."
 label_html(fld::Field) = form_option(fld, :safe_label) ? label(fld) : escape_html(label(fld))
-"""
-The label with its suffix, as Django's: the field's `label_suffix`, else the form's, else a colon;
-none when the label ends in punctuation already.
-"""
-function label_text(fld::Field, f = nothing)
-    l = label_html(fld)
-    sfx = form_option(fld, :label_suffix)
-    sfx === nothing && f !== nothing && (sfx = f.label_suffix)
-    isempty(l) || last(rstrip(l)) in (':', '?', '.', '!') ? l : l * escape_html(something(sfx, ":"))
-end
 
 "Whether a field's inputs are a group, shown in a `<fieldset>` (radios, checkboxes, a multi-value field)."
 uses_fieldset(fld::Field) = widget_type(fld) in ("radioselect", "checkboxselectmultiple", "multi")
@@ -1318,17 +1383,24 @@ help_html(bf::BoundField, tag) = isempty(bf.field.help_text) ? "" :
     (bf.field.help_text isa SafeString ? bf.field.help_text.s : escape_html(bf.field.help_text)) * "</$tag>"
 field_errors_html(bf::BoundField) = (id = html_id(bf.form, bf.field);
     errors_html(get(bf.form.errors, bf.field.name, String[]); id = isempty(id) ? nothing : id * "_error"))
-"` aria-describedby=...`: the help text's and the errors' ids (unless the widget sets its own), as Django's."
-function described_by(bf::BoundField)
+"""
+    aria_describedby(bf) -> String or nothing
+
+The ids of the field's help text and errors (Django's `BoundField.aria_describedby`): `""` when
+there are none (or no id, or a hidden input), `nothing` when the widget sets its own.
+"""
+function aria_describedby(bf::BoundField)
     fld = bf.field
-    fld.widget isa Widget && haskey(fld.widget.attrs, "aria-describedby") && return ""
+    fld.widget isa Widget && haskey(fld.widget.attrs, "aria-describedby") && return nothing
     id = html_id(bf.form, fld)
     (isempty(id) || is_hidden_field(fld)) && return ""
     ids = String[]
     isempty(fld.help_text) || push!(ids, id * "_helptext")
     haskey(bf.form.errors, fld.name) && push!(ids, id * "_error")
-    isempty(ids) ? "" : " aria-describedby=\"" * escape_html(join(ids, " ")) * "\""
+    join(ids, " ")
 end
+"` aria-describedby=...`, unless empty or the widget sets its own."
+described_by(bf::BoundField) = (ids = aria_describedby(bf); ids === nothing || isempty(ids) ? "" : " aria-describedby=\"" * escape_html(ids) * "\"")
 
 function field_row(bf::BoundField; tag = "p")
     fld = bf.field
@@ -1336,14 +1408,14 @@ function field_row(bf::BoundField; tag = "p")
     errs = field_errors_html(bf)
     if tag == "div"            # Django's div.html: label (a group's legend), help text, errors, then the widget
         if uses_fieldset(fld)
-            lg = form_option(fld, :no_label) ? "" : isempty(html_id(bf.form, fld)) ? label_text(fld, bf.form) : "<legend>" * label_text(fld, bf.form) * "</legend>"
-            return "<div><fieldset>" * lg * help_html(bf, "div") * errs * widget_html(bf) * "</fieldset></div>"
+            lg = form_option(fld, :no_label) ? "" : legend_tag(bf)
+            return "<div" * row_class(bf) * "><fieldset>" * lg * help_html(bf, "div") * errs * widget_html(bf) * "</fieldset></div>"
         end
-        return "<div>" * label_tag(bf) * help_html(bf, "div") * errs * widget_html(bf) * "</div>"
+        return "<div" * row_class(bf) * ">" * row_label(bf) * help_html(bf, "div") * errs * widget_html(bf) * "</div>"
     end
-    body = fld.kind === :bool ? widget_html(bf) * " " * label_tag(bf) : label_tag(bf) * " " * widget_html(bf)
-    tag == "li" && return "<li>" * errs * body * help_html(bf, "span") * "</li>"
-    errs * "<$tag>" * body * help_html(bf, "span") * "</$tag>"
+    body = fld.kind === :bool ? widget_html(bf) * " " * row_label(bf) : row_label(bf) * " " * widget_html(bf)
+    tag == "li" && return "<li" * row_class(bf) * ">" * errs * body * help_html(bf, "span") * "</li>"
+    errs * "<$tag" * row_class(bf) * ">" * body * help_html(bf, "span") * "</$tag>"
 end
 
 """
@@ -1361,8 +1433,8 @@ function render_rows(f::Form, row, close, wrap_hidden; wrap_errors = identity)
     rows = [row(bf) for bf in f if !is_hidden_field(bf.field)]
     hidden = join([widget_html(bf) for bf in f if is_hidden_field(bf.field)])
     if !isempty(hidden)
-        if isempty(rows)
-            push!(rows, wrap_hidden(hidden))
+        if isempty(rows)        # (only hidden fields: bare, or in a row after the form's errors, as Django's templates)
+            push!(rows, isempty(top) ? hidden : wrap_hidden(hidden))
         else
             last = rows[end]
             i = findlast(close, last)
@@ -1380,7 +1452,7 @@ as_div(f::Form) = render_rows(f, bf -> field_row(bf; tag = "div"), "</div>", h -
 "The whole form as `<li>` rows (put them in a `<ul>`)."
 as_ul(f::Form) = render_rows(f, bf -> field_row(bf; tag = "li"), "</li>", h -> "<li>" * h * "</li>"; wrap_errors = e -> "<li>" * e * "</li>")
 "The whole form as table rows (put them in a `<table>`)."
-as_table(f::Form) = render_rows(f, bf -> "<tr><th>" * label_tag(bf) * "</th><td>" * field_errors_html(bf) * widget_html(bf) *
+as_table(f::Form) = render_rows(f, bf -> "<tr" * row_class(bf) * "><th>" * row_label(bf) * "</th><td>" * field_errors_html(bf) * widget_html(bf) *
                                          (isempty(bf.field.help_text) ? "" : "<br>" * help_html(bf, "span")) * "</td></tr>",
                                 "</td></tr>", h -> "<tr><td colspan=\"2\">" * h * "</td></tr>";
                                 wrap_errors = e -> "<tr><td colspan=\"2\">" * e * "</td></tr>")
@@ -1406,7 +1478,7 @@ function tattr(f::Form, ::Val{S}) where {S}
     S === :errors && return ensure_validated(f).errors
     S === :non_field_errors && return non_field_errors(f)
     S === :is_bound && return f.data !== nothing
-    S === :is_multipart && return any(x -> x.kind in FILE_KINDS, f.fields)
+    S === :is_multipart && return is_multipart(f)
     S === :cleaned_data && return f.cleaned_data
     S === :media && return render_media(form_media(f))
     S === :render && return render_form(f)
@@ -1419,7 +1491,10 @@ end
 
 function tattr(bf::BoundField, ::Val{S}) where {S}
     S === :label && return label(bf.field)
-    S === :label_tag && return SafeString(label_tag(bf))
+    S === :label_tag && return SafeString(row_label(bf))
+    S === :legend_tag && return SafeString(form_option(bf.field, :no_label) ? "" : legend_tag(bf))
+    S === :css_classes && return css_classes(bf)
+    S === :aria_describedby && return aria_describedby(bf)
     S === :errors_html && return SafeString(field_errors_html(bf))
     S === :help_html && return SafeString(help_html(bf, "div"))
     S === :errors && return get(ensure_validated(bf.form).errors, bf.field.name, String[])
