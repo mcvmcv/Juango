@@ -27,10 +27,11 @@ struct QuerySet{T<:Model}
     values_mode::Symbol                            # values() rows: :dict; values_list: :tuple, :named or :flat
     group_fields::Union{Nothing,Vector{String}}    # values(...) |> annotate(aggregate): the GROUP BY it fixed (#201)
     aliases::Vector{Symbol}                        # annotations made by alias(): usable, not selected (#207)
+    immediate::Union{Nothing,Vector{Symbol}}       # only()'s names (nothing: defer() mode), so defer/only combine as Django
 end
 QuerySet{T}(where, order, limit, offset, isnone) where {T} =
     QuerySet{T}(where, order, limit, offset, isnone, Vector{Symbol}[], Prefetch[], nothing, nothing,
-                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing, Dict{Symbol,Int}(), :dict, nothing, Symbol[])
+                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing, Dict{Symbol,Int}(), :dict, nothing, Symbol[], nothing)
 
 """
     using_db(qs, "replica")
@@ -1247,23 +1248,34 @@ with one more query. `defer(qs, nothing)` clears the list.
 function defer(@nospecialize(qs::QuerySet), fields...)
     qs.values_fields === nothing || throw(ArgumentError("defer() can't follow values() or values_list()"))
     T = model_of(qs)
-    fields == (nothing,) && return chain(qs; deferred = Symbol[])
-    names = Symbol[Symbol(f) for f in fields]
+    fields == (nothing,) && return chain(qs; deferred = Symbol[], immediate = nothing)
+    names = deferrable_names(T, fields)
     check_deferrable(T, names)
-    chain(qs; deferred = unique(vcat(qs.deferred, names)))
+    qs.immediate === nothing && return chain(qs; deferred = unique(vcat(qs.deferred, names)))
+    # after only(): those names leave the set to load; if none is left, only these are deferred (as Django)
+    left = setdiff(qs.immediate, names)
+    isempty(left) || return immediate_loading(qs, T, left)
+    chain(qs; immediate = nothing, deferred = setdiff(names, qs.immediate))
 end
 defer(@nospecialize(T::Type{<:Model}), fields...) = defer(objects(T), fields...)
 
-"""
-    only(qs, :title, :author)
+"Field names as only/defer take them: `:pk` is the key, an attname (`:author_id`) its field."
+function deferrable_names(T, fields)
+    out = Symbol[]
+    for f in fields
+        f === nothing && throw(ArgumentError("Cannot pass nothing as an argument to only()."))
+        n = Symbol(f)
+        n === :pk && (n = :id)
+        i = findfirst(g -> g.kind === :fk && attname(g) === n, all_fields(T))
+        i === nothing || (n = all_fields(T)[i].name)
+        push!(out, n)
+    end
+    out
+end
 
-(Extends `Base.only`.) Load only these fields (and the id); the others are deferred, as with `defer`.
-"""
-function Base.only(@nospecialize(qs::QuerySet), field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...)
-    qs.values_fields === nothing || throw(ArgumentError("only() can't follow values() or values_list()"))
-    T = model_of(qs)
-    keep = Symbol[Symbol(field); Symbol.(collect(fields))]
-    check_deferrable(T, keep)
+"The queryset loading only `keep` (and the key): every other field deferred, through relations too."
+function immediate_loading(@nospecialize(qs::QuerySet), T, keep::Vector{Symbol})
+    isempty(keep) && return chain(qs; immediate = Symbol[], deferred = Symbol[])     # (nothing left: everything loads)
     # only(:profile__salary): the profile key is kept (for the join), and of the profile only salary
     mine = Set{Symbol}(Symbol(first(split(string(k), "__"))) for k in keep)
     deferred = Symbol[f.name for f in all_fields(T) if !(f.name in mine)]
@@ -1272,13 +1284,32 @@ function Base.only(@nospecialize(qs::QuerySet), field::Union{Symbol,AbstractStri
         length(parts) > 1 || continue
         for i in 1:length(parts)-1
             M = T
-            for p in parts[1:i]; M = related_model(all_fields(M)[findfirst(g -> g.name === Symbol(p), all_fields(M))]); end
+            for p in parts[1:i]
+                j = findfirst(g -> g.name === Symbol(p), all_fields(M))
+                M = j === nothing ? mti_child(M, p) : related_model(all_fields(M)[j])
+            end
             pre = join(parts[1:i], "__")
             kept = Set{String}(split(string(x), "__")[i+1] for x in keep if startswith(string(x), pre * "__"))
             append!(deferred, [Symbol(pre, "__", g.name) for g in all_fields(M) if !(string(g.name) in kept)])
         end
     end
-    chain(qs; deferred = unique!(deferred))
+    chain(qs; immediate = keep, deferred = unique!(deferred))
+end
+
+"""
+    only(qs, :title, :author)
+
+(Extends `Base.only`.) Load only these fields (and the id); the others are deferred, as with `defer`.
+After `defer`, the deferred names stay out (`defer(qs, :name) |> only(:name, :value)` loads value);
+a later `only` replaces an earlier one, as Django.
+"""
+function Base.only(@nospecialize(qs::QuerySet), field::Union{Symbol,AbstractString,Nothing}, fields::Union{Symbol,AbstractString,Nothing}...)
+    qs.values_fields === nothing || throw(ArgumentError("only() can't follow values() or values_list()"))
+    T = model_of(qs)
+    keep = deferrable_names(T, (field, fields...))
+    check_deferrable(T, filter(n -> n !== :id, keep))
+    qs.immediate === nothing && (keep = setdiff(keep, qs.deferred))
+    immediate_loading(qs, T, keep)
 end
 Base.only(@nospecialize(T::Type{<:Model}), field::Union{Symbol,AbstractString}, fields::Union{Symbol,AbstractString}...) =
     only(objects(T), field, fields...)

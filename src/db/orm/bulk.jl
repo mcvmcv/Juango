@@ -290,7 +290,7 @@ Base.@nospecializeinfer function combine(op, @nospecialize(qs::QuerySet), others
     end
     vm = first(parts).values_mode
     QuerySet{T}(Q[], String[], nothing, 0, false, Vector{Symbol}[], copy(qs.prefetch), nothing, nothing,
-                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all), qs.db, Dict{Symbol,Int}(), vm, nothing, Symbol[])
+                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all), qs.db, Dict{Symbol,Int}(), vm, nothing, Symbol[], nothing)
 end
 
 """

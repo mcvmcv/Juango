@@ -6384,3 +6384,87 @@ end
   end
 end
 
+# --- tests/defer ------------------------------------------------------------------------------------------
+@model struct DdfSecondary
+    first = CharField(max_length = 50)
+    second = CharField(max_length = 50)
+    Meta(table = "ddf_secondary")
+end
+@model struct DdfPrimary
+    name = CharField(max_length = 50)
+    value = CharField(max_length = 50)
+    related = ForeignKey(DdfSecondary; on_delete = :CASCADE, related_name = :primary_set)
+    Meta(table = "ddf_primary")
+end
+@model struct DdfChild <: DdfPrimary
+    Meta(table = "ddf_child")
+end
+@model struct DdfBigChild <: DdfPrimary
+    other = CharField(max_length = 50)
+    Meta(table = "ddf_bigchild")
+end
+redirect_stdout(devnull) do
+    ms = [DdfSecondary, DdfPrimary, DdfChild, DdfBigChild]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django defer: DeferTests, BigChildDeferTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    delayed(o) = length(Juango.deferred_fields(o))
+    s1 = create(DdfSecondary; first = "x1", second = "y1")
+    p1, p2 = create(DdfPrimary; name = "p1", value = "xx", related = s1), create(DdfPrimary; name = "p2", value = "yy", related = s1)
+    qs = objects(DdfPrimary)
+    D(q...) = Juango.defer(q...); O(q...) = Juango.only(q...)
+    # defer, only, and chains of them
+    @test delayed(first(D(qs, :name))) == 1 && delayed(get(D(qs, :name); pk = p1.pk)) == 1
+    @test delayed(first(D(qs, :related__first))) == 0 && delayed(first(D(D(qs, :name), :value))) == 2
+    @test delayed(first(O(qs, :name))) == 2 && delayed(get(O(qs, :name); pk = p1.pk)) == 2 && delayed(first(O(O(qs, :name), :value))) == 2
+    @test delayed(first(O(qs, :related__first))) == 2 && delayed(first(O(qs, :pk))) == 3 && delayed(first(O(s1.primary_set, :pk))) == 3
+    @test delayed(first(D(O(qs, :name, :value), :name))) == 2
+    @test delayed(first(O(D(qs, :name), :value, :name))) == 2
+    @test delayed(first(O(O(D(qs, :name), :name), :value))) == 2
+    @test delayed(first(O(D(qs, :name), :value))) == 2 && delayed(first(D(O(qs, :name), :value))) == 2
+    @test delayed(first(D(D(O(qs, :name), :name), :value))) == 1 && delayed(first(D(O(qs, :name), :name, :value))) == 1
+    @test delayed(first(D(O(qs, :name), :name))) == 0 && delayed(first(O(D(qs, :name), :name))) == 0
+    @test delayed(first(D(D(qs, :name), :name))) == 1
+    @test delayed(first(D(qs, :name, :value))) == 2 && delayed(first(D(qs, nothing))) == 0 && delayed(first(D(O(qs, :name), nothing))) == 0
+    @test tr(() -> O(qs, nothing)) isa ArgumentError
+    # a relation's only(:pk) in one query
+    s = create(DdfSecondary; first = "one", second = "two"); bulk_create([DdfPrimary(name = "pb", value = "v1", related = s) for _ in 1:5])
+    _, n = nq(() -> foreach(p -> p.pk, O(s.primary_set, :pk))); @test n == 1
+    # values() isn't deferred
+    @test get(values(D(objects(DdfPrimary), :name)); pk = p1.pk) == Dict(:id => p1.id, :name => "p1", :value => "xx", :related_id => s1.id)
+    @test get(values(O(objects(DdfPrimary), :name)); pk = p1.pk) == Dict(:id => p1.id, :name => "p1", :value => "xx", :related_id => s1.id)
+    # with select_related
+    obj = first(D(select_related(objects(DdfPrimary), :related), :related__first, :related__second))
+    @test delayed(obj.related) == 2 && delayed(obj) == 0
+    obj = get(O(select_related(objects(DdfPrimary), :related), :related__first); pk = p1.pk)
+    @test delayed(obj) == 2 && delayed(obj.related) == 1 && obj.related_id == s1.pk && obj.name == "p1"
+    # a deferred key: not followed by select_related, read in one query
+    obj, n = nq(() -> (o = first(D(select_related(objects(DdfPrimary)), :related)); (delayed(o), o.related.id)))
+    @test obj == (1, s1.pk)
+    # saving with a field deferred
+    o2 = get(D(objects(DdfPrimary), :value); name = "p2"); o2.name = "a new name"; save!(o2)
+    @test "a new name" in [p.name for p in objects(DdfPrimary)] && get(DdfPrimary; pk = p2.pk).value == "yy"
+    # a child without fields of its own
+    create(DdfChild; name = "c1", value = "foo", related = s1)
+    c = get(D(objects(DdfChild), :value); name = "c1"); @test delayed(c) == 1 && c.name == "c1" && c.value == "foo"
+    c = get(O(objects(DdfChild), :name); name = "c1"); @test delayed(c) == 2   # (Django 3: its parent link is a field) && c.name == "c1" && c.value == "foo"
+    # deferring a key by its attname
+    pr = get(D(objects(DdfPrimary), :related_id); name = "p1")
+    r, n = nq(() -> pr.related_id); @test r == s1.pk && n == 1
+  end
+  port_block() do
+    delayed(o) = length(Juango.deferred_fields(o))
+    s1 = create(DdfSecondary; first = "x1", second = "y1")
+    create(DdfBigChild; name = "b1", value = "foo", related = s1, other = "bar")
+    # BigChildDeferTests: fields of the parent and of the child (Django counts 4 for only(): its parent link is a field)
+    o = get(Juango.defer(objects(DdfBigChild), :value); name = "b1"); @test delayed(o) == 1 && o.name == "b1" && o.value == "foo" && o.other == "bar"
+    o = get(Juango.defer(objects(DdfBigChild), :other); name = "b1"); @test delayed(o) == 1 && o.name == "b1" && o.value == "foo" && o.other == "bar"
+    @test delayed(get(Juango.defer(objects(DdfBigChild), :other, :value); name = "b1")) == 2
+    o = get(Juango.only(objects(DdfBigChild), :name); name = "b1"); @test delayed(o) == 3 && o.name == "b1" && o.value == "foo" && o.other == "bar"
+    o = get(Juango.only(objects(DdfBigChild), :other); name = "b1"); @test delayed(o) == 3 && o.name == "b1" && o.value == "foo" && o.other == "bar"
+  end
+end
