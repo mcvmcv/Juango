@@ -578,3 +578,36 @@ end
     files = [UploadedFile("name1", "Content 1"), UploadedFile("name2", "Content 2")]
     @test [u.name for u in Juango.clean(MultipleFileField(), files)] == ["name1", "name2"]
 end
+
+const DFF_BEATLES = [("J", "John"), ("P", "Paul"), ("G", "George"), ("R", "Ringo")]
+dff_complex(; kw...) = MultiValueField([CharField(max_length = nothing), MultipleChoiceField(DFF_BEATLES), SplitDateTimeField()];
+    compress = vs -> isempty(vs) ? nothing : "$(vs[1]),$(join(vs[2])),$(Dates.format(vs[3], "yyyy-mm-dd HH:MM:SS"))",
+    decompress = v -> v === nothing ? [nothing, nothing, nothing] :
+                      (p = split(v, ","); [p[1], [string(c) for c in p[2]], DateTime(p[3], dateformat"yyyy-mm-dd HH:MM:SS")]), kw...)
+
+@testset "django forms_tests: field_tests (MultiValueField)" begin
+    f = dff_complex()
+    @test Juango.clean(f, ["some text", ["J", "P"], ["2007-04-25", "6:24:00"]]) == "some text,JP,2007-04-25 06:24:00"
+    @test raises(f, ["some text", ["X"], ["2007-04-25", "6:24:00"]], "Select a valid choice. X is not one of the available choices.")
+    # a part left out is empty: a required field's "This field is required."
+    @test clean_errors(f, ["some text", ["JP"]]) == ["This field is required."]
+    # a part not required may be left empty when not every field is required (require_all_fields = false)
+    pr = MultiValueField([CharField(max_length = nothing), CharField(max_length = nothing, required = false)];
+                         compress = vs -> join(something.(vs, ""), ","), decompress = v -> split(v, ","), require_all_fields = false)
+    @test Juango.clean(pr, ["Hello", ""]) == "Hello,"
+    @test clean_errors(pr, ["", "World"]) == ["Enter a complete value."]
+    pf = Form([:f => pr]; data = Dict("f_0" => "Hello", "f_1" => ""))
+    @test is_valid(pf) && pf.cleaned_data[:f] == "Hello,"
+    pf = Form([:f => pr]; data = Dict("f_0" => "", "f_1" => ""))
+    @test !is_valid(pf) && pf.errors[:f] == ["This field is required."]
+    # the form: has_changed compares the parts with the initial value's
+    g(data; initial = nothing) = Form([:field1 => dff_complex()]; data = data,
+                                      initial = initial === nothing ? Dict{Symbol,Any}() : Dict(:field1 => initial))
+    same = Dict("field1_0" => "some text", "field1_1" => ["J", "P"], "field1_2_0" => "2007-04-25", "field1_2_1" => "06:24:00")
+    gs = g(same)
+    @test is_valid(gs) && gs.cleaned_data[:field1] == "some text,JP,2007-04-25 06:24:00"
+    @test !has_changed(g(same; initial = "some text,JP,2007-04-25 06:24:00"))
+    @test has_changed(g(merge(same, Dict("field1_0" => "other text")); initial = "some text,JP,2007-04-25 06:24:00"))
+    @test has_changed(g(merge(same, Dict("field1_2_0" => "2009-04-25", "field1_2_1" => "11:44:00")); initial = "some text,JP,2007-04-25 06:24:00"))
+    @test has_changed(g(same))
+end

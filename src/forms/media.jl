@@ -140,18 +140,24 @@ struct MultiSpec
     fields::Vector{Field}
     compress::Function
     decompress::Function
+    require_all::Bool        # every part must be given (else a required part left empty is "incomplete")
 end
 
 """
-    MultiValueField(fields; compress, decompress, kw...)
+    MultiValueField(fields; compress, decompress, require_all_fields = true, kw...)
 
 One value from several inputs (named `name_0`, `name_1`, ...): each part is cleaned by its
 field, then `compress(values)` makes the value (it may throw `ArgumentError` with a message).
 `decompress(value)` splits an initial value into the parts' values.
+
+As Django's: with `require_all_fields` (the default) a part left empty makes a required field's
+"This field is required." (and is `nothing` when the field isn't required); without it, only the
+parts whose fields are required must be given, and each one left empty reports its field's
+`error_messages["incomplete"]` ("Enter a complete value.").
 """
-function MultiValueField(fields::AbstractVector; compress, decompress, widget = MultiWidget(), kw...)
+function MultiValueField(fields::AbstractVector; compress, decompress, widget = MultiWidget(), require_all_fields::Bool = true, kw...)
     f = Field(:multi; kw...)
-    f.related = MultiSpec(Field[deepcopy(x) for x in fields], compress, decompress)
+    f.related = MultiSpec(Field[deepcopy(x) for x in fields], compress, decompress, require_all_fields)
     f.widget = widget
     f
 end
@@ -170,10 +176,15 @@ SplitDateTimeField(; kw...) = MultiValueField([DateField(error_messages = Dict("
         settings.USE_TZ ? make_aware(dt) : dt
     end,
     decompress = v -> v === nothing ? [nothing, nothing] :
-        (dt = v isa TimeZones.ZonedDateTime ? make_naive(v) : DateTime(v); [Date(dt), Dates.format(dt, "HH:MM")]), kw...)
+        (dt = v isa TimeZones.ZonedDateTime ? make_naive(v) : DateTime(v); [Date(dt), Dates.format(dt, "HH:MM")]),
+    require_all_fields = false, kw...)
 
-multi_raw(f::Form, fld::Field) = f.data === nothing ? nothing :
-    [get(f.data, html_name(f, fld) * "_$(i - 1)", nothing) for i in eachindex(fld.related.fields)]
+multi_raw(f::Form, fld::Field) = f.data === nothing ? nothing : multi_parts(f.data, html_name(f, fld), fld)
+# name_0, name_1, ...: a multiple choice part's list, a multi-value part's own name_1_0, name_1_1, ...
+multi_parts(d, name, fld::Field) =
+    Any[(sub = fld.related.fields[i]; n = name * "_$(i - 1)";
+         sub.kind === :multi ? multi_parts(d, n, sub) : sub.kind in MULTI_KINDS ? raw_list(d, n) : get(d, n, nothing))
+        for i in eachindex(fld.related.fields)]
 
 """
 Clean a multi-value field's parts and compress them: `(value, error_or_nothing)`. As Django's
@@ -187,14 +198,24 @@ function clean_multi(fld::Field, raws)
     all(r -> r === nothing || isempty(strip(string(r))), raws) && return nothing, nothing
     vals, errs = Any[], String[]
     for (sub, r) in zip(spec.fields, raws)
+        if r === nothing || (r isa AbstractString && isempty(strip(r))) || (r isa Union{AbstractVector,Tuple} && isempty(r))
+            if spec.require_all
+                fld.blank || return nothing, [field_message(fld, "required", gettext("This field is required."))]
+                push!(vals, nothing)
+            elseif !sub.blank
+                m = field_message(sub, "incomplete", field_message(fld, "incomplete", gettext("Enter a complete value.")))
+                m in errs || push!(errs, m)
+            else
+                push!(vals, nothing)
+            end
+            continue
+        end
         v, err = to_julia(sub, r)
         if err !== nothing
-            push!(errs, field_message(sub, "invalid", err))
-        elseif v === nothing || v == ""
-            push!(errs, field_message(sub, "incomplete", field_message(fld, "incomplete", gettext("Enter a complete value."))))
+            append!(errs, err isa AbstractVector ? err : [field_message(sub, "invalid", err)])
         else
-            e = validate_field(sub, v)
-            isempty(e) ? push!(vals, v) : push!(errs, first(e))
+            e = sub.kind in MULTI_KINDS ? validator_errors(sub, v) : validate_field(sub, v)
+            isempty(e) ? push!(vals, v) : append!(errs, e)
         end
     end
     isempty(errs) || return nothing, (length(errs) == 1 ? errs[1] : unique(errs))
