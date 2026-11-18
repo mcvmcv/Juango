@@ -882,3 +882,158 @@ end
     f = song(Dict("name" => "From Me To You", "composers" => ["P", "J"]); auto_id = false)
     @test html_eq(f[:composers].as_hidden, "<input type=\"hidden\" name=\"composers\" value=\"P\"><input type=\"hidden\" name=\"composers\" value=\"J\">")
 end
+
+# Django's clean_<field>(): a field's own check, after the field's
+@form DftUserRegistration begin
+    username = CharField(max_length = 10)
+    password1 = CharField(max_length = nothing, widget = :password)
+    password2 = CharField(max_length = nothing, widget = :password)
+end
+function Juango.clean_field(f::Form, ::Val{:DftUserRegistration}, ::Val{:password2}, v)
+    cd = f.cleaned_data
+    get(cd, :password1, "") != "" && v != "" && cd[:password1] != v && throw(Juango.ValidationError("Please make sure your passwords match."))
+    v
+end
+# the form's clean(): errors for the form, for several fields, and add_error!
+@form DftUserRegistration2 begin
+    username = CharField(max_length = 10)
+    password1 = CharField(max_length = nothing, widget = :password)
+    password2 = CharField(max_length = nothing, widget = :password)
+end
+function Juango.clean_form(f::Form, ::Val{:DftUserRegistration2})
+    cd = f.cleaned_data
+    p1, p2 = get(cd, :password1, nothing), get(cd, :password2, nothing)
+    p1 !== nothing && p2 !== nothing && p1 != p2 && throw(Juango.ValidationError("Please make sure your passwords match."))
+    errs = Dict{Symbol,Vector{String}}()
+    p1 == "FORBIDDEN_VALUE" && (errs[:password1] = ["Forbidden value."])
+    p2 == "FORBIDDEN_VALUE" && (errs[:password2] = ["Forbidden value."])
+    isempty(errs) || throw(Juango.ValidationError(errs))
+    if p1 == "FORBIDDEN_VALUE2"
+        add_error!(f, nothing, "Non-field error 1.")
+        add_error!(f, :password1, "Forbidden value 2.")
+    end
+    if p2 == "FORBIDDEN_VALUE2"
+        add_error!(f, :password2, "Forbidden value 2.")
+        throw(Juango.ValidationError("Non-field error 2."))
+    end
+end
+
+@testset "django forms_tests: test_forms (escaping, validating several fields)" begin
+    # labels are escaped unless safe; values and errors are escaped
+    esc_form(d) = Form([:special_name => CharField(max_length = nothing, label = "<em>Special</em> Field"),
+                        :special_safe_name => CharField(max_length = nothing, label = Juango.SafeString("<em>Special</em> Field"))];
+                       data = d, auto_id = false, clean = function (f)
+                           add_error!(f, :special_name, "Something's wrong with '$(f.cleaned_data[:special_name])'")
+                       end)
+    f = esc_form(Dict("special_name" => "Should escape < & > and <script>alert('xss')</script>", "special_safe_name" => "<i>Do not escape</i>"))
+    t = as_table(f).s
+    @test occursin("<th>&lt;em&gt;Special&lt;/em&gt; Field:</th>", t) && occursin("<th><em>Special</em> Field:</th>", t)
+    @test occursin("Something&#39;s wrong with &#39;Should escape &lt; &amp; &gt; and &lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;&#39;", t) ||
+          occursin("Something&#x27;s wrong with &#x27;Should escape &lt; &amp; &gt; and &lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;&#x27;", t)
+    @test occursin("value=\"&lt;i&gt;Do not escape&lt;/i&gt;\"", t)
+
+    # clean_field: the field's error
+    @test isempty(DftUserRegistration(; auto_id = false).errors)
+    f = DftUserRegistration(Dict{String,Any}(); auto_id = false)
+    @test !is_valid(f) && f.errors[:username] == ["This field is required."] && f.errors[:password2] == ["This field is required."]
+    f = DftUserRegistration(Dict("username" => "adrian", "password1" => "foo", "password2" => "bar"); auto_id = false)
+    @test !is_valid(f) && f.errors[:password2] == ["Please make sure your passwords match."]
+    f = DftUserRegistration(Dict("username" => "adrian", "password1" => "foo", "password2" => "foo"); auto_id = false)
+    @test is_valid(f) && f.cleaned_data == Dict(:username => "adrian", :password1 => "foo", :password2 => "foo")
+
+    # the form's clean: the form's errors at the top
+    f = DftUserRegistration2(Dict{String,Any}(); auto_id = false)
+    @test html_eq(as_table(f), "<tr><th>Username:</th><td><ul class=\"errorlist\"><li>This field is required.</li></ul>" *
+                               "<input type=\"text\" name=\"username\" maxlength=\"10\" aria-invalid=\"true\" required></td></tr>" *
+                               "<tr><th>Password1:</th><td><ul class=\"errorlist\"><li>This field is required.</li></ul><input type=\"password\" name=\"password1\" aria-invalid=\"true\" required></td></tr>" *
+                               "<tr><th>Password2:</th><td><ul class=\"errorlist\"><li>This field is required.</li></ul><input type=\"password\" name=\"password2\" aria-invalid=\"true\" required></td></tr>")
+    f = DftUserRegistration2(Dict("username" => "adrian", "password1" => "foo", "password2" => "bar"); auto_id = false)
+    @test !is_valid(f) && f.errors[:__all__] == ["Please make sure your passwords match."]
+    @test html_eq(as_table(f), "<tr><td colspan=\"2\"><ul class=\"errorlist nonfield\"><li>Please make sure your passwords match.</li></ul></td></tr>" *
+                               "<tr><th>Username:</th><td><input type=\"text\" name=\"username\" value=\"adrian\" maxlength=\"10\" required></td></tr>" *
+                               "<tr><th>Password1:</th><td><input type=\"password\" name=\"password1\" required></td></tr>" *
+                               "<tr><th>Password2:</th><td><input type=\"password\" name=\"password2\" required></td></tr>")
+    @test html_eq(as_ul(f), "<li><ul class=\"errorlist nonfield\"><li>Please make sure your passwords match.</li></ul></li>" *
+                            "<li>Username: <input type=\"text\" name=\"username\" value=\"adrian\" maxlength=\"10\" required></li>" *
+                            "<li>Password1: <input type=\"password\" name=\"password1\" required></li><li>Password2: <input type=\"password\" name=\"password2\" required></li>")
+    @test html_eq(as_div(f), "<ul class=\"errorlist nonfield\"><li>Please make sure your passwords match.</li></ul>" *
+                             "<div>Username: <input type=\"text\" name=\"username\" value=\"adrian\" maxlength=\"10\" required></div>" *
+                             "<div>Password1: <input type=\"password\" name=\"password1\" required></div><div>Password2: <input type=\"password\" name=\"password2\" required></div>")
+    f = DftUserRegistration2(Dict("username" => "adrian", "password1" => "foo", "password2" => "foo"); auto_id = false)
+    @test is_valid(f) && f.cleaned_data[:password2] == "foo"
+    f = DftUserRegistration2(Dict("username" => "adrian", "password1" => "FORBIDDEN_VALUE", "password2" => "FORBIDDEN_VALUE"); auto_id = false)
+    @test !is_valid(f) && f.errors[:password1] == ["Forbidden value."] && f.errors[:password2] == ["Forbidden value."]
+    f = DftUserRegistration2(Dict("username" => "adrian", "password1" => "FORBIDDEN_VALUE2", "password2" => "FORBIDDEN_VALUE2"); auto_id = false)
+    @test !is_valid(f) && f.errors[:__all__] == ["Non-field error 1.", "Non-field error 2."]
+    @test f.errors[:password1] == ["Forbidden value 2."] && f.errors[:password2] == ["Forbidden value 2."]
+    e = try add_error!(f, "missing_field", "Some error.") catch e; e end
+    @test e isa ArgumentError && occursin("has no field named", e.msg)
+    e = try add_error!(f, :password1, Juango.ValidationError(Dict(:password1 => ["Some error."]))) catch e; e end
+    @test e isa ArgumentError && e.msg == "The argument `field` must be `None` when the `error` argument is a dictionary."
+    # a ValidationError for fields, given to add_error! with nothing: each field gets its messages
+    f = Form([:code => CharField(max_length = 10)]; data = Dict("code" => "x"))
+    is_valid(f)
+    add_error!(f, nothing, Juango.ValidationError(Dict(:code => ["Code error 1."], :__all__ => ["Non-field error 1."])))
+    @test f.errors[:code] == ["Code error 1."] && f.errors[:__all__] == ["Non-field error 1."]
+end
+
+@testset "django forms_tests: test_forms (has_error, hidden errors, field order, labels)" begin
+    reg(data) = Form([:username => CharField(max_length = 10), :password1 => CharField(max_length = nothing, widget = :password, min_length = 5),
+                      :password2 => CharField(max_length = nothing, widget = :password)]; data = data,
+                     clean = f -> (p1 = get(f.cleaned_data, :password1, ""); p2 = get(f.cleaned_data, :password2, "");
+                                   p1 != "" && p2 != "" && p1 != p2 && throw(Juango.ValidationError("Please make sure your passwords match."; code = "password_mismatch"))))
+    f = reg(Dict{String,Any}())
+    @test has_error(f, :password1)
+    f = reg(Dict("password1" => "Hi", "password2" => "Hi"))
+    @test has_error(f, :password1) && !has_error(f, :password2)
+    f = reg(Dict("password1" => "Bonjour", "password2" => "Hello"))
+    @test !has_error(f, :password1) && has_error(f)
+    # (has_error(field, code): Juango's errors don't keep their codes, #234)
+
+    # a hidden field's error, and the form's, with only hidden fields
+    f = Form([:hidden_input => CharField(max_length = nothing, widget = :hidden)]; data = Dict{String,Any}(), clean = f -> add_error!(f, nothing, "Form error"))
+    @test f[:hidden_input].errors == ["This field is required."]
+    @test f.errors == Dict(:hidden_input => ["This field is required."], :__all__ => ["Form error"])
+    top = "<ul class=\"errorlist nonfield\"><li>Form error</li><li>(Hidden field hidden_input) This field is required.</li></ul>"
+    hid = "<input type=\"hidden\" name=\"hidden_input\" id=\"id_hidden_input\">"
+    @test html_eq(as_table(f), "<tr><td colspan=\"2\">" * top * "</td></tr><tr><td colspan=\"2\">" * hid * "</td></tr>") ||
+          html_eq(as_table(f), "<tr><td colspan=\"2\">" * top * hid * "</td></tr>")
+    @test html_eq(as_p(f), top * "<p>" * hid * "</p>")
+    @test html_eq(as_div(f), top * "<div>" * hid * "</div>")
+
+    # fields in the order given, or in field_order (names not there are ignored)
+    p = Form([Symbol("field$i") => CharField(max_length = nothing) for i in 1:14]; auto_id = false)
+    @test html_eq(as_table(p), join(["<tr><th>Field$i:</th><td><input type=\"text\" name=\"field$i\" required></td></tr>" for i in 1:14]))
+    fs6 = [Symbol("field$i") => CharField(max_length = nothing) for i in (1, 2, 4, 5, 6)]
+    @test [f.name for f in Form(fs6; field_order = [:field6, :field5, :field4, :field2, :field1]).fields] == [:field6, :field5, :field4, :field2, :field1]
+    fs7 = vcat(fs6, [:field3 => CharField(max_length = nothing)])
+    @test [f.name for f in Form(fs7; field_order = [:field2, :field4, :field3, :field5, :field6]).fields] == [:field2, :field4, :field3, :field5, :field6, :field1]
+    @test [f.name for f in Form(fs7; field_order = [:unknown]).fields] == [:field1, :field2, :field4, :field5, :field6, :field3]
+
+    # max_length makes maxlength (the field's wins over the widget's)
+    p = Form([:username => CharField(max_length = 10), :password => CharField(max_length = 10, widget = :password),
+              :address => CharField(max_length = nothing)]; auto_id = false)
+    @test html_eq(as_ul(p), "<li>Username: <input type=\"text\" name=\"username\" maxlength=\"10\" required></li>" *
+                            "<li>Password: <input type=\"password\" name=\"password\" maxlength=\"10\" required></li>" *
+                            "<li>Address: <input type=\"text\" name=\"address\" required></li>")
+    p = Form([:username => CharField(max_length = 10, widget = Widget(attrs = Dict("maxlength" => 20)))]; auto_id = false)
+    @test html_eq(as_ul(p), "<li>Username: <input type=\"text\" name=\"username\" maxlength=\"10\" required></li>")
+
+    # labels: given, made from the name, without a colon after punctuation, or none
+    p = Form([:username => CharField(max_length = 10, label = "Your username"), :password1 => CharField(max_length = nothing, widget = :password),
+              :password2 => CharField(max_length = nothing, widget = :password, label = "Contraseña (de nuevo)")]; auto_id = false)
+    @test html_eq(as_ul(p), "<li>Your username: <input type=\"text\" name=\"username\" maxlength=\"10\" required></li>" *
+                            "<li>Password1: <input type=\"password\" name=\"password1\" required></li>" *
+                            "<li>Contraseña (de nuevo): <input type=\"password\" name=\"password2\" required></li>")
+    qs = [:q1 => "The first question", :q2 => "What is your name?", :q3 => "The answer to life is:", :q4 => "Answer this question!",
+          :q5 => "The last question. Period."]
+    questions(; kw...) = Form([n => CharField(max_length = nothing, label = l) for (n, l) in qs]; kw...)
+    suffixed(l) = last(l) in ":?.!" ? l : l * ":"
+    @test html_eq(as_p(questions(; auto_id = false)), join(["<p>$(suffixed(l)) <input type=\"text\" name=\"$n\" required></p>" for (n, l) in qs]))
+    @test html_eq(as_p(questions()), join(["<p><label for=\"id_$n\">$(suffixed(l))</label><input type=\"text\" name=\"$n\" id=\"id_$n\" required></p>" for (n, l) in qs]))
+    noname(; kw...) = Form([:username => CharField(max_length = 10, label = ""), :password => CharField(max_length = nothing, widget = :password)]; kw...)
+    @test html_eq(as_ul(noname(; auto_id = false)), "<li> <input type=\"text\" name=\"username\" maxlength=\"10\" required></li>" *
+                                                    "<li>Password: <input type=\"password\" name=\"password\" required></li>")
+    @test html_eq(as_ul(noname()), "<li><input id=\"id_username\" type=\"text\" name=\"username\" maxlength=\"10\" required></li>" *
+                                   "<li><label for=\"id_password\">Password:</label><input type=\"password\" name=\"password\" id=\"id_password\" required></li>")
+end

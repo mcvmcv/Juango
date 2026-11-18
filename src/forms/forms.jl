@@ -170,6 +170,25 @@ end
 
 "Hook for cross-field validation of `@form`-defined forms (dispatch on `Val{:FormName}`)."
 clean_form(f::Form, ::Val) = nothing
+"""
+    Juango.clean_field(form, ::Val{:FormName}, ::Val{:field}, value) -> value
+
+Django's `clean_<field>()`: define a method for a field of a `@form` (or `Form(...; name = ...)`) to
+check or change its cleaned value; return the value to keep, or throw `ValidationError` for the
+field's errors. It runs after the field's own checks, in the order of the fields, so
+`form.cleaned_data` has the fields before it.
+"""
+clean_field(f::Form, ::Val, ::Val, v) = v
+function run_clean_field!(f::Form, fld::Field, v)
+    f.cleaned_data[fld.name] = v
+    try
+        f.cleaned_data[fld.name] = clean_field(f, Val(Symbol(f.name)), Val(fld.name), v)
+    catch e
+        e isa ValidationError || rethrow()
+        delete!(f.cleaned_data, fld.name)
+        foreach(m -> add_error!(f, fld.name, m), reduce(vcat, collect(values(e.errors)); init = String[]))
+    end
+end
 "Hook run by `save!(form)` on the instance before it is saved (dispatch on `Val{:FormName}`)."
 Base.@nospecializeinfer form_save_hook(f::Form, ::Val, @nospecialize(obj)) = nothing
 
@@ -522,7 +541,7 @@ function is_valid(f::Form)
         if fld.kind in FILE_KINDS
             v, errs = clean_file_field(f, fld)
             foreach(e -> add_error!(f, fld.name, e), errs)
-            isempty(errs) && (f.cleaned_data[fld.name] = v)
+            isempty(errs) && run_clean_field!(f, fld, v)
             continue
         end
         v, err = to_julia(fld, raw_value(f, fld))
@@ -540,12 +559,12 @@ function is_valid(f::Form)
                                                    Dict("model" => uppercasefirst(string(modelmeta(f.model).verbose_name)), "field" => label(fld))))
         end
         foreach(e -> add_error!(f, fld.name, e), errs)
-        isempty(errs) && (f.cleaned_data[fld.name] = v)
+        isempty(errs) && run_clean_field!(f, fld, v)
     end
     f.model !== nothing && isempty(f.errors) && model_form_constraint_errors!(f)
     f.model !== nothing && model_form_clean!(f)
     f.clean === nothing || form_clean_hook(f)
-    clean_form(f, Val(Symbol(f.name)))
+    form_clean_hook(f, ff -> clean_form(ff, Val(Symbol(ff.name))))
     f.validated = true
     isempty(f.errors)
 end
@@ -593,10 +612,10 @@ function model_form_clean!(f::Form)
     end
 end
 
-"A form's `clean` function; a `ValidationError` it throws becomes form errors."
-function form_clean_hook(f::Form)
+"A form's `clean` function (or its `clean_form` method); a `ValidationError` it throws becomes form errors."
+function form_clean_hook(f::Form, fn = f.clean)
     try
-        f.clean(f)
+        fn(f)
     catch e
         e isa ValidationError || rethrow()
         names = Set(fld.name for fld in f.fields)
@@ -606,8 +625,27 @@ function form_clean_hook(f::Form)
     end
 end
 
-"Attach an error to a field (or to the whole form with `field=nothing`)."
+"""
+    add_error!(form, field, error)
+
+Attach an error to a field (or to the whole form with `field = nothing`), as Django's
+`Form.add_error`: `error` is a message or a `ValidationError`, whose messages for other fields
+go to those fields (then `field` must be `nothing`).
+"""
 function add_error!(f::Form, field, msg)
+    if msg isa ValidationError
+        if any(k -> k !== :__all__, keys(msg.errors))
+            field === nothing || throw(ArgumentError("The argument `field` must be `None` when the `error` argument is a dictionary."))
+            for (k, ms) in msg.errors, m in ms
+                add_error!(f, k === :__all__ ? nothing : k, m)
+            end
+        else
+            foreach(m -> add_error!(f, field, m), get(msg.errors, :__all__, String[]))
+        end
+        return nothing
+    end
+    field === nothing || any(x -> x.name === Symbol(field), f.fields) ||
+        throw(ArgumentError("'$(f.name)' has no field named '$field'."))
     k = field === nothing ? :__all__ : Symbol(field)
     push!(get!(f.errors, k, String[]), string(msg))
     delete!(f.cleaned_data, k)
@@ -615,6 +653,14 @@ function add_error!(f::Form, field, msg)
 end
 
 cleaned_data(f::Form) = f.cleaned_data
+
+"""
+    has_error(form, field = nothing)
+
+Whether the field (`nothing`: the form itself) has errors, validating a bound form first
+(Django's `Form.has_error`; Juango's errors don't keep their codes yet, #234).
+"""
+has_error(f::Form, field = nothing) = !isempty(get(ensure_validated(f).errors, field === nothing ? :__all__ : Symbol(field), String[]))
 
 "The value a field starts with: the form's initial data, else the field's default."
 function initial_for(f::Form, fld::Field)
@@ -942,6 +988,7 @@ function widget_html(bf::BoundField)
     localized = t == "number" && fld.related isa NamedTuple && get(fld.related, :localize, false)
     localized && (t = "text")
     extra = fld.max_length !== nothing && t in ("text", "email", "url", "password") ? " maxlength=\"$(fld.max_length)\"" : ""
+    isempty(extra) || (attrs = replace(attrs, r" maxlength=\"[^\"]*\"" => ""))         # (the field's max_length wins, as Django's)
     # the limits the validators set (min_length, min_value, max_value, step_size), as Django's widget_attrs
     lims = Dict{Symbol,String}()
     for v in fld.validators
@@ -1204,9 +1251,10 @@ A `<legend>` with the field's label, for a radio or checkbox group in a `<fields
 legend_tag(bf::BoundField) = "<legend>" * escape_html(string(label(bf.field))) * "</legend>"
 
 # (a radio or checkbox group's label points at no one input, as Django's)
-label_tag(bf::BoundField) = isempty(html_id(bf.form, bf.field)) ? escape_html(label(bf.field)) * ":" :
-                            uses_fieldset(bf.field) ? "<label>" * escape_html(label(bf.field)) * ":</label>" :
-                            "<label for=\"" * escape_html(label_id(bf)) * "\">" * escape_html(label(bf.field)) * ":</label>"
+label_tag(bf::BoundField) = form_option(bf.field, :no_label) ? "" :
+                            isempty(html_id(bf.form, bf.field)) ? label_text(bf.field) :
+                            uses_fieldset(bf.field) ? "<label>" * label_text(bf.field) * "</label>" :
+                            "<label for=\"" * escape_html(label_id(bf)) * "\">" * label_text(bf.field) * "</label>"
 """
 The field rendered with another kind of widget, without the widget's own attributes (Django's
 `BoundField.as_text()`, `as_textarea()`, `as_hidden()`; `{{ form.name.as_hidden }}` in templates).
@@ -1227,6 +1275,11 @@ function multiple_hidden_html(bf::BoundField)
     join(["<input type=\"hidden\" name=\"" * escape_html(html_name(f, fld)) * "\" value=\"" * escape_html(string(v isa Model ? v.pk : v)) * "\"" *
           (isempty(id) ? "" : id_attr(id * "_$(i - 1)")) * ">" for (i, v) in enumerate(vals)])
 end
+
+"A field's label as HTML: escaped, unless it was given as a `SafeString`."
+label_html(fld::Field) = form_option(fld, :safe_label) ? label(fld) : escape_html(label(fld))
+"The label with the form's suffix: a colon, unless it ends in punctuation already (as Django's)."
+label_text(fld::Field) = (l = label_html(fld); isempty(l) || last(rstrip(l)) in (':', '?', '.', '!') ? l : l * ":")
 
 "Whether a field's inputs are a group, shown in a `<fieldset>` (radios, checkboxes, a multi-value field)."
 uses_fieldset(fld::Field) = widget_type(fld) in ("radioselect", "checkboxselectmultiple", "multi")
@@ -1257,7 +1310,7 @@ function field_row(bf::BoundField; tag = "p")
     errs = field_errors_html(bf)
     if tag == "div"            # Django's div.html: label (a group's legend), help text, errors, then the widget
         if uses_fieldset(fld)
-            lg = isempty(html_id(bf.form, fld)) ? escape_html(label(fld)) * ":" : "<legend>" * escape_html(label(fld)) * ":</legend>"
+            lg = form_option(fld, :no_label) ? "" : isempty(html_id(bf.form, fld)) ? label_text(fld) : "<legend>" * label_text(fld) * "</legend>"
             return "<div><fieldset>" * lg * help_html(bf, "div") * errs * widget_html(bf) * "</fieldset></div>"
         end
         return "<div>" * label_tag(bf) * help_html(bf, "div") * errs * widget_html(bf) * "</div>"

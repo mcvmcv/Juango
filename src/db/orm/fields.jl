@@ -64,7 +64,7 @@ mutable struct Field
     primary_key::Bool                     # the model's primary key, instead of an automatic id (#221)
     through_fields::Union{Nothing,Tuple{Symbol,Symbol}}   # ManyToManyField: the through model's keys to the owner and the target
     db_constraint::Bool                   # ForeignKey: create the FOREIGN KEY constraint (false: the relation without one)
-    form::Any                             # form fields: (strip, empty_value, disabled) when any isn't the default, else nothing
+    form::Union{Nothing,Dict{Symbol,Any}}  # form fields' options that aren't the default (strip, empty_value, disabled, safe_label, no_label)
     att::Symbol         # attname for the name in `attfor` (see `attname`)
     col::String         # string(att): the column name
     attfor::Symbol      # the name `att` and `col` were worked out for
@@ -283,7 +283,13 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
     step_size === nothing || pushfirst!(validators, StepValueValidator(step_size; offset = min_value))
     max_value === nothing || pushfirst!(validators, MaxValueValidator(max_value))
     min_value === nothing || pushfirst!(validators, MinValueValidator(min_value))
-    label === nothing || (verbose_name = string(label))
+    fopts = Dict{Symbol,Any}()
+    strip || (fopts[:strip] = false)
+    empty_value === NO_DEFAULT || (fopts[:empty_value] = empty_value)
+    disabled && (fopts[:disabled] = true)
+    label isa SafeString && (fopts[:safe_label] = true)          # (a label marked safe is shown as HTML, as Django's mark_safe)
+    label isa AbstractString && isempty(label) && (fopts[:no_label] = true)      # (label = "": none at all, as Django's)
+    label === nothing || (verbose_name = label isa SafeString ? label.s : string(label))
     if auto_now || auto_now_add
         editable = false
         blank = true
@@ -303,11 +309,12 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
           db_collation === nothing ? nothing : string(db_collation), db_column === nothing ? nothing : string(db_column),
           to_field === nothing || to_field in (:id, :pk, "id", "pk") ? nothing : Symbol(to_field),
           primary_key, through_fields === nothing ? nothing : (Symbol(through_fields[1]), Symbol(through_fields[2])),
-          db_constraint, strip && empty_value === NO_DEFAULT && !disabled ? nothing : (strip = strip, empty_value = empty_value, disabled = disabled),
+          db_constraint, isempty(fopts) ? nothing : fopts,
           field_att(kind, :_), string(field_att(kind, :_)), :_)
 end
-"A form field's option (`:strip`, `:empty_value` or `:disabled`), or its default."
-form_option(f::Field, k::Symbol) = f.form === nothing ? (k === :strip ? true : k === :disabled ? false : NO_DEFAULT) : getfield(f.form, k)
+"A form field's option (`:strip`, `:empty_value`, `:disabled`, `:safe_label`, `:no_label`), or its default."
+form_option(f::Field, k::Symbol) = (d = k === :strip ? true : k === :empty_value ? NO_DEFAULT : false;
+                                    f.form === nothing ? d : get(f.form, k, d))
 
 """
     GeneratedField(; expression, output_field, db_persist = true)
