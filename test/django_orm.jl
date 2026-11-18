@@ -7516,3 +7516,112 @@ end
   end
 end
 
+# --- tests/transactions -----------------------------------------------------------------------------------
+@model struct DtxReporter
+    first_name = CharField(max_length = 30)
+    last_name = CharField(max_length = 30)
+    email = EmailField()
+    Meta(table = "dtx_reporter", ordering = [:first_name, :last_name])
+end
+redirect_stdout(devnull) do
+    ms = [DtxReporter]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django transactions: atomic, nested and merged blocks, rollback marks, durable blocks" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    oops(msg = "Oops") = error(msg)
+    names() = [(r.first_name, r.last_name) for r in objects(DtxReporter)]
+    reset() = delete!(objects(DtxReporter))
+    R(; kw...) = create(DtxReporter; first_name = "", last_name = "", email = "", kw...)
+    # AtomicTests: commit and rollback, nested (savepoints) and merged (savepoint = false)
+    atomic(() -> R(first_name = "Tintin")); @test names() == [("Tintin", "")]; reset()
+    @test tr(() -> atomic(() -> (R(first_name = "Haddock"); oops()))) isa ErrorException && isempty(names())
+    for sp in (true, false)
+        atomic(() -> (R(first_name = "Tintin"); atomic(() -> R(first_name = "Archibald", last_name = "Haddock"); savepoint = sp)))
+        @test names() == [("Archibald", "Haddock"), ("Tintin", "")]; reset()
+        # the inner block fails: with a savepoint only its work is undone; merged, the whole block is
+        atomic() do
+            R(first_name = "Tintin")
+            @test tr(() -> atomic(() -> (R(first_name = "Haddock"); oops()); savepoint = sp)) isa ErrorException
+        end
+        @test names() == (sp ? [("Tintin", "")] : []); reset()
+        # the outer block fails: everything is undone
+        @test tr(() -> atomic(() -> (R(last_name = "Tintin"); atomic(() -> R(last_name = "Haddock"); savepoint = sp); oops()))) isa ErrorException
+        @test isempty(names())
+        @test tr(() -> atomic(() -> (R(last_name = "Tintin"); tr(() -> atomic(() -> (R(first_name = "Haddock"); oops()); savepoint = sp)); oops()))) isa ErrorException
+        @test isempty(names())
+    end
+    # force a rollback without an exception
+    atomic() do
+        R(first_name = "Tintin"); @test get_rollback() == false; set_rollback!(true)
+    end
+    @test isempty(names())
+    # prevent a rollback: a failed merged block marks the outer one; unmark it and go back to a savepoint
+    atomic() do
+        R(first_name = "Tintin"); sid = savepoint()
+        @test tr(() -> atomic(() -> Juango.execute("SELECT no_such_col FROM dtx_reporter"); savepoint = false)) isa Exception
+        @test get_rollback() == true
+        set_rollback!(false); savepoint_rollback(sid)
+    end
+    @test names() == [("Tintin", "")]; reset()
+    # AtomicMergeTests: merged blocks share the outer block's fate
+    atomic() do
+        R(first_name = "Tintin")
+        atomic(savepoint = false) do
+            R(first_name = "Archibald", last_name = "Haddock")
+            @test tr(() -> atomic(() -> (R(first_name = "Calculus"); oops()); savepoint = false)) isa ErrorException
+            @test get_rollback(); set_rollback!(false); @test count(objects(DtxReporter)) == 3; set_rollback!(true)
+        end
+        @test get_rollback(); set_rollback!(false); @test count(objects(DtxReporter)) == 3; set_rollback!(true)
+    end
+    @test isempty(names())
+    atomic() do
+        R(first_name = "Tintin")
+        atomic() do
+            R(first_name = "Archibald", last_name = "Haddock")
+            @test tr(() -> atomic(() -> (R(first_name = "Calculus"); oops()); savepoint = false)) isa ErrorException
+            @test get_rollback(); set_rollback!(false); @test count(objects(DtxReporter)) == 3; set_rollback!(true)
+        end
+        @test count(objects(DtxReporter)) == 1
+    end
+    @test names() == [("Tintin", "")]; reset()
+    # after an error inside a block, no queries until it ends (the error is the cause)
+    r1 = R(first_name = "Archibald", last_name = "Haddock")
+    atomic() do
+        r2 = DtxReporter(first_name = "Cuthbert", last_name = "Calculus", email = "", id = r1.id)
+        @test tr(() -> save!(r2; force_insert = true)) isa Juango.IntegrityError
+        e = tr(() -> save!(r2; force_update = true))
+        @test e isa Juango.TransactionManagementError &&
+              occursin("An error occurred in the current transaction. You can't execute queries until the end of the 'atomic' block.", e.msg)
+    end
+    @test get(DtxReporter; pk = r1.pk).last_name == "Haddock"
+    # unmarked, the block goes on (where the database allows it)
+    if !IS_POSTGRES
+        atomic() do
+            r2 = DtxReporter(first_name = "Cuthbert", last_name = "Calculus", email = "", id = r1.id)
+            @test tr(() -> save!(r2; force_insert = true)) isa Juango.IntegrityError
+            set_rollback!(false); save!(r2; force_update = true)
+        end
+        @test get(DtxReporter; pk = r1.pk).last_name == "Calculus"
+    end
+    reset()
+    # (AtomicErrorsTests' set_autocommit, commit and rollback, and the tests without autocommit: #231)
+    atomic(() -> @test get_autocommit() == false); @test get_autocommit()
+    # DurableTests
+    atomic(() -> R(first_name = "Tintin"); durable = true); @test names() == [("Tintin", "")]; reset()
+    atomic(durable = true) do
+        r1 = R(first_name = "Tintin")
+        atomic(() -> R(first_name = "Archibald", last_name = "Haddock"))
+    end
+    @test length(names()) == 2; reset()
+    e = tr(() -> atomic(() -> atomic(() -> nothing; durable = true); durable = true))
+    @test e isa Juango.TransactionManagementError && occursin("A durable atomic block cannot be nested within another atomic block.", e.msg)
+    e = tr(() -> atomic(() -> atomic(() -> nothing; durable = true)))
+    @test e isa Juango.TransactionManagementError
+    atomic(() -> R(first_name = "Tintin"); durable = true); atomic(() -> R(first_name = "Archibald"); durable = true)
+    @test length(names()) == 2; reset()
+  end
+end
+

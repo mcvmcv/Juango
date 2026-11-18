@@ -206,10 +206,10 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
         # only the tables with a listed field; the row must be there
         tables = [M for M in chain_ if any(f -> attname(f) in only, modelmeta(M).fields)]
         # one table: one UPDATE, no transaction around it (as Django)
-        length(tables) == 1 ? update_columns!(tables[1], data, only) :
+        length(tables) == 1 ? mark_for_rollback_on_error(() -> update_columns!(tables[1], data, only)) :
             atomic(() -> foreach(M -> update_columns!(M, data, only), tables); savepoint = false)
     else
-        length(chain_) == 1 ? save_table!(chain_[1], data, true, fresh) :
+        length(chain_) == 1 ? mark_for_rollback_on_error(() -> save_table!(chain_[1], data, true, fresh)) :
             # a new object: its parent row is inserted first, then each child table's row straight after (an
             # INSERT, not an UPDATE that finds nothing, as Django)
             atomic(() -> foreach(M -> save_table!(M, data, M === chain_[1], fresh || (created && M !== chain_[1])), chain_); savepoint = false)

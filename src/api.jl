@@ -53,8 +53,8 @@ export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_lis
        clean_fields, validate_unique, validate_constraints, get_next_by, get_previous_by, bulk_create,
        bulk_update, add!, remove!, set!, clear!, through, atomic, advisory_lock, swap_user_model, with_nplusone_allowed, deploy_task!, deploy_waiting, run_deploy_tasks, on_commit, using_db, set_rollback!, get_rollback,
        get_order, set_order!, get_next_in_order, get_previous_in_order,
-       get_autocommit, savepoint, savepoint_commit, savepoint_rollback, execute_wrapper,
-       DoesNotExist, MultipleObjectsReturned, ProtectedError, RestrictedError, protected_message, SET, IntegrityError, DatabaseError, ValidationError, TransactionManagementError
+       get_autocommit, savepoint, savepoint_commit, savepoint_rollback, mark_for_rollback_on_error, execute_wrapper,
+       DoesNotExist, MultipleObjectsReturned, ProtectedError, RestrictedError, protected_message, SET, IntegrityError, DatabaseError, ValidationError, TransactionManagementError, NotSupportedError
 export run_async, sync_to_async, aget, acreate, acount, aexists, afirst, alast, acollect, aget_or_create,
        aupdate_or_create, abulk_create, abulk_update, aaggregate, ain_bulk, aupdate!, adelete!, asave!,
        arefresh!, aauthenticate, aiterator

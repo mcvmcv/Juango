@@ -780,6 +780,7 @@ function with_execute_wrappers_off(g)
 end
 
 function run_driver(f, sql, params)
+    check_not_broken()
     b = backend()
     supports_pooling(b) || return lock(() -> run_on(f, b, connection(), sql, params), DB_LOCK)
     st = task_db()
@@ -884,14 +885,7 @@ transaction.
 """
 function atomic(f; db = nothing, durable::Bool = false, savepoint::Bool = true)
     db === nothing || return with_db(() -> atomic(f; durable = durable, savepoint = savepoint), db)
-    if !savepoint && !durable && commit_holder().depth > 0
-        return try
-            f()
-        catch
-            set_rollback!(true)
-            rethrow()
-        end
-    end
+    !savepoint && !durable && commit_holder().depth > 0 && return mark_for_rollback_on_error(f)
     st0 = db_state()
     b = st0.backend
     supports_pooling(b) || return lock(DB_LOCK) do         # (the depth is shared: check it holding the lock)
@@ -930,7 +924,8 @@ Base.@nospecializeinfer function transaction(@nospecialize(f), b, h::Union{Datab
     try
         r = f()
         h.depth = depth
-        if take_rollback_mark!(depth + 1)                  # set_rollback!(true): undo without an exception
+        broken = take_broken!(depth + 1)                   # (a failed write: rolled back like set_rollback!(true))
+        if take_rollback_mark!(depth + 1) | broken          # set_rollback!(true): undo without an exception
             filter!(k -> k.level <= depth, h.hooks)
             execute(depth == 0 ? rollback_sql(b) : rollback_savepoint_sql(b, sp))
             depth == 0 || execute(release_savepoint_sql(b, sp))
@@ -940,6 +935,7 @@ Base.@nospecializeinfer function transaction(@nospecialize(f), b, h::Union{Datab
         r
     catch
         take_rollback_mark!(depth + 1)
+        take_broken!(depth + 1)
         h.depth = depth
         filter!(k -> k.level <= depth, h.hooks)            # callbacks of the rolled-back block
         try
@@ -962,6 +958,45 @@ function take_rollback_mark!(level::Int)
     s === nothing ? false : level in s ? (delete!(s, level); true) : false
 end
 
+# A write that failed inside an atomic block (mark_for_rollback_on_error) breaks it: no more queries in that
+# block until it ends (rolled back) or set_rollback!(false), as Django's needs_rollback after an error.
+broken_levels() = get!(() -> Dict{String,Int}(), task_local_storage(), :juango_broken_levels)::Dict{String,Int}
+function take_broken!(level::Int)
+    bl = get(task_local_storage(), :juango_broken_levels, nothing)
+    bl === nothing && return false
+    get(bl, current_alias(), 0) == level ? (delete!(bl, current_alias()); true) : false
+end
+function check_not_broken()
+    bl = get(task_local_storage(), :juango_broken_levels, nothing)
+    (bl === nothing || isempty(bl)) && return
+    l = get(bl, current_alias(), 0)
+    l > 0 && l <= commit_holder().depth &&
+        throw(TransactionManagementError("An error occurred in the current transaction. You can't execute queries until the end of the 'atomic' block."))
+end
+
+"""
+    mark_for_rollback_on_error(f; db = nothing)
+
+Run `f()`; if it throws inside an atomic block, mark that block to roll back and refuse further
+queries in it until it ends (Django's `transaction.mark_for_rollback_on_error`). `save!` runs its
+write this way, so an `IntegrityError` caught inside a block doesn't let the block go on as if
+nothing happened; `set_rollback!(false)` takes the mark off where the database allows it.
+"""
+function mark_for_rollback_on_error(f; db = nothing)
+    db === nothing || return with_db(() -> mark_for_rollback_on_error(f), db)
+    try
+        f()
+    catch
+        d = commit_holder().depth
+        if d > 0
+            set_rollback!(true)
+            bl = broken_levels()
+            haskey(bl, current_alias()) || (bl[current_alias()] = d)
+        end
+        rethrow()
+    end
+end
+
 """
     set_rollback!(flag = true; db = nothing)    get_rollback(; db = nothing) -> Bool
 
@@ -975,6 +1010,7 @@ function set_rollback!(flag::Bool = true; db = nothing)
     d == 0 && throw(TransactionManagementError("The rollback flag doesn't work outside of an atomic block."))
     s = get!(() -> Set{Int}(), rollback_marks(), current_alias())
     flag ? push!(s, d) : delete!(s, d)
+    flag || take_broken!(d)
     nothing
 end
 function get_rollback(; db = nothing)
