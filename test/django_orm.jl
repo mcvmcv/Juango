@@ -6638,3 +6638,254 @@ end
   end
 end
 
+# --- tests/annotations ------------------------------------------------------------------------------------
+@model struct DanEmployee
+    first_name = CharField(max_length = 20)
+    manager = BooleanField(default = false)
+    last_name = CharField(max_length = 20)
+    store = ForeignKey(DaStore; on_delete = :CASCADE, related_name = :employees)
+    age = IntegerField()
+    salary = DecimalField(max_digits = 8, decimal_places = 2)
+    Meta(table = "dan_employee")
+end
+@model struct DanCompany
+    name = CharField(max_length = 200)
+    motto = CharField(max_length = 200, null = true, blank = true)
+    ticker_name = CharField(max_length = 10, null = true, blank = true)
+    description = CharField(max_length = 200, null = true, blank = true)
+    Meta(table = "dan_company")
+end
+@model struct DanTicket
+    active_at = DateTimeField()
+    duration = DurationField()
+    Meta(table = "dan_ticket")
+end
+redirect_stdout(devnull) do
+    ms = [DanEmployee, DanCompany, DanTicket]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django annotations: NonAggregateAnnotationTestCase (part 1)" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    d = da_data(); b = d.b; s = d.s
+    books(qs = objects(DaBook)) = collect(qs)
+    # values, F, a joined field, a transform through a key
+    @test all(x -> x.is_book == 1, books(annotate(objects(DaBook); is_book = Value(1))))
+    @test all(x -> x.another_rating == x.rating, books(annotate(objects(DaBook); another_rating = F(:rating))))
+    @test all(x -> x.num_awards == x.publisher.num_awards, books(annotate(select_related(objects(DaBook), :publisher); num_awards = F(:publisher__num_awards))))
+    bulk_create([DanEmployee(first_name = "John", last_name = "Doe", age = 18, store = s[1], salary = 15000),
+                 DanEmployee(first_name = "Jane", last_name = "Jones", age = 30, store = s[2], salary = 30000),
+                 DanEmployee(first_name = "Jo", last_name = "Smith", age = 55, store = s[3], salary = 50000)])
+    @test all(e -> e.store_opened_year == Dates.year(e.store.original_opening), collect(annotate(objects(DanEmployee); store_opened_year = F(:store__original_opening__year))))
+    @test Set(values_list(annotate(objects(DaBook); floor_price = Floor(:price)), :pk, :floor_price)) ==
+          Set([(b[1].pk, 30), (b[2].pk, 23), (b[3].pk, 29), (b[4].pk, 29), (b[5].pk, 82), (b[6].pk, 75)])
+    create(DanCompany; name = " Django Software Foundation  "); create(DanCompany; name = "Yahoo")
+    @test Set((r[:name], r[:length]) for r in values(annotate(objects(DanCompany); length = Length(Trim(:name))), :name, :length)) ==
+          Set([(" Django Software Foundation  ", 26), ("Yahoo", 5)])
+    # mixed types through ExpressionWrapper
+    create(DanTicket; active_at = DateTime(2015, 3, 20, 14), duration = Hour(1))
+    t = first(annotate(objects(DanTicket); expires = ExpressionWrapper(F(:active_at) + F(:duration); output = :datetime)))
+    @test t.expires == DateTime(2015, 3, 20, 15)
+    bk = get(annotate(objects(DaBook); combined = ExpressionWrapper(F(:pages) + F(:rating); output = :int)); isbn = b[1].isbn)
+    @test bk.combined == Int(floor(b[1].pages + b[1].rating))
+    # Q as a value: empty and full conditions, wrapped, with aggregates
+    sel = collect(annotate(objects(DaBook); selected = ExpressionWrapper(Q(pk__in = Int[]); output = :bool)))
+    @test length(sel) == 6 && all(x -> !x.selected, sel)
+    sel = collect(annotate(objects(DaBook); selected = ExpressionWrapper(Q(pk__in = none(DaBook)); output = :bool)))
+    @test length(sel) == 6 && all(x -> !x.selected, sel)
+    sel = collect(annotate(objects(DaBook); selected = ExpressionWrapper(!Q(pk__in = Int[]); output = :bool)))
+    @test length(sel) == 6 && all(x -> x.selected, sel)
+    sel = collect(annotate(objects(DaBook); selected = Coalesce(!Q(pk__in = Int[]), Value(true))))
+    @test length(sel) == 6 && all(x -> x.selected == true || x.selected == 1, sel)
+    @test [x.rating_count for x in annotate(filter(DaBook; isbn = "159059725"); selected = ExpressionWrapper(!Q(pk__in = Int[]); output = :bool), rating_count = Count(:rating))] == [1]
+    @test aggregate(annotate(objects(DaBook); selected = ExpressionWrapper(!Q(pk__in = Int[]); output = :bool)); selected__sum = Sum(Cast(:selected, :int)))[:selected__sum] == 6
+    @test first(annotate(objects(DaAuthor); empty = Subquery(none(values(objects(DaAuthor), :id))))).empty === nothing
+    @test all(x -> x.is_book == 1 && x.rating_count == 1, books(annotate(objects(DaBook); is_book = Value(1), rating_count = Count(:rating))))
+    x = first(annotate(objects(DaBook); combined = ExpressionWrapper(Value(3) * Value(4); output = :int), rating_count = Count(:rating)))
+    @test x.combined == 12 && x.rating_count == 1
+    x = first(annotate(filter(DaBook; isbn = "159059725"); combined = ExpressionWrapper(F(:price) * F(:pages); output = :float), rating_count = Count(:rating)))
+    @test x.combined == 13410.0 && x.rating_count == 1
+    x = first(annotate(filter(DaBook; isbn = "159059725"); isnull_pubdate = ExpressionWrapper(Q(pubdate__isnull = true); output = :bool), rating_count = Count(:rating)))
+    @test x.isnull_pubdate == false && x.rating_count == 1
+    g = values(annotate(values(annotate(objects(DaAuthor); under_40 = ExpressionWrapper(Q(age__lt = 40); output = :bool)), :under_40); count_id = Count(:id)), :under_40, :count_id)
+    @test Set((Bool(r[:under_40]), r[:count_id]) for r in g) == Set([(false, 3), (true, 6)])
+    @test aggregate(annotate(objects(DaAuthor); other_age = F(:age)); s = Sum(:other_age))[:s] == aggregate(objects(DaAuthor); s = Sum(:age))[:s]
+    # filtering on annotations
+    @test all(x -> x.is_book == 1, books(filter(annotate(objects(DaBook); is_book = Value(1)); is_book = 1)))
+    @test all(x -> x.other_rating == 3.5, books(filter(annotate(objects(DaBook); other_rating = F(:rating)); other_rating = 3.5)))
+    @test all(x -> x.other_rating == x.rating, books(filter(annotate(objects(DaBook); other_rating = F(:rating)); other_rating = F(:rating))))
+    @test all(x -> x.sum_rating == x.rating, books(filter(annotate(objects(DaBook); sum_rating = Sum(:rating)); sum_rating = F(:sum_rating))))
+    @test tr(() -> collect(filter(annotate(objects(DaBook); sum_rating = Sum(:rating)); sum_rating = F(:nope)))) isa Exception
+    @test tr(() -> collect(values_list(annotate(objects(DaBook); annotation = Value(1)), :annotation_typo))) isa Exception
+    @test tr(() -> collect(values(values(annotate(objects(DaBook); author_name = F(:authors__name), author_id = F(:authors__id)), :author_name), :author_id))) isa Exception
+    # a decimal annotation; filtering on one; commutative combinations
+    sal = Juango.Decimal("0.01")
+    create(DanEmployee; first_name = "Max", last_name = "Paine", store = first(objects(DaStore)), age = 23, salary = sal)
+    @test get(annotate(objects(DanEmployee); new_salary = F(:salary) / 10); first_name = "Max").new_salary == sal / 10
+  end
+end
+
+@model struct DanDepartmentStore <: DaStore
+    chain = CharField(max_length = 255)
+    Meta(table = "dan_departmentstore")
+end
+redirect_stdout(devnull) do
+    ms = [DanDepartmentStore]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django annotations: NonAggregateAnnotationTestCase (part 2)" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    d = da_data(); b = d.b; p = d.p
+    # commutative arithmetic, with nothing too
+    @test get(annotate(objects(DaBook); r = F(:rating) + 2); pk = b[1].pk).r == get(annotate(objects(DaBook); r = 2 + F(:rating)); pk = b[1].pk).r
+    @test get(annotate(objects(DaBook); r = F(:rating) + Value(nothing)); pk = b[1].pk).r === nothing
+    @test get(annotate(objects(DaBook); r = Value(nothing) + F(:rating)); pk = b[1].pk).r === nothing
+    # update from an annotation
+    pre = get(DaBook; pk = b[2].pk)
+    update!(annotate(objects(DaBook); other_rating = F(:rating) - 1); rating = F(:other_rating))
+    @test get(DaBook; pk = b[2].pk).rating == pre.rating - 1
+    update!(objects(DaBook); rating = F(:rating) + 1)
+    # through an m2m and a reverse m2m
+    bs = collect(order_by(filter(annotate(objects(DaBook); author_age = F(:authors__age)); pk = b[1].pk), "author_age"))
+    @test bs[1].author_age == 34 && bs[2].author_age == 35
+    @test [x.store_name for x in order_by(filter(annotate(objects(DaBook); store_name = F(:store__name)); name = "Practical Django Projects"), "store_name")] ==
+          ["Amazon.com", "Books.com", "Mamma and Pappa's Books"]
+    # values() with annotations: referring to values, adding to them, transforms of them
+    qs = annotate(values(objects(DaBook), :rating); other_rating = F(:rating) - 1)
+    bk = get(qs; pk = b[1].pk); @test bk[:rating] - 1 == bk[:other_rating]
+    bk = get(qs; other_rating = 4); @test bk[:other_rating] == 4
+    bk = get(annotate(qs; other_isbn = F(:isbn)); other_rating = 4); @test bk[:other_rating] == 4 && bk[:other_isbn] == "155860191"
+    @test get(values(annotate(objects(DaBook); constant = ExpressionWrapper(Value(Date(2026, 1, 1)); output = :date)), :constant__year); pk = b[1].pk)[:constant__year] == 2026
+    # (Django's test registers Length as a lookup on CharField first; so does this one)
+    Juango.register_transform(lhs -> "LENGTH($lhs)", "length"; kinds = [:char], output = :int)
+    @test get(values_list(annotate(objects(DaBook); publisher_name = F(:publisher__name)), :publisher_name__length; flat = true); pk = b[1].pk) == length(p[1].name)
+    g = annotate(values(annotate(filter(DaBook; pk = b[1].pk); published = TruncMonth(:pubdate)), :published__year); count = Count(:pk))
+    @test collect(values_list(g, :published__year, :count)) == [(Dates.year(b[1].pubdate), 1)]
+    @test collect(values(values(annotate(filter(DaBook; pk = b[1].pk); published = TruncMonth(:pubdate)), :published__year), :published__year)) ==
+          [Dict(:published__year => Dates.year(b[1].pubdate))]
+    @test tr(() -> collect(values(annotate(objects(DaBook); published = TruncMonth(:pubdate)), :published__not_a_transform))) isa Exception
+    @test collect(keys(get(values(annotate(objects(DaBook); other_rating = F(:rating) - 1), :other_rating, :rating); pk = b[1].pk))) |> Set == Set([:other_rating, :rating])
+    for r in filter(annotate(values(objects(DaPublisher), :id, :book__rating); total = Sum(:book__rating)); pk = p[1].pk)
+        @test r[:book__rating] == r[:total]
+    end
+    # a deferred field referenced by an annotation; deferring the annotation is refused
+    qs = annotate(Juango.defer(objects(DaBook), :rating); other_rating = F(:rating) - 1)
+    r, n = nq(() -> (x = get(qs; other_rating = 4); (x.rating, x.other_rating))); @test r == (5, 4) && n == 2
+    @test tr(() -> get(Juango.defer(qs, :other_rating); other_rating = 4)) isa Exception
+    # a multi-table child's inherited and own fields, and its m2m, as annotations
+    dst = create(DanDepartmentStore; name = "Angus & Robinson", original_opening = DateTime(2014, 3, 8), friday_night_closing = Time(21), chain = "Westfield")
+    for x in filter(DaBook; rating__gt = 4); add!(dst.books, x); end
+    q = filter(order_by(annotate(objects(DanDepartmentStore); other_name = F(:name), other_chain = F(:chain), is_open = Value(true), book_isbn = F(:books__isbn)), "book_isbn"); chain = "Westfield")
+    @test [(x.other_name, x.other_chain, Bool(x.is_open), x.book_isbn) for x in q] ==
+          [("Angus & Robinson", "Westfield", true, "155860191"), ("Angus & Robinson", "Westfield", true, "159059725")]
+    @test first(annotate(objects(DaBook); no_value = ExpressionWrapper(Value(nothing); output = :int))).no_value === nothing
+    # ordering by an annotation and by an aggregate
+    @test [a.other_age for a in order_by(annotate(objects(DaAuthor); other_age = F(:age)), "other_age")] == [25, 29, 29, 34, 35, 37, 45, 46, 57]
+    @test [(r[:age], r[:age_count]) for r in order_by(annotate(values(objects(DaAuthor), :age); age_count = Count(:age)), "age_count", "age")] ==
+          [(25, 1), (34, 1), (35, 1), (37, 1), (45, 1), (46, 1), (57, 1), (29, 2)]
+    # raw SQL over an inherited field
+    @test_broken collect(values_list(annotate(objects(DanDepartmentStore); annotation = RawSQL("name", Any[])), :annotation; flat = true)) == ["Angus & Robinson"]   # (a multi-table child's inherited column in raw SQL: its parent table isn't joined for values())
+  end
+end
+
+@testset "django annotations: NonAggregateAnnotationTestCase (part 3)" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    d = da_data(); b = d.b; p = d.p; a = d.a
+    # boolean values; an annotation inside an aggregate grouped by values()
+    for x in annotate(objects(DaBook); is_book = ExpressionWrapper(Value(true); output = :bool), is_pony = ExpressionWrapper(Value(false); output = :bool),
+                      is_none = ExpressionWrapper(Value(nothing); output = :bool))
+        @test x.is_book === true && x.is_pony === false && x.is_none === nothing
+    end
+    qs = order_by(annotate(values(annotate(objects(DaPublisher); multiplier = Value(3)), :name); multiplied_value_sum = Sum(F(:multiplier) * F(:num_awards))))
+    @test Set((r[:name], r[:multiplied_value_sum]) for r in qs) ==
+          Set([("Apress", 9), ("Jonno's House of Books", 0), ("Morgan Kaufmann", 27), ("Prentice Hall", 21), ("Sams", 3)])
+    # an annotation must be an expression
+    # (Django refuses annotate(is_book = true); Juango takes a literal as Value(true))
+    # chained filters and annotations through an m2m each use their own join
+    qs = values(annotate(filter(annotate(filter(DaAuthor; name = "Adrian Holovaty", friends__age = 35); jacob_name = F(:friends__name)); friends__age = 29);
+                         james_name = F(:friends__name)), :jacob_name, :james_name)
+    @test collect(qs) == [Dict(:jacob_name => "Jacob Kaplan-Moss", :james_name => "James Bennett")]
+    # filtering on a subquery; annotations and aliases inside subqueries
+    long_books = values(annotate(values(filter(DaBook; publisher = OuterRef(:pk), pages__gt = 400), :publisher); count = Count(:pk)), :count)[1:1]
+    q = values(filter(annotate(objects(DaPublisher); total_books = Count(:book)); total_books = Subquery(long_books)), :name)
+    @test Set(r[:name] for r in q) == Set(["Sams", "Morgan Kaufmann"])
+    aw = alias(annotate(filter(DaPublisher; num_awards__gt = 4); publisher_annotate = Value(1)); publisher_alias = Value(1))
+    @test Set(x.pk for x in filter(DaPublisher; pk__in = aw)) == Set([p[3].pk, p[4].pk])
+    lb = alias(annotate(filter(DaBook; pages__gt = 400); book_annotate = Value(1)); book_alias = Value(1))
+    @test Set(r[:name] for r in values(filter(DaPublisher; book__in = lb), :name)) == Set(["Apress", "Sams", "Prentice Hall", "Morgan Kaufmann"])
+    @test get(annotate(objects(DaAuthor); exists = Exists(none(DanCompany))); pk = a[1].pk).exists in (false, 0)
+    # Exists and an aggregate after values(); a subquery grouped by an annotation
+    qs = order_by(values_list(annotate(values(objects(DaBook), :publisher); has_authors = Exists(filter(base_objects(through(DaBook, :authors)); dabook = OuterRef(:pk))),
+                                        max_pubdate = Max(:pubdate)), :max_pubdate; flat = true), "max_pubdate")
+    @test Set(collect(qs)) == Set([Date(1991, 10, 15), Date(2008, 3, 3), Date(2008, 6, 23), Date(2008, 11, 3)])
+    top(k) = Subquery(values(order_by(filter(DaBook; pubdate__year = OuterRef(k)), "-rating"), :rating)[1:1])
+    qs = values(annotate(values(annotate(objects(DaBook); pub_year = ExtractYear(:pubdate)), :pub_year); top_rating = top(:pub_year), total_pages = Sum(:pages)),
+                :pub_year, :total_pages, :top_rating)
+    @test Set((r[:pub_year], r[:top_rating], r[:total_pages]) for r in qs) == Set([(1991, 5.0, 946), (1995, 4.0, 1132), (2007, 4.5, 447), (2008, 4.0, 1178)])
+    qs = values(annotate(objects(DaBook); top_rating_year = top(:pubdate__year)), :pubdate__year, :top_rating_year)
+    @test sort([(r[:pubdate__year], r[:top_rating_year]) for r in qs]) == [(1991, 5.0), (1995, 4.0), (2007, 4.5), (2008, 4.0), (2008, 4.0), (2008, 4.0)]
+  end
+end
+
+@testset "django annotations: AliasTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    has(o, k) = haskey(getfield(o, :_data), k)
+    a1, a2, a3 = create(DaAuthor; name = "Adrian Holovaty", age = 34), create(DaAuthor; name = "Jacob Kaplan-Moss", age = 35), create(DaAuthor; name = "James Bennett", age = 34)
+    a4, a5 = create(DaAuthor; name = "Peter Norvig", age = 57), create(DaAuthor; name = "Stuart Russell", age = 46)
+    p1 = create(DaPublisher; name = "Apress", num_awards = 3)
+    bk(isbn, pages, rating, price, c, d, n) = create(DaBook; isbn, pages, rating, price = Juango.Decimal(price), contact = c, publisher = p1, pubdate = d, name = n)
+    b1 = bk("159059725", 447, 4.5, "30.00", a1, Date(2007, 12, 6), "The Definitive Guide to Django")
+    b2 = bk("159059996", 300, 4.0, "29.69", a3, Date(2008, 6, 23), "Practical Django Projects")
+    b3 = bk("013790395", 1132, 4.0, "82.80", a4, Date(1995, 1, 15), "Artificial Intelligence: A Modern Approach")
+    b4 = bk("155860191", 946, 5.0, "75.00", a4, Date(1991, 10, 15), "Paradigms of Artificial Intelligence Programming")
+    add!(b1.authors, a1, a2); add!(b2.authors, a3); add!(b3.authors, a4, a5); add!(b4.authors, a4)
+    create(DaStore; name = "Amazon.com", original_opening = DateTime(1994, 4, 23, 9, 17, 42), friday_night_closing = Time(23, 59, 59))
+    create(DaStore; name = "Books.com", original_opening = DateTime(2001, 3, 15, 11, 23, 37), friday_night_closing = Time(23, 59, 59))
+    # an alias isn't selected; an annotation over it is
+    @test !has(first(alias(objects(DaBook); is_book = Value(1))), :is_book)
+    qs = annotate(alias(objects(DaBook); is_book_alias = Value(1)); is_book = F(:is_book_alias))
+    @test !has(first(qs), :is_book_alias) && all(x -> x.is_book == 1, collect(qs))
+    qs = annotate(alias(objects(DaBook); another_rating_alias = F(:rating)); another_rating = F(:another_rating_alias))
+    @test all(x -> x.another_rating == x.rating, collect(qs))
+    qs = annotate(alias(objects(DaBook); pubdate_alias = F(:pubdate)); pubdate_year = F(:pubdate_alias__year))
+    @test all(x -> x.pubdate_year == Dates.year(x.pubdate), collect(qs))
+    x = first(alias(annotate(objects(DaBook); is_book = Value(1)); is_book_alias = F(:is_book))); @test has(x, :is_book) && !has(x, :is_book_alias)
+    @test !has(first(alias(annotate(objects(DaBook); is_book = Value(1)); is_book = F(:is_book))), :is_book)
+    @test all(x -> x.is_book == 1, collect(annotate(alias(objects(DaBook); is_book = Value(1)); is_book = F(:is_book))))
+    @test all(x -> x.is_book == 1, collect(annotate(alias(objects(DaBook); is_book_alias = Value(1)); is_book = Coalesce(:is_book_alias, Value(0)))))
+    qs = filter(alias(objects(DaAuthor); book__pages__sum = Sum(:book__pages)); book__pages__sum__gt = 2000)
+    @test [x.pk for x in qs] == [a4.pk]
+    qs = annotate(alias(select_related(objects(DaBook), :publisher); num_awards_alias = F(:publisher__num_awards)); num_awards = F(:num_awards_alias))
+    @test all(x -> x.num_awards == x.publisher.num_awards, collect(qs))
+    qs = annotate(alias(objects(DaBook); is_book_alias = Value(1), rating_count_alias = Count(:rating)); is_book = F(:is_book_alias), rating_count = F(:rating_count_alias))
+    @test all(x -> x.is_book == 1 && x.rating_count == 1, collect(qs)) && !has(first(qs), :rating_count_alias)
+    # filtering, updating, ordering by aliases
+    @test [x.pk for x in filter(alias(objects(DaBook); other_rating = F(:rating)); other_rating = 4.5)] == [b1.pk]
+    @test count(filter(alias(objects(DaBook); other_rating = F(:rating)); other_rating = F(:rating))) == 4
+    @test count(filter(alias(objects(DaBook); sum_rating = Sum(:rating)); sum_rating = F(:sum_rating))) == 4
+    update!(alias(objects(DaBook); other_rating = F(:rating) - 1); rating = F(:other_rating)); @test refresh!(b1).rating == 3.5
+    @test [a.age for a in order_by(alias(objects(DaAuthor); other_age = F(:age)), "other_age", "pk")] == [34, 34, 35, 46, 57]
+    @test [Dates.year(x.pubdate) for x in order_by(alias(objects(DaBook); other_pubdate = F(:pubdate)), "-other_pubdate__year")] == [2008, 2007, 1995, 1991]
+    @test [r[:age] for r in order_by(alias(values(objects(DaAuthor), :age); age_count = Count(:age)), "age_count", "age")] == [35, 46, 57, 34]
+    @test Set(dates(alias(objects(DaBook); pubdate_alias = F(:pubdate)), :pubdate_alias, :month)) == Set([Date(1991, 10, 1), Date(1995, 1, 1), Date(2007, 12, 1), Date(2008, 6, 1)])
+    @test Set(datetimes(alias(objects(DaStore); oa = F(:original_opening)), :oa, :year)) == Set([DateTime(1994, 1, 1), DateTime(2001, 1, 1)])
+    # what an alias can't be used for
+    @test tr(() -> aggregate(alias(objects(DaAuthor); other_age = F(:age)); s = Sum(:other_age))) isa Exception
+    @test tr(() -> first(Juango.defer(alias(objects(DaBook); rating_alias = F(:rating) - 1), :rating_alias))) isa Exception
+    @test tr(() -> first(Juango.only(alias(objects(DaBook); rating_alias = F(:rating) - 1), :rating_alias))) isa Exception
+    @test tr(() -> collect(values(alias(objects(DaBook); rating_alias = F(:rating) - 1), :rating_alias))) isa Exception
+    @test tr(() -> collect(values_list(alias(objects(DaBook); rating_alias = F(:rating) - 1), :rating_alias))) isa Exception
+    @test tr(() -> collect(values(alias(objects(DaBook); published = TruncMonth(:pubdate)), :published__year))) isa Exception
+    @test tr(() -> collect(values(values(annotate(objects(DaBook); published = TruncMonth(:pubdate)), :pk), :published__year))) isa Exception
+    @test get(values_list(alias(values_list(objects(DaBook), :pk); other_pk = F(:pk)), :pk); pk = b1.pk) == (b1.pk,)
+    # an alias name that could break out of the SQL is refused
+    @test tr(() -> alias(objects(DaBook); Symbol("name\"; --") => Value(1))) isa Exception
+  end
+end
+

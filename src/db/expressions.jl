@@ -449,6 +449,52 @@ prefix_refs(e::Func, prefix) = (a = [x isa Expression ? prefix_refs(x, prefix) :
 prefix_refs(e::CombinedExpression, prefix) = (l = prefix_refs(e.lhs, prefix); r = prefix_refs(e.rhs, prefix); l === nothing || r === nothing ? nothing : CombinedExpression(e.op, l, r))
 prefix_refs(@nospecialize(e), prefix) = nothing
 
+"""
+An annotation (or alias) with transforms applied to its value: `values(qs, :published__year)` for
+`annotate(qs; published = TruncMonth(:pubdate))`, `order_by(qs, "-pubdate_alias__year")`, as Django.
+"""
+struct AnnotationTransform <: Expression
+    name::Symbol            # the annotation
+    transforms::Vector{String}
+end
+"The field kind an expression gives, as far as transforms need it (:date, :datetime, :char, ...), or nothing."
+function expr_kind(c, @nospecialize(e))
+    e isa ExpressionWrapper && return e.output isa Symbol ? e.output : (e.output isa Field ? e.output.kind : nothing)
+    if e isa F
+        a = get(c.annotations, Symbol(e.name), nothing)
+        a === nothing || return expr_kind(c, a)
+        f = output_field(c.T, e)
+        return f === nothing ? nothing : f.kind
+    end
+    if e isa Func && e.name === :trunc
+        ink = expr_kind(c, e.args[1])
+        return trunc_output(e.args[2], something(ink, :datetime))
+    end
+    e isa Value && e.value isa Date && return :date
+    e isa Value && e.value isa DateTime && return :datetime
+    e isa Value && e.value isa AbstractString && return :char
+    f = output_field(c.T, e)
+    f === nothing ? nothing : f.kind
+end
+function compile_expr(c::SQLCompiler, e::AnnotationTransform)
+    a = c.annotations[e.name]
+    sql, ps = compile_expr(c, a)
+    kind = something(expr_kind(c, a), haskey(DATE_TRANSFORMS, e.transforms[1]) ? :datetime : :char)
+    tr = apply_transforms("($sql)", kind, e.transforms)
+    tr === nothing && throw(LookupError("Unsupported lookup '$(join(e.transforms, "__"))' for $kind or join on the field not permitted."))
+    tr[1], ps
+end
+"`name__year` as an annotation and transforms of it, when `name` is one of `anns` (longest name first); else nothing."
+function annotation_transform(anns, path::AbstractString)
+    occursin("__", path) || return nothing
+    names = sort!([string(p.first) for p in anns if !is_filtered_relation(p.second)]; by = length, rev = true)
+    for n in names
+        startswith(path, n * "__") || continue
+        return AnnotationTransform(Symbol(n), String.(split(path[length(n)+3:end], "__")))
+    end
+    nothing
+end
+
 "Resolve a field path for expressions: returns (SQL column, Field or nothing)."
 Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospecialize(T::Type), path::AbstractString)
     segs = String.(split(path, "__"))
@@ -533,6 +579,11 @@ value_sql(b, v) = ("?", Any[v])
 compile_expr(c::SQLCompiler, e::Value) = value_sql(backend(), e.value)
 
 function compile_expr(c::SQLCompiler, e::F)
+    # F(:published__year): a transform of an annotation
+    if occursin("__", e.name) && !haskey(c.annotations, Symbol(e.name)) && (at = annotation_transform(c.annotations, e.name)) !== nothing
+        sql, ps = compile_expr(c, at)
+        return "($sql)", ps
+    end
     if !occursin("__", e.name) && haskey(c.annotations, Symbol(e.name)) && !is_filtered_relation(c.annotations[Symbol(e.name)])
         a = c.annotations[Symbol(e.name)]
         contains_aggregate(a) && (c.uses_aggregate = true)
@@ -851,13 +902,20 @@ Base.@nospecializeinfer function annotate(@nospecialize(qs::QuerySet); kw...)
     for (k, v) in kw
         (findfield(modelmeta(T), k) !== nothing || k in (:id, :pk)) &&
             throw(ArgumentError("annotation '$k' conflicts with a field of $T"))
-        push!(anns, k => ref(v))
+        check_alias_name(k)
+        # an annotation or alias of that name is replaced; F(k) in the new one means the old one (as Django)
+        i = findlast(p -> p.first === k, anns)
+        e = ref(v)
+        i === nothing || (e = subst_ref(e, string(k), anns[i].second))
+        filter!(p -> p.first !== k, anns)
+        push!(anns, k => e)
     end
     after = copy(qs.annotated_after)
     for (k, _) in kw
         after[k] = length(qs.where)
     end
-    qs.values_fields === nothing && return chain(qs; annotations = anns, annotated_after = after)
+    als = setdiff(qs.aliases, collect(keys(kw)))      # annotate(alias(qs; x = ...); x = F(:x)): selected now
+    qs.values_fields === nothing && return chain(qs; annotations = anns, annotated_after = after, aliases = als)
     # on a values() query: the new annotations are columns of its rows (values_list's tuples too), and
     # the first aggregate fixes the GROUP BY to the fields values() named (#201)
     vf = qs.values_fields
@@ -866,9 +924,23 @@ Base.@nospecializeinfer function annotate(@nospecialize(qs::QuerySet); kw...)
     if gf === nothing && !qs.group_by_object && any(p -> contains_aggregate(ref(p.second)), kw)
         gf = [f for f in qs.values_fields if !any(p -> string(p.first) == f && contains_aggregate(p.second), qs.annotations)]
     end
-    chain(qs; annotations = anns, annotated_after = after, values_fields = vf, group_fields = gf)
+    chain(qs; annotations = anns, annotated_after = after, values_fields = vf, group_fields = gf, aliases = als)
 end
 Base.@nospecializeinfer annotate(@nospecialize(T::Type{<:Model}); kw...) = annotate(objects(T); kw...)
+
+"`e` with references to `name` replaced by `old` (an annotation redefined in terms of its previous self)."
+subst_ref(e::F, name, old) = e.name == name ? old : e
+subst_ref(e::Func, name, old) = Func(e.name, Any[x isa Expression ? subst_ref(x, name, old) : x for x in e.args])
+subst_ref(e::CombinedExpression, name, old) = CombinedExpression(e.op, subst_ref(e.lhs, name, old), subst_ref(e.rhs, name, old))
+subst_ref(e::ExpressionWrapper, name, old) = ExpressionWrapper(subst_ref(e.expr, name, old), e.output)
+subst_ref(@nospecialize(e), name, old) = e
+
+"Refuse an annotation or alias name that could break out of its quoting (as Django)."
+function check_alias_name(k)
+    s = string(k)
+    (any(ch -> isspace(ch) || iscntrl(ch) || ch in ('"', '\'', '`', ';', '#'), s) || occursin("--", s) || occursin("/*", s)) &&
+        throw(ArgumentError("Column aliases cannot contain whitespace characters, hashes, control characters, quotation marks, semicolons, or SQL comments."))
+end
 
 """
     alias(qs; name = expression, ...)
@@ -884,7 +956,12 @@ Base.@nospecializeinfer function alias(@nospecialize(qs::QuerySet); kw...)
     for (k, v) in kw
         (findfield(modelmeta(T), k) !== nothing || k in (:id, :pk)) &&
             throw(ArgumentError("alias '$k' conflicts with a field of $T"))
-        push!(anns, k => ref(v)); after[k] = length(qs.where)
+        check_alias_name(k)
+        i = findlast(p -> p.first === k, anns)
+        e = ref(v)
+        i === nothing || (e = subst_ref(e, string(k), anns[i].second))
+        filter!(p -> p.first !== k, anns)
+        push!(anns, k => e); after[k] = length(qs.where)
     end
     chain(qs; annotations = anns, annotated_after = after, aliases = unique!(vcat(qs.aliases, collect(keys(kw)))))
 end
@@ -908,6 +985,28 @@ function Base.values(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractS
     fs = isempty(fields) ? vcat(["id"], [string(attname(f)) for f in all_fields(T)],                  # values(): the annotations too
                                 [string(p.first) for p in qs.annotations if !is_filtered_relation(p.second) && !(p.first in qs.aliases)]) :
          String[string(f) for f in fields]
+    # an alias can't be selected: annotate() promotes it (as Django); an annotation's transform is one of its own
+    extra = Pair{Symbol,Any}[]
+    for f in fs
+        any(p -> string(p.first) == f, qs.annotations) && (Symbol(f) in qs.aliases) &&
+            throw(LookupError("Cannot select the '$f' alias. Use annotate() to promote it."))
+        any(p -> string(p.first) == f, qs.annotations) && continue
+        at = annotation_transform(qs.annotations, f)
+        at === nothing && continue
+        (at.name in qs.aliases || (qs.values_fields !== nothing && !(string(at.name) in qs.values_fields))) &&
+            throw(LookupError("Cannot select the '$(at.name)' alias. " * (at.name in qs.aliases ? "Use annotate() to promote it." :
+                  "It was excluded by a previous values() or values_list() call. Include '$(at.name)' in that call to select it.")))
+        push!(extra, Symbol(f) => at)
+    end
+    isempty(extra) || (qs = chain(qs; annotations = vcat(qs.annotations, extra)))
+    # an annotation an earlier values() left out can't come back (as Django)
+    if qs.values_fields !== nothing
+        for f in fs
+            Symbol(f) in map(first, qs.annotations) && !(f in qs.values_fields) &&
+                throw(LookupError("Cannot select the '$f' alias. It was excluded by a previous values() or values_list() call. " *
+                                  "Include '$f' in that call to select it."))
+        end
+    end
     chain(qs; values_fields = fs, values_mode = :dict,
           group_by_object = qs.group_fields === nothing && any(p -> contains_aggregate(p.second), qs.annotations))
 end

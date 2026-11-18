@@ -228,6 +228,18 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     meta = modelmeta(T)
     fname = parts[1] == "pk" ? "id" : String(parts[1])
     rest = String.(parts[2:end])
+    # an annotation whose name has "__" in it (alias(qs, Sum(:book__pages)) is book__pages__sum): longest name first
+    if alias == c.base
+        ks = string(key)
+        for n in sort!([string(k) for k in keys(c.annotations) if occursin("__", string(k))]; by = length, rev = true)
+            (ks == n || startswith(ks, n * "__")) || continue
+            rem = ks == n ? String[] : String.(split(ks[length(n)+3:end], "__"))
+            if length(rem) <= 1 && (isempty(rem) || rem[1] in LOOKUPS)
+                fname, rest, lookup = n, String[], isempty(rem) ? "exact" : rem[1]
+                break
+            end
+        end
+    end
     f = nothing
     colps = Any[]
     kind = nothing                     # the compared value's field kind, for custom lookups

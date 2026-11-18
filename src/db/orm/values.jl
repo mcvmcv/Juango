@@ -1,6 +1,11 @@
 # --- (de)serialisation ------------------------------------------------------------------
 
 from_db(f::Field, ::Nothing) = nothing
+# An integer column's value, or an expression's declared to be one: a float or decimal text (pages + rating on
+# SQLite gives 451.5) is truncated, as Python's int() in Django's converter.
+db_int(v) = v isa Integer ? Int(v) : v isa Real ? trunc(Int, v) :
+           (s = strip(string(v)); something(tryparse(Int, s), trunc(Int, parse(Float64, s))))
+
 function from_db(f::Field, v)
     f.kind === :fk && fk_to_field(f) !== nothing && return from_db(getfield_meta(related_model(f), fk_to_field(f)), v)   # (#220)
     r = from_db_extra(f, v)
@@ -8,7 +13,7 @@ function from_db(f::Field, v)
     k = f.kind
     k === :fk && pk_kind(related_model(f)) === :uuid && return v isa UUID ? v : UUID(string(v))
     k === :bool && return v isa Bool ? v : v != 0
-    k in INT_KINDS && return v isa Integer ? Int(v) : parse(Int, string(v))
+    k in INT_KINDS && return db_int(v)
     k === :fk && return Int(v)
     k === :float && return Float64(v)
     k === :time && return to_time(v)

@@ -350,6 +350,10 @@ function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true,
     isempty(order) && meta_ordering && (order = modelmeta(T).ordering)
     isempty(order) && return "", String[], Any[]
     # order_by("author") and Meta(ordering = ["-note"]): the related model's ordering, as Django
+    # "-pubdate_alias__year": a transform of an annotation or alias
+    order = Any[o isa AbstractString && !haskey(c.annotations, Symbol(lstrip(o, '-'))) &&
+                (at = annotation_transform(c.annotations, lstrip(o, '-'))) !== nothing ? OrderBy(at, startswith(o, "-"), nothing) : o
+                for o in order]
     order = Any[x for o in order for x in (o isa AbstractString && o != "?" && !haskey(c.annotations, Symbol(lstrip(o, '-'))) ?
                                             expand_fk_ordering(T, o) : Any[o])]
     parts, extra, ps = String[], String[], Any[]
@@ -1438,6 +1442,7 @@ function distinct_dates(qs::QuerySet, field, kind, order, kinds, what)
     (f === nothing || f.kind in (:date, :datetime, :time)) ||
         throw(ArgumentError("$what: '$field' isn't a DateField, TimeField or DateTimeField"))
     vals = DateTime[]
+    Symbol(field) in qs.aliases && (qs = chain(qs; aliases = setdiff(qs.aliases, [Symbol(field)])))   # (an alias: read here)
     for v in values_list(order_by(qs), field; flat = true)
         v === nothing && continue
         v isa TimeZones.ZonedDateTime && (v = DateTime(localtime(v), TimeZones.Local))
