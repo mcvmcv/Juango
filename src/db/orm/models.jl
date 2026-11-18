@@ -214,7 +214,8 @@ Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields:
         fsS, metaS = ABSTRACT_MODELS[S]
         filter!(p -> !any(q -> q.first === p.first, fsS), inherited)
         append!(inherited, fsS)
-        meta = merge(Base.structdiff(metaS, NamedTuple{(:table, :name, :verbose_name, :verbose_name_plural)}), meta)
+        # (verbose names are inherited too, as Django's abstract Meta: Meta(verbose_name_plural = "Audits"))
+        meta = merge(Base.structdiff(metaS, NamedTuple{(:table, :name)}), meta)
     end
     fields = vcat(filter(p -> !any(q -> q.first === p.first, fields), inherited), fields)
     parent = get(meta, :_parent, nothing)

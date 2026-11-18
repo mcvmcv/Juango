@@ -6134,3 +6134,155 @@ end
   end
 end
 
+# --- tests/model_inheritance_regress ----------------------------------------------------------------------
+@model struct DirPlace
+    name = CharField(max_length = 50, default = "")
+    address = CharField(max_length = 80, default = "")
+    Meta(table = "dir_place", ordering = ["name"])
+end
+@model struct DirRestaurant <: DirPlace
+    serves_hot_dogs = BooleanField(default = false)
+    serves_pizza = BooleanField(default = false)
+    Meta(table = "dir_restaurant")
+end
+@model struct DirItalianRestaurant <: DirRestaurant
+    serves_gnocchi = BooleanField(default = false)
+    Meta(table = "dir_italianrestaurant")
+end
+@model struct DirSupplier
+    name = CharField(max_length = 50)
+    restaurant = ForeignKey(DirRestaurant; on_delete = :CASCADE, related_name = :suppliers)
+    Meta(table = "dir_supplier")
+end
+@model struct DirWholesaler <: DirSupplier
+    retailer = ForeignKey(DirSupplier; on_delete = :CASCADE, related_name = :wholesale_supplier)
+    Meta(table = "dir_wholesaler")
+end
+@model struct DirParent
+    created = DateTimeField(default = () -> Dates.now())
+    Meta(table = "dir_parent")
+end
+@model struct DirChild <: DirParent
+    name = CharField(max_length = 10)
+    Meta(table = "dir_child")
+end
+@model struct DirSelfRefParent
+    parent_data = IntegerField()
+    self_data = ForeignKey(:self; on_delete = :SET_NULL, null = true, related_name = :self_children)
+    Meta(table = "dir_selfrefparent")
+end
+@model struct DirSelfRefChild <: DirSelfRefParent
+    child_data = IntegerField()
+    Meta(table = "dir_selfrefchild")
+end
+@model struct DirArticle
+    headline = CharField(max_length = 100)
+    pub_date = DateTimeField()
+    Meta(table = "dir_article", ordering = ["-pub_date", "headline"])
+end
+@model struct DirArticleWithAuthor <: DirArticle
+    author = CharField(max_length = 100)
+    Meta(table = "dir_articlewithauthor")
+end
+@model struct DirM2MBase
+    articles = ManyToManyField(DirArticle; related_name = :m2mbases)
+    Meta(table = "dir_m2mbase")
+end
+@model struct DirM2MChild <: DirM2MBase
+    name = CharField(max_length = 50)
+    Meta(table = "dir_m2mchild")
+end
+@abstract_model struct DirAuditBase
+    planned_date = DateField()
+    Meta(verbose_name_plural = "Audits")
+end
+@abstract_model struct DirCertificationAudit <: DirAuditBase
+end
+@model struct DirInternalCertificationAudit <: DirCertificationAudit
+    auditing_dept = CharField(max_length = 20)
+    Meta(table = "dir_internalcertificationaudit")
+end
+@model struct DirPerson
+    name = CharField(max_length = 100)
+    Meta(table = "dir_person", ordering = ["name"])
+end
+@abstract_model struct DirAbstractEvent
+    name = CharField(max_length = 100)
+    attendees = ManyToManyField(DirPerson; related_name = "%(class)s_set")
+    Meta(ordering = ["name"])
+end
+@model struct DirBirthdayParty <: DirAbstractEvent
+    Meta(table = "dir_birthdayparty")
+end
+@model struct DirBachelorParty <: DirAbstractEvent
+    Meta(table = "dir_bachelorparty")
+end
+@model struct DirMessyBachelorParty <: DirBachelorParty
+    Meta(table = "dir_messybachelorparty")
+end
+redirect_stdout(devnull) do
+    ms = [DirPlace, DirRestaurant, DirItalianRestaurant, DirSupplier, DirWholesaler, DirParent, DirChild, DirSelfRefParent,
+          DirSelfRefChild, DirArticle, DirArticleWithAuthor, DirM2MBase, through(DirM2MBase, :articles), DirM2MChild,
+          DirInternalCertificationAudit, DirPerson, DirBirthdayParty, through(DirBirthdayParty, :attendees), DirBachelorParty,
+          through(DirBachelorParty, :attendees), DirMessyBachelorParty]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django model_inheritance_regress" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    # values() through two levels; saving each level; a parent's row deleted with the child's
+    ir = create(DirItalianRestaurant; name = "Guido's House of Pasta", address = "944 W. Fullerton", serves_hot_dogs = true, serves_gnocchi = true)
+    @test collect(values(objects(DirRestaurant), :name, :serves_hot_dogs)) == [Dict(:name => "Guido's House of Pasta", :serves_hot_dogs => true)]
+    @test collect(values(objects(DirItalianRestaurant), :name, :serves_hot_dogs, :serves_gnocchi)) ==
+          [Dict(:name => "Guido's House of Pasta", :serves_hot_dogs => true, :serves_gnocchi => true)]
+    ir.name = "Lorenzo's Pasta Hut"; ir.serves_gnocchi = false; save!(ir)
+    @test collect(values(objects(DirItalianRestaurant), :name, :serves_gnocchi)) == [Dict(:name => "Lorenzo's Pasta Hut", :serves_gnocchi => false)]
+    ident = first(objects(DirItalianRestaurant)).id
+    @test get(DirPlace; pk = ident).name == "Lorenzo's Pasta Hut"
+    create(DirRestaurant; name = "a", address = "xx", serves_hot_dogs = true)
+    delete!(objects(DirRestaurant))
+    @test tr(() -> get(DirPlace; pk = ident)) isa Juango.DoesNotExist && tr(() -> get(DirItalianRestaurant; pk = ident)) isa Juango.DoesNotExist
+    # datetimes on a child's inherited field
+    create(DirChild; name = "child", created = DateTime(2008, 6, 26, 17))
+    @test collect(datetimes(objects(DirChild), :created, :month)) == [DateTime(2008, 6, 1)]
+    # saving a child given its parent's key updates that row
+    r = save!(DirRestaurant(serves_pizza = false)); orig = r.id
+    r2 = save!(DirRestaurant(id = orig, serves_pizza = true)); @test r2.id == orig && count(objects(DirRestaurant)) == 1 && get(DirRestaurant; pk = orig).serves_pizza
+    # select_related with no paths on a child whose key points at its own parent's model
+    @test isempty(collect(select_related(objects(DirWholesaler))))
+    # a child of a model with a self-referential key: deleted cleanly, excluded on the inherited key
+    obj = create(DirSelfRefChild; child_data = 37, parent_data = 42)
+    @test [x.pk for x in exclude(DirSelfRefParent; self_data = 72)] == [obj.pk] && [x.pk for x in exclude(DirSelfRefChild; self_data = 72)] == [obj.pk]
+    delete!(obj); @test count(objects(DirSelfRefParent)) == 0
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    # get_next_by / get_previous_by on an inherited date
+    c1 = save!(DirArticleWithAuthor(headline = "A1", author = "P1", pub_date = DateTime(2005, 8, 1, 3)))
+    c2 = save!(DirArticleWithAuthor(headline = "A2", author = "P2", pub_date = DateTime(2005, 8, 1, 10)))
+    c3 = save!(DirArticleWithAuthor(headline = "A3", author = "P3", pub_date = DateTime(2005, 8, 2)))
+    @test get_next_by(c1, :pub_date) == c2 && get_next_by(c2, :pub_date) == c3 && tr(() -> get_next_by(c3, :pub_date)) isa Juango.DoesNotExist
+    @test get_previous_by(c3, :pub_date) == c2 && get_previous_by(c2, :pub_date) == c1 && tr(() -> get_previous_by(c1, :pub_date)) isa Juango.DoesNotExist
+    # an inherited m2m on the child; the ordering column named once
+    @test isempty(collect(filter(DirM2MChild; articles__isnull = false)))
+    frag = (s = first(Juango.select_sql(order_by(objects(DirArticleWithAuthor), "pub_date", "pk"))); s[findfirst("ORDER BY", s)[1]:end])
+    @test length(findall("pub_date", frag)) == 1
+    # update() changing only a parent's field
+    art = create(DirArticleWithAuthor; author = "fred", headline = "Hey there!", pub_date = DateTime(2009, 3, 1, 8))
+    @test update!(filter(DirArticleWithAuthor; author = "fred"); headline = "Oh, no!") == 1
+    @test update!(filter(DirArticleWithAuthor; pk = art.pk); headline = "Oh, no!") == 1
+    # an abstract model's m2m with %(class)s, and a child of one of its models
+    p1, p2, p3, p4 = (create(DirPerson; name = n) for n in ("Alice", "Bob", "Carol", "Dave"))
+    birthday = create(DirBirthdayParty; name = "Birthday party for Alice"); set!(birthday.attendees, [p1, p3])
+    bachelor = create(DirBachelorParty; name = "Bachelor party for Bob"); set!(bachelor.attendees, [p2, p4])
+    @test [x.pk for x in p1.dirbirthdayparty_set] == [birthday.pk] && isempty(collect(p1.dirbachelorparty_set))
+    @test [x.pk for x in p2.dirbachelorparty_set] == [bachelor.pk]
+    @test tr(() -> p2.dirmessybachelorparty_set) isa Exception
+    messy = create(DirMessyBachelorParty; name = "Bachelor party for Dave"); set!(messy.attendees, [p4])
+    @test [x.pk for x in p4.dirbachelorparty_set] == [bachelor.pk, messy.pk]
+    # verbose_name_plural through two abstract models
+    @test Juango.modelmeta(DirInternalCertificationAudit).verbose_name_plural == "Audits"
+  end
+end
+
