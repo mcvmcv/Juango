@@ -252,7 +252,13 @@ function output_of(k::Symbol)
     k === :json ? JSONField() : throw(ArgumentError("output: unknown kind :$k"))
 end
 compile_expr(c::SQLCompiler, e::RawSQL) = ("($(e.sql))", copy(e.params))
-compile_expr(c::SQLCompiler, e::ExpressionWrapper) = compile_expr(c, e.expr)
+function compile_expr(c::SQLCompiler, e::ExpressionWrapper)
+    sql, ps = compile_expr(c, e.expr)
+    # a date or datetime parameter: PostgreSQL can't tell its type (EXTRACT(YEAR FROM $1) is ambiguous)
+    k = e.output isa Field ? e.output.kind : nothing
+    backend() isa PostgresBackend && e.expr isa Value && k in (:date, :datetime) && (sql = temporal_value_sql(backend(), k, sql))
+    sql, ps
+end
 contains_aggregate(e::ExpressionWrapper) = contains_aggregate(e.expr)
 contains_window(e::ExpressionWrapper) = contains_window(e.expr)
 bare_refs(e::ExpressionWrapper) = bare_refs(e.expr)

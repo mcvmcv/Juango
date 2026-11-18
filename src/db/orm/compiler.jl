@@ -467,6 +467,15 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
         (value = values(value, fk_to_field(f)))
     f === nothing || (kind = f.kind)
     f !== nothing && f.kind in INT_KINDS && value isa AbstractFloat && ((lookup, value) = int_float_bound(lookup, value))
+    # a bound outside the column's range (which PostgreSQL refuses as a parameter): every value is on one side of it,
+    # as Django's IntegerFieldOverflow
+    if f !== nothing && haskey(INT_RANGES, f.kind) && value isa Integer && !(value isa Bool) && lookup in ("exact", "lt", "lte", "gt", "gte")
+        lo, hi = INT_RANGES[f.kind]
+        if !(lo <= value <= hi)
+            all_on_side = lookup == "exact" ? false : lookup in ("gt", "gte") ? value < lo : value > hi
+            return (all_on_side ? "$col IS NOT NULL" : sql_false(backend())), copy(colps)
+        end
+    end
     cl = isempty(CUSTOM_LOOKUPS) ? nothing : find_custom(CUSTOM_LOOKUPS, lookup, kind)
     if cl !== nothing
         if value isa Expression

@@ -459,8 +459,34 @@ Base.@nospecializeinfer function where_clause(c::SQLCompiler, @nospecialize(qs::
     " WHERE " * join(parts, " AND "), ps
 end
 
+"""
+The relations of the model itself that the filters require (`exclude(profile = nothing)`,
+`filter(profile__isnull = false)`): a `select_related` join to them can be an INNER one, as Django
+demotes it (PostgreSQL won't lock the nullable side of an outer join).
+"""
+Base.@nospecializeinfer function required_relations(@nospecialize(qs::QuerySet))
+    out = Set{Symbol}()
+    for q in qs.where
+        q isa Q && q.connector === :AND || continue
+        if q.negated && length(q.children) == 1 && q.children[1] isa Pair
+            k, v = q.children[1]
+            parts = split(string(k), "__")
+            (length(parts) == 1 && v === nothing) || (parts[end] == "exact" && length(parts) == 2 && v === nothing) ||
+                (parts[end] == "isnull" && length(parts) == 2 && v === true) || continue
+            push!(out, Symbol(parts[1]))
+        elseif !q.negated
+            for ch in q.children
+                ch isa Pair || continue
+                parts = split(string(ch.first), "__")
+                length(parts) == 2 && parts[2] == "isnull" && ch.second === false && push!(out, Symbol(parts[1]))
+            end
+        end
+    end
+    out
+end
+
 "Joins and aliased columns for `select_related`; returns (path, model, alias) per related object."
-function related_columns!(c::SQLCompiler, paths, deferred = Symbol[])
+function related_columns!(c::SQLCompiler, paths, deferred = Symbol[]; required = Set{Symbol}())
     out = Tuple{Vector{Symbol},Any,String}[]
     cols = String[]
     for path in sort(paths; by = length)
@@ -475,11 +501,11 @@ function related_columns!(c::SQLCompiler, paths, deferred = Symbol[])
                 M = C
             elseif f === nothing                  # reverse one-to-one: LEFT JOIN other.fk = this.id
                 _, R, rf = reverse_one_to_one(M, s)
-                left = true
-                alias = join!(c, alias, (alias, s, :rev), modelmeta(R).table, column(rf), target_column(rf); left = true)
+                left = !(i == 1 && s in required)
+                alias = join!(c, alias, (alias, s, :rev), modelmeta(R).table, column(rf), target_column(rf); left = left)
                 M = R
             else
-                left = left || f.null
+                left = left || (f.null && !(i == 1 && s in required))
                 alias = field_alias!(c, alias, M, f)
                 alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, target_column(f), column(f); left = left)
                 M = related_model(f)
@@ -605,7 +631,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
                 A = P
             end
         end
-        related, rcols = related_columns!(c, qs.related, qs.deferred)
+        related, rcols = related_columns!(c, qs.related, qs.deferred; required = required_relations(qs))
         append!(sel, rcols)
         push!(group, pk_select(c.base, T))
         append!(group, [qcol(a, pk_colname(M)) for (_, M, a) in related])
@@ -634,9 +660,13 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         # a subquery annotation that reads the outer query (OuterRef(:book__name), across joins) is grouped by,
         # as Django does: PostgreSQL refuses the joined table's columns in it otherwise (#219). By its value,
         # not the columns it reads: those would split an object's group by each related row.
-        if grouped && qs.values_fields === nothing && columns === nothing && !idonly && !isempty(c.outer_refs) &&
-           !aggregating(v, qs.annotations) && !(sql in group)
-            push!(group, sql); group_ps[sql] = p
+        if grouped && columns === nothing && !idonly && !isempty(c.outer_refs) && !aggregating(v, qs.annotations)
+            if qs.values_fields === nothing
+                sql in group || (push!(group, sql); group_ps[sql] = p)
+            else
+                # values() rows: by its position in the select list, as the other annotations
+                qname(string(k)) in group || push!(group, qname(string(k)))
+            end
         end
         c.outer_refs = nothing
         if grouped && aggregating(v, qs.annotations)

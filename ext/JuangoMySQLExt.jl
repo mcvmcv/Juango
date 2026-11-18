@@ -73,7 +73,9 @@ function Juango.mysql_exec(conn, sql::String, params::Vector{Any})
     catch e
         if e isa MySQL.Protocol.StmtError || hasproperty(e, :sqlstate)
             st = string(getproperty(e, :sqlstate))
-            startswith(st, "23") && throw(Juango.IntegrityError(string(getproperty(e, :msg))))
+            # (1690, an out-of-range value such as a negative one in an unsigned column, is one too, as Django)
+            (startswith(st, "23") || (hasproperty(e, :errno) && getproperty(e, :errno) == 1690)) &&
+                throw(Juango.IntegrityError(string(getproperty(e, :msg))))
         end
         rethrow()
     finally

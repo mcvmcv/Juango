@@ -6925,7 +6925,8 @@ end
         @test vals(annotate(objects(DbfAuthor); h = F_(:alias)), :h) == [s === nothing ? nothing : h(s) for s in aliases]
     end
     IS_POSTGRES || @test vals(annotate(objects(DbfAuthor); h = SHA1(:alias)), :h) == [hx(Juango.SHA.sha1, s) for s in aliases]
-    @test vals(annotate(objects(DbfAuthor); h = SHA1(:alias)), :h)[1] == "e61a3587b3f7a142b8c7b9263c82f8119398ecb7" || IS_POSTGRES
+    # (SHA1 on PostgreSQL needs the pgcrypto extension, as Django's)
+    IS_POSTGRES || @test vals(annotate(objects(DbfAuthor); h = SHA1(:alias)), :h)[1] == "e61a3587b3f7a142b8c7b9263c82f8119398ecb7"
     delete!(objects(DbfAuthor))
     # case, length, slices, padding, repeat, replace, reverse, position
     j = create(DbfAuthor; name = "John Smith", alias = "smithj"); r = create(DbfAuthor; name = "Rhonda")
