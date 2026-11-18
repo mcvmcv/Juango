@@ -1086,3 +1086,51 @@ end
     pf(data = nothing) = Form([:name => CharField(max_length = nothing, initial = () -> "John Doe", disabled = true)]; data = data)
     @test pf()[:name].value == "John Doe" && pf(Dict{String,Any}())[:name].value == "John Doe"
 end
+
+@testset "django forms_tests: test_forms (prefixes, NullBooleanField, empty_permitted, hidden and visible fields)" begin
+    pdata = Dict("person1-first_name" => "John", "person1-last_name" => "Lennon", "person1-birthday" => "1940-10-9")
+    p = DftPerson(pdata; prefix = "person1")
+    @test html_eq(as_ul(p), join(["<li><label for=\"id_person1-$n\">$l:</label><input type=\"$t\" name=\"person1-$n\" value=\"$v\" id=\"id_person1-$n\" required></li>"
+                                  for (n, l, t, v) in (("first_name", "First name", "text", "John"), ("last_name", "Last name", "text", "Lennon"),
+                                                       ("birthday", "Birthday", "date", "1940-10-9"))]))
+    @test is_valid(p) && p.cleaned_data == Dict(:first_name => "John", :last_name => "Lennon", :birthday => Date(1940, 10, 9))
+    p = DftPerson(Dict("person1-first_name" => "", "person1-last_name" => "", "person1-birthday" => ""); prefix = "person1")
+    @test !is_valid(p) && p.errors[:first_name] == ["This field is required."] && p[:first_name].errors == ["This field is required."]
+    @test_throws KeyError p[Symbol("person1-first_name")]
+    # data without the prefix isn't seen
+    p = DftPerson(Dict("first_name" => "John", "last_name" => "Lennon", "birthday" => "1940-10-9"); prefix = "person1")
+    @test !is_valid(p) && p.errors[:birthday] == ["This field is required."]
+    # one dict for two forms
+    both = merge(pdata, Dict("person2-first_name" => "Jim", "person2-last_name" => "Morrison", "person2-birthday" => "1943-12-8"))
+    p1, p2 = DftPerson(both; prefix = "person1"), DftPerson(both; prefix = "person2")
+    @test is_valid(p1) && p1.cleaned_data[:first_name] == "John" && is_valid(p2) && p2.cleaned_data[:birthday] == Date(1943, 12, 8)
+
+    # NullBooleanField: unknown, yes, no, as Django's NullBooleanSelect reads the data
+    nbsel(v) = "<select name=\"is_cool\">" * join(["<option value=\"$k\"$(k == v ? " selected" : "")>$l</option>" for (k, l) in (("unknown", "Unknown"), ("true", "Yes"), ("false", "No"))]) * "</select>"
+    cool(d) = Form([:name => CharField(max_length = nothing), :is_cool => NullBooleanField()]; data = merge(Dict{String,Any}("name" => "Joe"), d), auto_id = false)
+    for (d, want) in ((Dict{String,Any}(), "unknown"), (Dict{String,Any}("is_cool" => "1"), "unknown"), (Dict{String,Any}("is_cool" => "2"), "true"),
+                      (Dict{String,Any}("is_cool" => "3"), "false"), (Dict{String,Any}("is_cool" => true), "true"), (Dict{String,Any}("is_cool" => false), "false"),
+                      (Dict{String,Any}("is_cool" => "unknown"), "unknown"), (Dict{String,Any}("is_cool" => "true"), "true"), (Dict{String,Any}("is_cool" => "false"), "false"))
+        @test html_eq(w(cool(d)[:is_cool]), nbsel(want))
+    end
+
+    # empty_permitted: an untouched form is valid, with nothing cleaned
+    song(data; kw...) = Form([:artist => CharField(max_length = nothing), :name => CharField(max_length = nothing)]; data = data, kw...)
+    f = song(Dict("artist" => "", "song" => ""))
+    @test !is_valid(f) && f.errors == Dict(:name => ["This field is required."], :artist => ["This field is required."]) && isempty(f.cleaned_data)
+    f = song(Dict("artist" => "", "song" => ""); empty_permitted = true, use_required_attribute = false)
+    @test is_valid(f) && isempty(f.errors) && isempty(f.cleaned_data)
+    f = song(Dict("artist" => "The Doors", "song" => ""))
+    @test !is_valid(f) && f.errors == Dict(:name => ["This field is required."]) && f.cleaned_data == Dict(:artist => "The Doors")
+    f = song(Dict("artist" => nothing, "song" => ""); empty_permitted = true, use_required_attribute = false)
+    @test is_valid(f)
+    f = Form([:amount => FloatField(), :qty => IntegerField()]; data = Dict("amount" => "0.0", "qty" => ""), initial = Dict(:amount => 0.0),
+             empty_permitted = true, use_required_attribute = false)
+    @test is_valid(f)
+    e = try DftPerson(; empty_permitted = true, use_required_attribute = true) catch e; e end
+    @test e isa ArgumentError && e.msg == "The empty_permitted and use_required_attribute arguments may not both be True."
+
+    # hidden and visible fields
+    f = Form([:token => CharField(max_length = nothing, widget = :hidden), :artist => CharField(max_length = nothing), :name => CharField(max_length = nothing)])
+    @test [bf.name for bf in hidden_fields(f)] == ["token"] && [bf.name for bf in visible_fields(f)] == ["artist", "name"]
+end

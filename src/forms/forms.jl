@@ -36,6 +36,7 @@ mutable struct Form
     use_required_attribute::Bool   # false: no HTML `required` (the browser won't block a partly filled formset)
     auto_id::Any          # the inputs' ids: "id_%s" (the default), a format with %s, true (the name), or false (no ids)
     label_suffix::Union{Nothing,String}   # after each label: nothing for a colon (unless the label ends in punctuation)
+    empty_permitted::Bool                 # an unchanged form is valid (with no cleaned data), as a formset's extra forms
 end
 
 """
@@ -46,7 +47,10 @@ end
 """
 function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
               name = "Form", model = nothing, instance = nothing, files = nothing, media = nothing,
-              use_required_attribute::Bool = true, field_order = nothing, auto_id = "id_%s", label_suffix = nothing)
+              use_required_attribute::Bool = true, field_order = nothing, auto_id = "id_%s", label_suffix = nothing,
+              empty_permitted::Bool = false)
+    empty_permitted && use_required_attribute &&
+        throw(ArgumentError("The empty_permitted and use_required_attribute arguments may not both be True."))
     fs = Field[]
     for (n, f) in fields
         f = deepcopy(f)
@@ -55,7 +59,8 @@ function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), pref
     end
     form = Form(string(name), fs, data, Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(initial)),
                 Dict{Symbol,Vector{String}}(), Dict{Symbol,Any}(), model, instance, string(prefix), false, clean, files,
-                media === nothing ? Media() : media, use_required_attribute, auto_id, label_suffix === nothing ? nothing : string(label_suffix))
+                media === nothing ? Media() : media, use_required_attribute, auto_id, label_suffix === nothing ? nothing : string(label_suffix),
+                empty_permitted)
     field_order === nothing || order_fields!(form, field_order)
     form
 end
@@ -538,6 +543,8 @@ function is_valid(f::Form)
     f.validated && return isempty(f.errors)
     empty!(f.errors)
     empty!(f.cleaned_data)
+    # an empty form that may be: valid, with nothing cleaned (Django's empty_permitted)
+    f.empty_permitted && !has_changed(f) && (f.validated = true; return true)
     for fld in f.fields
         if fld.kind in FILE_KINDS
             v, errs = clean_file_field(f, fld)
@@ -654,6 +661,11 @@ function add_error!(f::Form, field, msg)
 end
 
 cleaned_data(f::Form) = f.cleaned_data
+
+"The form's hidden fields, as bound fields (Django's `Form.hidden_fields`)."
+hidden_fields(f::Form) = [bf for bf in f if is_hidden_field(bf.field)]
+"The form's other fields, as bound fields (Django's `Form.visible_fields`)."
+visible_fields(f::Form) = [bf for bf in f if !is_hidden_field(bf.field)]
 
 """
     has_error(form, field = nothing)
@@ -967,8 +979,11 @@ function widget_html(bf::BoundField)
         # its first choice is always selected
         firsts = [k for (_, opts) in groups for (k, _) in opts]
         !(fld.blank || fld.kind === :fk) && (isempty(firsts) || string(firsts[1]) != "") && (attrs = replace(attrs, " required" => ""; count = 1))
+        # NullBooleanField: unknown is its empty choice, and yes and no are read as Django's NullBooleanSelect reads them
+        nb = fld.kind === :typedchoice && fld.related isa NamedTuple && haskey(fld.related, :any_value)
+        nb && (val = val === true || val in ("True", "true", "2") ? "true" : val === false || val in ("False", "false", "3") ? "false" : "unknown")
         print(io, "<select$attrs>")
-        (fld.blank || fld.kind === :fk) && print(io, "<option value=\"\">---------</option>")
+        (fld.blank || fld.kind === :fk) && !nb && print(io, "<option value=\"\">---------</option>")
         for (glabel, opts) in groups
             glabel === nothing || print(io, "<optgroup label=\"", escape_html(string(glabel)), "\">")
             for (k, lbl) in opts
