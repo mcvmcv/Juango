@@ -249,6 +249,11 @@ Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields:
         end
         push!(f.kind === :m2m ? m2m : f.kind === :gfk ? gfks : f.kind === :grel ? grels : f.kind === :fobj ? fobjs : fs, f)
     end
+    # Meta(constraints = [...]) names with %(app_label)s and %(class)s (an abstract model's constraints)
+    if haskey(meta, :constraints) && any(c -> c isa Constraint && occursin("%(", c.name), meta.constraints)
+        app = string(get(meta, :app_label, default_app_label(T)))
+        meta = merge(meta, (constraints = Any[c isa Constraint ? constraint_for_model(c, app, nameof(T)) : c for c in meta.constraints],))
+    end
     # code = CharField(max_length = 10, primary_key = true): the key is that field, as Django's (#221)
     pkfs = [f for f in fs if f.primary_key]
     if !isempty(pkfs)

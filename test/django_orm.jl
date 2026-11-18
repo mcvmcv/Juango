@@ -7704,3 +7704,125 @@ end
     atomic(() -> @test collect(select_for_update(order_by(objects(DsfPerson), :pk))[2:2]) == [other])
   end
 end
+
+# --- tests/constraints ------------------------------------------------------------------------------------
+@model struct DconProduct
+    price = IntegerField(null = true)
+    discounted_price = IntegerField(null = true)
+    unit = CharField(max_length = 15, null = true)
+    Meta(table = "dcon_product", constraints = [
+        CheckConstraint(condition = Q(price__gt = F(:discounted_price)), name = "price_gt_discounted_price"),
+        CheckConstraint(condition = Q(price__gt = 0), name = "%(app_label)s_%(class)s_price_gt_0"),
+        CheckConstraint(condition = Q(unit__isnull = true) | Q(unit__in = ["μg/mL", "ng/mL"]), name = "unicode_unit_list"),
+    ])
+end
+@model struct DconUniqueConstraintProduct
+    name = CharField(max_length = 255)
+    color = CharField(max_length = 32, null = true)
+    age = IntegerField(null = true)
+    Meta(table = "dcon_uniqueconstraintproduct", verbose_name = "unique constraint product",
+         constraints = [UniqueConstraint(fields = [:name, :color], name = "name_color_uniq")])
+end
+@model struct DconUniqueConstraintConditionProduct
+    name = CharField(max_length = 255)
+    color = CharField(max_length = 32, null = true)
+    Meta(table = "dcon_uniqueconstraintconditionproduct",
+         constraints = [UniqueConstraint(fields = [:name], name = "name_without_color_uniq", condition = Q(color__isnull = true))])
+end
+@abstract_model struct DconAbstractModel
+    age = IntegerField()
+    Meta(constraints = [CheckConstraint(condition = Q(age__gte = 18), name = "%(app_label)s_%(class)s_adult")])
+end
+@model struct DconChildModel <: DconAbstractModel
+    Meta(table = "dcon_childmodel")
+end
+redirect_stdout(devnull) do
+    ms = [DconProduct, DconUniqueConstraintProduct, DconUniqueConstraintConditionProduct, DconChildModel]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django constraints: CheckConstraint and UniqueConstraint" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    cname(T, i) = Juango.model_constraints(T)[i].name
+    app(T) = lowercase(Juango.modelmeta(T).app)
+    # BaseConstraint: messages and codes, default and custom
+    c = CheckConstraint(condition = Q(price__gt = F(:discounted_price)), name = "price")
+    e = tr(() -> Juango.validate(c, DconProduct, DconProduct(price = 5, discounted_price = 10)))
+    @test e isa Juango.ValidationError && e.errors[:__all__] == ["Constraint “price” is violated."] && e.code === nothing
+    c = CheckConstraint(condition = Q(price__gt = F(:discounted_price)), name = "price", violation_error_message = "custom base_name message",
+                        violation_error_code = "custom_code")
+    e = tr(() -> Juango.validate(c, DconProduct, DconProduct(price = 5, discounted_price = 10)))
+    @test e.errors[:__all__] == ["custom base_name message"] && e.code == "custom_code"
+    # equality
+    @test CheckConstraint(condition = Q(price__gt = F(:discounted_price)), name = "price") ==
+          CheckConstraint(condition = Q(price__gt = F(:discounted_price)), name = "price")
+    @test CheckConstraint(condition = Q(price__gt = F(:discounted_price)), name = "price") !=
+          CheckConstraint(condition = Q(price__gt = F(:discounted_price)), name = "price2")
+    @test CheckConstraint(condition = Q(price__gt = F(:discounted_price)), name = "price") !=
+          CheckConstraint(condition = Q(price__lt = F(:discounted_price)), name = "price")
+    @test CheckConstraint(condition = Q(price__gt = 0), name = "p", violation_error_message = "a") !=
+          CheckConstraint(condition = Q(price__gt = 0), name = "p", violation_error_message = "b")
+    @test CheckConstraint(condition = Q(price__gt = 0), name = "p", violation_error_code = "a") !=
+          CheckConstraint(condition = Q(price__gt = 0), name = "p", violation_error_code = "b")
+    @test tr(() -> CheckConstraint(condition = F(:discounted_price), name = "check")) isa ArgumentError
+    # the database enforces check constraints, unicode values too
+    create(DconProduct; price = 10, discounted_price = 5)
+    @test tr(() -> create(DconProduct; price = 10, discounted_price = 20)) isa Juango.IntegrityError
+    create(DconProduct; price = 10, discounted_price = 7, unit = "μg/mL")
+    @test tr(() -> create(DconProduct; price = 10, discounted_price = 7, unit = "l")) isa Juango.IntegrityError
+    # names with %(app_label)s and %(class)s, an abstract model's too
+    @test cname(DconProduct, 2) == "$(app(DconProduct))_dconproduct_price_gt_0"
+    @test tr(() -> create(DconProduct; price = 0, discounted_price = nothing)) isa Juango.IntegrityError
+    @test cname(DconChildModel, 1) == "$(app(DconChildModel))_dconchildmodel_adult"
+    @test tr(() -> create(DconChildModel; age = 17)) isa Juango.IntegrityError
+    # validate(): the values, an excluded field skips it, NULLs pass
+    pc = Juango.model_constraints(DconProduct)[1]
+    @test Juango.validate(pc, DconProduct, DconProduct(price = 10, discounted_price = 5)) === nothing
+    @test tr(() -> Juango.validate(pc, DconProduct, DconProduct(price = 10, discounted_price = 20))) isa Juango.ValidationError
+    @test Juango.validate(pc, DconProduct, DconProduct(price = 10, discounted_price = 20); exclude = [:discounted_price]) === nothing
+    @test Juango.validate(pc, DconProduct, DconProduct(price = 10, discounted_price = nothing)) === nothing
+    uc = Juango.model_constraints(DconProduct)[3]
+    @test Juango.validate(uc, DconProduct, DconProduct(unit = nothing)) === nothing
+    @test tr(() -> Juango.validate(uc, DconProduct, DconProduct(unit = "l"))) isa Juango.ValidationError
+    # UniqueConstraint: equality; arguments
+    @test UniqueConstraint(fields = [:foo, :bar], name = "unique") == UniqueConstraint(fields = [:foo, :bar], name = "unique")
+    @test UniqueConstraint(fields = [:foo, :bar], name = "unique") != UniqueConstraint(fields = [:foo, :bar], name = "unique2")
+    @test UniqueConstraint(fields = [:foo, :bar], name = "unique") != UniqueConstraint(fields = [:foo, :baz], name = "unique")
+    @test UniqueConstraint(fields = [:foo], name = "u", condition = Q(foo = F(:bar))) == UniqueConstraint(fields = [:foo], name = "u", condition = Q(foo = F(:bar)))
+    @test UniqueConstraint(fields = [:foo], name = "u", condition = Q(foo = F(:bar))) != UniqueConstraint(fields = [:foo], name = "u", condition = Q(foo = F(:baz)))
+    e = tr(() -> UniqueConstraint(name = "name")); @test e isa ArgumentError && occursin("At least one field or expression is required to define a unique constraint.", e.msg)
+    e = tr(() -> UniqueConstraint(Lower(:field_1); fields = [:field_2], name = "name"))
+    @test e isa ArgumentError && occursin("UniqueConstraint.fields and expressions are mutually exclusive.", e.msg)
+    @test tr(() -> UniqueConstraint(fields = [:color], name = "name", condition = "invalid")) isa ArgumentError
+    # the database enforces it; model validation reports it as a unique field would (code "unique")
+    p1 = create(DconUniqueConstraintProduct; name = "p1", color = "red"); create(DconUniqueConstraintProduct; name = "p2")
+    @test tr(() -> create(DconUniqueConstraintProduct; name = "p1", color = "red")) isa Juango.IntegrityError
+    errs = full_clean(DconUniqueConstraintProduct(name = "p1", color = "red"))
+    @test errs[:__all__] == ["Unique constraint product with this Name and Color already exists."]
+    nc = Juango.model_constraints(DconUniqueConstraintProduct)[1]
+    e = tr(() -> Juango.validate(nc, DconUniqueConstraintProduct, DconUniqueConstraintProduct(name = "p1", color = "red")))
+    @test e isa Juango.ValidationError && e.code == "unique"
+    # (the object itself, a different color, NULLs and excluded fields pass)
+    @test Juango.validate(nc, DconUniqueConstraintProduct, p1) === nothing
+    @test Juango.validate(nc, DconUniqueConstraintProduct, DconUniqueConstraintProduct(name = "p1", color = "blue")) === nothing
+    @test Juango.validate(nc, DconUniqueConstraintProduct, DconUniqueConstraintProduct(name = "p2")) === nothing
+    @test Juango.validate(nc, DconUniqueConstraintProduct, DconUniqueConstraintProduct(name = "p1", color = "red"); exclude = [:name]) === nothing
+    @test isempty(validate_constraints(DconUniqueConstraintProduct(name = "p1", color = "red"); exclude = [:color]))
+    # a custom message and code
+    cc = UniqueConstraint(fields = [:name], name = "name_uniq", violation_error_message = "Custom message", violation_error_code = "custom_code")
+    e = tr(() -> Juango.validate(cc, DconUniqueConstraintProduct, DconUniqueConstraintProduct(name = "p1")))
+    @test e.errors[:__all__] == ["Custom message"] && e.code == "custom_code"
+    # with a condition: only matching rows count; the message names the constraint
+    create(DconUniqueConstraintConditionProduct; name = "p1"); create(DconUniqueConstraintConditionProduct; name = "p2", color = "red")
+    if !IS_MYSQL                       # (MySQL can't enforce a partial unique index)
+        @test tr(() -> create(DconUniqueConstraintConditionProduct; name = "p1")) isa Juango.IntegrityError
+    end
+    create(DconUniqueConstraintConditionProduct; name = "p1", color = "blue")
+    errs = validate_constraints(DconUniqueConstraintConditionProduct(name = "p1"))
+    @test errs[:__all__] == ["Constraint “name_without_color_uniq” is violated."]
+    @test isempty(validate_constraints(DconUniqueConstraintConditionProduct(name = "p2")))
+    @test isempty(validate_constraints(DconUniqueConstraintConditionProduct(name = "p1", color = "green")))
+  end
+end
+

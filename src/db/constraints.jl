@@ -18,23 +18,30 @@
 abstract type Constraint end
 
 """
-    CheckConstraint(; condition::Q, name, violation_error_message = nothing)
+    CheckConstraint(; condition::Q, name, violation_error_message = nothing, violation_error_code = nothing)
 
 A `CHECK` constraint: every row must satisfy `condition`, written with the usual lookups
 (`exact`, `iexact`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `isnull`, `range`, `contains`,
 `startswith`, `endswith` and their `i` forms) on the model's own fields; compare fields with
 `F(:other)`. As in SQL, a condition that is unknown because of a NULL passes.
+
+The name may hold `%(app_label)s` and `%(class)s` (for an abstract model's constraints), and
+`violation_error_code` is the `ValidationError`'s code when it's violated (`Juango.validate`).
 """
 struct CheckConstraint <: Constraint
     condition::Q
     name::String
     violation_error_message::Union{Nothing,String}
+    violation_error_code::Union{Nothing,String}
 end
-CheckConstraint(; condition, name, violation_error_message = nothing) =
-    CheckConstraint(condition, string(name), violation_error_message === nothing ? nothing : string(violation_error_message))
+function CheckConstraint(; condition, name, violation_error_message = nothing, violation_error_code = nothing)
+    condition isa Q || throw(ArgumentError("CheckConstraint.condition must be a Q instance or boolean expression."))
+    CheckConstraint(condition, string(name), optstring(violation_error_message), optstring(violation_error_code))
+end
+optstring(x) = x === nothing ? nothing : string(x)
 
 """
-    UniqueConstraint(; fields, name, condition = nothing, violation_error_message = nothing)
+    UniqueConstraint(; fields, name, condition = nothing, violation_error_message = nothing, violation_error_code = nothing)
     UniqueConstraint(Lower(:email), ...; name)
 
 No two rows may have the same values in `fields`. With `condition`, only rows that satisfy
@@ -48,16 +55,21 @@ struct UniqueConstraint <: Constraint
     name::String
     condition::Union{Nothing,Q}
     violation_error_message::Union{Nothing,String}
+    violation_error_code::Union{Nothing,String}
 end
-function UniqueConstraint(expressions...; fields = Symbol[], name, condition = nothing, violation_error_message = nothing)
-    isempty(fields) == isempty(expressions) &&
-        throw(ArgumentError("UniqueConstraint '$name' needs either fields or expressions (not both)"))
+function UniqueConstraint(expressions...; fields = Symbol[], name, condition = nothing, violation_error_message = nothing,
+                          violation_error_code = nothing)
+    isempty(fields) && isempty(expressions) &&
+        throw(ArgumentError("At least one field or expression is required to define a unique constraint."))
+    isempty(fields) || isempty(expressions) ||
+        throw(ArgumentError("UniqueConstraint.fields and expressions are mutually exclusive."))
+    condition === nothing || condition isa Q || throw(ArgumentError("UniqueConstraint.condition must be a Q instance."))
     for e in expressions
         (e isa Union{F,Symbol,AbstractString} || e isa Func && e.name in (:lower, :upper) && length(e.args) == 1 && e.args[1] isa F) ||
             throw(ArgumentError("UniqueConstraint '$name': expressions can be F(:field), Lower(:field) or Upper(:field)"))
     end
     UniqueConstraint(Symbol[Symbol(f) for f in fields], collect(Any, expressions), string(name), condition,
-                     violation_error_message === nothing ? nothing : string(violation_error_message))
+                     optstring(violation_error_message), optstring(violation_error_code))
 end
 
 """
@@ -87,6 +99,33 @@ function ExclusionConstraint(; name, expressions, index_type = :gist, condition 
 end
 
 model_constraints(T) = collect(Constraint, get(modelmeta(T).extra, :constraints, Constraint[]))
+
+# Constraints are equal when all their parts are (as Django's __eq__)
+Base.:(==)(a::C, b::C) where {C<:Constraint} = all(n -> getfield(a, n) == getfield(b, n), fieldnames(C))
+Base.hash(c::Constraint, h::UInt) = foldl((h, n) -> hash(getfield(c, n), h), fieldnames(typeof(c)); init = hash(typeof(c), h))
+
+"A constraint with `%(app_label)s` and `%(class)s` in its name filled in for model `T` (at registration)."
+function constraint_for_model(c::Constraint, app, cls)
+    occursin("%(", c.name) || return c
+    name = replace(c.name, "%(app_label)s" => lowercase(string(app)), "%(class)s" => lowercase(string(cls)))
+    typeof(c)((n === :name ? name : getfield(c, n) for n in fieldnames(typeof(c)))...)
+end
+
+"""
+    Juango.validate(constraint, Model, obj; exclude = Symbol[])
+
+Check one constraint for an object's values, as Django's `constraint.validate(model, instance)`:
+throws `ValidationError` with the constraint's message and `violation_error_code` (or Django's
+`unique` code for a unique constraint over fields) when they violate it. Skipped when it uses an
+excluded field.
+"""
+Base.@nospecializeinfer function validate(c::Constraint, @nospecialize(T::Type{<:Model}), @nospecialize(obj::Model); exclude = Symbol[])
+    values = Dict{Symbol,Any}(f.name => field_data(obj, attname(f)) for f in all_fields(T) if !(f.name in exclude))
+    r = constraint_error(T, c, values, obj.id)
+    r === nothing && return nothing
+    msg, code = r
+    throw(ValidationError(msg; code = code))
+end
 
 # --- the schema snapshot -------------------------------------------------------------------------
 
@@ -357,57 +396,59 @@ Messages for the model's constraints that `values` (field name => value, a `Func
 a field missing from `values` are skipped. Unique constraints are checked with a query.
 """
 Base.@nospecializeinfer function constraint_errors(@nospecialize(T::Type{<:Model}), values, id)
-    has(name) = values isa AbstractDict ? haskey(values, Symbol(name)) : true
-    get_(name) = (v = values isa AbstractDict ? values[Symbol(name)] : values(name); v isa Model ? v.id : v)
     errs = String[]
-    vname = uppercasefirst(string(modelmeta(T).verbose_name))
     for c in model_constraints(T)
-        all(has, constraint_fields(c)) || continue
-        if c isa CheckConstraint
-            condition_value(T, c.condition, get_) === false || continue
-            push!(errs, something(c.violation_error_message, interpolate(gettext("Constraint “%(name)s” is violated."), Dict("name" => c.name))))
-        elseif c isa ExclusionConstraint
-            # enforced by PostgreSQL only; checked with a query when the operators have lookups
-            backend() isa PostgresBackend && all(x -> x[2] in ("=", "&&"), c.expressions) || continue
-            c.condition === nothing || condition_value(T, c.condition, get_) === true || continue
-            lookups = Pair{Symbol,Any}[]
-            for (f, op) in c.expressions
-                v = get_(f); v === nothing && @goto next
-                push!(lookups, Symbol(f, op == "=" ? "" : "__overlap") => v)
-            end
-            qs = filter(base_objects(T), Q(:AND, Any[lookups...], false))
-            c.condition === nothing || (qs = filter(qs, c.condition))
-            id === nothing || (qs = filter(qs, !Q(id = id)))
-            exists(qs) && push!(errs, something(c.violation_error_message,
-                                               interpolate(gettext("Constraint “%(name)s” is violated."), Dict("name" => c.name))))
-        else
-            c.condition === nothing || condition_value(T, c.condition, get_) === true || continue
-            lookups = Pair{Symbol,Any}[]
-            for f in c.fields
-                v = get_(f); v === nothing && @goto next
-                push!(lookups, f => v)
-            end
-            for e in c.expressions
-                name = e isa Func ? e.args[1].name : e isa F ? e.name : string(e)
-                v = get_(name); v === nothing && @goto next
-                push!(lookups, Symbol(name, e isa Func ? "__iexact" : "") => v)
-            end
-            qs = filter(base_objects(T), Q(:AND, Any[lookups...], false))
-            c.condition === nothing || (qs = filter(qs, c.condition))
-            id === nothing || (qs = filter(qs, !Q(id = id)))
-            if exists(qs)
-                msg = c.violation_error_message
-                if msg === nothing
-                    labels = [label(findfield(modelmeta(T), f)) for f in c.fields]
-                    msg = isempty(labels) || c.condition !== nothing ?
-                        interpolate(gettext("Constraint “%(name)s” is violated."), Dict("name" => c.name)) :
-                        interpolate(gettext("%(model)s with this %(fields)s already exists."),
-                                    Dict("model" => vname, "fields" => join(labels, " and ")))
-                end
-                push!(errs, msg)
-            end
-            @label next
-        end
+        r = constraint_error(T, c, values, id)
+        r === nothing || push!(errs, r[1])
     end
     errs
+end
+
+"`(message, code)` when `values` violate constraint `c` of `T`, else `nothing`."
+Base.@nospecializeinfer function constraint_error(@nospecialize(T::Type{<:Model}), c::Constraint, values, id)
+    has(name) = values isa AbstractDict ? haskey(values, Symbol(name)) : true
+    get_(name) = (v = values isa AbstractDict ? values[Symbol(name)] : values(name); v isa Model ? v.id : v)
+    vname = uppercasefirst(string(modelmeta(T).verbose_name))
+    violated() = something(c.violation_error_message, interpolate(gettext("Constraint “%(name)s” is violated."), Dict("name" => c.name)))
+    code = hasfield(typeof(c), :violation_error_code) ? c.violation_error_code : nothing
+    all(has, constraint_fields(c)) || return nothing
+    if c isa CheckConstraint
+        condition_value(T, c.condition, get_) === false || return nothing
+        return (violated(), code)
+    elseif c isa ExclusionConstraint
+        # enforced by PostgreSQL only; checked with a query when the operators have lookups
+        backend() isa PostgresBackend && all(x -> x[2] in ("=", "&&"), c.expressions) || return nothing
+        c.condition === nothing || condition_value(T, c.condition, get_) === true || return nothing
+        lookups = Pair{Symbol,Any}[]
+        for (f, op) in c.expressions
+            v = get_(f); v === nothing && return nothing
+            push!(lookups, Symbol(f, op == "=" ? "" : "__overlap") => v)
+        end
+        qs = filter(base_objects(T), Q(:AND, Any[lookups...], false))
+        c.condition === nothing || (qs = filter(qs, c.condition))
+        id === nothing || (qs = filter(qs, !Q(id = id)))
+        return exists(qs) ? (violated(), code) : nothing
+    end
+    c.condition === nothing || condition_value(T, c.condition, get_) === true || return nothing
+    lookups = Pair{Symbol,Any}[]
+    for f in c.fields
+        v = get_(f); v === nothing && return nothing
+        push!(lookups, f => v)
+    end
+    for e in c.expressions
+        name = e isa Func ? e.args[1].name : e isa F ? e.name : string(e)
+        v = get_(name); v === nothing && return nothing
+        push!(lookups, Symbol(name, e isa Func ? "__iexact" : "") => v)
+    end
+    qs = filter(base_objects(T), Q(:AND, Any[lookups...], false))
+    c.condition === nothing || (qs = filter(qs, c.condition))
+    id === nothing || (qs = filter(qs, !Q(id = id)))
+    exists(qs) || return nothing
+    # a constraint over fields without a condition reads as a unique field does (code "unique"), as Django
+    if c.violation_error_message === nothing && !isempty(c.fields) && c.condition === nothing
+        labels = [label(findfield(modelmeta(T), f)) for f in c.fields]
+        return (interpolate(gettext("%(model)s with this %(fields)s already exists."), Dict("model" => vname, "fields" => join(labels, " and "))),
+                something(code, "unique"))
+    end
+    (violated(), code)
 end

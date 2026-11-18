@@ -17,6 +17,9 @@ struct Q
     negated::Bool
 end
 Q(; kw...) = Q(:AND, Any[k => v for (k, v) in kw], false)
+# equal when built alike (as Django's Q.__eq__): constraints holding conditions compare too
+Base.:(==)(a::Q, b::Q) = a.connector === b.connector && a.negated == b.negated && a.children == b.children
+Base.hash(q::Q, h::UInt) = hash(q.children, hash(q.negated, hash(q.connector, hash(:Q, h))))
 Q(p::Pair) = Q(:AND, Any[Symbol(p.first) => p.second], false)
 Q(q::Q) = Q(:AND, Any[q], false)
 Base.:|(a::Q, b::Q) = Q(:OR, Any[a, b], false)
