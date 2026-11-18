@@ -4930,10 +4930,21 @@ end
     content_object = GenericForeignKey()
     Meta(table = "dk_taggeditem", ordering = ["tag", "content_type__model"])
 end
+@model struct DkComparison
+    comparative = CharField(max_length = 50)
+    content_type1 = ForeignKey(ContentType; on_delete = :CASCADE, related_name = :dk_comparative1_set)
+    object_id1 = PositiveIntegerField()
+    first_obj = GenericForeignKey(:content_type1, :object_id1)
+    content_type2 = ForeignKey(ContentType; on_delete = :CASCADE, related_name = :dk_comparative2_set)
+    object_id2 = PositiveIntegerField()
+    other_obj = GenericForeignKey(:content_type2, :object_id2)
+    Meta(table = "dk_comparison", ordering = ["id"])
+end
 @model struct DkAnimal
     common_name = CharField(max_length = 150)
     latin_name = CharField(max_length = 150, default = "")
     tags = GenericRelation(:DkTaggedItem; related_query_name = "animal")
+    comparisons = GenericRelation(:DkComparison; object_id_field = :object_id1, content_type_field = :content_type1)
     Meta(table = "dk_animal", ordering = ["id"])
 end
 @model struct DkVegetable
@@ -4953,7 +4964,7 @@ end
     Meta(table = "dk_manualpk")
 end
 redirect_stdout(devnull) do
-    ms = [DkTaggedItem, DkAnimal, DkVegetable, DkMineral, DkManualPK]
+    ms = [DkTaggedItem, DkComparison, DkAnimal, DkVegetable, DkMineral, DkManualPK]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
 end
 
@@ -5043,5 +5054,171 @@ end
     clear!(bacon.tags); @test isempty(collect(bacon.tags)) && tags(order_by(objects(DkTaggedItem), "tag")) == ["hairy"]
     f2, s2 = create(bacon.tags; tag = "fatty"), create(bacon.tags; tag = "salty")
     remove!(bacon.tags, f2); @test tags(bacon.tags) == ["salty"] && tags(order_by(objects(DkTaggedItem), "tag")) == ["hairy", "salty"]
+  end
+end
+
+@model struct DkValuableTaggedItem <: DkTaggedItem
+    value = PositiveIntegerField()
+    Meta(table = "dk_valuabletaggeditem")
+end
+@model struct DkCarrot <: DkVegetable
+    Meta(table = "dk_carrot")
+end
+@model struct DkGecko
+    has_tail = BooleanField(default = false)
+    Meta(table = "dk_gecko")
+end
+Juango.default_queryset(::Type{DkGecko}) = filter(base_objects(DkGecko); has_tail = true)     # Django's GeckoManager
+@model struct DkRock <: DkMineral
+    tags = GenericRelation(:DkTaggedItem)
+    Meta(table = "dk_rock")
+end
+@model struct DkValuableRock <: DkMineral
+    tags = GenericRelation(:DkValuableTaggedItem)
+    Meta(table = "dk_valuablerock")
+end
+@model struct DkForProxyModelModel
+    content_type = ForeignKey(ContentType; on_delete = :CASCADE, related_name = :dk_forproxy)
+    object_id = PositiveIntegerField()
+    obj = GenericForeignKey(; for_concrete_model = false)
+    title = CharField(max_length = 255, null = true)
+    Meta(table = "dk_forproxymodelmodel")
+end
+@model struct DkForConcreteModelModel
+    content_type = ForeignKey(ContentType; on_delete = :CASCADE, related_name = :dk_forconcrete)
+    object_id = PositiveIntegerField()
+    obj = GenericForeignKey()
+    Meta(table = "dk_forconcretemodelmodel")
+end
+@model struct DkConcreteRelatedModel
+    bases = GenericRelation(:DkForProxyModelModel; for_concrete_model = false)
+    Meta(table = "dk_concreterelatedmodel")
+end
+@model struct DkProxyRelatedModel <: DkConcreteRelatedModel
+    Meta(proxy = true)
+end
+@model struct DkAllowsNullGFK
+    content_type = ForeignKey(ContentType; on_delete = :SET_NULL, null = true, related_name = :dk_allowsnull)
+    object_id = PositiveIntegerField(null = true)
+    content_object = GenericForeignKey()
+    Meta(table = "dk_allowsnullgfk")
+end
+redirect_stdout(devnull) do
+    ms = [DkValuableTaggedItem, DkCarrot, DkGecko, DkRock, DkValuableRock, DkForProxyModelModel,
+          DkForConcreteModelModel, DkConcreteRelatedModel, DkAllowsNullGFK]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django generic_relations: GenericRelationsTests (part 2), ProxyRelatedModelTest" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    tags(qs) = [t.tag for t in qs]
+    pks(qs) = [x.pk for x in qs]
+    # test_multiple_gfk: two generic keys on one model, one relation through the second pair of fields
+    tiger, cheetah, bear = (create(DkAnimal; common_name = n) for n in ("tiger", "cheetah", "bear"))
+    c1 = create(DkComparison; first_obj = cheetah, other_obj = tiger, comparative = "faster")
+    c2 = create(DkComparison; first_obj = tiger, other_obj = cheetah, comparative = "cooler")
+    c3 = create(tiger.comparisons; other_obj = bear, comparative = "cooler")
+    c4 = create(tiger.comparisons; other_obj = cheetah, comparative = "stronger")
+    @test pks(cheetah.comparisons) == [c1.pk] && Set(pks(filter(tiger.comparisons; comparative = "cooler"))) == Set([c2.pk, c3.pk])
+    # test_prefetch_related_custom_object_id: through the first key to its relation
+    for cmp in prefetch_related(filter(DkComparison; pk__in = [c1.pk, c2.pk]), :first_obj__comparisons)
+        @test cmp.pk in pks(cmp.first_obj.comparisons)
+    end
+    delete!(filter(tiger.comparisons; comparative__in = ["cooler"]))
+    @test Set(pks(objects(DkComparison))) == Set([c1.pk, c4.pk])
+    delete!(cheetah)
+    @test pks(objects(DkComparison)) == [c4.pk]
+    # generic keys to subclasses, to a model whose default queryset hides the row, from a subclass
+    quartz = create(DkMineral; name = "Quartz", hardness = 7)
+    vt = create(DkValuableTaggedItem; content_object = quartz, tag = "shiny", value = 10)
+    @test vt.content_object.pk == quartz.pk && get(DkValuableTaggedItem; pk = vt.pk).content_object.pk == quartz.pk
+    granite = create(DkValuableRock; name = "granite", hardness = 5)
+    create(DkValuableTaggedItem; content_object = granite, tag = "countertop", value = 1)
+    @test count(filter(DkValuableRock; tags__value = 1)) == 1 && count(filter(DkValuableRock; tags__tag = "countertop")) == 1
+    delete!(granite); @test count(filter(DkValuableTaggedItem; tag = "countertop")) == 0
+    tailless = create(DkGecko; has_tail = false)
+    @test get(DkTaggedItem; pk = create(DkTaggedItem; content_object = tailless, tag = "lizard").pk).content_object.pk == tailless.pk
+    rock = create(DkRock; name = "granite", hardness = 5); create(DkTaggedItem; content_object = rock, tag = "countertop")
+    @test get(DkRock; tags__tag = "countertop").pk == rock.pk
+    carrot = create(DkCarrot; name = "carrot"); create(DkTaggedItem; content_object = carrot, tag = "orange")
+    @test get(DkCarrot; tags__tag = "orange").pk == carrot.pk
+    # get_or_create / update_or_create with the generic key in defaults
+    q2, diamond = create(DkMineral; name = "Quartz2", hardness = 7), create(DkMineral; name = "Diamond", hardness = 7)
+    t, c = get_or_create(DkTaggedItem; tag = "glassy", defaults = Dict(:content_object => q2)); @test c && t.content_object.id == q2.id
+    t, c = update_or_create(DkTaggedItem; tag = "sparkly", defaults = Dict(:content_object => q2)); @test c && t.content_object.id == q2.id
+    t, c = update_or_create(DkTaggedItem; tag = "sparkly", defaults = Dict(:content_object => diamond)); @test !c && t.content_object.id == diamond.id
+    t, c = update_or_create(DkTaggedItem; tag = "bright", create_defaults = Dict(:content_object => q2), defaults = Dict(:content_object => diamond))
+    @test c && t.content_object.id == q2.id
+    t, c = update_or_create(DkTaggedItem; tag = "bright", create_defaults = Dict(:content_object => q2), defaults = Dict(:content_object => diamond))
+    @test !c && t.content_object.id == diamond.id
+    # a generic key isn't a lookup; an unsaved target refused; the cached object follows changes to the fields
+    @test tr(() -> get(DkTaggedItem; content_object = "")) isa Exception
+    @test tr(() -> save!(DkTaggedItem(tag = "shiny", content_object = DkMineral(name = "Q", hardness = 7)))) isa Exception
+    @test tr(() -> bulk_create([DkTaggedItem(tag = "shiny", content_object = DkMineral(name = "Q", hardness = 7))])) isa Exception
+    broccoli, cauliflower = create(DkVegetable; name = "Broccoli"), create(DkVegetable; name = "Cauliflower")
+    tag = create(DkTaggedItem; content_object = broccoli, tag = "yummy")
+    tag.object_id = cauliflower.id; @test tag.content_object.pk == cauliflower.pk
+    newid = max(maximum(pks(objects(DkVegetable))), maximum(pks(objects(DkMineral)))) + 1
+    brocc2 = create(DkVegetable; id = newid, name = "Broccoli2"); diam2 = create(DkMineral; id = newid, name = "Diamond2", hardness = 7)
+    tag = create(DkTaggedItem; content_object = brocc2, tag = "yummy2")
+    tag.content_type = get_for_model(diam2); @test tag.content_object isa DkMineral && tag.content_object.pk == diam2.pk
+    spinach = DkVegetable(name = "spinach"); @test DkTaggedItem(content_object = spinach).content_object === spinach
+    @test DkAllowsNullGFK(content_object = nothing).content_object === nothing && DkTaggedItem(content_object = nothing).content_object === nothing
+  end
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    tags(qs) = [t.tag for t in qs]
+    platypus = create(DkAnimal; common_name = "Platypus"); bacon = create(DkVegetable; name = "Bacon", is_yucky = false)
+    # changes through a prefetched relation show
+    p = get(prefetch_related(objects(DkAnimal), :tags); pk = platypus.pk)
+    @test isempty(collect(p.tags)); weird = create(p.tags; tag = "weird"); @test tags(p.tags) == ["weird"]
+    delete!(weird)
+    p = get(prefetch_related(objects(DkAnimal), :tags); pk = platypus.pk)
+    w2 = create(DkTaggedItem; tag = "weird", content_object = platypus); add!(p.tags, w2); @test tags(p.tags) == ["weird"]
+    p = get(prefetch_related(objects(DkAnimal), :tags); pk = platypus.pk)
+    @test tags(p.tags) == ["weird"]; remove!(p.tags, w2); @test isempty(collect(p.tags))
+    w3 = create(platypus.tags; tag = "weird"); p = get(prefetch_related(objects(DkAnimal), :tags); pk = platypus.pk)
+    @test tags(p.tags) == ["weird"]; clear!(p.tags); @test isempty(collect(p.tags))
+    p = get(prefetch_related(objects(DkAnimal), :tags); pk = platypus.pk)
+    furry = create(DkTaggedItem; tag = "furry", content_object = platypus); set!(p.tags, [furry]); @test tags(p.tags) == ["furry"]
+    weird = create(DkTaggedItem; tag = "weird", content_object = platypus); set!(p.tags, [weird]); @test tags(p.tags) == ["weird"]
+    clear!(platypus.tags)
+    furry = create(platypus.tags; tag = "furry"); p = get(prefetch_related(objects(DkAnimal), :tags); pk = platypus.pk)
+    weird = create(platypus.tags; tag = "weird"); add!(p.tags, weird); @test tags(p.tags) == ["furry", "weird"]
+    remove!(p.tags, weird); @test tags(p.tags) == ["furry"]
+    clear!(platypus.tags)
+    # prefetching through generic keys to several models, then their own generic relations
+    create(DkTaggedItem; content_object = platypus, tag = "prefetch_tag_1")
+    create(DkTaggedItem; content_object = create(DkVegetable; name = "Broccoli"), tag = "prefetch_tag_2")
+    create(DkTaggedItem; content_object = create(DkAnimal; common_name = "Bear"), tag = "prefetch_tag_3")
+    ts, n = nq(() -> collect(prefetch_related(filter(DkTaggedItem; tag__startswith = "prefetch_tag_"), :content_object, :content_object__tags)))
+    @test n == 4
+    for t in ts
+        @test [x.pk for x in t.content_object.tags] == [t.pk]
+    end
+    # GenericPrefetch: a queryset per model
+    tv = create(DkTaggedItem; tag = "great", content_object = bacon); ta = create(DkTaggedItem; tag = "awesome", content_object = platypus)
+    tv, ta = get(DkTaggedItem; pk = tv.pk), get(DkTaggedItem; pk = ta.pk)
+    _, n = nq(() -> prefetch_related_objects([tv, ta], GenericPrefetch(:content_object, [objects(DkVegetable), Juango.only(objects(DkAnimal), :common_name)])))
+    @test n == 2
+    r, n = nq(() -> (tv.content_object.name, ta.content_object.common_name)); @test r == ("Bacon", "Platypus") && n == 0
+    r, n = nq(() -> ta.content_object.latin_name); @test n == 1
+  end
+  port_block() do
+    # ProxyRelatedModelTest: for_concrete_model
+    base = DkForConcreteModelModel(); rel = create(DkProxyRelatedModel); base.obj = rel; save!(base)
+    @test typeof(get(DkForConcreteModelModel; pk = base.pk).obj) === DkConcreteRelatedModel        # (the concrete model by default)
+    base = DkForProxyModelModel(); rel = create(DkConcreteRelatedModel); base.obj = rel; save!(base)
+    @test get(DkForProxyModelModel; pk = base.pk).obj.pk == rel.pk
+    @test get(DkConcreteRelatedModel; bases__id = base.id).pk == rel.pk
+    base = DkForProxyModelModel(); prel = create(DkProxyRelatedModel); base.obj = prel; save!(base)
+    @test typeof(get(DkForProxyModelModel; pk = base.pk).obj) === DkProxyRelatedModel           # the proxy comes back
+    @test get(DkProxyRelatedModel; bases__id = base.id).pk == prel.pk
+    @test get(get(DkProxyRelatedModel; pk = prel.pk).bases).pk == base.pk
+    base = DkForProxyModelModel(); base.obj = create(DkConcreteRelatedModel); save!(base)
+    newrel = create(DkConcreteRelatedModel); set!(newrel.bases, [base])
+    @test get(get(DkConcreteRelatedModel; pk = newrel.pk).bases).pk == base.pk
   end
 end

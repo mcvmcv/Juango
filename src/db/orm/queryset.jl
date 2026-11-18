@@ -950,6 +950,20 @@ prefetch_strip!(rows) = (foreach(r -> delete!((getfield(r, :_data)::Dict{Symbol,
 Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), name::Symbol, @nospecialize(qs), to_attr)
     isempty(objs) && return Any[]
     T = typeof(first(objs))
+    # objects of several models (reached through a generic key: content_object__tags): each model on its own
+    if any(o -> typeof(o) !== T, objs)
+        types = unique(map(typeof, objs))
+        gs = [find_generic(generic_relations(U), name) for U in types]
+        # the same generic relation on every model: one query for them all
+        if all(g -> g !== nothing, gs) && length(unique(map(g -> related_model(g), gs))) == 1
+            return prefetch_generic_relation_mixed!(objs, name, qs, to_attr)
+        end
+        out = Any[]
+        for U in unique(map(typeof, objs))
+            append!(out, prefetch_level!(Any[o for o in objs if typeof(o) === U], name, qs, to_attr))
+        end
+        return out
+    end
     f = findfield(modelmeta(T), name)
     if f !== nothing && f.kind === :fk && f.name === name
         R = related_model(f)
@@ -970,7 +984,7 @@ Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), na
     mm = find_m2m(T, string(name))
     mm === nothing || return prefetch_m2m!(objs, mm[1], mm[2], mm[3], qs, to_attr)
     g = find_generic(generic_fks(T), name)
-    g === nothing || return prefetch_generic_fk!(objs, g)
+    g === nothing || return prefetch_generic_fk!(objs, g, qs)
     g = find_generic(generic_relations(T), name)
     g === nothing || return prefetch_generic_relation!(objs, g, qs, to_attr)
     # a multi-table parent link (restaurant.place_ptr) or child link (place.restaurant): rows with the same ids

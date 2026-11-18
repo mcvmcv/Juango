@@ -487,7 +487,7 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
         if g !== nothing
             M = related_model(g)
             ctf, fkf = g.through
-            ctcol, ctid = column(getfield_meta(M, ctf)), get_for_model(T).id::Integer
+            ctcol, ctid = column(getfield_meta(M, ctf)), generic_ct(T, g).id::Integer
             alias = join!(c, alias, expr_key(c, alias, g.name), modelmeta(M).table, column(getfield_meta(M, fkf)), "id";
                           left = true, extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
             T = M
@@ -498,7 +498,7 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
         if rg !== nothing                      # tag.animal (a GenericRelation's related_query_name): LEFT JOIN the owner
             O, g = rg
             ctf, fkf = g.through
-            ctcol, ctid = column(getfield_meta(T, ctf)), get_for_model(O).id::Integer
+            ctcol, ctid = column(getfield_meta(T, ctf)), generic_ct(O, g).id::Integer
             prev = alias
             alias = join!(c, alias, expr_key(c, alias, Symbol(s)), modelmeta(O).table,
                           natural_pk(O) ? column(pk_fields(O)[1]) : "id", column(getfield_meta(T, fkf));

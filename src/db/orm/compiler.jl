@@ -314,8 +314,8 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             M = related_model(g)
             ctf, fkf = g.through
             ctcol, fkcol = column(getfield_meta(M, ctf)), column(getfield_meta(M, fkf))
-            ctid = get_for_model(T).id::Integer
-            mt = qname(modelmeta(M).table)
+            ctid = generic_ct(T, g).id::Integer
+            mt = qname(modelmeta(getfield_meta(M, fkf).model).table)      # (the table holding the key: a child's parent's)
             cond(a) = "$(qcol(a, fkcol)) = $(qcol(alias, "id")) AND $(qcol(a, ctcol)) = $ctid"
             if isempty(rest) && lookup == "isnull"
                 a = new_alias!(c)
@@ -328,8 +328,16 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                 sql, ps = compile_lookup(c, a, M, subkey, value, negated)
                 return ("EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(cond(a)) AND $sql)", ps)
             end
-            a = join!(c, alias, scope_key(c, alias, g.name), modelmeta(M).table, fkcol, "id"; left = true,
-                      extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
+            Mf = getfield_meta(M, fkf).model
+            if modelmeta(Mf).table != modelmeta(M).table
+                # the related model is a multi-table child: its key columns are in the parent's table
+                ap = join!(c, alias, scope_key(c, alias, g.name), modelmeta(Mf).table, fkcol, "id"; left = true,
+                           extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
+                a = join!(c, ap, (ap, :__child, M), modelmeta(M).table, "id", "id"; left = true)
+            else
+                a = join!(c, alias, scope_key(c, alias, g.name), modelmeta(M).table, fkcol, "id"; left = true,
+                          extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
+            end
             c.distinct = true
             return compile_lookup(c, a, M, subkey, value, negated)
         end
@@ -338,7 +346,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             O, g = rg
             ctf, fkf = g.through
             ctcol, fkcol = column(getfield_meta(T, ctf)), column(getfield_meta(T, fkf))
-            ctid = get_for_model(O).id::Integer
+            ctid = generic_ct(O, g).id::Integer
             ot = qname(modelmeta(O).table)
             # (an object id kept as text is compared as text)
             opk = natural_pk(O) ? column(pk_fields(O)[1]) : "id"

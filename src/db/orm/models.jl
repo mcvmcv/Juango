@@ -642,7 +642,7 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
     g = find_generic(generic_relations(T), s)
     if g !== nothing
         qs = generic_queryset(m, g)
-        return pre isa PrefetchedList ? chain(qs; cache = pre.items) : qs
+        return pre isa PrefetchedList ? chain(qs; cache = pre.items, owner = qs.owner) : qs
     end
     mm = find_m2m(T, string(s))
     if mm !== nothing

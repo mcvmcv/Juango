@@ -154,6 +154,16 @@ Base.@nospecializeinfer function sync_related_keys!(@nospecialize(obj::Model), o
             throw(ArgumentError("save!() prohibited to prevent data loss due to unsaved related object '$(f.name)'"))
         data[attname(f)] = target_value(f, rel)
     end
+    # a generic key assigned an object that wasn't saved then: refused now, or its id picked up if it's saved since
+    for g in generic_fks(typeof(obj))
+        rel = get(cache, g.name, nothing)
+        rel isa Model || continue
+        ctf, fkf = g.related
+        (only === nothing || fkf in only) || continue
+        get(data, fkf, nothing) === nothing || continue
+        rel.id === nothing && throw(ArgumentError("save!() prohibited to prevent data loss due to unsaved related object '$(g.name)'"))
+        data[fkf] = getfield_meta(typeof(obj), fkf).kind in STRING_KINDS ? string(rel.id) : rel.id
+    end
 end
 
 Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Union{Nothing,Set{Symbol}} = nothing)
@@ -378,6 +388,7 @@ Base.@nospecializeinfer function create_params(@nospecialize(T::Type{<:Model}), 
     for k in keys(ps)
         k in (:pk, :id) && continue
         any(f -> f.name === k || attname(f) === k, all_fields(T)) && continue
+        any(g -> g.name === k, generic_fks(T)) && continue            # content_object = obj
         which(tattr!, Tuple{concrete_model(T),Val{k},Any}).sig !== Tuple{typeof(tattr!),Any,Val,Any} && continue
         push!(bad, "'$k'")
     end

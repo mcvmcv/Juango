@@ -471,7 +471,7 @@ Base.@nospecializeinfer function deletion_closure!(seen::IdDict{Any,Set{Any}}, r
     for g in generic_relations(T)
         M = related_model(g)
         ctf, fkf = g.through
-        deletion_closure!(seen, restricts, M, row_keys(filter(base_objects(M), Q(Symbol(ctf, :_id) => get_for_model(T).id), Q(Symbol(fkf, "__in") => v))))
+        deletion_closure!(seen, restricts, M, row_keys(filter(base_objects(M), Q(Symbol(ctf, :_id) => generic_ct(T, g).id), Q(Symbol(fkf, "__in") => v))))
     end
     for C in child_models(T)
         deletion_closure!(seen, restricts, C, collect(values_list(filter(base_objects(C); id__in = v), :id; flat = true)))
@@ -521,7 +521,7 @@ Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector
     for g in generic_relations(T)    # objects pointing here through a GenericForeignKey
         M = related_model(g)
         ctf, fkf = g.through
-        rel = filter(base_objects(M), Q(Symbol(ctf, :_id) => get_for_model(T).id), Q(Symbol(fkf, "__in") => ids))
+        rel = filter(base_objects(M), Q(Symbol(ctf, :_id) => generic_ct(T, g).id), Q(Symbol(fkf, "__in") => ids))
         delete_ids!(M, row_keys(rel))
     end
     for C in child_models(T)        # rows of subclasses that extend these rows
