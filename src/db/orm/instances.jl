@@ -464,6 +464,7 @@ end
 
 const EMAIL_RE = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 const SLUG_RE = r"^[-a-zA-Z0-9_]+$"
+const UNICODE_SLUG_RE = r"^[-\p{L}\p{N}_]+$"
 const URL_RE = r"^https?://[^\s/$.?#].[^\s]*$"i
 
 """
@@ -511,6 +512,8 @@ function validate_field(f::Field, v)
     isempty_val = v === nothing || (v isa AbstractString && isempty(v))
     if isempty_val
         (!f.blank && f.kind !== :bool) && push!(errs, field_message(f, "required", gettext("This field is required.")))
+        # a BooleanField that isn't nullable must be true or false
+        f.kind === :bool && v === nothing && !f.null && push!(errs, field_message(f, "null", gettext("This field cannot be null.")))
         return errs
     end
     if f.kind === :json && (p = json_nonfinite_path(v)) !== nothing
@@ -529,8 +532,12 @@ function validate_field(f::Field, v)
                                   Dict("max" => f.max_length, "len" => length(v), "limit_value" => f.max_length, "show_value" => length(v))))
     end
     f.kind === :email && !occursin(EMAIL_RE, string(v)) && push!(errs, field_message(f, "invalid", gettext("Enter a valid email address.")))
-    f.kind === :slug && !occursin(SLUG_RE, string(v)) &&
-        push!(errs, field_message(f, "invalid", gettext("Enter a valid “slug” consisting of letters, numbers, underscores or hyphens.")))
+    if f.kind === :slug
+        uni = f.related isa NamedTuple && get(f.related, :allow_unicode, false)
+        occursin(uni ? UNICODE_SLUG_RE : SLUG_RE, string(v)) ||
+            push!(errs, field_message(f, "invalid", uni ? gettext("Enter a valid “slug” consisting of Unicode letters, numbers, underscores, or hyphens.") :
+                                                         gettext("Enter a valid “slug” consisting of letters, numbers, underscores or hyphens.")))
+    end
     f.kind === :url && !occursin(URL_RE, string(v)) && push!(errs, field_message(f, "invalid", gettext("Enter a valid URL.")))
     if f.kind === :decimal
         r = validation_error(DecimalValidator(f.max_digits, f.decimal_places), v)
@@ -571,6 +578,38 @@ ValidationError(d::AbstractDict) =
     ValidationError(Dict{Symbol,Vector{String}}(Symbol(k) => (v isa AbstractString ? [String(v)] : String[string(x) for x in v]) for (k, v) in d))
 Base.showerror(io::IO, e::ValidationError) =
     print(io, "ValidationError: ", join([k === :__all__ ? join(v, " ") : "$k: " * join(v, " ") for (k, v) in e.errors], "; "))
+
+"""
+    clean_value(field, value) -> value
+
+A value for one field, converted and validated as Django's `Field.clean(value, instance)`: text
+that is a number for a numeric field becomes the number, then the field's checks (required,
+choices, range, length, validators) run. Throws `ValidationError` with the field's messages.
+
+    clean_value(IntegerField(), "2")     # 2
+    clean_value(IntegerField(), "a")     # ValidationError
+"""
+function clean_value(f::Field, v)
+    x = v
+    if v isa AbstractString && !isempty(v)
+        t = strip(v)
+        bad() = throw(ValidationError(Dict(something(f.name === :_ ? nothing : f.name, :value) =>
+                                           [field_message(f, "invalid", gettext("“%(value)s” value must be a number."), Dict("value" => v))])))
+        if f.kind in INT_KINDS
+            x = something(tryparse(Int, t), Some(nothing)); x === nothing && bad()
+        elseif f.kind === :float
+            x = something(tryparse(Float64, t), Some(nothing)); x === nothing && bad()
+        elseif f.kind === :decimal
+            x = try Decimal(t) catch; bad() end
+        elseif f.kind === :bool
+            l = lowercase(t)
+            x = l in ("true", "1", "t", "yes") ? true : l in ("false", "0", "f", "no") ? false : bad()
+        end
+    end
+    errs = validate_field(f, x)
+    isempty(errs) || throw(ValidationError(Dict(something(f.name === :_ ? nothing : f.name, :value) => errs)))
+    x
+end
 
 """
     Juango.clean(obj)
@@ -627,8 +666,10 @@ Base.@nospecializeinfer function clean_fields(@nospecialize(obj::Model); exclude
     T = typeof(obj)
     errors = Dict{Symbol,Vector{String}}()
     for f in all_fields(T)
-        (f.name in exclude || !f.editable) && continue
+        # (a BinaryField isn't editable by default but is checked, as Django checks every field)
+        (f.name in exclude || (!f.editable && f.kind !== :binary)) && continue
         v = getproperty(obj, attname(f))
+        !f.editable && (v === nothing || isempty(v)) && continue      # (a non-editable BinaryField: only its length)
         v === DB_DEFAULT && continue                  # the database supplies it
         errs = validate_field(f, v)
         isempty(errs) || (errors[f.name] = errs)

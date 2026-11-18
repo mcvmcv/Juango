@@ -187,16 +187,33 @@ function Base.filter(@nospecialize(qs::QuerySet), qargs::Union{Q,Expression}...;
     q = Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], false)
     push!(w, q)
     # a condition that can't match (id__in = []): no rows, without a query, as Django's EmptyResultSet (#224)
-    chain(qs; where = w, isnone = qs.isnone || cannot_match(q))
+    chain(qs; where = w, isnone = qs.isnone || cannot_match(q, model_of(qs)))
 end
-"Whether a condition can never match: an `__in` with no values, in an AND, or in every branch of an OR."
-function cannot_match(q::Q)
+"""
+Whether a condition can never match: an `__in` with no values, or a value outside an integer
+column's range (`value = 2^31` for an IntegerField), in an AND, or in every branch of an OR.
+"""
+Base.@nospecializeinfer function cannot_match(q::Q, @nospecialize(T) = nothing)
     q.negated && return false               # (NOT of an impossible condition matches every row)
     q.connector === :XOR && return false
-    kids = Bool[ch isa Q ? (!empty_q(ch) && cannot_match(ch)) :
-                ch isa Pair && endswith(string(ch.first), "__in") && ch.second isa Union{AbstractArray,Tuple,AbstractSet} &&
-                all(v -> v === nothing, ch.second) for ch in q.children if !(ch isa Q && empty_q(ch))]
+    kids = Bool[ch isa Q ? (!empty_q(ch) && cannot_match(ch, T)) :
+                ch isa Pair && ((endswith(string(ch.first), "__in") && ch.second isa Union{AbstractArray,Tuple,AbstractSet} &&
+                                 all(v -> v === nothing, ch.second)) || out_of_int_range(T, ch))
+                for ch in q.children if !(ch isa Q && empty_q(ch))]
     q.connector === :OR ? !isempty(kids) && all(kids) : any(kids)
+end
+"`field[__exact|__lt|__lte|__gt|__gte] = n` on an integer field of `T` that no row's value can satisfy."
+Base.@nospecializeinfer function out_of_int_range(@nospecialize(T), ch::Pair)
+    T isa Type && T <: Model && ch.second isa Integer && !(ch.second isa Bool) || return false
+    parts = split(string(ch.first), "__")
+    length(parts) <= 2 || return false
+    op = length(parts) == 2 ? parts[2] : "exact"
+    op in ("exact", "lt", "lte", "gt", "gte") || return false
+    f = findfield(modelmeta(T), Symbol(parts[1]))
+    (f === nothing || !haskey(INT_RANGES, f.kind)) && return false
+    lo, hi = INT_RANGES[f.kind]
+    v = ch.second
+    op == "exact" ? !(lo <= v <= hi) : op == "lt" ? v <= lo : op == "lte" ? v < lo : op == "gt" ? v >= hi : v > hi
 end
 Base.filter(@nospecialize(T::Type{<:Model}), qargs::Union{Q,Expression}...; kw...) = filter(objects(T), qargs...; kw...)
 Base.filter(qargs::Union{Q,Expression}...; kw...) = qs -> filter(qs, qargs...; kw...)
@@ -470,7 +487,7 @@ function related_columns!(c::SQLCompiler, paths, deferred = Symbol[])
             sub = path[1:i]
             any(x -> x[1] == sub, out) && continue
             push!(out, (sub, M, alias))
-            push!(cols, "$(qcol(alias, "id")) AS $(qname(alias * "__id"))")
+            push!(cols, "$(qcol(alias, pk_colname(M))) AS $(qname(alias * "__id"))")
             pre = join(string.(sub), "__") * "__"
             for g in modelmeta(M).fields
                 Symbol(pre, g.name) in deferred && continue          # only(:profile__salary)
@@ -591,7 +608,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         related, rcols = related_columns!(c, qs.related, qs.deferred)
         append!(sel, rcols)
         push!(group, pk_select(c.base, T))
-        append!(group, [qcol(a, "id") for (_, _, a) in related])
+        append!(group, [qcol(a, pk_colname(M)) for (_, M, a) in related])
     end
     pre_ann = copy(sel)            # the select list without annotations (for a wrapping query)
     ann_sel, ann_ps = String[], Any[]

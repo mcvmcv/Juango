@@ -152,19 +152,47 @@ function to_db(f::Field, v)
     k === :hstore && return encode_hstore(backend(), v)
     k === :array && return encode_array(backend(), v)
     k in RANGE_KINDS && return encode_range(backend(), v)
-    k === :uuid && return string(v)
+    k === :uuid && return string(uuid_value(f, v))
+    # numbers given as text are taken as numbers; other text is refused, as Django's get_prep_value
+    k in INT_KINDS && v isa AbstractString && return dbparam(prep_number(f, Int, v))
+    k === :float && v isa AbstractString && return dbparam(prep_number(f, Float64, v))
     k === :time && return time_string(to_time(v))
     k === :binary && return dbparam(Vector{UInt8}(v isa AbstractString ? codeunits(v) : v))
     if k === :ipaddress
         v == "" && return dbparam(nothing)
         ip = clean_ip(string(v), f.related.protocol, f.related.unpack_ipv4)
-        return ip isa Tuple ? string(v) : ip            # invalid values go as typed (full_clean reports them)
+        # an invalid IPv6 address is refused (as Django); others go as typed (full_clean reports them)
+        ip isa Tuple && occursin(':', string(v)) && throw(ValidationError(Dict(f.name => [gettext("Enter a valid IPv6 address.")])))
+        return ip isa Tuple ? string(v) : ip
     end
     k === :duration && return encode_duration(backend(), duration_us(v isa Duration ? v : to_duration(v)))
     k === :decimal && return string(f.decimal_places === nothing ? to_decimal(v) : round(to_decimal(v); digits = f.decimal_places))
     k === :geometry && return encode_geometry(v)
     dbparam(v)
 end
+"A number field's value given as text, or an error naming the field (Django's message)."
+function prep_number(f::Field, ::Type{T}, v::AbstractString) where {T}
+    t = strip(v)
+    x = tryparse(T, t)
+    T === Int && x === nothing && (y = tryparse(Float64, t); y !== nothing && isfinite(y) && (x = trunc(Int, y)))
+    x === nothing && throw(ArgumentError("Field '$(f.name)' expected a number but got $(repr(String(v)))."))
+    x
+end
+
+"A UUID field's value: a UUID, its text with or without hyphens (anywhere), or an integer below 2^128."
+function uuid_value(f::Field, v)
+    v isa UUID && return v
+    bad() = throw(ValidationError(Dict(f.name => ["“$(v)” is not a valid UUID."])))
+    if v isa Integer
+        0 <= v < big(2)^128 || bad()
+        return UUID(UInt128(v))
+    end
+    v isa AbstractString || bad()
+    h = lowercase(replace(strip(v), "-" => ""))
+    (length(h) == 32 && all(c -> c in "0123456789abcdef", h)) || bad()
+    UUID(parse(UInt128, h; base = 16))
+end
+
 "Where a value for a JSON field holds NaN or ±Inf (`\"data.runs[2]\"`, or `\"value\"` at the top), or nothing."
 function json_nonfinite_path(v, path = "value")
     v isa AbstractFloat && return isfinite(v) ? nothing : path

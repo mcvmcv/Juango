@@ -201,15 +201,41 @@ struct ChoiceGroup
 end
 choice_pair(c::Choice) = c.value => c.label
 choice_pair(c::Pair) = c.first => c.second
+choice_pair(c::Tuple{Any,Any}) = c[1] => c[2]                 # ("a", "A"), as Django's
 choice_pair(c) = c => string(c)
-is_group(c) = c isa Pair && c.second isa AbstractVector && !(c.second isa AbstractString)
+is_group(c) = c isa Pair && (c.second isa AbstractVector || c.second isa AbstractDict || c.second isa Tuple) && !(c.second isa AbstractString)
 
 normchoices(::Nothing) = nothing
 normchoices(cs::ChoiceSet) = cs.choices
 normchoices(f::Function) = f                                   # called when the choices are needed
+# a Dict, as Django's choices = {"Group 1": {1: "First"}, 0: "Other"}: its pairs, groups' too
+normchoices(cs::AbstractDict) = normchoices(Any[k => (v isa AbstractDict ? collect(Pair{Any,Any}, v) : v) for (k, v) in cs])
 normchoices(cs) = any(is_group, cs) ?
     Any[is_group(c) ? ChoiceGroup(c.first, Pair{Any,Any}[choice_pair(x) for x in c.second]) : choice_pair(c) for c in cs] :
     Pair{Any,Any}[choice_pair(c) for c in cs]
+
+"""
+    get_choices(field; include_blank = true, limit_choices_to = nothing, ordering = ())
+
+The choices a form would offer for a field, as `value => label` pairs (Django's `Field.get_choices`):
+its own choices, or for a foreign key the related objects (`pk => string(obj)`), filtered by
+`limit_choices_to` and ordered by `ordering` (else the related model's ordering). A blank choice
+`"" => "---------"` comes first with `include_blank`, unless the choices have one.
+"""
+function get_choices(f::Field; include_blank::Bool = true, limit_choices_to = nothing, ordering = ())
+    out = Pair{Any,Any}[]
+    if f.kind === :fk
+        qs = objects(related_model(f))
+        limit_choices_to === nothing || (qs = limit_choices_to isa Q ? filter(qs, limit_choices_to) : filter(qs; (Symbol(k) => v for (k, v) in pairs(limit_choices_to))...))
+        isempty(ordering) || (qs = order_by(qs, ordering...))
+        append!(out, [o.pk => string(o) for o in qs])
+    else
+        cs = normchoices(f.choices isa Function ? f.choices() : f.choices)
+        cs === nothing || append!(out, Any[c isa ChoiceGroup ? (c.label => c.choices) : c for c in cs])
+    end
+    has_blank = any(c -> c.first == "" || (c.second isa AbstractVector && any(x -> x.first == "", c.second)), out)
+    include_blank && !has_blank ? vcat(Pair{Any,Any}["" => "---------"], out) : out
+end
 
 "A field's choices in groups: `(group label or nothing, value => label pairs)`."
 function choice_groups(f::Field)
@@ -302,7 +328,9 @@ end
 CharField(; max_length = 255, kw...) = Field(:char; max_length = max_length, kw...)
 TextField(; kw...) = Field(:text; kw...)
 EmailField(; max_length = 254, kw...) = Field(:email; max_length = max_length, kw...)
-SlugField(; max_length = 50, kw...) = Field(:slug; max_length = max_length, db_index = true, kw...)
+"`SlugField(; allow_unicode = true)`: letters and digits of any script too, as Django's."
+SlugField(; max_length = 50, allow_unicode::Bool = false, kw...) =
+    Field(:slug; max_length = max_length, db_index = true, related = allow_unicode ? (allow_unicode = true,) : nothing, kw...)
 URLField(; max_length = 200, kw...) = Field(:url; max_length = max_length, kw...)
 "A 32-bit integer (`INTEGER`), validated to -2147483648..2147483647."
 IntegerField(; kw...) = Field(:int; kw...)

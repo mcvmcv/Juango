@@ -32,7 +32,12 @@ function from_db(f::Field, v)
     v isa AbstractString ? String(v) : v
 end
 
-to_db(f::Field, v::Model) = saved_key(f.kind === :fk ? target_value(f, v) : v.id, v)      # (other values: see fields_extra.jl)
+function to_db(f::Field, v::Model)                                                     # (other values: see fields_extra.jl)
+    # an object for a plain value is a mistake (as Django: a TypeError)
+    (f.kind === :float || f.kind === :decimal || f.kind in STRING_KINDS || f.kind === :bool) &&
+        throw(ArgumentError("Tried to update field $(f.name) with a model instance, $(repr(v)). Use a value compatible with the field."))
+    saved_key(f.kind === :fk ? target_value(f, v) : v.id, v)
+end
 to_db(f::Field, c::Choice) = to_db(f, c.value)
 
 """
@@ -87,6 +92,8 @@ Base.@nospecializeinfer is_composite(@nospecialize(T::Type)) = pk_kind(T) === :c
 Base.@nospecializeinfer pk_fields(@nospecialize(T::Type)) = Field[getfield_meta(T, n) for n in modelmeta(concrete_model(T)).extra[:pk].fields]
 "The primary key of rows at `alias`, as SQL: `alias.id`, or a row value `(alias.a, alias.b)`."
 pk_ref(alias, T::Type) = is_composite(T) ? "(" * join([qcol(alias, column(f)) for f in pk_fields(T)], ", ") * ")" : qcol(alias, "id")
+"The column of a model's single-column primary key: `id`, or a natural key's column."
+Base.@nospecializeinfer pk_colname(@nospecialize(T::Type)) = natural_pk(T) ? column(pk_fields(T)[1]) : "id"
 "The primary key column(s) of rows at `alias`, for a SELECT list."
 pk_select(alias, T::Type) = is_composite(T) ? join([qcol(alias, column(f)) for f in pk_fields(T)], ", ") : qcol(alias, "id")
 "A composite key's tuple from an object's data (`nothing` if a part is missing); a natural key's one value."

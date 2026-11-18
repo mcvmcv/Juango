@@ -7111,3 +7111,314 @@ dbf_dt(s, e; name = "") = create(DbfDTModel; name, start_datetime = s, end_datet
   end
 end
 
+# --- tests/model_fields (integers) ------------------------------------------------------------------------
+@model struct DmfIntegerModel
+    value = IntegerField()
+    Meta(table = "dmf_integermodel")
+end
+@model struct DmfSmallIntegerModel
+    value = SmallIntegerField()
+    Meta(table = "dmf_smallintegermodel")
+end
+@model struct DmfBigIntegerModel
+    value = BigIntegerField()
+    Meta(table = "dmf_bigintegermodel")
+end
+@model struct DmfPositiveSmallIntegerModel
+    value = PositiveSmallIntegerField()
+    Meta(table = "dmf_positivesmallintegermodel")
+end
+@model struct DmfPositiveIntegerModel
+    value = PositiveIntegerField()
+    Meta(table = "dmf_positiveintegermodel")
+end
+@model struct DmfPositiveBigIntegerModel
+    value = PositiveBigIntegerField()
+    Meta(table = "dmf_positivebigintegermodel")
+end
+redirect_stdout(devnull) do
+    ms = [DmfIntegerModel, DmfSmallIntegerModel, DmfBigIntegerModel, DmfPositiveSmallIntegerModel, DmfPositiveIntegerModel, DmfPositiveBigIntegerModel]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django model_fields: integer fields" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    for (M, lo, hi) in ((DmfIntegerModel, -2147483648, 2147483647), (DmfSmallIntegerModel, -32768, 32767),
+                        (DmfBigIntegerModel, typemin(Int64), typemax(Int64)), (DmfPositiveSmallIntegerModel, 0, 32767),
+                        (DmfPositiveIntegerModel, 0, 2147483647), (DmfPositiveBigIntegerModel, 0, typemax(Int64)))
+        # the documented range saves and loads as it was
+        for v in (lo, hi)
+            o = M(value = v); @test isempty(full_clean(o)); save!(o)
+            q = filter(M; value = v); @test count(q) == 1 && first(q).value == v && first(q).value isa Int
+        end
+        # one past either end is refused by validation
+        lo == typemin(Int64) || @test !isempty(full_clean(M(value = lo - 1)))
+        hi == typemax(Int64) || @test !isempty(full_clean(M(value = hi + 1)))
+        # a value out of the column's range matches nothing, without a query (no database error)
+        if lo != typemin(Int64) && hi != typemax(Int64)
+            r, n = nq(() -> tr(() -> get(M; value = lo - 1))); @test r isa Juango.DoesNotExist && n == 0
+            r, n = nq(() -> tr(() -> get(M; value = hi + 1))); @test r isa Juango.DoesNotExist && n == 0
+            @test count(filter(M; value__gt = lo - 1)) == 2 && count(filter(M; value__lt = hi + 1)) == 2
+            r, n = nq(() -> tr(() -> get(M; value__lt = lo - 1))); @test r isa Juango.DoesNotExist && n == 0
+            r, n = nq(() -> tr(() -> get(M; value__gt = hi + 1))); @test r isa Juango.DoesNotExist && n == 0
+        end
+        delete!(objects(M))
+        # text that is a number is taken as it; text that isn't, refused
+        create(M; value = "10"); @test get(M; value = "10").value == 10
+        @test tr(() -> create(M; value = "non-numeric string")) isa Exception
+        delete!(objects(M))
+    end
+    # a positive field refuses going below zero in the database
+    p = create(DmfPositiveIntegerModel; value = 0); p.value = F(:value) - 1
+    @test tr(() -> save!(p)) isa Juango.IntegrityError
+    # validation of a field's value on its own
+    f = IntegerField(); @test Juango.clean_value(f, "2") == 2 && tr(() -> Juango.clean_value(f, "a")) isa Exception
+    @test Juango.clean_value(IntegerField(null = true, blank = true), nothing) === nothing
+    @test tr(() -> Juango.clean_value(IntegerField(null = true, blank = false), nothing)) isa Exception
+    @test tr(() -> Juango.clean_value(IntegerField(choices = [(1, "1")]), "0")) isa Exception
+  end
+end
+
+# --- tests/model_fields (char, decimal, boolean, duration) ------------------------------------------------
+@model struct DmfPost
+    title = CharField(max_length = 100)
+    body = TextField()
+    Meta(table = "dmf_post")
+end
+@model struct DmfBigD
+    d = DecimalField(max_digits = 32, decimal_places = 30)
+    Meta(table = "dmf_bigd")
+end
+@model struct DmfFoo
+    a = CharField(max_length = 10)
+    d = DecimalField(max_digits = 5, decimal_places = 3)
+    Meta(table = "dmf_foo")
+end
+@model struct DmfBooleanModel
+    bfield = BooleanField()
+    Meta(table = "dmf_booleanmodel")
+end
+@model struct DmfNullBooleanModel
+    nbfield = BooleanField(null = true, blank = true)
+    Meta(table = "dmf_nullbooleanmodel")
+end
+@model struct DmfFksToBooleans
+    bf = ForeignKey(DmfBooleanModel; on_delete = :CASCADE, related_name = :fks)
+    nbf = ForeignKey(DmfNullBooleanModel; on_delete = :CASCADE, related_name = :fks)
+    Meta(table = "dmf_fkstobooleans")
+end
+@model struct DmfDurationModel
+    field = DurationField()
+    Meta(table = "dmf_durationmodel")
+end
+@model struct DmfNullDurationModel
+    field = DurationField(null = true)
+    Meta(table = "dmf_nulldurationmodel")
+end
+redirect_stdout(devnull) do
+    ms = [DmfPost, DmfBigD, DmfFoo, DmfBooleanModel, DmfNullBooleanModel, DmfFksToBooleans, DmfDurationModel, DmfNullDurationModel]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django model_fields: char, decimal, boolean and duration fields" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    cv(f, v) = Juango.clean_value(f, v)
+    # char: a number compared with text matches nothing; emoji keep; choices and blanks in clean
+    @test count(filter(DmfPost; title = 9)) == 0
+    p = create(DmfPost; title = "Smile 😀", body = "Whatever."); refresh!(p); @test p.title == "Smile 😀"
+    @test tr(() -> cv(CharField(max_length = 10), "")) isa Juango.ValidationError && cv(CharField(max_length = 10, blank = true), "") == ""
+    @test cv(CharField(max_length = 1, choices = [("a", "A"), ("b", "B")]), "a") == "a"
+    @test tr(() -> cv(CharField(max_length = 5, choices = [("a", "A"), ("b", "B")]), "not a")) isa Juango.ValidationError
+    @test tr(() -> cv(CharField(max_length = 5), nothing)) isa Juango.ValidationError
+    # decimal: text filters, no float conversion either way, NaN and infinities refused, limits in clean
+    foo = create(DmfFoo; a = "abc", d = Juango.Decimal("12.34")); @test [x.pk for x in filter(DmfFoo; d = "12.34")] == [foo.pk]
+    bd = save!(DmfBigD(d = "12.9")); @test get(DmfBigD; pk = bd.pk).d == Juango.Decimal("12.9")
+    big = create(DmfBigD; d = Juango.Decimal(".100000000000000000000000000005")); refresh!(big)
+    # (SQLite's NUMERIC columns keep 15 significant digits)
+    if !IS_POSTGRES && !IS_MYSQL
+        @test_broken big.d == Juango.Decimal(".100000000000000000000000000005")
+    else
+        @test big.d == Juango.Decimal(".100000000000000000000000000005")
+    end
+    for v in ("nan", "inf", "-inf", NaN, Inf, -Inf)
+        @test tr(() -> create(DmfBigD; d = v)) isa Exception
+    end
+    # values far past the column's digits in lookups (no error)
+    @test isempty(collect(filter(DmfFoo; d__gte = 100000000000))) && [x.pk for x in filter(DmfFoo; d__lte = Juango.Decimal("123456"))] == [foo.pk]
+    @test tr(() -> cv(DecimalField(max_digits = 2, decimal_places = 0), 100)) isa Juango.ValidationError
+    @test tr(() -> cv(DecimalField(max_digits = 5, decimal_places = 1), Juango.Decimal("0.99"))) isa Juango.ValidationError
+    @test tr(() -> cv(DecimalField(max_digits = 4, decimal_places = 2), "non-numeric string")) isa Juango.ValidationError
+    @test cv(DecimalField(max_digits = 4, decimal_places = 2), "3.14") == Juango.Decimal("3.14")
+    # boolean: true and false come back as Bools, through select_related too; no default; nothing refused
+    for (M, k) in ((DmfBooleanModel, :bfield), (DmfNullBooleanModel, :nbfield)), v in (true, false)
+        o = create(M; k => v); refresh!(o); @test getproperty(o, k) === v
+    end
+    bmt, bmf = create(DmfBooleanModel; bfield = true), create(DmfBooleanModel; bfield = false)
+    nbmt, nbmf = create(DmfNullBooleanModel; nbfield = true), create(DmfNullBooleanModel; nbfield = false)
+    m1, m2 = create(DmfFksToBooleans; bf = bmt, nbf = nbmt), create(DmfFksToBooleans; bf = bmf, nbf = nbmf)
+    ma = get(select_related(objects(DmfFksToBooleans), :bf); pk = m1.id); @test ma.bf.bfield === true && ma.nbf.nbfield === true
+    mc = get(select_related(objects(DmfFksToBooleans)); pk = m2.id); @test mc.bf.bfield === false && mc.nbf.nbfield === false
+    # (Juango's BooleanField defaults to false where Django's has no default: set nothing to see it refused)
+    b = DmfBooleanModel(); b.bfield = nothing; @test tr(() -> save!(b)) isa Juango.IntegrityError
+    nb = DmfNullBooleanModel(); @test nb.nbfield === nothing; save!(nb)
+    @test tr(() -> cv(BooleanField(), nothing)) isa Juango.ValidationError && cv(BooleanField(null = true, blank = true), nothing) === nothing
+    # duration: long and fractional values round trip; comparisons
+    d = Dates.Microsecond(8999999999999999)
+    create(DmfDurationModel; field = d); @test Dates.toms(first(objects(DmfDurationModel)).field) == Dates.toms(d)
+    create(DmfNullDurationModel); @test first(objects(DmfNullDurationModel)).field === nothing
+    delete!(objects(DmfDurationModel))
+    o = create(DmfDurationModel; field = Millisecond(2050)); refresh!(o); @test Dates.toms(o.field) == 2050
+    delete!(objects(DmfDurationModel))
+    objs = [create(DmfDurationModel; field = Day(1)), create(DmfDurationModel; field = Second(1)), create(DmfDurationModel; field = Second(-1))]
+    @test [x.pk for x in filter(DmfDurationModel; field = Day(1))] == [objs[1].pk]
+    @test Set(x.pk for x in filter(DmfDurationModel; field__gt = Day(0))) == Set([objs[1].pk, objs[2].pk])
+  end
+end
+
+# --- tests/model_fields (uuid, binary, IP address, text, slug, float, datetime) ---------------------------
+@model struct DmfUUIDModel
+    field = UUIDField()
+    Meta(table = "dmf_uuidmodel")
+end
+@model struct DmfNullableUUIDModel
+    field = UUIDField(null = true, blank = true)
+    Meta(table = "dmf_nullableuuidmodel")
+end
+@model struct DmfDataModel
+    short_data = BinaryField(max_length = 10, default = UInt8[0x08])
+    data = BinaryField(null = true)
+    Meta(table = "dmf_datamodel")
+end
+@model struct DmfGenericIPAddress
+    ip = GenericIPAddressField(null = true, protocol = "ipv4")
+    Meta(table = "dmf_genericipaddress")
+end
+@model struct DmfGenericIPAddressAny
+    ip = GenericIPAddressField(null = true, blank = true)
+    Meta(table = "dmf_genericipaddressany")
+end
+@model struct DmfBigS
+    s = SlugField(max_length = 255)
+    Meta(table = "dmf_bigs")
+end
+@model struct DmfUnicodeSlugField
+    s = SlugField(max_length = 255, allow_unicode = true)
+    Meta(table = "dmf_unicodeslugfield")
+end
+@model struct DmfFloatModel
+    size = FloatField()
+    Meta(table = "dmf_floatmodel")
+end
+@model struct DmfDateTimeModel
+    d = DateField()
+    dt = DateTimeField()
+    t = TimeField()
+    Meta(table = "dmf_datetimemodel")
+end
+redirect_stdout(devnull) do
+    ms = [DmfUUIDModel, DmfNullableUUIDModel, DmfDataModel, DmfGenericIPAddress, DmfGenericIPAddressAny, DmfBigS, DmfUnicodeSlugField,
+          DmfFloatModel, DmfDateTimeModel]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django model_fields: uuid, binary, IP address, text, slug, float and datetime fields" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    # uuid: a UUID, or text with or without hyphens (even misplaced); NULL; a bad value refused
+    u = uuid4(); create(DmfUUIDModel; field = u); @test get(objects(DmfUUIDModel)).field == u
+    want = UUID("550e8400-e29b-41d4-a716-446655440000")
+    for s in ("550e8400e29b41d4a716446655440000", "550e8400-e29b-41d4-a716-446655440000", "550e84-00-e29b-41d4-a716-4-466-55440000")
+        delete!(objects(DmfUUIDModel)); create(DmfUUIDModel; field = s); @test get(objects(DmfUUIDModel)).field == want
+    end
+    create(DmfNullableUUIDModel; field = nothing); @test get(objects(DmfNullableUUIDModel)).field === nothing
+    @test tr(() -> get(DmfUUIDModel; field = "not-a-uuid")) isa Exception && tr(() -> create(DmfUUIDModel; field = "not-a-uuid")) isa Exception
+    # binary: bytes in and out, filtered by; too long refused by validation; text isn't binary
+    bin = UInt8[0x00, 0x46, 0xfe]
+    dm = save!(DmfDataModel(data = bin)); dm = get(DmfDataModel; pk = dm.pk); @test Vector{UInt8}(dm.data) == bin && Vector{UInt8}(dm.short_data) == [0x08]
+    save!(dm); @test Vector{UInt8}(get(DmfDataModel; pk = dm.pk).data) == bin
+    create(DmfDataModel; data = UInt8[0xef, 0xbb, 0xbf]); @test [x.pk for x in filter(DmfDataModel; data = bin)] == [dm.pk]
+    @test !isempty(full_clean(DmfDataModel(short_data = repeat(bin, 4))))
+    # IP addresses: NULL, blank as NULL, normalised, whitespace stripped, a bad one refused
+    create(DmfGenericIPAddressAny); @test get(objects(DmfGenericIPAddressAny)).ip === nothing
+    delete!(objects(DmfGenericIPAddressAny))
+    o = create(DmfGenericIPAddressAny; ip = ""); refresh!(o); @test o.ip === nothing
+    update!(objects(DmfGenericIPAddressAny); ip = ""); refresh!(o); @test o.ip === nothing
+    delete!(objects(DmfGenericIPAddressAny))
+    i = create(DmfGenericIPAddressAny; ip = "::1"); @test get(objects(DmfGenericIPAddressAny)).ip == i.ip
+    delete!(objects(DmfGenericIPAddressAny))
+    o = create(DmfGenericIPAddressAny; ip = " 192.0.2.1 "); refresh!(o); @test o.ip == "192.0.2.1"
+    @test [x.pk for x in filter(DmfGenericIPAddressAny; ip = " 192.0.2.1 ")] == [o.pk]
+    o2 = create(DmfGenericIPAddressAny; ip = "2001:0db8:0000::0001"); refresh!(o2); @test o2.ip == "2001:db8::1"
+    @test tr(() -> create(DmfGenericIPAddressAny; ip = "not:valid")) isa Exception
+    @test tr(() -> Juango.clean_value(GenericIPAddressField(protocol = "ipv4"), "::1")) isa Juango.ValidationError
+    # text: a number compared with text matches nothing; emoji keep
+    @test count(filter(DmfPost; body = 24)) == 0
+    p = create(DmfPost; title = "Whatever", body = "Smile 😀."); refresh!(p); @test p.body == "Smile 😀."
+    # slugs up to their max_length, unicode ones too
+    @test get(DmfBigS; pk = create(DmfBigS; s = "slug"^50).pk).s == "slug"^50
+    @test get(DmfUnicodeSlugField; pk = create(DmfUnicodeSlugField; s = "你好你好"^50).pk).s == "你好你好"^50
+    # float: an object as a value refused; text that isn't a number refused
+    fm = DmfFloatModel(size = 2.5); fm.size = fm; @test tr(() -> save!(fm)) isa Exception
+    fm.size = 2.5; save!(fm); @test fm.id !== nothing
+    @test tr(() -> create(DmfFloatModel; size = "non-numeric string")) isa Exception
+    # dates, datetimes and times saved completely (milliseconds); __date
+    d, dt, t = Date(2014, 3, 12), DateTime(2014, 3, 12, 21, 22, 23, 240), Time(21, 22, 23, 240)
+    m = create(DmfDateTimeModel; d = d, dt = dt, t = t); obj = first(objects(DmfDateTimeModel))
+    @test (obj.d, obj.dt, obj.t) == (d, dt, t)
+    create(DmfDateTimeModel; d = d, dt = DateTime(2014, 3, 11, 21, 22, 23, 240), t = t)
+    @test get(DmfDateTimeModel; dt__date = d) == m
+  end
+end
+
+# --- tests/model_fields (foreign keys, choices and display) -----------------------------------------------
+dmf_get_foo() = get(DmfFoo; a = "dflt").pk
+@model struct DmfBar
+    b = CharField(max_length = 10)
+    a = ForeignKey(DmfFoo; on_delete = :CASCADE, default = dmf_get_foo, related_name = :bars)
+    Meta(table = "dmf_bar")
+end
+@model struct DmfPrimaryKeyCharModel
+    key = CharField(max_length = 10, primary_key = true)          # (Django's is named string)
+    Meta(table = "dmf_primarykeycharmodel")
+end
+@model struct DmfFkToChar
+    out = ForeignKey(DmfPrimaryKeyCharModel; on_delete = :CASCADE, related_name = :fks)
+    Meta(table = "dmf_fktochar")
+end
+const DMF_WHIZ_CHOICES = Dict{Any,Any}("Group 1" => Dict(1 => "First", 2 => "Second"), "Group 2" => [3 => "Third", 4 => "Fourth"], 0 => "Other")
+@model struct DmfWhiz
+    c = IntegerField(choices = DMF_WHIZ_CHOICES, null = true)
+    Meta(table = "dmf_whiz")
+end
+redirect_stdout(devnull) do
+    ms = [DmfBar, DmfPrimaryKeyCharModel, DmfFkToChar, DmfWhiz]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django model_fields: foreign keys, choices and display" begin
+  port_block() do
+    # a key whose default is a callable; a key to an empty-string natural key
+    a = create(DmfFoo; a = "dflt", d = Juango.Decimal("12.34")); b = create(DmfBar; b = "bcd"); @test b.a == a
+    ce = create(DmfPrimaryKeyCharModel; key = ""); fk = create(DmfFkToChar; out = ce)
+    @test get(select_related(objects(DmfFkToChar), :out); id = fk.pk).out == ce
+    # the label of a value, grouped choices included; a value that isn't a choice is itself
+    @test DmfWhiz(c = 1).get_c_display == "First" && DmfWhiz(c = 0).get_c_display == "Other"
+    @test DmfWhiz(c = 9).get_c_display == 9 && DmfWhiz(c = nothing).get_c_display === nothing
+    # get_choices: a blank first unless there's one; a key's related objects, ordered and limited
+    @test Juango.get_choices(CharField(max_length = 1, choices = Pair{String,String}[]); include_blank = false) == []
+    @test Juango.get_choices(CharField(max_length = 1, choices = ["" => "<><>", "a" => "A"]); include_blank = true) == ["" => "<><>", "a" => "A"]
+    @test first(Juango.get_choices(CharField(max_length = 1, choices = ["a" => "A"]))) == ("" => "---------")
+    delete!(objects(DmfBar)); delete!(objects(DmfFoo))
+    foo1, foo2 = create(DmfFoo; a = "a", d = "12.35"), create(DmfFoo; a = "b", d = "12.34")
+    create(DmfBar; a = foo1, b = "b"); create(DmfBar; a = foo2, b = "a")
+    fld = Juango.getfield_meta(DmfBar, :a)
+    @test Juango.get_choices(fld; include_blank = false, ordering = ("a",)) == [foo1.pk => string(foo1), foo2.pk => string(foo2)]
+    @test Juango.get_choices(fld; include_blank = false, ordering = ("-a",)) == [foo2.pk => string(foo2), foo1.pk => string(foo1)]
+    @test Juango.get_choices(fld; include_blank = false, limit_choices_to = Dict(:a => "a")) == [foo1.pk => string(foo1)]
+    @test length(Juango.get_choices(fld; include_blank = false, limit_choices_to = Dict())) == 2
+  end
+end
+
