@@ -5516,3 +5516,113 @@ end
   @test !totally_ordered(order_by(alias(objects(DrBarcodedArticle); parent_unique_rank = F(:parent__unique_rank)), "parent_unique_rank"))
   @test !totally_ordered(none(order_by(objects(DrAuthor)))) && totally_ordered(none(order_by(objects(DrAuthor), "pk")))
 end
+
+# --- tests/null_queries, tests/null_fk --------------------------------------------------------------------
+@model struct DnqPoll
+    question = CharField(max_length = 200)
+    Meta(table = "dnq_poll")
+end
+@model struct DnqChoice
+    poll = ForeignKey(DnqPoll; on_delete = :CASCADE, related_name = :choice_set)
+    choice = CharField(max_length = 200, null = true)
+    Meta(table = "dnq_choice")
+end
+@model struct DnqOuterA
+    Meta(table = "dnq_outera")
+end
+@model struct DnqOuterB
+    data = CharField(max_length = 10)
+    Meta(table = "dnq_outerb")
+end
+@model struct DnqInner
+    first = ForeignKey(DnqOuterA; on_delete = :CASCADE, related_name = :inner)
+    third = ForeignKey(DnqOuterB; on_delete = :SET_NULL, null = true, related_name = :inner)
+    Meta(table = "dnq_inner")
+end
+@model struct DnfSystemDetails
+    details = TextField()
+    Meta(table = "dnf_systemdetails")
+end
+@model struct DnfSystemInfo
+    system_details = ForeignKey(DnfSystemDetails; on_delete = :CASCADE, related_name = :infos)
+    system_name = CharField(max_length = 32)
+    Meta(table = "dnf_systeminfo")
+end
+@model struct DnfForum
+    system_info = ForeignKey(DnfSystemInfo; on_delete = :CASCADE, related_name = :forums)
+    forum_name = CharField(max_length = 32)
+    Meta(table = "dnf_forum")
+end
+@model struct DnfPost
+    forum = ForeignKey(DnfForum; on_delete = :SET_NULL, null = true, related_name = :posts)
+    title = CharField(max_length = 32)
+    Meta(table = "dnf_post")
+end
+@model struct DnfComment
+    post = ForeignKey(DnfPost; on_delete = :SET_NULL, null = true, related_name = :comments)
+    comment_text = CharField(max_length = 250)
+    Meta(table = "dnf_comment", ordering = ["comment_text"])
+end
+@model struct DnfItem
+    title = CharField(max_length = 100)
+    Meta(table = "dnf_item")
+end
+@model struct DnfPropertyValue
+    label = CharField(max_length = 100)
+    Meta(table = "dnf_propertyvalue")
+end
+@model struct DnfProperty
+    item = ForeignKey(DnfItem; on_delete = :CASCADE, related_name = :props)
+    key = CharField(max_length = 100)
+    value = ForeignKey(DnfPropertyValue; on_delete = :SET_NULL, null = true, related_name = :props)
+    Meta(table = "dnf_property")
+end
+redirect_stdout(devnull) do
+    ms = [DnqPoll, DnqChoice, DnqOuterA, DnqOuterB, DnqInner, DnfSystemDetails, DnfSystemInfo, DnfForum, DnfPost, DnfComment,
+          DnfItem, DnfPropertyValue, DnfProperty]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django null_queries, null_fk" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    pks(qs) = [x.pk for x in qs]
+    # NullQueriesTests: nothing is NULL only for exact and iexact
+    p1 = save!(DnqPoll(question = "Why?"))
+    c1, c2 = save!(DnqChoice(poll = p1, choice = "Because.")), save!(DnqChoice(poll = p1, choice = "Why Not?"))
+    @test isempty(collect(filter(DnqChoice; choice__exact = nothing))) && isempty(collect(filter(DnqChoice; choice__iexact = nothing)))
+    @test pks(order_by(exclude(DnqChoice; choice = nothing), "id")) == [c1.pk, c2.pk]
+    @test tr(() -> collect(filter(DnqChoice; foo__exact = nothing))) isa Exception
+    @test tr(() -> collect(filter(DnqChoice; id__gt = nothing))) isa Exception
+    # an unsaved object's relation can't be used
+    @test tr(() -> collect(DnqPoll(question = "How?").choice_set)) isa Exception || isempty(collect(DnqPoll(question = "How?").choice_set))
+    # outer joins across a reverse relation and on
+    obj = create(DnqOuterA)
+    @test pks(filter(DnqOuterA; inner__third = nothing)) == [obj.pk] && pks(filter(DnqOuterA; inner__third__data = nothing)) == [obj.pk]
+    inner = create(DnqInner; first = obj)
+    @test pks(filter(DnqInner; first__inner__third = nothing)) == [inner.pk]
+    outerb = create(DnqOuterB; data = "reverse")
+    @test isempty(collect(filter(DnqOuterB; inner__isnull = false)))
+    create(DnqInner; first = obj)
+    @test pks(exclude(DnqOuterB; inner__isnull = false)) == [outerb.pk]
+  end
+  port_block() do
+    # NullFkTests: select_related across a null key, at several depths
+    d = create(DnfSystemDetails; details = "First details"); s = create(DnfSystemInfo; system_name = "First forum", system_details = d)
+    f = create(DnfForum; system_info = s, forum_name = "First forum"); p = create(DnfPost; forum = f, title = "First Post")
+    c1 = create(DnfComment; post = p, comment_text = "My first comment"); c2 = create(DnfComment; comment_text = "My second comment")
+    @test get(select_related(objects(DnfComment), :post); id = c1.id).post.pk == p.pk
+    @test get(select_related(objects(DnfComment), :post); id = c2.id).post === nothing
+    view(qs) = [(c.id, c.comment_text, c.post === nothing ? nothing : c.post.title) for c in qs]
+    @test view(select_related(objects(DnfComment), :post__forum__system_info)) == [(c1.id, "My first comment", "First Post"), (c2.id, "My second comment", nothing)]
+    @test first(filter(select_related(objects(DnfComment), :post); post__isnull = true)).post === nothing
+    @test view(select_related(objects(DnfComment), :post__forum__system_info__system_details)) == [(c1.id, "My first comment", "First Post"), (c2.id, "My second comment", nothing)]
+    # test_combine_isnull: & and | of querysets with a null key condition, either way round
+    item = create(DnfItem; title = "Some Item"); pv = create(DnfPropertyValue; label = "Some Value")
+    create(item.props; key = "a", value = pv); create(item.props; key = "b")
+    q1, q2 = Q(props__key = "a", props__value = pv), Q(props__key = "b", props__value__isnull = true)
+    @test get(DnfItem, q1).pk == item.pk && get(DnfItem, q2).pk == item.pk
+    @test [x.pk for x in filter(DnfItem, q1) & filter(DnfItem, q2)] == [x.pk for x in filter(DnfItem, q2) & filter(DnfItem, q1)]
+    @test [x.pk for x in filter(DnfItem, q1) | filter(DnfItem, q2)] == [x.pk for x in filter(DnfItem, q2) | filter(DnfItem, q1)]
+  end
+end

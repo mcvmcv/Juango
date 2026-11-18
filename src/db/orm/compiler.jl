@@ -551,6 +551,11 @@ Base.@nospecializeinfer function lookup_condition(c::SQLCompiler, col, lookup, @
         sql, ps = one_column_subquery(c, value)
         return ("$col $(COMPARISON_OPS[lookup]) ($sql)", ps)
     end
+    if value === nothing                # (Django: None is a value for exact and iexact only)
+        lookup == "iexact" && return ("$col IS NULL", Any[])
+        lookup in ("gt", "gte", "lt", "lte", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "regex", "iregex") &&
+            throw(ArgumentError("Cannot use nothing as a query value with '$lookup' (only exact, iexact and ne take it; use isnull)"))
+    end
     if lookup == "exact"
         value === nothing && return ("$col IS NULL", Any[])
         return ("$col = ?", Any[conv(value)])
