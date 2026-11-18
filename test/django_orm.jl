@@ -5770,3 +5770,194 @@ end
     @test w2.department == d2 && w1.department == d1
   end
 end
+
+# --- tests/model_inheritance ------------------------------------------------------------------------------
+@abstract_model struct DmiCommonInfo
+    name = CharField(max_length = 50)
+    age = PositiveIntegerField()
+    Meta(ordering = ["name"])
+end
+@model struct DmiWorker <: DmiCommonInfo
+    job = CharField(max_length = 50)
+    Meta(table = "dmi_worker")
+end
+@model struct DmiStudent <: DmiCommonInfo
+    school_class = CharField(max_length = 10)
+    Meta(table = "dmi_student", ordering = String[])
+end
+@model struct DmiPost
+    title = CharField(max_length = 50)
+    Meta(table = "dmi_post")
+end
+@abstract_model struct DmiAttachment
+    post = ForeignKey(DmiPost; on_delete = :CASCADE, related_name = "attached_%(class)s_set",
+                      related_query_name = "attached_%(app_label)s_%(class)ss")
+    content = TextField()
+end
+@model struct DmiComment <: DmiAttachment
+    is_spam = BooleanField(default = false)
+    Meta(table = "dmi_comment")
+end
+@model struct DmiLink <: DmiAttachment
+    url = URLField()
+    Meta(table = "dmi_link")
+end
+@model struct DmiChef
+    name = CharField(max_length = 50)
+    Meta(table = "dmi_chef")
+end
+@model struct DmiPlace
+    name = CharField(max_length = 50, default = "")
+    address = CharField(max_length = 80, default = "")
+    Meta(table = "dmi_place")
+end
+@model struct DmiRestaurant <: DmiPlace
+    rating = IntegerField(null = true, blank = true)
+    serves_hot_dogs = BooleanField(default = false)
+    serves_pizza = BooleanField(default = false)
+    chef = ForeignKey(DmiChef; on_delete = :SET_NULL, null = true, blank = true, related_name = :restaurants)
+    Meta(table = "dmi_my_restaurant", ordering = ["-rating"])
+end
+@model struct DmiItalianRestaurant <: DmiRestaurant
+    serves_gnocchi = BooleanField(default = false)
+    Meta(table = "dmi_italianrestaurant")
+end
+@model struct DmiSupplier <: DmiPlace
+    customers = ManyToManyField(DmiRestaurant; related_name = :provider)
+    Meta(table = "dmi_supplier")
+end
+@model struct DmiCustomSupplier <: DmiSupplier
+    Meta(table = "dmi_customsupplier")
+end
+@model struct DmiParkingLot <: DmiPlace
+    main_site = ForeignKey(DmiPlace; on_delete = :CASCADE, related_name = :lot)
+    Meta(table = "dmi_parkinglot")
+end
+@model struct DmiGrandParent
+    first_name = CharField(max_length = 80, default = "")
+    last_name = CharField(max_length = 80, default = "")
+    email = EmailField(unique = true, null = true)
+    place = ForeignKey(DmiPlace; on_delete = :CASCADE, null = true, related_name = Symbol("+"))
+    Meta(table = "dmi_grandparent", ordering = ["-pk"], unique_together = [(:first_name, :last_name)])
+end
+@model struct DmiParent <: DmiGrandParent
+    Meta(table = "dmi_parent")
+end
+@model struct DmiChild <: DmiParent
+    Meta(table = "dmi_child")
+end
+@model struct DmiGrandChild <: DmiChild
+    Meta(table = "dmi_grandchild")
+end
+redirect_stdout(devnull) do
+    ms = [DmiWorker, DmiStudent, DmiPost, DmiComment, DmiLink, DmiChef, DmiPlace, DmiRestaurant, DmiItalianRestaurant,
+          DmiSupplier, through(DmiSupplier, :customers), DmiCustomSupplier, DmiParkingLot, DmiGrandParent, DmiParent, DmiChild, DmiGrandChild]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django model_inheritance" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    names(qs) = [x.name for x in qs]
+    # abstract base models: fields and ordering inherited, the subclass's own Meta replacing it
+    create(DmiWorker; name = "Fred", age = 35, job = "Quarry worker"); create(DmiWorker; name = "Barney", age = 34, job = "Quarry worker")
+    create(DmiStudent; name = "Pebbles", age = 5, school_class = "1B")
+    @test collect(values(objects(DmiWorker), :name)) == [Dict(:name => "Barney"), Dict(:name => "Fred")]
+    @test isempty(Juango.modelmeta(DmiStudent).ordering)
+    # %(class)s and %(app_label)s in an abstract model's related names
+    post = create(DmiPost; title = "Lorem Ipsum")
+    create(post.attached_dmicomment_set; content = "Save \$ on V1agr@", is_spam = true)
+    create(post.attached_dmilink_set; content = "The web framework", url = "http://www.djangoproject.com/")
+    @test count(post.attached_dmicomment_set) == 1 && count(post.attached_dmilink_set) == 1
+    @test tr(() -> getproperty(post, Symbol("attached_%(class)s_set"))) isa Exception
+    app = lowercase(Juango.modelmeta(DmiComment).app)
+    @test [p.pk for p in filter(DmiPost; Symbol("attached_$(app)_dmicomments__is_spam") => true)] == [post.pk]
+    @test tr(() -> collect(filter(DmiPost; attached_dmicomment_set__is_spam = true))) isa Exception
+    # a reverse relation of another branch isn't the child's; Meta ordering inherited through the chain
+    @test isempty(collect(filter(DmiPlace; dmisupplier__name = "foo")))
+    @test tr(() -> collect(filter(DmiRestaurant; dmisupplier__name = "foo"))) isa Exception
+    @test Juango.modelmeta(DmiRestaurant).ordering == ["-rating"]
+    # creating a child: inserts only (one per table)
+    atomic() do
+        _, n = nq(() -> create(DmiGrandChild; email = "grand_parent@example.com", first_name = "grand", last_name = "parent")); @test n == 4
+        _, n = nq(() -> save!(DmiGrandChild())); @test n == 4
+    end
+    delete!(objects(DmiGrandParent))
+    # a copy of a child with an inherited m2m
+    r = create(DmiRestaurant); sup = create(DmiCustomSupplier; name = "Central market", address = "944 W. Fullerton")
+    set!(sup.customers, [r]); old = collect(sup.customers)
+    sup.pk = nothing; save!(sup); set!(sup.customers, old)
+    @test [x.pk for x in get(DmiSupplier; pk = sup.pk).customers] == [r.pk]
+    @test DmiPlace(id = 1) != DmiRestaurant(id = 1)
+    # Meta ordering by pk through the parents
+    p1 = create(DmiParent; first_name = "Joe", email = "joe@email.com"); p2 = create(DmiParent; first_name = "Jon", email = "jon@email.com")
+    @test [x.pk for x in objects(DmiParent)] == [p2.pk, p1.pk]
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    names(qs) = [x.name for x in qs]
+    # ModelInheritanceDataTests
+    restaurant = create(DmiRestaurant; name = "Demon Dogs", address = "944 W. Fullerton", serves_hot_dogs = true, serves_pizza = false, rating = 2)
+    chef = create(DmiChef; name = "Albert")
+    ir = create(DmiItalianRestaurant; name = "Ristorante Miron", address = "1234 W. Ash", serves_hot_dogs = false, serves_pizza = false,
+                serves_gnocchi = true, rating = 4, chef = chef)
+    @test names(filter(DmiItalianRestaurant; address = "1234 W. Ash")) == ["Ristorante Miron"]
+    ir.address = "1234 W. Elm"; save!(ir); @test names(filter(DmiItalianRestaurant; address = "1234 W. Elm")) == ["Ristorante Miron"]
+    @test names(filter(DmiRestaurant; name = "Demon Dogs")) == ["Demon Dogs"]
+    @test typeof(get(DmiPlace; name = "Demon Dogs")) === DmiPlace
+    @test get(DmiPlace; name = "Demon Dogs").dmirestaurant == get(DmiRestaurant; name = "Demon Dogs")
+    @test get(DmiPlace; name = "Ristorante Miron").dmirestaurant.dmiitalianrestaurant == get(DmiItalianRestaurant; name = "Ristorante Miron")
+    @test get(DmiRestaurant; name = "Ristorante Miron").dmiitalianrestaurant == get(DmiItalianRestaurant; name = "Ristorante Miron")
+    @test get(DmiPlace; name = "Demon Dogs").dmirestaurant.dmiitalianrestaurant === nothing
+    @test tr(() -> get(DmiItalianRestaurant; name = "The Noodle Void")) isa Juango.DoesNotExist
+    @test tr(() -> get(objects(DmiRestaurant))) isa Juango.MultipleObjectsReturned
+    @test tr(() -> save!(DmiRestaurant(id = 999); update_fields = [:name])) isa Exception
+    # relations on inherited models
+    s1 = create(DmiSupplier; name = "Joe's Chickens", address = "123 Sesame St"); set!(s1.customers, [restaurant, ir])
+    s2 = create(DmiSupplier; name = "Luigi's Pasta", address = "456 Sesame St"); set!(s2.customers, [ir])
+    p = get(DmiPlace; name = "Joe's Chickens")
+    @test p.dmirestaurant === nothing && p.dmisupplier == s1
+    @test names(order_by(ir.provider, "-name")) == ["Luigi's Pasta", "Joe's Chickens"]
+    @test names(filter(DmiRestaurant; provider__name__contains = "Chickens")) == ["Ristorante Miron", "Demon Dogs"]
+    @test names(filter(DmiItalianRestaurant; provider__name__contains = "Chickens")) == ["Ristorante Miron"]
+    create(DmiParkingLot; name = "Main St", address = "111 Main St", main_site = s1)
+    create(DmiParkingLot; name = "Well Lit", address = "124 Sesame St", main_site = ir)
+    @test get(DmiRestaurant; lot__name = "Well Lit").name == "Ristorante Miron"
+    # update across parent and child at once; values and select_related of parent fields
+    @test update!(filter(DmiRestaurant; serves_hot_dogs = true, name__contains = "D"); name = "Demon Puppies", serves_hot_dogs = false) == 1
+    r1 = get(DmiRestaurant; pk = restaurant.pk); @test !r1.serves_hot_dogs && r1.name == "Demon Puppies"
+    @test collect(values(objects(DmiItalianRestaurant), :name, :rating)) == [Dict(:name => "Ristorante Miron", :rating => 4)]
+    _, n = nq(() -> first(objects(DmiItalianRestaurant)).chef); @test n == 2
+    _, n = nq(() -> first(select_related(objects(DmiItalianRestaurant), :chef)).chef); @test n == 1
+    # select_related from parent to child, with a deferred child field
+    qs = order_by(Juango.defer(select_related(objects(DmiRestaurant), :dmiitalianrestaurant), :dmiitalianrestaurant__serves_gnocchi), "rating")
+    objs, n = nq(() -> (o = collect(qs); o[2].dmiitalianrestaurant.serves_gnocchi; o)); @test n == 2
+    @test objs[1].name == "Demon Puppies" && objs[1].rating == 2 && objs[2].dmiitalianrestaurant.name == "Ristorante Miron" && objs[2].dmiitalianrestaurant.rating == 4
+    # saving a child that changed nothing: an UPDATE per table, no more
+    atomic() do
+        _, n = nq(() -> save!(ir)); @test n == 3
+    end
+    # isnull through a child link
+    create(DmiSupplier; name = "Central market", address = "610 some street")
+    @test "Central market" in names(filter(DmiPlace; dmisupplier__isnull = false))
+    @test !("Central market" in names(filter(DmiPlace; dmisupplier__isnull = true)))
+    @test !("Central market" in names(exclude(DmiPlace; dmisupplier__isnull = false)))
+    @test "Central market" in names(exclude(DmiPlace; dmisupplier__isnull = true))
+  end
+  port_block() do
+    nq(f) = Juango.count_queries(f)
+    # the parent's loaded relations are shared down the chain of child links
+    place = create(DmiPlace); create(DmiGrandChild; place = place)
+    gp = latest(objects(DmiGrandParent), "pk")
+    _, n = nq(() -> gp.place); @test n == 1
+    parent = gp.dmiparent; _, n = nq(() -> parent.place); @test n == 0
+    child = parent.dmichild; _, n = nq(() -> child.place); @test n == 0
+    gc = child.dmigrandchild; _, n = nq(() -> gc.place); @test n == 0
+    # InheritanceUniqueTests: unique fields and unique_together of a parent, checked for a child
+    create(DmiGrandParent; email = "grand_parent@example.com", first_name = "grand", last_name = "parent")
+    @test !isempty(Juango.validate_unique(DmiGrandChild(email = "grand_parent@example.com", first_name = "grand", last_name = "child")))
+    @test !isempty(Juango.validate_unique(DmiGrandChild(email = "grand_child@example.com", first_name = "grand", last_name = "parent")))
+  end
+end

@@ -210,7 +210,9 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
             atomic(() -> foreach(M -> update_columns!(M, data, only), tables); savepoint = false)
     else
         length(chain_) == 1 ? save_table!(chain_[1], data, true, fresh) :
-            atomic(() -> foreach(M -> save_table!(M, data, M === chain_[1], fresh), chain_); savepoint = false)
+            # a new object: its parent row is inserted first, then each child table's row straight after (an
+            # INSERT, not an UPDATE that finds nothing, as Django)
+            atomic(() -> foreach(M -> save_table!(M, data, M === chain_[1], fresh || (created && M !== chain_[1])), chain_); savepoint = false)
     end
     refresh_computed!(obj)
     refresh_expression_fields!(obj, exprs)
@@ -718,15 +720,16 @@ end
 "Messages for `Meta(unique_together = ...)` sets that `values` would duplicate."
 Base.@nospecializeinfer function unique_together_errors(@nospecialize(T::Type{<:Model}), values, id)
     errs = String[]
-    for u in modelmeta(T).unique_together
+    # a multi-table child is checked against its parents' sets too (in their tables), as Django
+    for M in unique!(Any[concrete_model(T); ancestors(T)]), u in modelmeta(M).unique_together
         all(n -> haskey(values, n), u) || continue
         vals = [values[n] isa Model ? values[n].id : values[n] for n in u]
         any(isnothing, vals) && continue
-        qs = filter(base_objects(T), Q(:AND, Any[n => v for (n, v) in zip(u, vals)], false))
+        qs = filter(base_objects(M), Q(:AND, Any[n => v for (n, v) in zip(u, vals)], false))
         id === nothing || (qs = filter(qs, !Q(id = id)))
         exists(qs) && push!(errs, interpolate(gettext("%(model)s with this %(fields)s already exists."),
-            Dict("model" => uppercasefirst(string(modelmeta(T).verbose_name)),
-                 "fields" => join([label(findfield(modelmeta(T), n)) for n in u], " and "))))
+            Dict("model" => uppercasefirst(string(modelmeta(M).verbose_name)),
+                 "fields" => join([label(findfield(modelmeta(M), n)) for n in u], " and "))))
     end
-    errs
+    unique!(errs)
 end

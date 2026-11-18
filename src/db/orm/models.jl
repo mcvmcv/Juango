@@ -237,6 +237,15 @@ Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields:
         f.name = name
         f.model = T
         name in (:id, :pk) && error("$T: '$name' is reserved for the automatic primary key")
+        # related_name = "attached_%(class)s_set" (an abstract model's field): this model's name and app filled in
+        for k in (:related_name, :related_query_name)
+            v = getfield(f, k)
+            v === nothing && continue
+            str = string(v)
+            occursin("%(", str) || continue
+            app = string(get(meta, :app_label, default_app_label(T)))
+            setfield!(f, k, Symbol(replace(str, "%(class)s" => lowercase(string(nameof(T))), "%(app_label)s" => lowercase(app))))
+        end
         push!(f.kind === :m2m ? m2m : f.kind === :gfk ? gfks : f.kind === :grel ? grels : f.kind === :fobj ? fobjs : fs, f)
     end
     # code = CharField(max_length = 10, primary_key = true): the key is that field, as Django's (#221)
@@ -675,7 +684,16 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
         # prefetch_related(:child) or select_related(:child): the child, or nothing
         pre isa PrefetchedList && return isempty(pre.items) ? nothing : pre.items[1]
         pre === NOTFOUND || return pre
-        return first(filter(base_objects(C); id = data[:id]))
+        c = first(filter(base_objects(C); id = data[:id]))
+        # the parent's loaded relations go with it (grand_parent.parent.place: no query), as Django
+        if c !== nothing
+            ccache = getfield(c, :_cache)::Dict{Symbol,Any}
+            for (k, v) in getfield(m, :_cache)::Dict{Symbol,Any}
+                (startswith(string(k), "__") || haskey(ccache, k) || mti_child(T, k) !== nothing) && continue
+                ccache[k] = v
+            end
+        end
+        return c
     end
     if table_parent(T) !== nothing && s === parent_accessor(T)
         pre === NOTFOUND || return pre

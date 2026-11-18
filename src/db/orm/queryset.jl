@@ -1217,6 +1217,10 @@ function check_deferrable(T, names)
         parts = split(string(n), "__")
         for (i, p) in enumerate(parts)
             f = findfirst(g -> g.name === Symbol(p), all_fields(M))
+            if f === nothing && i < length(parts) && (C = mti_child(M, p)) !== nothing
+                M = C                                         # through a multi-table child link (select_related)
+                continue
+            end
             f === nothing && throw(LookupError("$(nameof(M)) has no field '$p' that can be deferred"))
             g = all_fields(M)[f]
             i < length(parts) || break
