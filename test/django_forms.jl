@@ -762,3 +762,123 @@ end
                             "<li><label for=\"id_first_name\">First name:</label><input id=\"id_first_name\" name=\"first_name\" type=\"text\" value=\"John\" required>" *
                             "<input id=\"id_last_name\" name=\"last_name\" type=\"hidden\"></li>")
 end
+
+@testset "django forms_tests: test_forms (booleans, widgets, choices, radios, checkboxes, disabled fields)" begin
+    signup(data = nothing; kw...) = Form([:email => EmailField(max_length = 320), :get_spam => BooleanField()]; data = data, kw...)
+    f = signup(; auto_id = false)
+    @test html_eq(w(f[:email]), "<input type=\"email\" name=\"email\" maxlength=\"320\" required>")
+    # (a required BooleanField has `required` in Django; Juango's checkbox never does, as it needn't be checked)
+    @test html_eq(w(f[:get_spam]), "<input type=\"checkbox\" name=\"get_spam\">")
+    f = signup(Dict("email" => "test@example.com", "get_spam" => true); auto_id = false)
+    @test html_eq(w(f[:email]), "<input type=\"email\" name=\"email\" maxlength=\"320\" value=\"test@example.com\" required>")
+    @test html_eq(w(f[:get_spam]), "<input checked type=\"checkbox\" name=\"get_spam\">")
+    for v in ("True", "true")
+        @test html_eq(w(signup(Dict("email" => "test@example.com", "get_spam" => v); auto_id = false)[:get_spam]),
+                      "<input checked type=\"checkbox\" name=\"get_spam\">")
+    end
+    for v in ("False", "false")
+        @test !occursin("checked", w(signup(Dict("email" => "test@example.com", "get_spam" => v); auto_id = false)[:get_spam]))
+    end
+    f = signup(Dict("email" => "test@example.com", "get_spam" => "0"))
+    @test is_valid(f) && f.cleaned_data[:get_spam] === true          # (a checkbox sent as "0" is checked, #16820)
+
+    # widgets, and as_textarea / as_text / as_hidden
+    contact(data = nothing; mw = :textarea, kw...) = Form([:subject => CharField(max_length = nothing), :message => CharField(max_length = nothing, widget = mw)];
+                                                          data = data, kw...)
+    f = contact(; auto_id = false)
+    @test html_eq(w(f[:subject]), "<input type=\"text\" name=\"subject\" required>")
+    @test html_eq(w(f[:message]), "<textarea name=\"message\" rows=\"10\" cols=\"40\" required></textarea>")
+    @test html_eq(f[:subject].as_textarea, "<textarea name=\"subject\" rows=\"10\" cols=\"40\" required></textarea>")
+    @test html_eq(f[:message].as_text, "<input type=\"text\" name=\"message\" required>")
+    @test html_eq(f[:message].as_hidden, "<input type=\"hidden\" name=\"message\">")
+    f = contact(; mw = Widget(:textarea; attrs = Dict("rows" => 80, "cols" => 20)), auto_id = false)
+    @test html_eq(w(f[:message]), "<textarea name=\"message\" rows=\"80\" cols=\"20\" required></textarea>")
+    @test html_eq(f[:message].as_text, "<input type=\"text\" name=\"message\" required>")
+    f = contact(Dict("subject" => "Hello", "message" => "I love you."); mw = Widget(:textarea; attrs = Dict("rows" => 80, "cols" => 20)), auto_id = false)
+    @test html_eq(f[:subject].as_textarea, "<textarea rows=\"10\" cols=\"40\" name=\"subject\" required>Hello</textarea>")
+    @test html_eq(f[:message].as_text, "<input type=\"text\" name=\"message\" value=\"I love you.\" required>")
+    @test html_eq(f[:message].as_hidden, "<input type=\"hidden\" name=\"message\" value=\"I love you.\">")
+
+    # choices: a select (no `required` without an empty first choice)
+    fw(data = nothing; lang = ChoiceField([("P", "Python"), ("J", "Java")]), kw...) =
+        Form([:name => CharField(max_length = nothing), :language => lang]; data = data, kw...)
+    f = fw(; auto_id = false)
+    @test html_eq(w(f[:language]), "<select name=\"language\"><option value=\"P\">Python</option><option value=\"J\">Java</option></select>")
+    f = fw(Dict("name" => "Django", "language" => "P"); auto_id = false)
+    @test html_eq(w(f[:language]), "<select name=\"language\"><option value=\"P\" selected>Python</option><option value=\"J\">Java</option></select>")
+    f = fw(; lang = ChoiceField([("", "------"), ("P", "Python"), ("J", "Java")]), auto_id = false)
+    @test html_eq(w(f[:language]), "<select name=\"language\" required><option value=\"\" selected>------</option><option value=\"P\">Python</option><option value=\"J\">Java</option></select>")
+    f = fw(; lang = ChoiceField([("P", "Python"), ("J", "Java")]; widget = Widget(attrs = Dict("class" => "foo"))), auto_id = false)
+    @test html_eq(w(f[:language]), "<select class=\"foo\" name=\"language\"><option value=\"P\">Python</option><option value=\"J\">Java</option></select>")
+    f = fw(; lang = ChoiceField(), auto_id = false)
+    @test html_eq(w(f[:language]), "<select name=\"language\"></select>")
+
+    # radios: a div of labelled inputs; the group's label points at none of them, and as_div makes it a fieldset
+    radio_lang = ChoiceField([("P", "Python"), ("J", "Java")]; widget = :radio)
+    f = fw(; lang = radio_lang, auto_id = false)
+    rad(v, l) = "<div><label><input type=\"radio\" name=\"language\" value=\"$v\" required> $l</label></div>"
+    @test html_eq(w(f[:language]), "<div>" * rad("P", "Python") * rad("J", "Java") * "</div>")
+    @test html_eq(as_table(f), "<tr><th>Name:</th><td><input type=\"text\" name=\"name\" required></td></tr>" *
+                               "<tr><th>Language:</th><td><div>" * rad("P", "Python") * rad("J", "Java") * "</div></td></tr>")
+    @test html_eq(as_div(f), "<div> Name: <input type=\"text\" name=\"name\" required></div><div><fieldset>Language:<div>" *
+                             rad("P", "Python") * rad("J", "Java") * "</div></fieldset></div>")
+    f = fw(; lang = radio_lang)
+    radi(i, v, l) = "<div><label for=\"id_language_$i\"><input type=\"radio\" id=\"id_language_$i\" value=\"$v\" name=\"language\" required> $l</label></div>"
+    radios = "<div id=\"id_language\">" * radi(0, "P", "Python") * radi(1, "J", "Java") * "</div>"
+    @test html_eq(w(f[:language]), radios)
+    @test html_eq(as_table(f), "<tr><th><label for=\"id_name\">Name:</label></th><td><input type=\"text\" name=\"name\" id=\"id_name\" required></td></tr>" *
+                               "<tr><th><label>Language:</label></th><td>" * radios * "</td></tr>")
+    @test html_eq(as_p(f), "<p><label for=\"id_name\">Name:</label><input type=\"text\" name=\"name\" id=\"id_name\" required></p>" *
+                           "<p><label>Language:</label>" * radios * "</p>")
+    @test html_eq(as_div(f), "<div><label for=\"id_name\">Name:</label><input type=\"text\" name=\"name\" required id=\"id_name\"></div>" *
+                             "<div><fieldset><legend>Language:</legend>" * radios * "</fieldset></div>")
+    # the options of a bound field
+    beatles = ChoiceField([("john", "John"), ("paul", "Paul"), ("george", "George"), ("ringo", "Ringo")]; widget = :radio)
+    opts = collect(Form([:name => beatles])[:name])
+    @test length(opts) == 4 && opts[1].id_for_label == "id_name_0" && opts[1].choice_label == "John"
+    @test html_eq(opts[1].tag, "<input type=\"radio\" name=\"name\" value=\"john\" id=\"id_name_0\" required>")
+    @test html_eq(string(opts[1]), "<label for=\"id_name_0\"><input type=\"radio\" name=\"name\" value=\"john\" id=\"id_name_0\" required> John</label>")
+    opts = collect(Form([:name => beatles]; auto_id = false)[:name])
+    @test html_eq(join(string.(opts)), join(["<label><input type=\"radio\" name=\"name\" value=\"$(lowercase(n))\" required> $n</label>" for n in ("John", "Paul", "George", "Ringo")]))
+    opts = collect(Form([:name => ChoiceField([("john", "John"), ("paul", "Paul")])]; auto_id = false)[:name])
+    @test length(opts) == 2 && opts[1].choice_label == "John" && html_eq(opts[1].tag, "<option value=\"john\">John</option>")
+
+    # multiple choices
+    song(data = nothing; comp = MultipleChoiceField([("J", "John Lennon"), ("P", "Paul McCartney")]), kw...) =
+        Form([:name => CharField(max_length = nothing), :composers => comp]; data = data, kw...)
+    @test html_eq(w(song(; comp = MultipleChoiceField([]), auto_id = false)[:composers]), "<select multiple name=\"composers\" required></select>")
+    @test html_eq(w(song(; auto_id = false)[:composers]),
+                  "<select multiple name=\"composers\" required><option value=\"J\">John Lennon</option><option value=\"P\">Paul McCartney</option></select>")
+    f = song(Dict("name" => "Yesterday", "composers" => ["P"]); auto_id = false)
+    @test html_eq(w(f[:composers]),
+                  "<select multiple name=\"composers\" required><option value=\"J\">John Lennon</option><option value=\"P\" selected>Paul McCartney</option></select>")
+    f = song()
+    @test html_eq(as_p(f), "<p><label for=\"id_name\">Name:</label><input type=\"text\" name=\"name\" required id=\"id_name\"></p>" *
+                           "<p><label for=\"id_composers\">Composers:</label><select name=\"composers\" required id=\"id_composers\" multiple>" *
+                           "<option value=\"J\">John Lennon</option><option value=\"P\">Paul McCartney</option></select></p>")
+    # as checkboxes: a group too
+    f = song(; comp = MultipleChoiceField([("J", "John Lennon"), ("P", "Paul McCartney")]; widget = :checkboxes))
+    boxes = "<div id=\"id_composers\"><div><label for=\"id_composers_0\"><input type=\"checkbox\" name=\"composers\" value=\"J\" id=\"id_composers_0\"> John Lennon</label></div>" *
+            "<div><label for=\"id_composers_1\"><input type=\"checkbox\" name=\"composers\" value=\"P\" id=\"id_composers_1\"> Paul McCartney</label></div></div>"
+    @test html_eq(as_p(f), "<p><label for=\"id_name\">Name:</label><input type=\"text\" name=\"name\" required id=\"id_name\"></p><p><label>Composers:</label>" * boxes * "</p>")
+    @test html_eq(as_div(f), "<div><label for=\"id_name\">Name:</label><input type=\"text\" name=\"name\" required id=\"id_name\"></div>" *
+                             "<div><fieldset><legend>Composers:</legend>" * boxes * "</fieldset></div>")
+
+    # disabled fields take the initial value, whatever is submitted
+    pf(data; field_initial = false, kw...) = Form([:name => CharField(max_length = nothing),
+                                                   :birthday => DateField(disabled = true, default = field_initial ? Date(1974, 8, 16) : Juango.NO_DEFAULT)]; data = data, kw...)
+    for data in (Dict("name" => "John Doe"), Dict("name" => "John Doe", "birthday" => "1984-11-10"))
+        for form in (pf(data; initial = Dict(:birthday => Date(1974, 8, 16))), pf(data; field_initial = true))
+            @test is_valid(form) && form.cleaned_data == Dict(:birthday => Date(1974, 8, 16), :name => "John Doe")
+        end
+    end
+    for form in (pf(Dict{String,Any}(); initial = Dict(:birthday => Date(1974, 8, 16))), pf(Dict{String,Any}(); field_initial = true))
+        @test !is_valid(form) && form[:birthday].value == Date(1974, 8, 16)
+    end
+
+    # a multiple choice as hidden inputs: one per value
+    f = song(Dict("name" => "Yesterday", "composers" => ["P"]); auto_id = false)
+    @test html_eq(f[:composers].as_hidden, "<input type=\"hidden\" name=\"composers\" value=\"P\">")
+    f = song(Dict("name" => "From Me To You", "composers" => ["P", "J"]); auto_id = false)
+    @test html_eq(f[:composers].as_hidden, "<input type=\"hidden\" name=\"composers\" value=\"P\"><input type=\"hidden\" name=\"composers\" value=\"J\">")
+end

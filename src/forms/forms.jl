@@ -265,7 +265,10 @@ function raw_value(f::Form, fld::Field)
         return (isempty(y) || isempty(m) || isempty(d)) ? "invalid" : "$y-$(lpad(m, 2, '0'))-$(lpad(d, 2, '0'))"
     end
     fld.kind in MULTI_KINDS && return raw_list(f.data, html_name(f, fld))
-    get(f.data, html_name(f, fld), nothing)
+    v = get(f.data, html_name(f, fld), nothing)
+    # a checkbox as Django's CheckboxInput reads it: "false" is unchecked, any other value sent is checked ("0" too, #16820)
+    fld.kind === :bool && widget_kind(fld.widget) === nothing && v isa AbstractString && return lowercase(v) != "false"
+    v
 end
 "All submitted values for a multi-valued field."
 raw_list(d::QueryDict, k) = getlist(d, k)
@@ -841,6 +844,7 @@ label_id(bf::BoundField) = bf.field.widget isa SelectDateWidget ? html_id(bf.for
 function widget_html(bf::BoundField)
     f, fld = bf.form, bf.field
     fld.kind === :multi && return multi_widget_html(bf)
+    widget_kind(fld.widget) === :hidden && fld.kind in MULTI_KINDS && return multiple_hidden_html(bf)
     fld.widget isa SelectDateWidget && return select_date_html(bf)
     fld.widget isa Widget && fld.widget.template_name !== nothing && return widget_template_html(bf)
     widget_kind(fld.widget) in (:radio, :checkboxes) && return choice_list_html(bf)
@@ -913,13 +917,14 @@ function widget_html(bf::BoundField)
         # a required select without an empty first choice has no `required` (Django's Select.use_required_attribute):
         # its first choice is always selected
         firsts = [k for (_, opts) in groups for (k, _) in opts]
-        !(fld.blank || fld.kind === :fk) && !isempty(firsts) && string(firsts[1]) != "" && (attrs = replace(attrs, " required" => ""; count = 1))
+        !(fld.blank || fld.kind === :fk) && (isempty(firsts) || string(firsts[1]) != "") && (attrs = replace(attrs, " required" => ""; count = 1))
         print(io, "<select$attrs>")
         (fld.blank || fld.kind === :fk) && print(io, "<option value=\"\">---------</option>")
         for (glabel, opts) in groups
             glabel === nothing || print(io, "<optgroup label=\"", escape_html(string(glabel)), "\">")
             for (k, lbl) in opts
-                sel = val !== nothing && string(val) == string(k) ? " selected" : ""
+                # (with no value, an empty-value choice is the one selected, as Django's)
+                sel = (val === nothing ? string(k) == "" : string(val) == string(k)) ? " selected" : ""
                 print(io, "<option value=\"", escape_html(string(k)), "\"", sel, option_attrs_html(fld.widget, k, lbl), ">", escape_html(string(lbl)), "</option>")
             end
             glabel === nothing || print(io, "</optgroup>")
@@ -927,7 +932,9 @@ function widget_html(bf::BoundField)
         print(io, "</select>")
         return String(take!(io))
     elseif (fld.kind in (:text, :json, :hstore) && widget_kind(fld.widget) === nothing) || widget_kind(fld.widget) === :textarea
-        return "<textarea$attrs cols=\"40\" rows=\"10\">" * escape_html(display_string(val)) * "</textarea>"
+        wa = fld.widget isa Widget ? fld.widget.attrs : Dict{String,String}()      # (the widget's own rows and cols replace these)
+        return "<textarea$attrs" * (haskey(wa, "cols") ? "" : " cols=\"40\"") * (haskey(wa, "rows") ? "" : " rows=\"10\"") * ">" *
+               escape_html(display_string(val)) * "</textarea>"
     end
     t = input_type(fld)
     t == "hidden" && (attrs = replace(attrs, " required" => ""; count = 1))       # (a hidden input is never required, as Django's)
@@ -1052,7 +1059,8 @@ function subwidget_tag(w::BoundWidget)
         "\"" * (isempty(html_id(w.bf.form, fld)) ? "" : id_attr(subwidget_id(w))) * req * widget_attrs(fld.widget) *
         option_attrs_html(fld.widget, w.value, w.label) * (w.selected ? " checked" : "") * ">"
 end
-subwidget_html(w::BoundWidget) = "<label for=\"" * escape_html(subwidget_id(w)) * "\">" * subwidget_tag(w) * " " * escape_html(w.label) * "</label>"
+subwidget_html(w::BoundWidget) = "<label" * (isempty(html_id(w.bf.form, w.bf.field)) ? "" : " for=\"" * escape_html(subwidget_id(w)) * "\"") * ">" *
+                                 subwidget_tag(w) * " " * escape_html(w.label) * "</label>"
 function tattr(w::BoundWidget, ::Val{S}) where {S}
     S === :tag && return SafeString(subwidget_tag(w))
     S === :id_for_label && return subwidget_id(w)
@@ -1195,8 +1203,33 @@ A `<legend>` with the field's label, for a radio or checkbox group in a `<fields
 """
 legend_tag(bf::BoundField) = "<legend>" * escape_html(string(label(bf.field))) * "</legend>"
 
-label_tag(bf::BoundField) = isempty(label_id(bf)) ? escape_html(label(bf.field)) * ":" :
+# (a radio or checkbox group's label points at no one input, as Django's)
+label_tag(bf::BoundField) = isempty(html_id(bf.form, bf.field)) ? escape_html(label(bf.field)) * ":" :
+                            uses_fieldset(bf.field) ? "<label>" * escape_html(label(bf.field)) * ":</label>" :
                             "<label for=\"" * escape_html(label_id(bf)) * "\">" * escape_html(label(bf.field)) * ":</label>"
+"""
+The field rendered with another kind of widget, without the widget's own attributes (Django's
+`BoundField.as_text()`, `as_textarea()`, `as_hidden()`; `{{ form.name.as_hidden }}` in templates).
+"""
+function as_widget(bf::BoundField, kind::Symbol)
+    g = deepcopy(bf.field)
+    g.widget = Widget(kind)
+    kind === :text && g.kind in (:text, :json, :hstore) && (g.kind = :char)      # (a text input, not a textarea)
+    widget_html(BoundField(bf.form, g))
+end
+
+"A multiple choice as hidden inputs, one per chosen value (Django's `MultipleHiddenInput`)."
+function multiple_hidden_html(bf::BoundField)
+    f, fld = bf.form, bf.field
+    vals = display_value(bf)
+    vals = vals isa AbstractVector ? vals : vals === nothing ? Any[] : Any[vals]
+    id = html_id(f, fld)
+    join(["<input type=\"hidden\" name=\"" * escape_html(html_name(f, fld)) * "\" value=\"" * escape_html(string(v isa Model ? v.pk : v)) * "\"" *
+          (isempty(id) ? "" : id_attr(id * "_$(i - 1)")) * ">" for (i, v) in enumerate(vals)])
+end
+
+"Whether a field's inputs are a group, shown in a `<fieldset>` (radios, checkboxes, a multi-value field)."
+uses_fieldset(fld::Field) = widget_type(fld) in ("radioselect", "checkboxselectmultiple", "multi")
 
 "Validate a bound form not validated yet (rendering it and reading its errors do, as Django's `form.errors`)."
 ensure_validated(f::Form) = (f.data !== nothing && !f.validated && is_valid(f); f)
@@ -1222,7 +1255,11 @@ function field_row(bf::BoundField; tag = "p")
     fld = bf.field
     is_hidden_field(fld) && return widget_html(bf)
     errs = field_errors_html(bf)
-    if tag == "div"            # Django's div.html: label, help text, errors, then the widget
+    if tag == "div"            # Django's div.html: label (a group's legend), help text, errors, then the widget
+        if uses_fieldset(fld)
+            lg = isempty(html_id(bf.form, fld)) ? escape_html(label(fld)) * ":" : "<legend>" * escape_html(label(fld)) * ":</legend>"
+            return "<div><fieldset>" * lg * help_html(bf, "div") * errs * widget_html(bf) * "</fieldset></div>"
+        end
         return "<div>" * label_tag(bf) * help_html(bf, "div") * errs * widget_html(bf) * "</div>"
     end
     body = fld.kind === :bool ? widget_html(bf) * " " * label_tag(bf) : label_tag(bf) * " " * widget_html(bf)
@@ -1322,7 +1359,8 @@ function tattr(bf::BoundField, ::Val{S}) where {S}
     S === :html_name && return html_name(bf.form, bf.field)
     S === :initial && return initial_for(bf.form, bf.field)
     S === :data && return bf.form.data === nothing ? nothing : raw_value(bf.form, bf.field)
-    S === :use_fieldset && return widget_type(bf.field) in ("radioselect", "checkboxselectmultiple", "multi")
+    S === :use_fieldset && return uses_fieldset(bf.field)
+    S in (:as_text, :as_textarea, :as_hidden) && return SafeString(as_widget(bf, S === :as_text ? :text : S === :as_textarea ? :textarea : :hidden))
     S === :subwidgets && return subwidgets(bf)
     NOTFOUND
 end
