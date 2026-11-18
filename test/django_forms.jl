@@ -1402,3 +1402,85 @@ Juango.clean_field(::Form, ::Val{:DftEscaping}, ::Val{:visible}, v) = throw(Juan
     @test aria_describedby(Form([:name => CharField(max_length = nothing, widget = Widget(attrs = Dict("aria-describedby" => "my-id")))]; data = Dict("name" => "MyName"))[:name]) === nothing
     @test aria_describedby(Form([:name => CharField(max_length = nothing)])[:name]) == ""
 end
+
+@testset "django forms_tests: test_forms (use_required_attribute)" begin
+    mf(req) = Form([:f1 => CharField(max_length = 30), :f2 => CharField(max_length = 30, required = false),
+                    :f3 => CharField(max_length = nothing, widget = :textarea), :f4 => ChoiceField([("P", "Python"), ("J", "Java")])];
+                   use_required_attribute = req)
+    for req in (true, false)
+        r = req ? " required" : ""
+        f1 = "<label for=\"id_f1\">F1:</label><input id=\"id_f1\" maxlength=\"30\" name=\"f1\" type=\"text\"$r>"
+        f2 = "<label for=\"id_f2\">F2:</label><input id=\"id_f2\" maxlength=\"30\" name=\"f2\" type=\"text\">"
+        f3 = "<label for=\"id_f3\">F3:</label><textarea cols=\"40\" id=\"id_f3\" name=\"f3\" rows=\"10\"$r></textarea>"
+        f4 = "<label for=\"id_f4\">F4:</label><select id=\"id_f4\" name=\"f4\"><option value=\"P\">Python</option><option value=\"J\">Java</option></select>"
+        rows(tag) = join("<$tag>" * x * "</$tag>" for x in (f1, f2, f3, f4))
+        @test html_eq(as_p(mf(req)), rows("p")) && html_eq(as_ul(mf(req)), rows("li")) && html_eq(as_div(mf(req)), rows("div"))
+        @test html_eq(as_table(mf(req)), join("<tr><th>" * replace(x, r"(</label>)" => s"\1</th><td>") * "</td></tr>" for x in (f1, f2, f3, f4)))
+    end
+end
+
+@testset "django forms_tests: test_forms (templates)" begin
+    t(src, f) = render(Template(src), Dict{String,Any}("form" => f))
+    # iterating a radio group and a checkbox group
+    fw = Form([:name => CharField(max_length = nothing), :language => ChoiceField([("P", "Python"), ("J", "Java")]; widget = :radio)])
+    @test html_eq(t("{% for radio in form.language %}<div class=\"myradio\">{{ radio }}</div>{% endfor %}", fw),
+                  "<div class=\"myradio\"><label for=\"id_language_0\"><input id=\"id_language_0\" name=\"language\" type=\"radio\" value=\"P\" required> Python</label></div>" *
+                  "<div class=\"myradio\"><label for=\"id_language_1\"><input id=\"id_language_1\" name=\"language\" type=\"radio\" value=\"J\" required> Java</label></div>")
+    song = Form([:name => CharField(max_length = nothing), :composers => MultipleChoiceField([("J", "John Lennon"), ("P", "Paul McCartney")]; widget = :checkboxes)];
+                data = Dict("composers" => ["J", "P"]), auto_id = false)
+    @test html_eq(t("{% for checkbox in form.composers %}<div class=\"mycheckbox\">{{ checkbox }}</div>{% endfor %}", song),
+                  "<div class=\"mycheckbox\"><label><input checked name=\"composers\" type=\"checkbox\" value=\"J\"> John Lennon</label></div>" *
+                  "<div class=\"mycheckbox\"><label><input checked name=\"composers\" type=\"checkbox\" value=\"P\"> Paul McCartney</label></div>")
+
+    # fields one by one in a template, with their errors (ErrorList.as_ul) and the form's (non_field_errors)
+    reg(data = nothing; auto_id = false) =
+        Form([:username => CharField(max_length = 10, help_text = "Good luck picking a username that doesn't already exist."),
+              :password1 => CharField(max_length = nothing, widget = :password), :password2 => CharField(max_length = nothing, widget = :password)];
+             data = data, auto_id = auto_id,
+             clean = f -> (p1 = get(f.cleaned_data, :password1, ""); p2 = get(f.cleaned_data, :password2, "");
+                           p1 != "" && p2 != "" && p1 != p2 && throw(Juango.ValidationError("Please make sure your passwords match."))))
+    src = "<form>{{ form.username.errors.as_ul }}<p><label>Your username: {{ form.username }}</label></p>" *
+          "{{ form.password1.errors.as_ul }}<p><label>Password: {{ form.password1 }}</label></p>" *
+          "{{ form.password2.errors.as_ul }}<p><label>Password (again): {{ form.password2 }}</label></p><input type=\"submit\" required></form>"
+    un(v = "") = "<input type=\"text\" name=\"username\"" * (isempty(v) ? "" : " value=\"$v\"") * " maxlength=\"10\" required>"
+    pw(n; inv = false) = "<input type=\"password\" name=\"$n\"" * (inv ? " aria-invalid=\"true\"" : "") * " required>"
+    @test html_eq(t(src, reg()), "<form><p><label>Your username: " * un() * "</label></p><p><label>Password: " * pw("password1") *
+                                 "</label></p><p><label>Password (again): " * pw("password2") * "</label></p><input type=\"submit\" required></form>")
+    req_err = "<ul class=\"errorlist\"><li>This field is required.</li></ul>"
+    @test html_eq(t(src, reg(Dict("username" => "django"))),
+                  "<form><p><label>Your username: " * un("django") * "</label></p>" * req_err * "<p><label>Password: " * pw("password1"; inv = true) *
+                  "</label></p>" * req_err * "<p><label>Password (again): " * pw("password2"; inv = true) * "</label></p><input type=\"submit\" required></form>")
+    # the label
+    @test html_eq(t("<form><p><label>{{ form.username.label }}: {{ form.username }}</label></p><p><label>{{ form.password1.label }}: {{ form.password1 }}</label></p></form>", reg()),
+                  "<form><p><label>Username: " * un() * "</label></p><p><label>Password1: " * pw("password1") * "</label></p></form>")
+    # label_tag: just the text without ids
+    lt = "<form><p>{{ form.username.label_tag }} {{ form.username }}<span {% if form.username.id_for_label %}id=\"{{ form.username.id_for_label }}_helptext\"{% endif %}>" *
+         "{{ form.username.help_text }}</span></p><p>{{ form.password1.label_tag }} {{ form.password1 }}</p></form>"
+    @test html_eq(replace(t(lt, reg()), "&#39;" => "'", "&#x27;" => "'"),
+                  "<form><p>Username: " * un() * "<span>Good luck picking a username that doesn't already exist.</span></p><p>Password1: " * pw("password1") * "</p></form>")
+    @test html_eq(replace(t(lt, reg(; auto_id = "id_%s")), "&#39;" => "'", "&#x27;" => "'"),
+                  "<form><p><label for=\"id_username\">Username:</label><input id=\"id_username\" type=\"text\" name=\"username\" maxlength=\"10\" " *
+                  "aria-describedby=\"id_username_helptext\" required><span id=\"id_username_helptext\">Good luck picking a username that doesn't already exist.</span></p>" *
+                  "<p><label for=\"id_password1\">Password1:</label><input type=\"password\" name=\"password1\" id=\"id_password1\" required></p></form>")
+    # legend_tag
+    lg = "<form><p>{{ form.username.legend_tag }} {{ form.username }}</p><p>{{ form.password1.legend_tag }} {{ form.password1 }}</p></form>"
+    @test html_eq(t(lg, reg()), "<form><p>Username: " * un() * "</p><p>Password1: " * pw("password1") * "</p></form>")
+    @test html_eq(t(lg, reg(; auto_id = "id_%s")),
+                  "<form><p><legend>Username:</legend><input id=\"id_username\" type=\"text\" name=\"username\" maxlength=\"10\" aria-describedby=\"id_username_helptext\" required></p>" *
+                  "<p><legend>Password1:</legend><input type=\"password\" name=\"password1\" id=\"id_password1\" required></p></form>")
+    # help text, escaped; none for a field without
+    @test occursin("Good luck picking a username that doesn&#", t("{{ form.username.help_text }}", reg()))
+    @test t("{{ form.password1.help_text }}", reg()) == ""
+    # the form's own errors show only where the template puts non_field_errors
+    bad = reg(Dict("username" => "django", "password1" => "foo", "password2" => "bar"))
+    ok = "<p><label>Your username: " * un("django") * "</label></p><p><label>Password: " * pw("password1") *
+         "</label></p><p><label>Password (again): " * pw("password2") * "</label></p><input type=\"submit\" required></form>"
+    @test html_eq(t(src, bad), "<form>" * ok)
+    @test html_eq(t("<form>{{ form.non_field_errors }}" * src[7:end], bad),
+                  "<form><ul class=\"errorlist nonfield\"><li>Please make sure your passwords match.</li></ul>" * ok)
+    # ErrorList: a vector of messages, as_ul and as_text
+    e = ErrorList(["Foo", "Foobar"])
+    @test e == ["Foo", "Foobar"] && "Foo" in e
+    @test Juango.errors_text(e) == "* Foo\n* Foobar" && as_ul(e).s == "<ul class=\"errorlist\"><li>Foo</li><li>Foobar</li></ul>"
+    @test as_ul(ErrorList(["Foo"]; error_class = "foobar-error-class")).s == "<ul class=\"errorlist foobar-error-class\"><li>Foo</li></ul>"
+end

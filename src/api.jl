@@ -75,7 +75,7 @@ export Form, @form, ModelForm, is_valid, add_widget_attrs!, add_error!, as_p, cl
        Widget, MultiWidget, MultiValueField, SplitDateTimeField, Media, ModelChoiceField,
        ModelMultipleChoiceField, ChoiceField, TypedChoiceField, TypedMultipleChoiceField, MultipleChoiceField, MultipleFileField, RegexField,
        ComboField, as_field_group, as_div, as_ul, as_table, NullBooleanField, SelectDateWidget, SplitHiddenDateTimeWidget,
-       order_fields!, non_field_errors, has_error, hidden_fields, visible_fields, errors_json_data, errors_as_json, legend_tag, label_tag, css_classes, is_multipart, aria_describedby, set_field!, delete_field!
+       order_fields!, non_field_errors, has_error, hidden_fields, visible_fields, errors_json_data, errors_as_json, legend_tag, label_tag, css_classes, is_multipart, aria_describedby, ErrorList, set_field!, delete_field!
 # views
 export recording, recorded, undo_recorded!, undo_problem, UndoProblem, not_recording, undoing, undoing_recorded, has_changes,
        render, redirect, query_param, component!, get_text_list, ModelResource, export_data, export_rows, export_download, import_data,

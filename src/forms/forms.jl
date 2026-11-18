@@ -881,6 +881,28 @@ errors_html(errs; class = nothing, id = nothing) = isempty(errs) ? "" :
     "<ul class=\"errorlist" * (class === nothing ? "" : " " * class) * "\"" * (id === nothing ? "" : id_attr(id)) * ">" *
     join(["<li>" * escape_html(e) * "</li>" for e in errs]) * "</ul>"
 
+"""
+    ErrorList(messages; error_class=nothing, id=nothing)
+
+A list of error messages that renders itself, as Django's `ErrorList`: `{{ form.name.errors }}` and
+`{{ form.non_field_errors }}` in a template are a `<ul class="errorlist">` (`as_ul`), and
+`.as_text` gives `* message` lines. It is a vector of strings otherwise.
+"""
+struct ErrorList <: AbstractVector{String}
+    messages::Vector{String}
+    error_class::Union{Nothing,String}
+    id::Union{Nothing,String}
+end
+ErrorList(ms = String[]; error_class = nothing, id = nothing) =
+    ErrorList(collect(String, ms), error_class === nothing ? nothing : string(error_class), id === nothing ? nothing : string(id))
+Base.size(e::ErrorList) = size(e.messages)
+Base.getindex(e::ErrorList, i::Int) = e.messages[i]
+as_ul(e::ErrorList) = SafeString(errors_html(e.messages; class = e.error_class, id = e.id))
+"The errors as `* message` lines (Django's `ErrorList.as_text`)."
+errors_text(e::ErrorList) = join(("* " * m for m in e.messages), "\n")
+__html__(e::ErrorList) = as_ul(e).s
+tattr(e::ErrorList, ::Val{S}) where {S} = S === :as_ul ? as_ul(e) : S === :as_text ? errors_text(e) : NOTFOUND
+
 input_type(fld::Field) = fld.widget isa Widget && haskey(fld.widget.attrs, "type") ? fld.widget.attrs["type"] :    # (TextInput(attrs = type => email))
     widget_kind(fld.widget) === :password ? "password" : widget_kind(fld.widget) === :hidden ? "hidden" :
     fld.kind === :email ? "email" : fld.kind === :url ? "url" : fld.kind in INT_KINDS || fld.kind in (:float, :decimal) ? "number" :
@@ -1476,7 +1498,7 @@ function tattr(f::Form, ::Val{S}) where {S}
     S === :as_ul && return as_ul(f)
     S === :as_table && return as_table(f)
     S === :errors && return ensure_validated(f).errors
-    S === :non_field_errors && return non_field_errors(f)
+    S === :non_field_errors && return ErrorList(non_field_errors(ensure_validated(f)); error_class = "nonfield")
     S === :is_bound && return f.data !== nothing
     S === :is_multipart && return is_multipart(f)
     S === :cleaned_data && return f.cleaned_data
@@ -1497,7 +1519,8 @@ function tattr(bf::BoundField, ::Val{S}) where {S}
     S === :aria_describedby && return aria_describedby(bf)
     S === :errors_html && return SafeString(field_errors_html(bf))
     S === :help_html && return SafeString(help_html(bf, "div"))
-    S === :errors && return get(ensure_validated(bf.form).errors, bf.field.name, String[])
+    S === :errors && return (id = html_id(bf.form, bf.field);
+                             ErrorList(get(ensure_validated(bf.form).errors, bf.field.name, String[]); id = isempty(id) ? nothing : id * "_error"))
     S === :name && return string(bf.field.name)        # the field's own name (Django's); html_name is the prefixed one
     S === :id_for_label && return label_id(bf)
     S === :value && return display_value(bf)
