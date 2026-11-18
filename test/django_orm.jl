@@ -5626,3 +5626,147 @@ end
     @test [x.pk for x in filter(DnfItem, q1) | filter(DnfItem, q2)] == [x.pk for x in filter(DnfItem, q2) | filter(DnfItem, q1)]
   end
 end
+
+# --- tests/custom_pk --------------------------------------------------------------------------------------
+@model struct DpkEmployee
+    employee_code = IntegerField(primary_key = true, db_column = "code")
+    first_name = CharField(max_length = 20)
+    last_name = CharField(max_length = 20)
+    Meta(table = "dpk_employee", ordering = ["last_name", "first_name"])
+end
+@model struct DpkBusiness
+    name = CharField(max_length = 20, primary_key = true)
+    employees = ManyToManyField(DpkEmployee; related_name = :business_set, related_query_name = :business)
+    Meta(table = "dpk_business", verbose_name_plural = "businesses")
+end
+redirect_stdout(devnull) do
+    ms = [DpkEmployee, DpkBusiness, through(DpkBusiness, :employees)]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django custom_pk: BasicCustomPKTests, CustomPKTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    pks(qs) = [x.pk for x in qs]
+    names(qs) = [b.name for b in qs]
+    dan = create(DpkEmployee; employee_code = 123, first_name = "Dan", last_name = "Jones")
+    fran = create(DpkEmployee; employee_code = 456, first_name = "Fran", last_name = "Bones")
+    business = create(DpkBusiness; name = "Sears"); add!(business.employees, dan, fran)
+    # pk and the field's own name in lookups, related lookups both ways, get, in_bulk
+    @test pks(filter(DpkEmployee; pk = 123)) == [123] && pks(filter(DpkEmployee; employee_code = 123)) == [123]
+    @test pks(filter(DpkEmployee; pk__in = [123, 456])) == [456, 123] && pks(objects(DpkEmployee)) == [456, 123]
+    @test names(filter(DpkBusiness; name = "Sears")) == ["Sears"] && names(filter(DpkBusiness; pk = "Sears")) == ["Sears"]
+    @test pks(business.employees) == [456, 123] && names(fran.business_set) == ["Sears"]
+    @test pks(filter(DpkEmployee; business__name = "Sears")) == [456, 123] && pks(filter(DpkEmployee; business__pk = "Sears")) == [456, 123]
+    @test names(filter(DpkBusiness; employees__employee_code = 123)) == ["Sears"] && names(filter(DpkBusiness; employees__pk = 123)) == ["Sears"]
+    @test names(filter(DpkBusiness; employees__first_name__startswith = "Fran")) == ["Sears"]
+    @test get(DpkEmployee; pk = 123) == dan && get(DpkEmployee; pk = 456) == fran && get(DpkEmployee; employee_code = 123) == dan
+    @test tr(() -> get(DpkEmployee; pk = 42)) isa Juango.DoesNotExist
+    e = get(DpkEmployee; pk = 123); @test e.pk == 123 && e.employee_code == 123
+    @test in_bulk(objects(DpkEmployee), [123, 456])[123] == dan && in_bulk(objects(DpkBusiness), ["Sears"])["Sears"] == business
+    f2 = get(DpkEmployee; pk = 456); f2.last_name = "Jones"; save!(f2)
+    @test pks(filter(DpkEmployee; last_name = "Jones")) == [123, 456]
+    # creating with pk or the name; unicode keys; a duplicate key; a zero key; no key at all
+    create(DpkEmployee; employee_code = 1234, first_name = "Foo", last_name = "Bar"); create(DpkEmployee; pk = 1235, first_name = "Foo", last_name = "Baz")
+    create(DpkBusiness; name = "Bears"); create(DpkBusiness; pk = "Tears")
+    @test exists(filter(DpkEmployee; employee_code = 1235)) && exists(filter(DpkBusiness; name = "Tears"))
+    create(DpkBusiness; name = "jaźń"); @test exists(filter(DpkBusiness; pk = "jaźń"))
+    @test tr(() -> create(DpkEmployee; employee_code = 123, first_name = "Fred", last_name = "Jones")) isa Juango.IntegrityError
+    create(DpkEmployee; employee_code = 0, first_name = "Frank", last_name = "Jones"); @test get(DpkEmployee; pk = 0).employee_code == 0
+    @test tr(() -> create(DpkEmployee; first_name = "Tom", last_name = "Smith")) isa Exception
+  end
+end
+
+# --- tests/model_regress ----------------------------------------------------------------------------------
+@model struct DmrArticle
+    headline = CharField(max_length = 100, default = "Default headline")
+    pub_date = DateTimeField()
+    status = IntegerField(blank = true, null = true, choices = [(1, "first"), (2, "second")])
+    misc_data = CharField(max_length = 100, blank = true)
+    article_text = TextField()
+    Meta(table = "dmr_article", ordering = ["pub_date", "headline"], verbose_name = "Ångström's Articles")
+end
+# (Django's Movie has movie_id = AutoField(primary_key = True): an automatic key under another name, #229)
+@model struct DmrParty
+    when = DateField(null = true)
+    Meta(table = "dmr_party")
+end
+@model struct DmrEvent
+    when = DateTimeField()
+    Meta(table = "dmr_event")
+end
+@model struct DmrDepartment
+    code = PositiveIntegerField(primary_key = true)         # (Django's is named id: #229)
+    name = CharField(max_length = 200)
+    Meta(table = "dmr_department")
+end
+@model struct DmrWorker
+    department = ForeignKey(DmrDepartment; on_delete = :CASCADE, related_name = :workers)
+    name = CharField(max_length = 200)
+    Meta(table = "dmr_worker")
+end
+Base.string(w::DmrWorker) = w.name
+@model struct DmrNonAutoPK
+    name = CharField(max_length = 10, primary_key = true)
+    Meta(table = "dmr_nonautopk")
+end
+@model struct DmrModel1
+    pkey = IntegerField(unique = true, db_index = true)
+    Meta(table = "dmr_model1")
+end
+@model struct DmrModel2
+    model1 = ForeignKey(DmrModel1; on_delete = :CASCADE, unique = true, to_field = :pkey, related_name = :model2s)
+    Meta(table = "dmr_model2")
+end
+@model struct DmrModel3
+    model2 = ForeignKey(DmrModel2; on_delete = :CASCADE, unique = true, to_field = :model1, related_name = :model3s)
+    Meta(table = "dmr_model3")
+end
+redirect_stdout(devnull) do
+    ms = [DmrArticle, DmrParty, DmrEvent, DmrDepartment, DmrWorker, DmrNonAutoPK, DmrModel1, DmrModel2, DmrModel3]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django model_regress" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    whens(qs) = [p.when for p in qs]
+    # key comparisons; an empty choice; long and unicode text
+    @test isempty(collect(filter(DmrWorker; department__gte = 0))) && isempty(collect(filter(DmrWorker; department__lte = 0)))
+    a = create(DmrArticle; headline = "Look at me!", pub_date = Dates.now())
+    @test a.get_status_display === nothing && get(DmrArticle; pk = a.pk).misc_data == ""
+    @test length(get(DmrArticle; pk = create(DmrArticle; headline = "big", pub_date = Dates.now(), article_text = "ABCDE"^1000).pk).article_text) == 5000
+    @test length(get(DmrArticle; pk = create(DmrArticle; headline = "big", pub_date = Dates.now(), article_text = "אבג"^1000).pk).article_text) == 3000
+    # date part lookups, with numbers or text
+    for d in (Date(1999, 12, 31), Date(1998, 12, 31), Date(1999, 1, 1), Date(1, 3, 3)); create(DmrParty; when = d); end
+    @test isempty(collect(filter(DmrParty; when__month = 2)))
+    @test whens(filter(DmrParty; when__month = 1)) == [Date(1999, 1, 1)]
+    @test Set(whens(filter(DmrParty; when__month = 12))) == Set([Date(1999, 12, 31), Date(1998, 12, 31)])
+    @test whens(filter(DmrParty; when__year = 1998)) == [Date(1998, 12, 31)]
+    @test Set(whens(filter(DmrParty; when__day = "31"))) == Set([Date(1999, 12, 31), Date(1998, 12, 31)])
+    @test Set(whens(filter(DmrParty; when__month = "12"))) == Set([Date(1999, 12, 31), Date(1998, 12, 31)])
+    @test whens(filter(DmrParty; when__year = "1998")) == [Date(1998, 12, 31)]
+    @test whens(filter(DmrParty; when__year = 1)) == [Date(1, 3, 3)] && whens(filter(DmrParty; when__year = "1")) == [Date(1, 3, 3)]
+    delete!(objects(DmrParty)); create(DmrParty; when = Date(1999, 1, 1)); create(DmrParty)
+    p = first(filter(DmrParty; when__month = 1)); @test p.when == Date(1999, 1, 1)
+    @test [Dates.month(d) for d in dates(filter(DmrParty; pk = p.pk), :when, :month)] == [1]
+    # get_next_by / get_previous_by
+    for t in (DateTime(2000, 1, 1, 16), DateTime(2000, 1, 1, 6, 1, 1), DateTime(2000, 1, 1, 13, 1, 1)); create(DmrEvent; when = t); end
+    e = create(DmrEvent; when = DateTime(2000, 1, 1, 12, 0, 20, 24))
+    @test get_next_by(e, :when).when == DateTime(2000, 1, 1, 13, 1, 1) && get_previous_by(e, :when).when == DateTime(2000, 1, 1, 6, 1, 1)
+    @test tr(() -> get_next_by(DmrEvent(), :when)) isa Exception && tr(() -> get_previous_by(DmrEvent(), :when)) isa Exception
+    # a key to a natural positive-integer key; chained to_field keys
+    d = create(DmrDepartment; code = 10, name = "IT"); w = create(DmrWorker; department = d, name = "Full-time"); @test string(w) == "Full-time"
+    m1 = create(DmrModel1; pkey = 1000); m2 = create(DmrModel2; model1 = m1); create(DmrModel3; model2 = m2)
+    m3 = get(DmrModel3; model2 = 1000); @test m3.model2.pk == m2.pk && m3.model2.model1.pkey == 1000
+    # validate_unique on a natural key
+    create(DmrNonAutoPK; name = "one"); @test !isempty(Juango.validate_unique(DmrNonAutoPK(name = "one")))      # (Juango returns the errors)
+    # a copy's related object is its own
+    d1, d2 = create(DmrDepartment; code = 1, name = "department1"), create(DmrDepartment; code = 2, name = "department2")
+    w1 = create(DmrWorker; name = "worker", department = d1); w1.department
+    w2 = copy(w1)
+    @test w2.department == d1
+    w2.department = d2
+    @test w2.department == d2 && w1.department == d1
+  end
+end

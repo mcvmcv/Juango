@@ -492,7 +492,7 @@ Base.@nospecializeinfer function construct(@nospecialize(T::Type{<:Model}); kwar
     obj = T(Dict{Symbol,Any}(:id => nothing), Dict{Symbol,Any}())
     data = (getfield(obj, :_data)::Dict{Symbol,Any})
     kw = Dict{Symbol,Any}(kwargs)
-    haskey(kw, :pk) && (kw[:id] = pop!(kw, :pk))
+    haskey(kw, :pk) && (kw[natural_pk(T) ? pk_fields(T)[1].name : :id] = pop!(kw, :pk))     # (a natural key's field)
     haskey(kw, :id) && (data[:id] = pop!(kw, :id))
     for f in all_fields(T)
         if haskey(kw, f.name)
@@ -695,7 +695,8 @@ end
 
 Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::Symbol, @nospecialize(v))
     data = (getfield(m, :_data)::Dict{Symbol,Any})
-    s === :pk && (s = :id)
+    # (pk = ... on a model with a natural primary key sets that field, as Django)
+    s === :pk && (s = natural_pk(typeof(m)) ? pk_fields(typeof(m))[1].name : :id)
     g = find_generic(generic_fks(typeof(m)), s)
     g === nothing || return set_generic!(m, g, v)
     g = find_generic(foreign_objects(typeof(m)), s)
@@ -791,6 +792,18 @@ Base.@nospecializeinfer function property_list(@nospecialize(T))
 end
 
 Base.@nospecializeinfer Base.:(==)(@nospecialize(a::Model), @nospecialize(b::Model)) = typeof(a) === typeof(b) && a.id !== nothing && a.id == b.id
+"""
+    copy(obj)
+
+Another instance with the same field values (Django's `copy.copy(instance)`): its loaded related
+objects aren't shared, so pointing the copy's key elsewhere leaves the original alone.
+"""
+Base.@nospecializeinfer function Base.copy(@nospecialize(m::Model))
+    c = typeof(m)(copy(getfield(m, :_data)::Dict{Symbol,Any}), Dict{Symbol,Any}())
+    db = get(getfield(m, :_cache)::Dict{Symbol,Any}, :__db, nothing)
+    db === nothing || ((getfield(c, :_cache)::Dict{Symbol,Any})[:__db] = db)
+    c
+end
 Base.@nospecializeinfer Base.hash(@nospecialize(m::Model), h::UInt) = m.id === nothing ? objectid(m) ⊻ h : hash((typeof(m), m.id), h)
 Base.show(io::IO, m::Model) = print(io, nameof(typeof(m)), " object (", something(m.id, "unsaved"), ")")
 function Base.show(io::IO, ::MIME"text/plain", m::Model)

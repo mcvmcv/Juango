@@ -408,6 +408,11 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
         elseif !isempty(rest) && (tr = apply_transforms(qcol(alias, column(f)), f.kind, rest)) !== nothing
             col, kind = tr                  # registered transforms: name__lower__...
             kind === f.kind || (f = nothing)
+            # when__day = "31": an integer part compared with text given as a number, as Django
+            if kind === :int
+                pint(v) = v isa AbstractString ? something(tryparse(Int, strip(v)), v) : v
+                value = value isa AbstractVector ? map(pint, value) : pint(value)
+            end
         elseif !isempty(rest)
             f.kind === :fk || throw(LookupError("unsupported lookup '$(join(rest, "__"))' for $(f.kind) field '$fname'" *
                                                 suggest_lookup(rest[1])))
