@@ -106,6 +106,8 @@ end
     Index(Lower(:email), ...; name)
     GinIndex(fields...; name=nothing)
 
+A field named `"-field"` is that column in descending order.
+
 An index for `Meta(indexes=[...])`. `method=:gin` (`GinIndex`) is a PostgreSQL GIN index,
 for JSON, array and full-text columns; other databases skip it.
 
@@ -262,8 +264,9 @@ Base.@nospecializeinfer function table_state(@nospecialize(T::Type))
     root = isempty(ancestors(T)) ? T : last(ancestors(T))
     idx = Index[]
     for ix in get(m.extra, :indexes, Index[])
-        cols = [col(c) for c in ix.columns]
-        push!(idx, Index(cols, something(ix.name, constraint_name(m.table, cols..., ix.method === :btree ? "idx" : string(ix.method))),
+        # ("-field": that column descending)
+        cols = [startswith(c, "-") ? "-" * col(c[2:end]) : col(c) for c in ix.columns]
+        push!(idx, Index(cols, something(ix.name, constraint_name(m.table, lstrip.(cols, '-')..., ix.method === :btree ? "idx" : string(ix.method))),
                          ix.unique, ix.method, Tuple{String,String}[(f, col(x)) for (f, x) in ix.expressions],
                          ix.condition === nothing ? nothing : condition_to_columns(T, ix.condition),
                          String[col(c) for c in ix.include], ix.opclasses))
@@ -446,8 +449,9 @@ function index_spec_sql(b::DatabaseBackend, table, ix::Index; if_not_exists = fa
     if isempty(ix.expressions)
         for (i, c) in enumerate(ix.columns)
             i > 1 && print(io, ", ")
-            print(io, quote_name(b, c))
+            print(io, quote_name(b, lstrip(c, '-')))
             pg && !isempty(ix.opclasses) && print(io, " ", ix.opclasses[i])
+            startswith(c, "-") && print(io, " DESC")
         end
     else
         join(io, (f == "" ? quote_name(b, x) : "($f($(quote_name(b, x))))" for (f, x) in ix.expressions), ", ")

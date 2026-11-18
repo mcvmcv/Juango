@@ -7826,3 +7826,126 @@ end
   end
 end
 
+# ---- Django's indexes tests (tests/indexes): the SQL an Index makes, and partial, covering and operator-class
+# indexes created on the database. (Django's checks of its schema editor's deferred SQL and of MySQL's foreign-key
+# indexes have no counterpart: Juango's migrations build indexes from a table snapshot.)
+@model struct DidxArticle
+    headline = CharField(max_length = 100)
+    pub_date = DateTimeField()
+    published = BooleanField(default = false)
+    Meta(table = "didx_article", indexes = [Index(:headline, :pub_date)])
+end
+@model struct DidxIndexedArticle2
+    headline = CharField(max_length = 100)
+    body = TextField()
+    Meta(table = "didx_indexedarticle2")
+end
+@model struct DidxOrdered
+    headline = CharField(max_length = 100)
+    Meta(table = "didx_ordered", indexes = [Index("-headline")])
+end
+redirect_stdout(devnull) do
+    ms = [DidxArticle, DidxIndexedArticle2, DidxOrdered]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django indexes" begin
+  port_block() do
+    b = Juango.backend()
+    q(s) = Juango.quote_name(b, s)
+    sql(T, ix) = join(Juango.index_spec_sql(b, Juango.modelmeta(T).table, ix))
+    # the indexes on a table, by name
+    function index_names(table)
+        rows = IS_POSTGRES ? Juango.execute("SELECT indexname AS n FROM pg_indexes WHERE tablename = ?", [table]) :
+               IS_MYSQL ? Juango.execute("SELECT DISTINCT index_name AS n FROM information_schema.statistics " *
+                                         "WHERE table_schema = DATABASE() AND table_name = ?", [table]) :
+                          Juango.execute("SELECT name AS n FROM sqlite_master WHERE type = 'index' AND tbl_name = ?", [table])
+        Set(String(r[:n]) for r in rows)
+    end
+    add(T, ix) = foreach(s -> Juango.execute(s), Juango.index_spec_sql(b, Juango.modelmeta(T).table, ix))
+    remove(T, ix) = foreach(s -> Juango.execute(s), Juango.drop_index_spec_sql(b, Juango.modelmeta(T).table, ix))
+    # names are deterministic, and Meta(indexes) gets one (quoted in its SQL)
+    st = Juango.table_state(DidxArticle)
+    @test length(st.indexes) == 1
+    ix = st.indexes[1]
+    @test ix.name == Juango.table_state(DidxArticle).indexes[1].name
+    @test occursin(q(ix.name), sql(DidxArticle, ix)) && ix.name in index_names("didx_article")
+    # the columns list, descending columns, and operator classes (PostgreSQL only; ignored elsewhere)
+    @test occursin("($(q("headline")))", sql(DidxArticle, Index(:headline; name = "whitespace_idx")))
+    @test occursin("($(q("headline")) DESC)", sql(DidxArticle, Index("-headline"; name = "whitespace_idx")))
+    ops = Index(:headline; name = "whitespace_idx", opclasses = ["text_pattern_ops"])
+    dops = Index("-headline"; name = "whitespace_idx", opclasses = ["text_pattern_ops"])
+    if IS_POSTGRES
+        @test occursin("($(q("headline")) text_pattern_ops)", sql(DidxArticle, ops))
+        @test occursin("($(q("headline")) text_pattern_ops DESC)", sql(DidxArticle, dops))
+    else
+        @test !occursin("text_pattern_ops", sql(DidxArticle, ops))
+        @test occursin("($(q("headline")) DESC)", sql(DidxArticle, dops))
+    end
+    # a descending index in Meta: its name leaves the '-' out
+    oix = Juango.table_state(DidxOrdered).indexes[1]
+    @test oix.columns == ["-headline"] && !occursin("-", oix.name)
+    # operator classes on the database: one per column, with a condition, descending, with INCLUDE
+    opclass(name) = IS_POSTGRES ?
+        Set((String(r[:o]), String(r[:i])) for r in Juango.execute(
+            "SELECT opcname AS o, c.relname AS i FROM pg_opclass AS oc JOIN pg_index AS ind ON oc.oid = ANY(ind.indclass) " *
+            "JOIN pg_class AS c ON c.oid = ind.indexrelid WHERE c.relname = ?", [name])) : nothing
+    for (name, ix, want) in (
+            ("test_ops_class", Index(:headline; name = "test_ops_class", opclasses = ["varchar_pattern_ops"]), ["varchar_pattern_ops"]),
+            ("test_ops_class_multiple", Index(:headline, :body; name = "test_ops_class_multiple",
+                                              opclasses = ["varchar_pattern_ops", "text_pattern_ops"]), ["varchar_pattern_ops", "text_pattern_ops"]),
+            ("test_ops_class_partial", Index(:body; name = "test_ops_class_partial", opclasses = ["text_pattern_ops"],
+                                             condition = Q(headline__contains = "China")), ["text_pattern_ops"]),
+            ("test_ops_class_ordered", Index("-body"; name = "test_ops_class_ordered", opclasses = ["text_pattern_ops"]), ["text_pattern_ops"]),
+            ("test_ops_class_ordered_partial", Index("-body"; name = "test_ops_class_ordered_partial", opclasses = ["text_pattern_ops"],
+                                                     condition = Q(headline__contains = "China")), ["text_pattern_ops"]),
+            ("test_ops_class_include", Index(:body; name = "test_ops_class_include", opclasses = ["text_pattern_ops"],
+                                             include = [:headline]), ["text_pattern_ops"]))
+        IS_MYSQL && (ix.condition !== nothing || occursin("body", join(ix.columns))) && continue    # (MySQL: no partial or TEXT indexes)
+        add(DidxIndexedArticle2, ix)                   # (elsewhere the operator classes are ignored, not an error)
+        IS_POSTGRES && @test opclass(name) == Set((o, name) for o in want)
+        @test name in index_names("didx_indexedarticle2")
+        remove(DidxIndexedArticle2, ix)
+        @test !(name in index_names("didx_indexedarticle2"))
+    end
+    # partial indexes (skipped where the database has none, as Django ignores the condition there)
+    for (name, ix, wh) in (
+            ("recent_article_idx", Index(:pub_date; name = "recent_article_idx",
+                                         condition = Q(pub_date__gt = DateTime(2015, 1, 1))), "WHERE $(q("pub_date"))"),
+            ("recent_article_idx", Index(:id; name = "recent_article_idx", condition = Q(id__in = [1, 2, 3])), "WHERE $(q("id"))"),
+            ("published_index", Index(:published; name = "published_index", condition = Q(published = true)), "WHERE $(q("published"))"),
+            ("recent_article_idx", Index(:pub_date, :headline; name = "recent_article_idx",
+                                         condition = Q(pub_date__isnull = false) & Q(headline__contains = "China")), "WHERE "),
+            ("recent_article_idx", Index(:pub_date; name = "recent_article_idx", condition = Q(pub_date__isnull = false)),
+             "WHERE $(q("pub_date")) IS NOT NULL"))
+        s = sql(DidxArticle, ix)
+        if IS_MYSQL
+            @test isempty(s)                           # (the index is skipped)
+            continue
+        end
+        @test occursin(wh, s)
+        add(DidxArticle, ix)
+        @test name in index_names("didx_article")
+        remove(DidxArticle, ix)
+        @test !(name in index_names("didx_article"))
+    end
+    # covering indexes (INCLUDE on PostgreSQL; ignored elsewhere)
+    cov = Index(:headline; name = "covering_headline_idx", include = [:pub_date, :published])
+    if IS_POSTGRES
+        @test occursin("($(q("headline"))) INCLUDE ($(q("pub_date")), $(q("published")))", sql(DidxArticle, cov))
+    else
+        @test !occursin("INCLUDE", sql(DidxArticle, cov))
+    end
+    add(DidxArticle, cov)
+    @test "covering_headline_idx" in index_names("didx_article")
+    IS_POSTGRES && @test occursin("INCLUDE (pub_date, published)",
+                                  String(Juango.execute("SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'covering_headline_idx'")[1][:d]))
+    remove(DidxArticle, cov)
+    @test !("covering_headline_idx" in index_names("didx_article"))
+    if !IS_MYSQL
+        cp = Index(:headline; name = "covering_partial_headline_idx", include = [:pub_date], condition = Q(pub_date__isnull = false))
+        @test occursin("WHERE $(q("pub_date")) IS NOT NULL", sql(DidxArticle, cp))
+        add(DidxArticle, cp); @test "covering_partial_headline_idx" in index_names("didx_article"); remove(DidxArticle, cp)
+    end
+  end
+end
