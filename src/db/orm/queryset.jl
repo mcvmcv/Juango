@@ -90,7 +90,7 @@ manager(::Type{T}, ::Val{N}) where {T,N} = throw(ArgumentError("$T has no manage
 Base.@nospecializeinfer objects(@nospecialize(T::Type{<:Model}), name::Symbol) = manager(T, Val(name))
 "An empty queryset."
 Base.@nospecializeinfer none(@nospecialize(T::Type{<:Model})) = QuerySet{T}(Q[], String[], nothing, 0, true)
-none(qs::QuerySet{T}) where {T} = none(T)
+none(qs::QuerySet{T}) where {T} = chain(qs; isnone = true)     # (its ordering and the rest kept, as Django)
 
 """
 A new queryset with some parts replaced. Cached results and the many-to-many context
@@ -292,23 +292,41 @@ function expand_fk_ordering(@nospecialize(T::Type), o::AbstractString, depth::In
     desc = startswith(o, "-")
     path = lstrip(o, '-')
     segs = split(path, "__")
+    # a multi-table child ordered by its parent link: the parent's ordering, whose fields the child has
+    if length(segs) == 1 && table_parent(concrete_model(T)) !== nothing && Symbol(segs[1]) === parent_accessor(concrete_model(T))
+        P = table_parent(concrete_model(T))
+        ord = modelmeta(P).ordering
+        isempty(ord) && return Any["$(desc ? "-" : "")id"]
+        return Any[x for r in ord for x in (r isa AbstractString ? expand_fk_ordering(T, (desc ⊻ startswith(r, "-") ? "-" : "") * lstrip(r, '-'), depth + 1, Any[seen; P]) :
+                                            Any[desc ? reverse_order(order_item(r)) : order_item(r)])]
+    end
     M = T
     f = nothing
     for s in segs
         f = findfield(modelmeta(M), Symbol(s))
-        f !== nothing && f.kind === :fk || return [String(o)]       # not a path of foreign keys: as it is
+        # (by the key's attname, author_id: the column itself, not the related model's ordering)
+        f !== nothing && f.kind === :fk && f.name === Symbol(s) || return Any[String(o)]
         M = related_model(f)
     end
     R = M
     ord = modelmeta(R).ordering
-    (isempty(ord) || !all(x -> x isa AbstractString, ord)) && return [String(o)]
+    isempty(ord) && return Any[String(o)]
     # LoopX ordered by y, LoopY by x: Django's "Infinite loop caused by ordering"
     R in seen && throw(LookupError("infinite loop caused by ordering: $(nameof(T)) by '$path' comes back to $(nameof(R))'s Meta(ordering)"))
-    out = String[]
+    out = Any[]
     for r in ord
-        rdesc = startswith(r, "-")
-        term = (desc ⊻ rdesc ? "-" : "") * path * "__" * lstrip(r, '-')
-        append!(out, expand_fk_ordering(T, term, depth + 1, Any[seen; R]))
+        if r isa AbstractString
+            rdesc = startswith(r, "-")
+            term = (desc ⊻ rdesc ? "-" : "") * path * "__" * lstrip(r, '-')
+            append!(out, expand_fk_ordering(T, term, depth + 1, Any[seen; R]))
+        else
+            # an expression (Lower(:name)): its field references taken through the path
+            ob = order_item(r)
+            e = prefix_refs(ob.expr, path)
+            e === nothing && return Any[String(o)]
+            t = OrderBy(e, ob.descending, ob.nulls_first)
+            push!(out, desc ? reverse_order(t) : t)
+        end
     end
     out
 end
@@ -1124,6 +1142,48 @@ Base.@nospecializeinfer function Base.contains(@nospecialize(qs::QuerySet), @nos
     exists(filter(qs; pk = obj.pk))
 end
 Base.@nospecializeinfer Base.in(@nospecialize(obj::Model), @nospecialize(qs::QuerySet)) = contains(qs, obj)
+
+"""
+    totally_ordered(qs) -> Bool
+
+Whether the queryset's ordering picks out one order of its rows (Django's `QuerySet.totally_ordered`):
+it orders by the primary key, or by a non-null unique field, or by every field of a unique set
+(`unique_together`, a UniqueConstraint without a condition) none of them nullable. Orderings
+through relations, by expressions or by a key's related model don't count. Pagination over a
+queryset that isn't may show rows twice or skip them.
+"""
+Base.@nospecializeinfer function totally_ordered(@nospecialize(qs::QuerySet))
+    T = model_of(qs)
+    order_cleared(qs) && return false
+    order = isempty(qs.order) ? collect(Any, modelmeta(T).ordering) : qs.order
+    isempty(order) && return false
+    anns = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in qs.annotations)
+    have = Set{Symbol}()
+    for o in order
+        o = order_item(o)
+        name = o isa AbstractString ? lstrip(o, '-') : (o.expr isa F ? o.expr.name : nothing)
+        name === nothing && continue
+        a = get(anns, Symbol(name), nothing)
+        a isa F && (name = a.name)                          # alias(qs; my_pk = F(:pk))
+        occursin("__", name) && continue                     # through a relation
+        name in ("pk", "id") && return true
+        f = findfirst(g -> attname(g) === Symbol(name) || (g.name === Symbol(name) && g.kind !== :fk), all_fields(T))
+        f === nothing && continue
+        g = all_fields(T)[f]
+        natural_pk(T) && g === pk_fields(T)[1] && return true
+        g.unique && !g.null && return true
+        push!(have, g.name)
+    end
+    sets = Vector{Vector{Symbol}}(modelmeta(concrete_model(T)).unique_together)
+    for c in model_constraints(T)
+        c isa UniqueConstraint && isempty(c.expressions) && (c.condition === nothing || empty_q(c.condition)) && push!(sets, c.fields)
+    end
+    for fs in sets
+        all(n -> n in have, fs) && !any(n -> getfield_meta(T, n).null, fs) && return true
+    end
+    false
+end
+tattr(qs::QuerySet, ::Val{:totally_ordered}) = totally_ordered(qs)
 
 Base.@nospecializeinfer default_order(@nospecialize(qs::QuerySet)) =
     order_cleared(qs) ? Any["id"] :

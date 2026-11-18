@@ -5355,3 +5355,164 @@ end
     @test flds == [:selfref_set, :cited] && [x.pk for x in ap2.selfref_set] == [s.pk] && [x.pk for x in ap2.cited] == [s.pk]
   end
 end
+
+# --- tests/ordering ---------------------------------------------------------------------------------------
+@model struct DrAuthor
+    name = CharField(max_length = 63, null = true, blank = true)
+    editor = ForeignKey(:self; on_delete = :CASCADE, null = true, related_name = :edited)
+    Meta(table = "dr_author", ordering = ["-pk"])
+end
+@model struct DrArticle
+    author = ForeignKey(DrAuthor; on_delete = :SET_NULL, null = true, related_name = :article)
+    second_author = ForeignKey(DrAuthor; on_delete = :SET_NULL, null = true, related_name = Symbol("+"))
+    headline = CharField(max_length = 100)
+    pub_date = DateTimeField()
+    Meta(table = "dr_article", ordering = ["-pub_date", Asc(:headline), Asc(:author__name), Asc(:second_author__name)])
+end
+@model struct DrOrderedByAuthorArticle <: DrArticle
+    Meta(proxy = true, ordering = ["author", "second_author"])
+end
+@model struct DrOrderedByFArticle <: DrArticle
+    Meta(proxy = true, ordering = [Asc(:author; nulls_first = true), "id"])
+end
+@model struct DrChildArticle <: DrArticle
+    Meta(table = "dr_childarticle")
+end
+@model struct DrReference
+    article = ForeignKey(DrOrderedByAuthorArticle; on_delete = :CASCADE, related_name = :references)
+    proof = OneToOneField(DrArticle; on_delete = :CASCADE, related_name = Symbol("+"))
+    Meta(table = "dr_reference", ordering = ["article"])
+end
+@model struct DrOrderedByExpression
+    name = CharField(max_length = 30)
+    Meta(table = "dr_orderedbyexpression", ordering = [Lower(:name)])
+end
+@model struct DrOrderedByExpressionChild
+    parent = ForeignKey(DrOrderedByExpression; on_delete = :CASCADE, related_name = :children)
+    Meta(table = "dr_orderedbyexpressionchild", ordering = ["parent"])
+end
+@model struct DrOrderedByExpressionGrandChild
+    parent = ForeignKey(DrOrderedByExpressionChild; on_delete = :CASCADE, related_name = :children)
+    Meta(table = "dr_orderedbyexpressiongrandchild")
+end
+@model struct DrBarcodedArticle
+    rank = IntegerField(unique = true, null = true)
+    unique_rank = IntegerField(unique = true)
+    headline = CharField(max_length = 100)
+    slug = CharField(max_length = 100, default = "slug")
+    pub_date = DateField(null = true)
+    barcode = CharField(max_length = 30, default = "bar")
+    parent = ForeignKey(:self; on_delete = :SET_NULL, null = true, related_name = :children)
+    Meta(table = "dr_barcodedarticle", unique_together = [(:headline, :slug)],
+         constraints = [UniqueConstraint(fields = [:pub_date, :rank], name = "dr_unique_pub_date_rank"),
+                        UniqueConstraint(fields = [:rank], condition = Q(rank__gt = 0), name = "dr_unique_rank_conditional"),
+                        UniqueConstraint(fields = [:barcode], condition = Q(), name = "dr_unique_barcode_empty_condition")])
+end
+redirect_stdout(devnull) do
+    ms = [DrAuthor, DrArticle, DrChildArticle, DrReference, DrOrderedByExpression, DrOrderedByExpressionChild,
+          DrOrderedByExpressionGrandChild]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django ordering: OrderingTests, TotallyOrderedTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    hl(qs) = [a.headline for a in qs]
+    a1 = create(DrArticle; headline = "Article 1", pub_date = DateTime(2005, 7, 26))
+    a2 = create(DrArticle; headline = "Article 2", pub_date = DateTime(2005, 7, 27))
+    a3 = create(DrArticle; headline = "Article 3", pub_date = DateTime(2005, 7, 27))
+    a4 = create(DrArticle; headline = "Article 4", pub_date = DateTime(2005, 7, 28))
+    au1, au2 = create(DrAuthor; name = "Name 1"), create(DrAuthor; name = "Name 2"); create(DrAuthor); create(DrAuthor)
+    # Meta ordering with expressions; order_by overrides it; the last order_by wins
+    @test hl(objects(DrArticle)) == ["Article 4", "Article 2", "Article 3", "Article 1"] && first(objects(DrArticle)).pk == a4.pk
+    @test hl(order_by(objects(DrArticle), "headline")) == ["Article 1", "Article 2", "Article 3", "Article 4"]
+    @test hl(order_by(objects(DrArticle), "pub_date", "-headline")) == ["Article 1", "Article 3", "Article 2", "Article 4"]
+    @test tr(() -> collect(order_by(objects(DrArticle), "author__unknown_field"))) isa Exception
+    @test hl(order_by(order_by(objects(DrArticle), "id"), "-headline")) == ["Article 4", "Article 3", "Article 2", "Article 1"]
+    @test tr(() -> Desc(:author; nulls_last = true, nulls_first = true)) isa ArgumentError
+    # nulls first/last, reversible
+    update!(filter(DrArticle; headline = "Article 3"); author = au1); update!(filter(DrArticle; headline = "Article 4"); author = au2)
+    rev(qs, want) = (pks = [x.pk for x in qs]; pks == [x.pk for x in want] && [x.pk for x in reverse(qs)] == reverse(pks))
+    @test rev(order_by(objects(DrArticle), Desc(:author; nulls_last = true), "headline"), [a4, a3, a1, a2])
+    @test rev(order_by(objects(DrArticle), Asc(:author; nulls_last = true), "headline"), [a3, a4, a1, a2])
+    @test rev(order_by(objects(DrArticle), Desc(Upper(:author__name); nulls_last = true), "headline"), [a4, a3, a1, a2])
+    @test rev(order_by(annotate(objects(DrArticle); upper_name = Upper(:author__name)), Asc(:upper_name; nulls_last = true), "headline"), [a3, a4, a1, a2])
+    @test rev(order_by(objects(DrArticle), Asc(:author; nulls_first = true), "headline"), [a1, a2, a3, a4])
+    @test rev(order_by(objects(DrArticle), Desc(:author; nulls_first = true), "headline"), [a1, a2, a4, a3])
+    @test rev(order_by(annotate(objects(DrArticle); upper_name = Upper(:author__name)), Desc(:upper_name; nulls_first = true), "headline"), [a1, a2, a4, a3])
+    # slicing; random; reverse(); reverse of Meta ordering; no reverse after slicing
+    @test hl(order_by(objects(DrArticle), "headline")[1:2]) == ["Article 1", "Article 2"]
+    @test hl(order_by(objects(DrArticle), "headline")[2:3]) == ["Article 2", "Article 3"]
+    @test length(collect(order_by(objects(DrArticle), "?"))) == 4
+    @test hl(reverse(objects(DrArticle))[1:2]) == ["Article 1", "Article 3"]
+    q1 = order_by(objects(DrArticle), Asc(:headline))
+    @test hl(reverse(q1)) == ["Article 4", "Article 3", "Article 2", "Article 1"] && hl(q1) == ["Article 1", "Article 2", "Article 3", "Article 4"]
+    create(DrArticle; headline = "Article 5", pub_date = DateTime(2005, 7, 30), author = au1, second_author = au2)
+    create(DrArticle; headline = "Article 5", pub_date = DateTime(2005, 7, 30), author = au2, second_author = au1)
+    @test [a.author.name for a in reverse(filter(DrArticle; headline = "Article 5"))] == ["Name 2", "Name 1"]
+    @test [a.author.name for a in filter(DrArticle; headline = "Article 5")] == ["Name 1", "Name 2"]
+    delete!(filter(DrArticle; headline = "Article 5"))
+    @test tr(() -> reverse(objects(DrArticle)[1:2])) isa Exception && tr(() -> last(objects(DrArticle)[1:2])) isa Exception
+    # by pk in Meta; by a key's attname (not the related model's ordering); a self-referential key
+    @test [a.pk for a in objects(DrAuthor)] == [a.pk for a in order_by(objects(DrAuthor), "-pk")]
+    authors = collect(order_by(objects(DrAuthor), "id"))
+    for (i, art) in enumerate((a4, a3, a2, a1)); art.author = authors[i]; save!(art; update_fields = [:author]); end
+    @test hl(order_by(objects(DrArticle), "author_id")) == ["Article 4", "Article 3", "Article 2", "Article 1"]
+    a1.author = create(DrAuthor; editor = au1); save!(a1); a2.author = create(DrAuthor; editor = au2); save!(a2)
+    @test hl(order_by(filter(DrArticle; author__isnull = false, pk__in = [a1.pk, a2.pk]), "author__editor")) == ["Article 2", "Article 1"]
+    @test hl(order_by(filter(DrArticle; author__isnull = false, pk__in = [a1.pk, a2.pk]), "author__editor_id")) == ["Article 1", "Article 2"]
+    # F expressions, a duplicated one, constants, Case
+    @test hl(order_by(objects(DrArticle), F(:headline))) == ["Article 1", "Article 2", "Article 3", "Article 4"]
+    @test hl(order_by(objects(DrArticle), Desc(:headline))) == ["Article 4", "Article 3", "Article 2", "Article 1"]
+    @test hl(order_by(objects(DrArticle), Asc(:headline), Desc(:headline))) == ["Article 1", "Article 2", "Article 3", "Article 4"]
+    @test hl(order_by(objects(DrArticle), Desc(:headline), Asc(:headline))) == ["Article 4", "Article 3", "Article 2", "Article 1"]
+    @test [a.pk for a in order_by(annotate(objects(DrArticle); constant = Value("1")), "constant", "-headline")] == [a4.pk, a3.pk, a2.pk, a1.pk]
+    @test collect(values_list(order_by(annotate(objects(DrArticle); constant = Value("1")), "constant", "-headline"), :headline; flat = true)) ==
+          ["Article 4", "Article 3", "Article 2", "Article 1"]
+    @test [a.pk for a in order_by(objects(DrArticle), Value("1"), "-headline")] == [a4.pk, a3.pk, a2.pk, a1.pk]
+    @test [a.pk for a in order_by(objects(DrArticle), Desc(Case(When(pk__in = Int[]; then = Value(1)); default = Value(0))), "pk")] == [a1.pk, a2.pk, a3.pk, a4.pk]
+    # a related model's ordering through a proxy's ordering; Meta ordering by F with nulls first
+    fa, sa = create(DrAuthor), create(DrAuthor)
+    a1.author = fa; a1.second_author = sa; save!(a1); a2.author = sa; a2.second_author = fa; save!(a2)
+    r1 = create(DrReference; article_id = a1.pk, proof_id = a1.pk); r2 = create(DrReference; article_id = a2.pk, proof_id = a2.pk)
+    @test [r.pk for r in objects(DrReference)] == [r2.pk, r1.pk]
+    update!(objects(DrArticle); author = nothing, second_author = nothing)
+    update!(filter(DrOrderedByFArticle; headline = "Article 2"); author = au2); update!(filter(DrOrderedByFArticle; headline = "Article 3"); author = au1)
+    @test hl(objects(DrOrderedByFArticle)) == ["Article 1", "Article 4", "Article 3", "Article 2"]
+    # a multi-table child ordered by its parent link (the parent's Meta ordering)
+    ca1 = create(DrChildArticle; headline = "h2", pub_date = DateTime(2005, 7, 27), author = au2)
+    ca2 = create(DrChildArticle; headline = "h2", pub_date = DateTime(2005, 7, 27), author = au1)
+    ca3 = create(DrChildArticle; headline = "h3", pub_date = DateTime(2005, 7, 27), author = au1)
+    ca4 = create(DrChildArticle; headline = "h1", pub_date = DateTime(2005, 7, 28))
+    @test [x.pk for x in order_by(objects(DrChildArticle), "drarticle_ptr")] == [ca4.pk, ca2.pk, ca1.pk, ca3.pk]
+    # Meta ordering doesn't change a GROUP BY
+    update!(exclude(DrArticle; headline = "Article 4"); author = au1); update!(filter(DrArticle; headline = "Article 4"); author = au2)
+    @test Set((r[:author], r[:count]) for r in annotate(values(filter(DrArticle; headline__startswith = "Article"), :author); count = Count(:author))) ==
+          Set([(au1.pk, 3), (au2.pk, 1)])
+    # ordering by a key to a model ordered by an expression, and through two of them
+    p3, p2, p1 = create(DrOrderedByExpression; name = "oBJ 3"), create(DrOrderedByExpression; name = "OBJ 2"), create(DrOrderedByExpression; name = "obj 1")
+    c3, c2, c1 = (create(DrOrderedByExpressionChild; parent = p) for p in (p3, p2, p1))
+    @test [x.pk for x in order_by(objects(DrOrderedByExpressionChild), "parent")] == [c1.pk, c2.pk, c3.pk]
+    g3, g2, g1 = (create(DrOrderedByExpressionGrandChild; parent = c) for c in (c3, c2, c1))
+    @test [x.pk for x in order_by(objects(DrOrderedByExpressionGrandChild), "parent")] == [g1.pk, g2.pk, g3.pk]
+    # an expression over an annotation; select_related with an annotation of the same name
+    @test [x.pk for x in order_by(annotate(objects(DrAuthor); upper_name = Upper(:name)), Length(:upper_name), "pk")] ==
+          [x.pk for x in order_by(objects(DrAuthor), Length(Upper(:name)), "pk")]
+    @test first(order_by(filter(annotate(select_related(objects(DrArticle), :author); name = Upper(:author__name)); pk = a1.pk), Asc(:name))).pk == a1.pk
+    @test first(order_by(filter(annotate(select_related(objects(DrArticle), :author); name = Upper(:author__name)); pk = a1.pk), "name")).pk == a1.pk
+  end
+  # TotallyOrderedTests
+  @test totally_ordered(objects(DrAuthor)) && !totally_ordered(order_by(objects(DrAuthor), "name"))
+  @test !totally_ordered(order_by(objects(DrBarcodedArticle), "rank")) && totally_ordered(order_by(objects(DrBarcodedArticle), "rank", "pk"))
+  @test !totally_ordered(order_by(objects(DrBarcodedArticle), "pub_date", "rank")) && totally_ordered(order_by(objects(DrBarcodedArticle), "headline", "slug"))
+  @test totally_ordered(order_by(objects(DrAuthor), "-pk"))
+  @test totally_ordered(order_by(objects(DrAuthor), F(:pk))) && !totally_ordered(order_by(objects(DrAuthor), F(:name)))
+  @test !totally_ordered(order_by(objects(DrReference), "proof")) && totally_ordered(order_by(objects(DrReference), "proof_id"))
+  @test !totally_ordered(order_by(objects(DrArticle), "author__pk"))
+  @test totally_ordered(order_by(objects(DrBarcodedArticle), "barcode"))
+  @test totally_ordered(order_by(alias(objects(DrAuthor); my_pk = F(:pk)), "my_pk")) && !totally_ordered(order_by(alias(objects(DrAuthor); my_pk = F(:name)), "my_pk"))
+  @test !totally_ordered(order_by(alias(objects(DrAuthor); my_editor = F(:editor__pk)), "my_editor"))
+  @test totally_ordered(order_by(alias(objects(DrBarcodedArticle); my_unique_rank = F(:unique_rank)), "my_unique_rank"))
+  @test !totally_ordered(order_by(alias(objects(DrBarcodedArticle); parent_unique_rank = F(:parent__unique_rank)), "parent_unique_rank"))
+  @test !totally_ordered(none(order_by(objects(DrAuthor)))) && totally_ordered(none(order_by(objects(DrAuthor), "pk")))
+end

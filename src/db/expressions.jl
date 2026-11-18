@@ -442,6 +442,13 @@ contains_aggregate(::Window) = false
 
 # --- compilation ----------------------------------------------------------------------------
 
+"An expression with its field references taken through `prefix` (`Lower(:name)` → `Lower(:parent__name)`), or nothing if it can't be."
+prefix_refs(e::F, prefix) = F(prefix * "__" * e.name)
+prefix_refs(e::Value, prefix) = e
+prefix_refs(e::Func, prefix) = (a = [x isa Expression ? prefix_refs(x, prefix) : x for x in e.args]; any(isnothing, a) ? nothing : Func(e.name, a))
+prefix_refs(e::CombinedExpression, prefix) = (l = prefix_refs(e.lhs, prefix); r = prefix_refs(e.rhs, prefix); l === nothing || r === nothing ? nothing : CombinedExpression(e.op, l, r))
+prefix_refs(@nospecialize(e), prefix) = nothing
+
 "Resolve a field path for expressions: returns (SQL column, Field or nothing)."
 Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospecialize(T::Type), path::AbstractString)
     segs = String.(split(path, "__"))
