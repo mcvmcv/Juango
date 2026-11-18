@@ -6889,3 +6889,225 @@ end
   end
 end
 
+# --- tests/db_functions (text and comparison) -------------------------------------------------------------
+@model struct DbfAuthor
+    name = CharField(max_length = 50, default = "")
+    alias = CharField(max_length = 50, null = true, blank = true)
+    goes_by = CharField(max_length = 50, null = true, blank = true)
+    age = PositiveSmallIntegerField(default = 30)
+    Meta(table = "dbf_author")
+end
+@model struct DbfArticle
+    title = CharField(max_length = 50)
+    summary = CharField(max_length = 200, null = true, blank = true)
+    text = TextField(default = "")
+    written = DateTimeField()
+    published = DateTimeField(null = true, blank = true)
+    updated = DateTimeField(null = true, blank = true)
+    views = PositiveIntegerField(default = 0)
+    Meta(table = "dbf_article")
+end
+redirect_stdout(devnull) do
+    ms = [DbfAuthor, DbfArticle]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django db_functions: text and comparison functions" begin
+  port_block() do
+    vals(qs, k) = collect(values_list(order_by(qs, "pk"), k; flat = true))
+    # hashes, with Julia's own as the reference; NULL stays NULL
+    bulk_create([DbfAuthor(alias = a) for a in ("John Smith", "Jordan Élena", "皇帝", "", nothing)])
+    hx(f, s) = s === nothing ? nothing : bytes2hex(f(s))
+    aliases = ["John Smith", "Jordan Élena", "皇帝", "", nothing]
+    for (F_, h) in ((MD5, s -> bytes2hex(Juango.MD5_hash(codeunits(s)))), (SHA256, s -> bytes2hex(Juango.SHA.sha256(s))),
+                    (SHA224, s -> bytes2hex(Juango.SHA.sha224(s))), (SHA384, s -> bytes2hex(Juango.SHA.sha384(s))),
+                    (SHA512, s -> bytes2hex(Juango.SHA.sha512(s))))
+        @test vals(annotate(objects(DbfAuthor); h = F_(:alias)), :h) == [s === nothing ? nothing : h(s) for s in aliases]
+    end
+    IS_POSTGRES || @test vals(annotate(objects(DbfAuthor); h = SHA1(:alias)), :h) == [hx(Juango.SHA.sha1, s) for s in aliases]
+    @test vals(annotate(objects(DbfAuthor); h = SHA1(:alias)), :h)[1] == "e61a3587b3f7a142b8c7b9263c82f8119398ecb7" || IS_POSTGRES
+    delete!(objects(DbfAuthor))
+    # case, length, slices, padding, repeat, replace, reverse, position
+    j = create(DbfAuthor; name = "John Smith", alias = "smithj"); r = create(DbfAuthor; name = "Rhonda")
+    @test vals(annotate(objects(DbfAuthor); x = Lower(:name)), :x) == ["john smith", "rhonda"]
+    @test vals(annotate(objects(DbfAuthor); x = Upper(:name)), :x) == ["JOHN SMITH", "RHONDA"]
+    @test vals(annotate(objects(DbfAuthor); x = Length(:name), y = Length(:alias)), :x) == [10, 6]
+    @test vals(annotate(objects(DbfAuthor); y = Length(:alias)), :y) == [6, nothing]
+    @test vals(annotate(objects(DbfAuthor); x = Left(:name, 5)), :x) == ["John ", "Rhond"]
+    @test vals(annotate(objects(DbfAuthor); x = Right(:name, 5)), :x) == ["Smith", "honda"]
+    @test vals(annotate(objects(DbfAuthor); x = Substr(:name, 1, 5)), :x) == ["John ", "Rhond"]
+    @test vals(annotate(objects(DbfAuthor); x = Substr(:name, 2)), :x) == ["ohn Smith", "honda"]
+    @test vals(annotate(objects(DbfAuthor); x = LPad(:name, 7, Value("xy"))), :x) == ["John Sm", "xRhonda"]
+    @test vals(annotate(objects(DbfAuthor); x = RPad(:name, 7, Value("xy"))), :x) == ["John Sm", "Rhondax"]
+    @test vals(annotate(objects(DbfAuthor); x = Repeat(:name, 2)), :x) == ["John SmithJohn Smith", "RhondaRhonda"]
+    @test vals(annotate(objects(DbfAuthor); x = Replace(:name, Value("R"), Value("D"))), :x) == ["John Smith", "Dhonda"]
+    @test vals(annotate(objects(DbfAuthor); x = Reverse(:name)), :x) == ["htimS nhoJ", "adnohR"]
+    @test vals(annotate(objects(DbfAuthor); x = StrIndex(:name, Value("h"))), :x) == [3, 2]
+    @test vals(annotate(objects(DbfAuthor); x = Ord(:name)), :x) == [Int('J'), Int('R')]
+    @test vals(annotate(objects(DbfAuthor); x = Chr(Value(65))), :x) == ["A", "A"]
+    # trims; concatenation, with nulls as empty
+    create(DbfAuthor; name = "  padded  ")
+    @test vals(filter(annotate(objects(DbfAuthor); x = Trim(:name)); name = "  padded  "), :x) == ["padded"]
+    @test vals(filter(annotate(objects(DbfAuthor); x = LTrim(:name)); name = "  padded  "), :x) == ["padded  "]
+    @test vals(filter(annotate(objects(DbfAuthor); x = RTrim(:name)); name = "  padded  "), :x) == ["  padded"]
+    @test vals(filter(annotate(objects(DbfAuthor); x = Concat(:name, Value(" ("), :alias, Value(")"))); pk__in = [j.pk, r.pk]), :x) == ["John Smith (smithj)", "Rhonda ()"]
+    # coalesce, greatest, least, nullif
+    @test vals(filter(annotate(objects(DbfAuthor); x = Coalesce(:alias, :name)); pk__in = [j.pk, r.pk]), :x) == ["smithj", "Rhonda"]
+    a1, a2 = create(DbfArticle; title = "a", written = DateTime(2020, 1, 1), published = DateTime(2020, 2, 1)), create(DbfArticle; title = "b", written = DateTime(2020, 3, 1), published = DateTime(2020, 2, 1))
+    @test vals(annotate(objects(DbfArticle); x = Greatest(:written, :published)), :x) == [DateTime(2020, 2, 1), DateTime(2020, 3, 1)]
+    @test vals(annotate(objects(DbfArticle); x = Least(:written, :published)), :x) == [DateTime(2020, 1, 1), DateTime(2020, 2, 1)]
+    @test vals(filter(annotate(objects(DbfAuthor); x = NullIf(:alias, Value("smithj"))); pk__in = [j.pk, r.pk]), :x) == [nothing, nothing]
+    @test vals(filter(annotate(objects(DbfAuthor); x = NullIf(:name, Value("Rhonda"))); pk__in = [j.pk, r.pk]), :x) == ["John Smith", nothing]
+    # Random: a float in [0, 1)
+    @test all(x -> 0 <= x < 1, vals(annotate(objects(DbfAuthor); x = Random()), :x))
+    @test length(collect(order_by(objects(DbfAuthor), Random()))) == 3
+  end
+end
+
+@model struct DbfDecimalModel
+    n1 = DecimalField(decimal_places = 2, max_digits = 6)
+    n2 = DecimalField(decimal_places = 7, max_digits = 9, null = true, blank = true)
+    Meta(table = "dbf_decimalmodel")
+end
+@model struct DbfIntegerModel
+    big = BigIntegerField(null = true, blank = true)
+    normal = IntegerField(null = true, blank = true)
+    small = SmallIntegerField(null = true, blank = true)
+    Meta(table = "dbf_integermodel")
+end
+@model struct DbfFloatModel
+    f1 = FloatField(null = true, blank = true)
+    f2 = FloatField(null = true, blank = true)
+    Meta(table = "dbf_floatmodel")
+end
+redirect_stdout(devnull) do
+    ms = [DbfDecimalModel, DbfIntegerModel, DbfFloatModel]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django db_functions: math functions" begin
+  port_block() do
+    near(x, y; tol = 1e-6) = x !== nothing && abs(Float64(x) - Float64(y)) < tol
+    one_(qs; kw...) = first(annotate(qs; kw...))
+    # every function gives NULL for NULL
+    create(DbfIntegerModel)
+    o = one_(objects(DbfIntegerModel); a = Abs(:normal), c = Ceil(:normal), f = Floor(:normal), r = Round(:normal), r5 = Round(:normal, 5),
+             s = Sqrt(:normal), sg = Sign(:normal), e = Exp(:normal), ln = Ln(:normal), sn = Sin(:normal), cs = Cos(:normal), tn = Tan(:normal),
+             d = Degrees(:normal), rd = Radians(:normal), pw = Power(:normal, :normal), md = Mod(:normal, :normal))
+    @test all(k -> getproperty(o, k) === nothing, (:a, :c, :f, :r, :r5, :s, :sg, :e, :ln, :sn, :cs, :tn, :d, :rd, :pw, :md))
+    delete!(objects(DbfIntegerModel))
+    # decimals, floats and integers
+    create(DbfDecimalModel; n1 = Juango.Decimal("-0.8"), n2 = Juango.Decimal("1.2"))
+    o = one_(objects(DbfDecimalModel); a = Abs(:n1), c = Ceil(:n1), f = Floor(:n1), s = Sign(:n1), r = Round(:n2, 0), sq = Sqrt(:n2),
+             pw = Power(:n2, Value(2)), ex = Exp(:n2), ln = Ln(:n2), lg = Log(Value(10), Value(100)), md = Mod(Value(7), Value(3)))
+    @test near(o.a, 0.8) && near(o.c, 0) && near(o.f, -1) && near(o.s, -1) && near(o.r, 1) && near(o.sq, sqrt(1.2))
+    @test near(o.pw, 1.44) && near(o.ex, exp(1.2)) && near(o.ln, log(1.2)) && near(o.lg, 2) && near(o.md, 1)
+    create(DbfFloatModel; f1 = -27.5, f2 = 0.33)
+    o = one_(objects(DbfFloatModel); a = Abs(:f1), c = Ceil(:f1), f = Floor(:f1), r = Round(:f2, 1), sn = Sin(:f2), cs = Cos(:f2), tn = Tan(:f2),
+             ct = Cot(:f2), as = ASin(:f2), ac = ACos(:f2), at = ATan(:f2), at2 = ATan2(:f1, :f2), d = Degrees(:f2), rd = Radians(:f1))
+    @test near(o.a, 27.5) && near(o.c, -27) && near(o.f, -28) && near(o.r, 0.3) && near(o.sn, sin(0.33)) && near(o.cs, cos(0.33))
+    @test near(o.tn, tan(0.33)) && near(o.ct, cot(0.33)) && near(o.as, asin(0.33)) && near(o.ac, acos(0.33)) && near(o.at, atan(0.33))
+    @test near(o.at2, atan(-27.5, 0.33)) && near(o.d, rad2deg(0.33)) && near(o.rd, deg2rad(-27.5))
+    create(DbfIntegerModel; small = -20, normal = 15, big = -1)
+    o = one_(objects(DbfIntegerModel); a = Abs(:small), sg = Sign(:big), md = Mod(:normal, Value(4)), pw = Power(:small, Value(2)), r = Round(:normal, -1))
+    @test o.a == 20 && near(o.sg, -1) && near(o.md, 3) && near(o.pw, 400) && near(o.r, 20)
+    @test near(first(annotate(objects(DbfIntegerModel); p = Pi())).p, pi)
+    # in lookups and ordering
+    @test count(filter(annotate(objects(DbfFloatModel); a = Abs(:f1)); a__gt = 27)) == 1
+    create(DbfFloatModel; f1 = 2.0, f2 = 1.0)
+    @test [round(x.f1; digits = 1) for x in order_by(objects(DbfFloatModel), Abs(:f1))] == [2.0, -27.5]
+  end
+end
+
+@model struct DbfDTModel
+    name = CharField(max_length = 32, default = "")
+    start_datetime = DateTimeField(null = true, blank = true)
+    end_datetime = DateTimeField(null = true, blank = true)
+    start_date = DateField(null = true, blank = true)
+    end_date = DateField(null = true, blank = true)
+    start_time = TimeField(null = true, blank = true)
+    end_time = TimeField(null = true, blank = true)
+    duration = DurationField(null = true, blank = true)
+    Meta(table = "dbf_dtmodel")
+end
+redirect_stdout(devnull) do
+    ms = [DbfDTModel]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+dbf_dt(s, e; name = "") = create(DbfDTModel; name, start_datetime = s, end_datetime = e, start_date = Date(s), end_date = e === nothing ? nothing : Date(e),
+                                 start_time = Time(s), end_time = e === nothing ? nothing : Time(e), duration = e === nothing ? nothing : e - s)
+
+@testset "django db_functions: Extract and Trunc" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    pairs_(qs, k) = [(m.start_datetime, getproperty(m, k)) for m in order_by(qs, "start_datetime")]
+    s1, e1 = DateTime(2015, 6, 15, 14, 30, 50, 321), DateTime(2016, 6, 15, 14, 10, 50, 123)
+    m1 = dbf_dt(s1, e1); m2 = dbf_dt(e1, s1)
+    # each part, of a datetime, a date and a time
+    for (part, fnc, f) in ((:year, ExtractYear, Dates.year), (:month, ExtractMonth, Dates.month), (:day, ExtractDay, Dates.day),
+                           (:quarter, ExtractQuarter, Dates.quarterofyear), (:week, ExtractWeek, Dates.week),
+                           (:hour, ExtractHour, Dates.hour), (:minute, ExtractMinute, Dates.minute), (:second, ExtractSecond, Dates.second))
+        @test pairs_(annotate(objects(DbfDTModel); x = fnc(:start_datetime)), :x) == [(s1, f(s1)), (e1, f(e1))]
+        @test pairs_(annotate(objects(DbfDTModel); x = Extract(:start_datetime, part)), :x) == [(s1, f(s1)), (e1, f(e1))]
+        part in (:hour, :minute, :second) ||
+            @test pairs_(annotate(objects(DbfDTModel); x = fnc(:start_date)), :x) == [(s1, f(s1)), (e1, f(e1))]
+        part in (:hour, :minute, :second) &&
+            @test pairs_(annotate(objects(DbfDTModel); x = fnc(:start_time)), :x) == [(s1, f(s1)), (e1, f(e1))]
+    end
+    # week day (1 = Sunday) and ISO week day (1 = Monday)
+    wd(d) = Dates.dayofweek(d) % 7 + 1
+    @test pairs_(annotate(objects(DbfDTModel); x = ExtractWeekDay(:start_datetime)), :x) == [(s1, wd(s1)), (e1, wd(e1))]
+    @test pairs_(annotate(objects(DbfDTModel); x = ExtractIsoWeekDay(:start_datetime)), :x) == [(s1, Dates.dayofweek(s1)), (e1, Dates.dayofweek(e1))]
+    # as lookups, compared with each other
+    @test count(filter(DbfDTModel; start_datetime__year = 2015)) == 1
+    @test count(filter(DbfDTModel; start_datetime__year__gt = 2015)) == 1 && count(filter(DbfDTModel; start_datetime__year__lte = 2015)) == 1
+    @test count(filter(annotate(objects(DbfDTModel); y = ExtractYear(:start_datetime)); y = ExtractYear(:end_datetime))) == 0
+    # nothing gives nothing
+    create(DbfDTModel; name = "none")
+    @test get(annotate(objects(DbfDTModel); x = ExtractYear(:start_datetime)); name = "none").x === nothing
+    @test get(annotate(objects(DbfDTModel); x = TruncYear(:start_datetime)); name = "none").x === nothing
+    @test get(annotate(objects(DbfDTModel); x = TruncDate(:start_datetime)); name = "none").x === nothing
+    @test get(annotate(objects(DbfDTModel); x = TruncTime(:start_datetime)); name = "none").x === nothing
+    delete!(filter(DbfDTModel; name = "none"))
+    # parts a duration doesn't have are refused
+    for p in (:year, :iso_year, :month, :week, :week_day, :iso_week_day, :quarter)
+        @test tr(() -> collect(annotate(objects(DbfDTModel); x = Extract(:duration, p)))) isa Exception
+    end
+    # truncation of a datetime, a date and a time
+    tz(d, k) = k === :year ? DateTime(Dates.year(d)) : k === :quarter ? DateTime(Dates.year(d), 3 * (Dates.quarterofyear(d) - 1) + 1) :
+               k === :month ? DateTime(Dates.year(d), Dates.month(d)) : k === :week ? DateTime(Dates.firstdayofweek(Date(d))) :
+               k === :day ? DateTime(Date(d)) : k === :hour ? Dates.floor(d, Hour) : k === :minute ? Dates.floor(d, Minute) : Dates.floor(d, Second)
+    for (k, fnc) in ((:year, TruncYear), (:quarter, TruncQuarter), (:month, TruncMonth), (:week, TruncWeek), (:day, TruncDay),
+                     (:hour, TruncHour), (:minute, TruncMinute), (:second, TruncSecond))
+        @test pairs_(annotate(objects(DbfDTModel); x = fnc(:start_datetime)), :x) == [(s1, tz(s1, k)), (e1, tz(e1, k))]
+        k in (:hour, :minute, :second) ||
+            @test pairs_(annotate(objects(DbfDTModel); x = fnc(:start_date)), :x) == [(s1, Date(tz(s1, k))), (e1, Date(tz(e1, k)))]
+    end
+    @test pairs_(annotate(objects(DbfDTModel); x = TruncDate(:start_datetime)), :x) == [(s1, Date(s1)), (e1, Date(e1))]
+    @test pairs_(annotate(objects(DbfDTModel); x = TruncTime(:start_datetime)), :x) == [(s1, Time(s1)), (e1, Time(e1))]
+    # a truncated time compared in a filter
+    @test count(filter(annotate(objects(DbfDTModel); t = TruncSecond(:start_datetime)); t = Dates.floor(s1, Second))) == 1
+    @test count(filter(objects(DbfDTModel); start_datetime__date = Date(s1))) == 1
+    # truncation inside a subquery with its own parameters
+    sub = values(filter(annotate(objects(DbfDTModel); d = TruncDay(:start_datetime)); d = DateTime(Date(s1))), :pk)
+    @test [m.pk for m in filter(DbfDTModel; pk__in = sub)] == [m1.pk]
+  end
+  port_block() do
+    # ISO year, quarter and week across the year's ends
+    e = DateTime(2016, 6, 15, 14, 10, 50, 123)
+    w52, w1, w53 = DateTime(2014, 12, 27, 13), DateTime(2014, 12, 31, 13), DateTime(2015, 12, 31, 13)
+    o1, o2, o3 = dbf_dt(w52, e), dbf_dt(w1, e), dbf_dt(w53, e)
+    qs = order_by(filter(DbfDTModel; start_datetime__in = [w52, w1, w53]), "start_datetime")
+    @test [m.x for m in annotate(qs; x = ExtractIsoYear(:start_datetime))] == [2014, 2015, 2015]
+    @test [m.x for m in annotate(qs; x = ExtractWeek(:start_datetime))] == [52, 1, 53]
+    @test [m.pk for m in order_by(filter(DbfDTModel; start_datetime__iso_year = 2015), "start_datetime")] == [o2.pk, o3.pk]
+    @test [m.pk for m in order_by(filter(DbfDTModel; start_datetime__iso_year__gt = 2014), "start_datetime")] == [o2.pk, o3.pk]
+    @test [m.pk for m in filter(DbfDTModel; start_datetime__iso_year__lte = 2014)] == [o1.pk]
+    lq, fq = dbf_dt(DateTime(2014, 12, 31, 13), e; name = "q"), dbf_dt(DateTime(2015, 1, 1, 13), e; name = "q")
+    @test [m.x for m in order_by(annotate(filter(DbfDTModel; name = "q"); x = ExtractQuarter(:start_datetime)), "start_datetime")] == [4, 1]
+    # weeks truncated before the year 1000
+    @test get(annotate(filter(DbfDTModel; pk = create(DbfDTModel; start_datetime = DateTime(900, 6, 15)).pk); w = TruncWeek(:start_datetime))).w ==
+          DateTime(Dates.firstdayofweek(Date(900, 6, 15)))
+  end
+end
+

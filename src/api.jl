@@ -202,11 +202,11 @@ end
 
 module Functions
 using ..Juango: Lower, Upper, Length, Coalesce, Concat, Cast, Now, Greatest, Least, NullIf, Collate, Replace,
-    Substr, Left, Right, Trim, LTrim, RTrim, LPad, RPad, Repeat, Reverse, StrIndex, MD5, SHA256, Chr, Ord, Abs,
+    Substr, Left, Right, Trim, LTrim, RTrim, LPad, RPad, Repeat, Reverse, StrIndex, MD5, SHA256, SHA1, SHA224, SHA384, SHA512, Random, Chr, Ord, Abs,
     Round, Ceil, Floor, Mod, Power, Sqrt, Sign, Ln, Log, Exp, Sin, Cos, Tan, Cot, ASin, ACos, ATan, ATan2,
     Degrees, Radians, Pi, StdDev, Variance, ArrayAgg, JSONBAgg, StringAgg, BoolAnd, BoolOr, BitAnd, BitOr
 export Lower, Upper, Length, Coalesce, Concat, Cast, Now, Greatest, Least, NullIf, Collate, Replace,
-    Substr, Left, Right, Trim, LTrim, RTrim, LPad, RPad, Repeat, Reverse, StrIndex, MD5, SHA256, Chr, Ord, Abs,
+    Substr, Left, Right, Trim, LTrim, RTrim, LPad, RPad, Repeat, Reverse, StrIndex, MD5, SHA256, SHA1, SHA224, SHA384, SHA512, Random, Chr, Ord, Abs,
     Round, Ceil, Floor, Mod, Power, Sqrt, Sign, Ln, Log, Exp, Sin, Cos, Tan, Cot, ASin, ACos, ATan, ATan2,
     Degrees, Radians, Pi, StdDev, Variance, ArrayAgg, JSONBAgg, StringAgg, BoolAnd, BoolOr, BitAnd, BitOr
 end

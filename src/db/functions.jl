@@ -45,6 +45,13 @@ Reverse(x) = fn(:reverse, ref(x))
 StrIndex(x, substring) = fn(:strindex, ref(x), ref(substring))
 MD5(x) = fn(:md5, ref(x))
 SHA256(x) = fn(:sha256, ref(x))
+"SHA-1, SHA-224, SHA-384 and SHA-512 of text, as hex (Django's; SHA1 on PostgreSQL needs the pgcrypto extension, as Django's)."
+SHA1(x) = fn(:sha1, ref(x))
+SHA224(x) = fn(:sha224, ref(x))
+SHA384(x) = fn(:sha384, ref(x))
+SHA512(x) = fn(:sha512, ref(x))
+"A random float in [0, 1), a new one for each row (Django's `Random()`, for order_by)."
+Random() = fn(:random)
 "The character with a code point."
 Chr(x) = fn(:chr, ref(x))
 "The code point of the first character."
@@ -53,7 +60,7 @@ Ord(x) = fn(:ord, ref(x))
 # math
 Abs(x) = fn(:abs, ref(x))
 "Rounded to `precision` decimal places."
-Round(x, precision::Integer = 0) = fn(:round, ref(x), Value(precision))
+Round(x, precision::Integer = 0) = fn(:round, ref(x), Int(precision))    # (the precision is inlined: an Int)
 Ceil(x) = fn(:ceil, ref(x))
 Floor(x) = fn(:floor, ref(x))
 Mod(a, b) = fn(:mod, ref(a), ref(b))
@@ -95,9 +102,10 @@ Degrees(x) = fn(:degrees, ref(x))
 Radians(x) = fn(:radians, ref(x))
 Pi() = fn(:pi)
 
-const TEXT_FUNCS = (:replace, :substr, :trim, :ltrim, :rtrim, :lpad, :rpad, :repeat, :reverse, :md5, :sha256, :chr, :left, :right)
+const TEXT_FUNCS = (:replace, :substr, :trim, :ltrim, :rtrim, :lpad, :rpad, :repeat, :reverse, :md5, :sha256, :chr, :left, :right,
+                    :sha1, :sha224, :sha384, :sha512)
 const MATH_FUNCS = (:abs, :ceil, :floor, :mod, :power, :sqrt, :sign, :ln, :log, :exp, :sin, :cos, :tan, :cot,
-                    :asin, :acos, :atan, :atan2, :degrees, :radians, :pi)
+                    :asin, :acos, :atan, :atan2, :degrees, :radians, :pi, :random)
 
 "SQL for the functions above (`nothing` for the ones expressions.jl handles itself)."
 function function_sql(b::DatabaseBackend, n::Symbol, sqls, e)
@@ -109,8 +117,11 @@ function function_sql(b::DatabaseBackend, n::Symbol, sqls, e)
     n === :collate && return "($(sqls[1]) COLLATE \"$(e.args[2])\")"
     n === :strindex && return "STRPOS($(sqls[1]), $(sqls[2]))"
     n === :sha256 && return "ENCODE(SHA256(CONVERT_TO($(sqls[1]), 'UTF8')), 'hex')"
+    n in (:sha224, :sha384, :sha512) && return "ENCODE($(uppercase(string(n)))(CONVERT_TO($(sqls[1]), 'UTF8')), 'hex')"
+    n === :sha1 && return "ENCODE(DIGEST(CONVERT_TO($(sqls[1]), 'UTF8'), 'sha1'), 'hex')"     # (pgcrypto)
+    n === :random && return "RANDOM()"
     n === :ord && return "ASCII($(sqls[1]))"
-    n === :round && return "ROUND(CAST($(sqls[1]) AS NUMERIC), $(sqls[2]))"
+    n === :round && return "ROUND(CAST($(sqls[1]) AS NUMERIC), $(e.args[2]))"
     n === :log && return "LOG(CAST($(sqls[1]) AS NUMERIC), CAST($(sqls[2]) AS NUMERIC))"
     nothing
 end
@@ -118,9 +129,12 @@ function function_sql(b::MySQLBackend, n::Symbol, sqls, e)
     n === :collate && return "($(sqls[1]) COLLATE $(e.args[2]))"
     n === :strindex && return "INSTR($(sqls[1]), $(sqls[2]))"
     n === :sha256 && return "SHA2($(sqls[1]), 256)"
+    n === :sha1 && return "SHA1($(sqls[1]))"
+    n in (:sha224, :sha384, :sha512) && return "SHA2($(sqls[1]), $(string(n)[4:end]))"
+    n === :random && return "RAND()"
     n === :ord && return "ORD($(sqls[1]))"
     n === :chr && return "CHAR($(sqls[1]) USING utf8mb4)"
-    n === :round && return "ROUND($(sqls[1]), $(sqls[2]))"
+    n === :round && return "ROUND($(sqls[1]), $(e.args[2]))"
     n === :log && return "LOG($(sqls[1]), $(sqls[2]))"
     invoke(function_sql, Tuple{DatabaseBackend,Symbol,Any,Any}, b, n, sqls, e)
 end
@@ -133,7 +147,11 @@ function function_sql(b::SQLiteBackend, n::Symbol, sqls, e)
     n === :chr && return "CHAR($(sqls[1]))"
     n === :left && return "SUBSTR($(sqls[1]), 1, $(sqls[2]))"
     n === :right && return "juango_right($(sqls[1]), $(sqls[2]))"
-    n === :round && return "ROUND($(sqls[1]), $(sqls[2]))"
+    if n === :round
+        p = e.args[2]::Int                 # SQLite's ROUND takes a negative precision as 0
+        p < 0 && return "(ROUND($(sqls[1]) / $(10.0^-p)) * $(10^-p))"
+        return "ROUND($(sqls[1]), $p)"
+    end
     n in (:nullif, :replace, :trim, :ltrim, :rtrim, :abs, :substr) && return uppercase(string(n)) * "(" * join(sqls, ", ") * ")"
     n === :pi && return "juango_pi()"
     "juango_$n(" * join(sqls, ", ") * ")"                 # registered below
@@ -151,6 +169,8 @@ const SQLITE_SCALARS = Dict(
     "right" => (s, n) -> (s = string(s); Int(n) <= 0 ? "" : last(s, Int(n))),
     "md5" => s -> bytes2hex(MD5_hash(codeunits(string(s)))),
     "sha256" => s -> bytes2hex(sha256(string(s))),
+    "sha1" => s -> bytes2hex(sha1(string(s))), "sha224" => s -> bytes2hex(sha224(string(s))),
+    "sha384" => s -> bytes2hex(sha384(string(s))), "sha512" => s -> bytes2hex(sha512(string(s))),
     "ceil" => x -> ceil(num(x)), "floor" => x -> floor(num(x)),
     "mod" => (a, b) -> (a isa Integer && b isa Integer) ? rem(a, b) : rem(num(a), num(b)),
     "power" => (a, b) -> num(a)^num(b), "sqrt" => x -> sqrt(num(x)), "sign" => x -> Int(sign(num(x))),
@@ -165,6 +185,7 @@ function register_sqlite_extras!(db)
         SQLite.register(db, nomiss(f); nargs = first(methods(f)).nargs - 1, name = "juango_" * name)
     end
     SQLite.register(db, () -> Float64(pi); nargs = 0, name = "juango_pi")
+    SQLite.register(db, () -> rand(); nargs = 0, name = "juango_random")
     SQLite.register(db, (p, s) -> (p === missing || s === missing) ? missing : occursin(Regex(string(p)), string(s)); nargs = 2, name = "regexp")
     # variance and standard deviation (population and sample), and bitwise and/or
     for (name, final) in (("var_pop", v -> v[1] < 1 ? missing : v[3] / v[1]), ("var_samp", v -> v[1] < 2 ? missing : v[3] / (v[1] - 1)),

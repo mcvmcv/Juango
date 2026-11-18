@@ -716,7 +716,12 @@ function compile_expr(c::SQLCompiler, e::Func)
     n === :concat && return "(" * join(["COALESCE(CAST($s AS $(cast_type(b, :text))), '')" for s in sqls], " || ") * ")", ps
     n === :cast && return "CAST($(sqls[1]) AS $(cast_type(b, e.args[2] === :string ? :text : e.args[2])))", ps
     n === :now && return "?", Any[timezone_now()]     # Julia's clock and local time, like the DateTimes Juango stores
-    n === :extract && return date_part_expr(b, e.args[2], sqls[1], something(temporal_kind(c, e.args[1]), :datetime)), ps
+    if n === :extract
+        tk = temporal_kind(c, e.args[1])
+        tk === :duration && e.args[2] in (:year, :iso_year, :month, :week, :week_day, :iso_week_day, :quarter) &&
+            throw(ArgumentError("Cannot extract component '$(e.args[2])' from DurationField '$(e.args[1] isa F ? e.args[1].name : "")'."))
+        return date_part_expr(b, e.args[2], sqls[1], something(tk, :datetime)), ps
+    end
     n === :trunc && return trunc_expr(b, e.args[2], sqls[1], something(temporal_kind(c, e.args[1]), :datetime)), ps
     n in (:similarity, :word_similarity, :strict_word_similarity, :unaccent) &&
         return uppercase(string(n)) * "(" * join(sqls, ", ") * ")", ps
