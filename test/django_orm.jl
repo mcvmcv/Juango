@@ -5961,3 +5961,176 @@ end
     @test !isempty(Juango.validate_unique(DmiGrandChild(email = "grand_child@example.com", first_name = "grand", last_name = "parent")))
   end
 end
+
+# --- tests/proxy_models -----------------------------------------------------------------------------------
+@model struct DpxPerson
+    name = CharField(max_length = 50)
+    Meta(table = "dpx_person")
+end
+# Django's PersonManager (leaves out fred) and SubManager (leaves out wilma)
+Juango.default_queryset(::Type{DpxPerson}) = exclude(base_objects(DpxPerson); name = "fred")
+@model struct DpxMyPerson <: DpxPerson
+    Meta(proxy = true, ordering = ["name"])
+end
+Juango.default_queryset(::Type{DpxMyPerson}) = exclude(base_objects(DpxMyPerson); name = "wilma")
+Juango.manager(::Type{DpxMyPerson}, ::Val{:other}) = exclude(base_objects(DpxMyPerson); name = "fred")
+@model struct DpxOtherPerson <: DpxPerson
+    Meta(proxy = true, ordering = ["name"])
+end
+Juango.manager(::Type{DpxOtherPerson}, ::Val{:excluder}) = exclude(base_objects(DpxOtherPerson); name = "wilma")
+@model struct DpxStatusPerson <: DpxMyPerson
+    status = CharField(max_length = 80, default = "")
+    Meta(table = "dpx_statusperson")
+end
+Juango.default_queryset(::Type{DpxStatusPerson}) = base_objects(DpxStatusPerson)
+@model struct DpxMyPersonProxy <: DpxMyPerson
+    Meta(proxy = true)
+end
+@model struct DpxLowerStatusPerson <: DpxMyPersonProxy
+    status = CharField(max_length = 80)
+    Meta(table = "dpx_lowerstatusperson")
+end
+Juango.default_queryset(::Type{DpxLowerStatusPerson}) = base_objects(DpxLowerStatusPerson)
+@model struct DpxUser
+    name = CharField(max_length = 100)
+    Meta(table = "dpx_user")
+end
+@model struct DpxUserProxy <: DpxUser
+    Meta(proxy = true)
+end
+@model struct DpxUserProxyProxy <: DpxUserProxy
+    Meta(proxy = true)
+end
+@model struct DpxCountry
+    name = CharField(max_length = 50)
+    Meta(table = "dpx_country")
+end
+@model struct DpxState
+    name = CharField(max_length = 50)
+    country = ForeignKey(DpxCountry; on_delete = :CASCADE, related_name = :states)
+    Meta(table = "dpx_state")
+end
+@model struct DpxStateProxy <: DpxState
+    Meta(proxy = true)
+end
+@model struct DpxBaseUser
+    name = CharField(max_length = 255)
+    Meta(table = "dpx_baseuser")
+end
+@model struct DpxTrackerUser <: DpxBaseUser
+    status = CharField(max_length = 50)
+    Meta(table = "dpx_trackeruser")
+end
+@model struct DpxProxyTrackerUser <: DpxTrackerUser
+    Meta(proxy = true)
+end
+@model struct DpxIssue
+    summary = CharField(max_length = 255, default = "")
+    assignee = ForeignKey(DpxProxyTrackerUser; on_delete = :CASCADE, related_name = :issues)
+    Meta(table = "dpx_issue")
+end
+@model struct DpxBug <: DpxIssue
+    version = CharField(max_length = 50)
+    reporter = ForeignKey(DpxBaseUser; on_delete = :CASCADE, related_name = :bugs)
+    Meta(table = "dpx_bug")
+end
+@model struct DpxProxyBug <: DpxBug
+    Meta(proxy = true)
+end
+@model struct DpxProxyProxyBug <: DpxProxyBug
+    Meta(proxy = true)
+end
+@model struct DpxImprovement <: DpxIssue
+    version = CharField(max_length = 50)
+    reporter = ForeignKey(DpxProxyTrackerUser; on_delete = :CASCADE, related_name = :improvements)
+    associated_bug = ForeignKey(DpxProxyProxyBug; on_delete = :CASCADE, related_name = :improvements)
+    Meta(table = "dpx_improvement")
+end
+@model struct DpxProxyImprovement <: DpxImprovement
+    Meta(proxy = true)
+end
+redirect_stdout(devnull) do
+    ms = [DpxPerson, DpxStatusPerson, DpxLowerStatusPerson, DpxUser, DpxCountry, DpxState, DpxBaseUser, DpxTrackerUser,
+          DpxIssue, DpxBug, DpxImprovement]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django proxy_models: ProxyModelTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    names(qs) = [x.name for x in qs]
+    # a proxy reads and writes its concrete model's table; a non-proxy child doesn't
+    @test first(Juango.select_sql(objects(DpxStatusPerson))) != first(Juango.select_sql(base_objects(DpxPerson)))
+    person = create(DpxPerson; name = "Foo McBar")
+    @test length(collect(objects(DpxPerson))) == 1 && length(collect(objects(DpxMyPerson))) == 1
+    @test get(DpxMyPerson; name = "Foo McBar").id == person.id
+    @test isempty(collect(objects(DpxStatusPerson)))
+    create(DpxMyPerson; name = "Bazza del Frob"); @test length(collect(objects(DpxMyPerson))) == 2 && length(collect(objects(DpxPerson))) == 2
+    create(DpxLowerStatusPerson; status = "low", name = "homer"); @test names(objects(DpxLowerStatusPerson)) == ["homer"]
+    @test sort(names(objects(DpxMyPersonProxy))) == ["Bazza del Frob", "Foo McBar", "homer"]
+    @test all(x -> x isa DpxMyPersonProxy, collect(objects(DpxMyPersonProxy)))
+    mx = aggregate(base_objects(DpxPerson); mx = Max(:id))[:mx]
+    @test tr(() -> get(DpxMyPersonProxy; name = "Zathras")) isa Juango.DoesNotExist
+    @test tr(() -> get(DpxMyPersonProxy; id__lt = mx + 1)) isa Juango.MultipleObjectsReturned
+    @test tr(() -> get(DpxStatusPerson; name = "Zathras")) isa Juango.DoesNotExist
+    @test tr(() -> save!(DpxStatusPerson(id = 999); update_fields = [:name])) isa Exception
+    create(DpxStatusPerson; name = "Bazza Jr."); create(DpxStatusPerson; name = "Foo Jr.")
+    @test tr(() -> get(DpxStatusPerson; id__lt = aggregate(base_objects(DpxPerson); mx = Max(:id))[:mx] + 1)) isa Juango.MultipleObjectsReturned
+  end
+  port_block() do
+    names(qs) = [x.name for x in qs]
+    # a proxy's own default queryset and named managers
+    for n in ("fred", "wilma", "barney"); create(DpxPerson; name = n); end
+    @test names(objects(DpxMyPerson)) == ["barney", "fred"]
+    @test names(objects(DpxMyPerson, :other)) == ["barney", "wilma"]
+    @test names(objects(DpxOtherPerson)) == ["barney", "wilma"]                    # (the concrete model's default)
+    @test names(objects(DpxOtherPerson, :excluder)) == ["barney", "fred"]
+    # save signals are sent for the proxy that was saved, not its concrete model
+    out = String[]
+    h(tag) = (s; kw...) -> push!(out, tag)
+    hs = [(pre_save, DpxMyPerson, h("MyPerson pre save")), (post_save, DpxMyPerson, h("MyPerson post save")),
+          (pre_save, DpxPerson, h("Person pre save")), (post_save, DpxPerson, h("Person post save"))]
+    foreach(x -> connect!(x[1], x[3]; sender = x[2]), hs)
+    try
+        create(DpxMyPerson; name = "dino"); @test out == ["MyPerson pre save", "MyPerson post save"]
+    finally
+        foreach(x -> disconnect!(x[1], x[3]; sender = x[2]), hs)
+    end
+    @test get_for_model(DpxPerson) === get_for_model(DpxOtherPerson)
+    # proxies of proxies; the concrete model; delete and update through a proxy (one query)
+    create(DpxUser; name = "Bruce")
+    @test names(objects(DpxUser)) == names(objects(DpxUserProxy)) == names(objects(DpxUserProxyProxy)) == ["Bruce"]
+    @test Juango.concrete_model(DpxUserProxyProxy) === DpxUser
+    u2 = create(DpxUserProxy; name = "George"); @test names(order_by(objects(DpxUserProxy), "name")) == ["Bruce", "George"]
+    delete!(u2); @test names(objects(DpxUserProxy)) == ["Bruce"]
+    user = get(DpxUser; name = "Bruce")
+    _, n = Juango.count_queries(() -> update!(filter(DpxUserProxy; id = user.id); name = "George")); @test n == 1
+    refresh!(user); @test user.name == "George"
+    # select_related through a proxy
+    country = create(DpxCountry; name = "Australia"); create(DpxState; name = "New South Wales", country = country)
+    @test names(select_related(objects(DpxState), :country)) == names(select_related(objects(DpxStateProxy), :country)) == ["New South Wales"]
+    @test get(select_related(objects(DpxStateProxy), :country); name = "New South Wales").name == "New South Wales"
+  end
+  port_block() do
+    # keys to proxies, both ways; proxies of multi-table children with select_related
+    tu = create(DpxTrackerUser; name = "Contributor", status = "contrib"); ptu = get(objects(DpxProxyTrackerUser))
+    issue = create(DpxIssue; assignee = tu)
+    @test get(tu.issues).pk == issue.pk && get(ptu.issues).pk == issue.pk
+    @test [x.pk for x in filter(DpxTrackerUser; issues = issue)] == [tu.pk] && [x.pk for x in filter(DpxProxyTrackerUser; issues = issue)] == [ptu.pk]
+    contributor = create(DpxProxyTrackerUser; name = "Contributor2", status = "contrib"); someone = create(DpxBaseUser; name = "Someone")
+    create(DpxBug; summary = "fix this", version = "1.1beta", assignee = contributor, reporter = someone)
+    pcontributor = create(DpxProxyTrackerUser; name = "OtherContributor", status = "proxy")
+    create(DpxImprovement; summary = "improve that", version = "1.1beta", assignee = contributor, reporter = pcontributor,
+           associated_bug = first(objects(DpxProxyProxyBug)))
+    r = get(DpxProxyBug; version__icontains = "beta"); @test r isa DpxProxyBug && r.summary == "fix this"
+    r = get(select_related(objects(DpxProxyBug), :reporter); version__icontains = "beta"); @test r isa DpxProxyBug && r.reporter.name == "Someone"
+    r = get(select_related(objects(DpxProxyProxyBug), :reporter); version__icontains = "beta"); @test r isa DpxProxyProxyBug
+    r = get(select_related(objects(DpxProxyImprovement), :reporter); reporter__name__icontains = "butor")
+    @test r isa DpxProxyImprovement && r.summary == "improve that"
+    # select_related with only() through a proxy key; == between a model and its proxy
+    r = get(Juango.only(select_related(objects(DpxIssue), :assignee), :assignee__status); pk = issue.pk); @test r.assignee.status == "contrib"
+    @test DpxMyPerson(id = 100) == DpxPerson(id = 100) && hash(DpxMyPerson(id = 100)) == hash(DpxPerson(id = 100))
+  end
+end
+

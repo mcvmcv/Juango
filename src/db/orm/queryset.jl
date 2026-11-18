@@ -77,7 +77,15 @@ relations see, for example to hide soft-deleted rows. Build on `base_objects`:
 
     Juango.default_queryset(::Type{Post}) = filter(base_objects(Post); deleted = false)
 """
-Base.@nospecializeinfer default_queryset(@nospecialize(T::Type{<:Model})) = base_objects(T)
+Base.@nospecializeinfer function default_queryset(@nospecialize(T::Type{<:Model}))
+    # a proxy without its own: its parent's (Django's proxies inherit the default manager), as the proxy's rows
+    m = modelmeta_or_nothing(T)
+    m !== nothing && m.proxy && m.parent !== nothing && return retype(default_queryset(m.parent), T)
+    base_objects(T)
+end
+"The same query for model `T` (a proxy of the queryset's model, or the model a proxy stands for)."
+Base.@nospecializeinfer retype(@nospecialize(qs::QuerySet), @nospecialize(T::Type)) =
+    QuerySet{T}((getfield(qs, n) for n in fieldnames(typeof(qs)))...)
 
 """
     manager(::Type{Model}, ::Val{name})

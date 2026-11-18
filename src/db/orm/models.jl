@@ -552,7 +552,9 @@ Base.@nospecializeinfer function compute_reverse_relations(@nospecialize(T::Type
         (modelmeta(M).proxy || !model_in_use(M)) && continue
         for f in modelmeta(M).fields
             f.kind === :fk || continue
-            related_model(f) in lin || continue
+            # (a key to a proxy of this model, or of a parent, is a relation of it too, as Django)
+            R = related_model(f)
+            R in lin || any(L -> concrete_model(R) === concrete_model(L), lin) || continue
             push!(out, (reverse_name(f), M, f))
         end
     end
@@ -809,7 +811,9 @@ Base.@nospecializeinfer function property_list(@nospecialize(T))
     names
 end
 
-Base.@nospecializeinfer Base.:(==)(@nospecialize(a::Model), @nospecialize(b::Model)) = typeof(a) === typeof(b) && a.id !== nothing && a.id == b.id
+# (a proxy and its concrete model are equal for the same key, as Django; a multi-table parent and child aren't)
+Base.@nospecializeinfer Base.:(==)(@nospecialize(a::Model), @nospecialize(b::Model)) =
+    concrete_model(typeof(a)) === concrete_model(typeof(b)) && a.id !== nothing && a.id == b.id
 """
     copy(obj)
 
@@ -822,7 +826,7 @@ Base.@nospecializeinfer function Base.copy(@nospecialize(m::Model))
     db === nothing || ((getfield(c, :_cache)::Dict{Symbol,Any})[:__db] = db)
     c
 end
-Base.@nospecializeinfer Base.hash(@nospecialize(m::Model), h::UInt) = m.id === nothing ? objectid(m) ⊻ h : hash((typeof(m), m.id), h)
+Base.@nospecializeinfer Base.hash(@nospecialize(m::Model), h::UInt) = m.id === nothing ? objectid(m) ⊻ h : hash((concrete_model(typeof(m)), m.id), h)
 Base.show(io::IO, m::Model) = print(io, nameof(typeof(m)), " object (", something(m.id, "unsaved"), ")")
 function Base.show(io::IO, ::MIME"text/plain", m::Model)
     print(io, "<", nameof(typeof(m)), ": ")
