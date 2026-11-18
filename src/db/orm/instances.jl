@@ -12,9 +12,21 @@ INSERT (when `obj.id === nothing`) or UPDATE the object. Sets `auto_now` /
 out unless listed), an empty list saves nothing (and sends no signals),
 an unknown name is an error, and so is a row that no longer exists. `pre_save` and
 `post_save` receive `update_fields` (a `Set{Symbol}`, or `nothing`).
+
+`force_insert = true` INSERTs even when the object has a primary key (an IntegrityError if the row
+exists); `force_update = true` UPDATEs, and it's an error if no row was there to update (Django's
+`save(force_insert=..., force_update=...)`).
 """
-Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, update_fields = nothing, touch_auto_now::Bool = true)
+Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, update_fields = nothing, touch_auto_now::Bool = true,
+                                      force_insert::Bool = false, force_update::Bool = false)
     T = typeof(obj)
+    force_insert && force_update && throw(ArgumentError("Cannot force both insert and updating in model saving."))
+    force_insert && update_fields !== nothing && throw(ArgumentError("Cannot force an insert with update_fields."))
+    if force_update
+        (getfield(obj, :_data)::Dict{Symbol,Any})[:id] === nothing && throw(ArgumentError("Cannot force an update in save!() with no primary key."))
+        d = getfield(obj, :_data)::Dict{Symbol,Any}
+        update_fields === nothing && (update_fields = [attname(f) for f in all_fields(T) if haskey(d, attname(f)) && f.generated === nothing])
+    end
     only = update_fields === nothing ? nothing : update_field_set(T, update_fields)
     only !== nothing && isempty(only) && return obj
     # an object loaded with only()/defer() saves the fields it has (loaded or set since), as Django's
@@ -35,7 +47,7 @@ Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, 
     with_db(alias) do
         check_relations_db(obj)
         number_in_order!(obj)
-        save_here!(obj, only)
+        save_here!(obj, only; force_insert = force_insert)
         set_instance_db!(obj)
     end
 end
@@ -166,7 +178,7 @@ Base.@nospecializeinfer function sync_related_keys!(@nospecialize(obj::Model), o
     end
 end
 
-Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Union{Nothing,Set{Symbol}} = nothing)
+Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Union{Nothing,Set{Symbol}} = nothing; force_insert::Bool = false)
     T = typeof(obj)
     data = (getfield(obj, :_data)::Dict{Symbol,Any})
     sync_related_keys!(obj, only)
@@ -185,7 +197,7 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
     store_uploaded_files!(obj, data)
     exprs = [f for f in all_fields(T) if get(data, attname(f), nothing) isa Expression && (only === nothing || attname(f) in only)]
     chain_ = reverse(vcat([concrete_model(T)], ancestors(T)))     # root table first
-    fresh = false
+    fresh = force_insert && data[:id] !== nothing      # save!(...; force_insert): INSERT with the key given
     if data[:id] === nothing && pk_kind(T) === :uuid
         data[:id] = uuid4()           # UUID keys are made here, so the row is inserted directly
         fresh = true
@@ -284,7 +296,7 @@ Base.@nospecializeinfer function update_columns!(@nospecialize(M::Type), data, o
     else
         n = execute_changes("UPDATE $(qname(modelmeta(M).table)) SET $sets WHERE $(qname("id")) = ?", vcat(vals, data[:id]))
     end
-    n == 0 && throw(ArgumentError("save!(...; update_fields) didn't affect any rows: no $(nameof(M)) with key $(repr(data[:id]))"))
+    n == 0 && throw(ArgumentError("save!(...; update_fields or force_update) didn't affect any rows: no $(nameof(M)) with key $(repr(data[:id]))"))
     nothing
 end
 
@@ -353,6 +365,14 @@ Base.@nospecializeinfer function refresh!(@nospecialize(obj::Model); fields = no
     db = instance_db(obj)
     if fields !== nothing                     # only these fields (Django's refresh_from_db(fields=...))
         names = Symbol.(collect(fields))
+        any(n -> occursin("__", string(n)), names) &&
+            throw(ArgumentError("Found \"__\" in fields argument. Relations and transforms are not allowed in fields."))
+        cache = (getfield(obj, :_cache)::Dict{Symbol,Any})
+        # a relation that isn't a column (reverse keys, many-to-many, a reverse one-to-one): its cached rows go
+        rels = [n for n in names if findfield(modelmeta(T), n) === nothing]
+        foreach(n -> forget_prefetched!(obj, n), rels)
+        names = setdiff(names, rels)
+        isempty(names) && return obj
         atts = [attname(getfield_meta(T, n)) for n in names]
         row = with_db(() -> only(values(filter(base_objects(T); id = obj.id), String.(atts)...)), db)
         data = (getfield(obj, :_data)::Dict{Symbol,Any})

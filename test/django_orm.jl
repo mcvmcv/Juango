@@ -5222,3 +5222,136 @@ end
     @test get(get(DkConcreteRelatedModel; pk = newrel.pk).bases).pk == base.pk
   end
 end
+
+# --- tests/basic ------------------------------------------------------------------------------------------
+@model struct DxArticle
+    headline = CharField(max_length = 100, default = "Default headline")
+    pub_date = DateTimeField()
+    Meta(table = "dx_article", ordering = ["pub_date", "headline"])
+end
+@model struct DxFeaturedArticle
+    article = OneToOneField(DxArticle; on_delete = :CASCADE, related_name = :featured)
+    Meta(table = "dx_featuredarticle")
+end
+@model struct DxSelfRef
+    selfref = ForeignKey(:self; on_delete = :SET_NULL, null = true, blank = true, related_name = Symbol("+"))
+    article = ForeignKey(DxArticle; on_delete = :SET_NULL, null = true, blank = true, related_name = :selfref_set)
+    article_cited = ForeignKey(DxArticle; on_delete = :SET_NULL, null = true, blank = true, related_name = :cited)
+    Meta(table = "dx_selfref")
+end
+@model struct DxPrimaryKeyWithFalseyDefault
+    code = IntegerField(primary_key = true, default = 0)
+    Meta(table = "dx_pkfalseydefault")
+end
+redirect_stdout(devnull) do
+    ms = [DxArticle, DxFeaturedArticle, DxSelfRef, DxPrimaryKeyWithFalseyDefault]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django basic: ModelInstanceCreationTests, ModelTest, ModelLookupTest, ModelRefreshTests" begin
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    # creation: nothing written until save!; defaults; precision; saving again updates
+    a = DxArticle(id = nothing, headline = "Parrot programs in Python", pub_date = DateTime(2005, 7, 28))
+    @test a.id === nothing && count(objects(DxArticle)) == 0
+    save!(a); @test a.id !== nothing && count(objects(DxArticle)) == 1
+    @test tr(() -> DxArticle(headline = "x", pub_date = DateTime(2005, 7, 31), foo = "bar")) isa Exception
+    a1, a2 = create(DxArticle; headline = "First", pub_date = DateTime(2005, 7, 30)), create(DxArticle; headline = "First", pub_date = DateTime(2005, 7, 30))
+    @test a1.id != a2.id
+    @test save!(DxArticle(pub_date = DateTime(2005, 7, 31))).headline == "Default headline"
+    for d in (DateTime(2005, 7, 31, 12, 30), DateTime(2005, 7, 31, 12, 30, 45), DateTime(2005, 7, 31, 12, 30, 45, 180))
+        x = save!(DxArticle(headline = "precise", pub_date = d)); @test get(DxArticle; id__exact = x.id).pub_date == d
+    end
+    x = save!(DxArticle(headline = "original", pub_date = DateTime(2014, 5, 16))); id0 = x.id
+    save!(x); @test x.id == id0; x.headline = "Updated headline"; save!(x); @test x.id == id0
+    @test x in objects(DxArticle) && exists(filter(DxArticle; id = x.id))
+    # a falsey natural key default is saved in one query
+    _, n = nq(() -> save!(DxPrimaryKeyWithFalseyDefault())); @test n == 1
+    # a key given as text is stored as the integer it stands for
+    y = create(DxArticle; id = "123456", pub_date = DateTime(2025, 9, 16)); @test get(DxArticle; pk = 123456).pk == 123456
+    # manual keys, ==, hash, sets
+    save!(DxArticle(id = 101, headline = "Article 101", pub_date = DateTime(2005, 7, 31, 12, 30, 45)))
+    @test get(DxArticle; pk = 101).headline == "Article 101"
+    @test a1 != a2 && a1 == get(DxArticle; id__exact = a1.id)
+    @test DxArticle(id = 1) == DxArticle(id = 1) && DxArticle() != DxArticle()
+    @test get(DxArticle; pk = 101) in Set([a1, a2, get(DxArticle; pk = 101)])
+    @test hash(DxArticle(id = 1)) == hash(DxArticle(id = 1))
+    # year edge, unicode
+    delete!(objects(DxArticle))
+    a11 = create(DxArticle; headline = "Article 11", pub_date = DateTime(2008, 1, 1))
+    a12 = create(DxArticle; headline = "Article 12", pub_date = DateTime(2008, 12, 31, 23, 59, 59, 999))
+    @test [x.pk for x in filter(DxArticle; pub_date__year = 2008)] == [a11.pk, a12.pk]
+    u = save!(DxArticle(headline = "林原 めぐみ", pub_date = DateTime(2005, 7, 28)))
+    @test get(DxArticle; pk = u.id).headline == "林原 めぐみ"
+    # none(): no query, whatever follows
+    _, n = nq(() -> (length(collect(values_list(none(DxArticle), :pk))), length(collect(order_by(values_list(none(DxArticle), :id), "id"))),
+                     length(collect(filter(none(DxArticle); id__in = values_list(objects(DxArticle), :id; flat = true))))))
+    @test n == 0
+    sr = create(DxSelfRef); @test tr(() -> get(DxSelfRef; selfref = sr)) isa Juango.DoesNotExist
+    # Now() saved: the value read back
+    art = save!(DxArticle(pub_date = Now())); @test art.pub_date isa DateTime
+    # force_insert / force_update
+    f = create(DxArticle; pub_date = DateTime(2020, 1, 1))
+    _, n = nq(() -> save!(f; force_update = true)); @test n == 1
+    delete!(filter(DxArticle; pk = f.pk))
+    @test tr(() -> save!(f; force_update = true)) isa Exception
+    save!(f; force_insert = true); @test exists(filter(DxArticle; pk = f.pk))
+    @test tr(() -> save!(f; force_insert = true)) isa Juango.IntegrityError
+    @test tr(() -> save!(f; force_insert = true, force_update = true)) isa Exception
+  end
+  port_block() do
+    tr(f) = try f() catch err; err end
+    nq(f) = Juango.count_queries(f)
+    # ModelLookupTest
+    a = save!(DxArticle(headline = "Swallow programs in Python", pub_date = DateTime(2005, 7, 28)))
+    @test get(DxArticle; id__exact = a.id) == a && get(DxArticle; headline__startswith = "Swallow") == a
+    @test get(DxArticle; pub_date__year = 2005, pub_date__month = 7, pub_date__day = 28) == a && get(DxArticle; pub_date__week_day = 5) == a
+    @test tr(() -> get(DxArticle; id__exact = 2000)) isa Juango.DoesNotExist
+    @test tr(() -> get(DxArticle; pub_date__week_day = 6)) isa Juango.DoesNotExist
+    @test [x.pk for x in filter(DxArticle; pk__in = [a.id])] == [a.pk]
+    save!(DxArticle(headline = "Swallow bites Python", pub_date = DateTime(2005, 7, 28)))
+    err = tr(() -> get(DxArticle; headline__startswith = "Swallow"))
+    @test err isa Juango.MultipleObjectsReturned
+    # ModelRefreshTests
+    delete!(objects(DxArticle))
+    a = create(DxArticle; pub_date = DateTime(2020, 1, 1)); create(DxArticle; pub_date = DateTime(2020, 1, 2))
+    update!(filter(DxArticle; pk = a.pk); headline = "new headline")
+    _, n = nq(() -> refresh!(a)); @test n == 1 && a.headline == "new headline"
+    orig = a.pub_date; newd = a.pub_date + Day(10)
+    update!(objects(DxArticle); headline = "new headline 2", pub_date = newd)
+    _, n = nq(() -> refresh!(a; fields = [:headline])); @test n == 1 && a.headline == "new headline 2" && a.pub_date == orig
+    refresh!(a); @test a.pub_date == newd
+    @test tr(() -> refresh!(a; fields = [:foo__bar])) isa ArgumentError
+    _, n = nq(() -> refresh!(a; fields = Symbol[])); @test n == 0
+    s1, s2 = create(DxSelfRef), create(DxSelfRef); s3 = create(DxSelfRef; selfref = s1)
+    s3c = get(DxSelfRef; pk = s3.pk); s3c.selfref                # loaded
+    s3.selfref = s2; save!(s3)
+    refresh!(s3c); @test s3c.selfref.pk == s2.pk
+    s2b = create(DxSelfRef; selfref = s1); s2b.selfref = nothing; refresh!(s2b); @test s2b.selfref.pk == s1.pk
+    a2 = DxArticle(id = a.pk); _, n = nq(() -> refresh!(a2)); @test n == 1 && a2.pub_date == a.pub_date
+    art = create(DxArticle; headline = "Parrot", pub_date = DateTime(2005, 7, 28)); s = create(DxSelfRef; article = art)
+    delete!(art); refresh!(s); @test s.article_id === nothing && s.article === nothing
+    # a reverse one-to-one, a one-to-one's target, prefetched reverse relations: refreshed
+    art = create(DxArticle; headline = "Test", pub_date = DateTime(2024, 2, 4))
+    @test tr(() -> art.featured) isa Exception || art.featured === nothing
+    create(DxFeaturedArticle; article_id = art.pk); refresh!(art); @test art.featured !== nothing
+    art2 = create(DxArticle; headline = "Test2", pub_date = DateTime(2024, 2, 5))
+    @test tr(() -> art2.featured) isa Exception || art2.featured === nothing
+    create(DxFeaturedArticle; article_id = art2.pk); refresh!(art2; fields = [:featured]); @test art2.featured !== nothing
+    feat = get(DxFeaturedArticle; article_id = art.pk); @test feat.article.headline == "Test"
+    art.headline = "Test 2.0"; save!(art); refresh!(feat); @test feat.article.headline == "Test 2.0"
+    delete!(objects(DxSelfRef)); delete!(objects(DxFeaturedArticle)); delete!(objects(DxArticle))
+    a = create(DxArticle; pub_date = DateTime(2005, 7, 28)); s = create(DxSelfRef; article = a, article_cited = a)
+    ap = first(prefetch_related(objects(DxArticle), :selfref_set, :cited))
+    @test [x.pk for x in ap.selfref_set] == [s.pk] && [x.pk for x in ap.cited] == [s.pk]
+    s.article = nothing; s.article_cited = nothing; save!(s)
+    @test [x.pk for x in ap.selfref_set] == [s.pk]          # (still the prefetched rows)
+    refresh!(ap); @test isempty(collect(ap.selfref_set)) && isempty(collect(ap.cited))
+    ap2 = first(prefetch_related(objects(DxArticle), :selfref_set, :cited))
+    s.article = a; s.article_cited = a; save!(s)
+    @test isempty(collect(ap2.selfref_set))
+    flds = [:selfref_set, :cited]; refresh!(ap2; fields = flds)
+    @test flds == [:selfref_set, :cited] && [x.pk for x in ap2.selfref_set] == [s.pk] && [x.pk for x in ap2.cited] == [s.pk]
+  end
+end
