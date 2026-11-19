@@ -206,11 +206,15 @@ function convert_naive_datetimes(; from_tz = settings.TIME_ZONE, verbose = true)
                     n += 1
                     continue
                 end
-                for r in execute("SELECT $(quote_name(b, "id")) AS id, $c AS v FROM $t WHERE $c IS NOT NULL")
+                # each row by its primary key: id, or a composite or natural key's columns
+                keys = is_composite(T) ? String[column(k) for k in pk_fields(T)] : ["id"]
+                sel = join(["$(quote_name(b, k)) AS k$i" for (i, k) in enumerate(keys)], ", ")
+                cond = join(["$(quote_name(b, k)) = ?" for k in keys], " AND ")
+                for r in execute("SELECT $sel, $c AS v FROM $t WHERE $c IS NOT NULL")
                     v = r[:v] isa DateTime ? r[:v] : something(todatetime(string(r[:v])), nothing)
                     v === nothing && continue
                     utc = DateTime(TimeZones.astimezone(TimeZones.ZonedDateTime(v, tz; from_utc = false), UTC_TZ))
-                    execute("UPDATE $t SET $c = ? WHERE $(quote_name(b, "id")) = ?", Any[utc, r[:id]])
+                    execute("UPDATE $t SET $c = ? WHERE $cond", Any[utc; Any[r[Symbol("k$i")] for i in eachindex(keys)]])
                 end
                 n += 1
                 verbose && println("  converted $(m.table).$(column(f))")
