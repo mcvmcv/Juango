@@ -74,29 +74,49 @@ function migration_code(m::Migration)
     """
 end
 
+"""
+    suggest_name(ops, initial) -> String
+
+A migration's name from its operations, as Django's `Migration.suggest_name`: "initial", or each
+operation's fragment ("person", "delete_person", "person_name", "alter_person_name", ...) joined
+until the name would pass 52 characters ("..._and_more"); "auto_<timestamp>" when there are no
+operations or one has no fragment (RunSQL, RunJulia, SeparateDatabaseAndState).
+"""
 function suggest_name(ops, initial)
     initial && return "initial"
-    isempty(ops) && return "auto_" * Dates.format(now(), "yyyymmdd_HHMM")
-    part(op::CreateModel) = lowercase(op.model)
-    part(op::DeleteModel) = "delete_" * op.table
-    part(op::RenameModel) = "rename_" * op.old * "_" * op.new
-    part(op::AddField) = op.table * "_" * op.column.name
-    part(op::RemoveField) = "remove_" * op.table * "_" * op.name
-    part(op::AlterField) = "alter_" * op.table * "_" * op.column.name
-    part(op::RenameField) = "rename_" * op.table * "_" * op.old * "_" * op.new
-    part(op::AlterUniqueTogether) = "alter_" * op.table * "_unique_together"
-    part(op::AlterPrimaryKey) = "alter_" * op.table * "_pk"
-    part(op::AlterModelTableComment) = "alter_" * op.table * "_table_comment"
-    part(op::AddIndex) = op.table * "_" * op.index.name
-    part(op::RemoveIndex) = "remove_" * op.name
-    part(op::AddConstraint) = op.table * "_" * op.constraint.name
-    part(op::RemoveConstraint) = "remove_" * op.name
-    part(op) = "custom"
-    name = join(part.(ops), "_")
-    all(op -> op isa AddField, ops) && length(ops) == 1 && (name = "add_" * name)
-    s = replace(lowercase(name), r"[^a-z0-9_]+" => "_")
-    length(s) > 50 ? "auto_" * Dates.format(now(), "yyyymmdd_HHMM") : s
+    auto() = "auto_" * Dates.format(now(), "yyyymmdd_HHMM")
+    frags = String[]
+    for op in ops
+        f = name_fragment(op)
+        f === nothing && return auto()
+        push!(frags, replace(lowercase(f), r"\W+" => "_"))
+    end
+    isempty(frags) && return auto()
+    name = frags[1]
+    for f in frags[2:end]
+        new = name * "_" * f
+        length(new) > 52 && return name * "_and_more"
+        name = new
+    end
+    name
 end
+"An operation's part of a migration name (Django's `migration_name_fragment`), or nothing."
+name_fragment(op) = nothing
+name_fragment(op::CreateModel) = op.model
+name_fragment(op::DeleteModel) = "delete_" * op.table
+name_fragment(op::RenameModel) = "rename_" * op.old * "_" * op.new
+name_fragment(op::AddField) = op.table * "_" * op.column.name
+name_fragment(op::RemoveField) = "remove_" * op.table * "_" * op.name
+name_fragment(op::AlterField) = "alter_" * op.table * "_" * op.column.name
+name_fragment(op::RenameField) = "rename_" * op.old * "_" * op.table * "_" * op.new
+name_fragment(op::AlterUniqueTogether) = "alter_" * op.table * "_unique_together"
+name_fragment(op::AlterPrimaryKey) = "alter_" * op.table * "_pk"
+name_fragment(op::AlterModelTableComment) = "alter_" * op.table * "_table_comment"
+name_fragment(op::Union{AddIndex,AddIndexConcurrently}) = op.table * "_" * something(op.index.name, join(op.index.columns, "_"))
+name_fragment(op::Union{RemoveIndex,RemoveIndexConcurrently}) = "remove_" * op.table * "_" * op.name
+name_fragment(op::AddConstraint) = op.table * "_" * op.constraint.name
+name_fragment(op::RemoveConstraint) = "remove_" * op.table * "_" * op.name
+name_fragment(op::CreateExtension) = "create_extension_" * op.name
 
 """
 `makemigrations(update = true)`: fold the model changes into the app's latest migration (which
@@ -123,7 +143,19 @@ function update_migration(g::Graph, app, leaves; name, dry_run, questioner, log)
     [path]
 end
 
-next_number(g::Graph, app) = 1 + maximum([parse(Int, k[2][1:4]) for k in keys(g.nodes) if k[1] == app]; init = 0)
+"""
+    parse_number(name) -> Union{Int,Nothing}
+
+A migration's number from its name, as Django's: a squashed one's is the last it replaces
+("0002_squashed_0005" is 5), otherwise the leading digits, or nothing.
+"""
+function parse_number(name::AbstractString)
+    m = match(r".*_squashed_(\d+)", name)
+    m === nothing || return parse(Int, m[1])
+    m = match(r"^\d+", name)
+    m === nothing ? nothing : parse(Int, m.match)
+end
+next_number(g::Graph, app) = 1 + maximum([something(parse_number(k[2]), 0) for k in keys(g.nodes) if k[1] == app]; init = 0)
 
 function write_file(app, number, name, m::Migration; dry_run = false, log = println)
     dir = migration_dir(app)

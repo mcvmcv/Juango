@@ -601,3 +601,172 @@ end
     # test_references_* (no references_model API); the *_ignore_swapped tests (in migrations.jl);
     # the generated-field and db_default tests (in migrations.jl)
 end
+
+# --- test_autodetector: the operations between two states --------------------------------------------
+
+dmst(ops...; app = "testapp") = (st = Juango.SchemaState(); foreach(op -> DM.state_forwards!(op, st, app), ops); st)
+dmchanges(from, to; app = "testapp", rename = false) = dmcode(DM.diff_states(from, to, app; questioner = _ -> rename))
+author(cols...; kw...) = DM.CreateModel("author"; model = "Author", columns = collect(Juango.Column, cols), kw...)
+book(cols...; kw...) = DM.CreateModel("book"; model = "Book", columns = collect(Juango.Column, cols), kw...)
+aname = Juango.Column("name", :string; max_length = 200)
+bauthor = dmcol("author_id", :fk; references = "author")
+btitle = Juango.Column("title", :string; max_length = 200)
+
+@testset "django migrations: test_autodetector" begin
+    # test_new_model
+    @test dmchanges(dmst(), dmst(author(aname))) == dmcode([author(aname)])
+    # test_old_model
+    @test dmchanges(dmst(author(aname)), dmst()) == dmcode([DM.DeleteModel("author")])
+    # test_add_field
+    @test dmchanges(dmst(author(aname)), dmst(author(aname, dmcol("age")))) == dmcode([DM.AddField("author", dmcol("age"))])
+    # test_remove_field
+    @test dmchanges(dmst(author(aname)), dmst(author())) == dmcode([DM.RemoveField("author", "name")])
+    # test_alter_field
+    @test dmchanges(dmst(author(aname)), dmst(author(Juango.Column("name", :string; max_length = 400)))) ==
+          dmcode([DM.AlterField("author", Juango.Column("name", :string; max_length = 400))])
+    # test_alter_field_to_not_null_with_default
+    @test dmchanges(dmst(author(Juango.Column("name", :string; max_length = 200, null = true))),
+                    dmst(author(Juango.Column("name", :string; max_length = 200, default = "Ada Lovelace")))) ==
+          dmcode([DM.AlterField("author", Juango.Column("name", :string; max_length = 200, default = "Ada Lovelace"))])
+    # test_add_field_with_default
+    @test dmchanges(dmst(author()), dmst(author(Juango.Column("name", :string; max_length = 200, default = "Ada Lovelace")))) ==
+          dmcode([DM.AddField("author", Juango.Column("name", :string; max_length = 200, default = "Ada Lovelace"))])
+    # test_rename_field (asked; Juango adds the new column before removing the old one, Django the other way round)
+    @test dmchanges(dmst(author(aname)), dmst(author(Juango.Column("names", :string; max_length = 200))); rename = true) ==
+          dmcode([DM.RenameField("author", "name", "names")])
+    @test dmchanges(dmst(author(aname)), dmst(author(Juango.Column("names", :string; max_length = 200)))) ==
+          dmcode([DM.AddField("author", Juango.Column("names", :string; max_length = 200)), DM.RemoveField("author", "name")])
+    # test_rename_model (asked; the foreign keys pointing at it follow, so they don't change)
+    writer = DM.CreateModel("writer"; model = "Writer", columns = [aname])
+    @test dmchanges(dmst(author(aname), book(bauthor)), dmst(writer, book(dmcol("author_id", :fk; references = "writer"))); rename = true) ==
+          dmcode([DM.RenameModel("author", "writer"; model = "Writer")])
+    # test_rename_field_with_renamed_model (both asked: the table's columns are compared without their names)
+    @test dmchanges(dmst(author(aname)), dmst(DM.CreateModel("writer"; model = "Writer", columns = [Juango.Column("renamed_name", :string; max_length = 200)]));
+                    rename = true) == dmcode([DM.RenameModel("author", "writer"; model = "Writer"), DM.RenameField("writer", "name", "renamed_name")])
+    # test_circular_fk_dependency, test_same_app_circular_fk_dependency (a migration's foreign keys are added once its tables exist)
+    @test dmchanges(dmst(), dmst(author(aname, dmcol("book_id", :fk; references = "book")), book(btitle, bauthor))) ==
+          dmcode([book(btitle, bauthor), author(aname, dmcol("book_id", :fk; references = "book"))])
+    # test_alter_db_table_add, test_alter_db_table_change (the model's table changed: renamed without asking)
+    @test dmchanges(dmst(author(aname)), dmst(DM.CreateModel("author_one"; model = "Author", columns = [aname]))) ==
+          dmcode([DM.RenameModel("author", "author_one"; model = "Author")])
+    # test_alter_db_table_no_changes
+    @test isempty(dmchanges(dmst(author(aname)), dmst(author(aname))))
+    # test_alter_db_table_comment_add, _change, _remove, _no_changes
+    @test dmchanges(dmst(author(aname)), dmst(author(aname; comment = "Table comment"))) == dmcode([DM.AlterModelTableComment("author", "Table comment")])
+    @test dmchanges(dmst(author(aname; comment = "Table comment")), dmst(author(aname; comment = "New table comment"))) ==
+          dmcode([DM.AlterModelTableComment("author", "New table comment")])
+    @test dmchanges(dmst(author(aname; comment = "Table comment")), dmst(author(aname))) == dmcode([DM.AlterModelTableComment("author", nothing)])
+    @test isempty(dmchanges(dmst(author(aname; comment = "Table comment")), dmst(author(aname; comment = "Table comment"))))
+    # test_empty_unique_together
+    @test isempty(dmchanges(dmst(author(aname; unique_together = [])), dmst(author(aname; unique_together = []))))
+    # test_create_model_with_indexes
+    ix = Juango.Index("name"; name = "create_model_with_indexes_idx")
+    @test dmchanges(dmst(), dmst(author(aname; indexes = [ix]))) == dmcode([author(aname; indexes = [ix])])
+    # test_add_indexes, test_remove_indexes
+    bix = Juango.Index("author_id", "title"; name = "book_title_author_idx")
+    @test dmchanges(dmst(author(aname), book(bauthor, btitle)), dmst(author(aname), book(bauthor, btitle; indexes = [bix]))) == dmcode([DM.AddIndex("book", bix)])
+    @test dmchanges(dmst(author(aname), book(bauthor, btitle; indexes = [bix])), dmst(author(aname), book(bauthor, btitle))) ==
+          dmcode([DM.RemoveIndex("book", "book_title_author_idx")])
+    # test_rename_indexes (#257: Juango drops and recreates it)
+    @test_broken dmchanges(dmst(book(bauthor, btitle; indexes = [bix])), dmst(book(bauthor, btitle; indexes = [Juango.Index("author_id", "title"; name = "renamed_idx")]))) ==
+                 ["RenameIndex(\"book\", \"renamed_idx\", \"book_title_author_idx\")"]
+    # test_order_fields_indexes (the field before its index; removed, the index before the field)
+    @test dmchanges(dmst(author(aname), book(bauthor)), dmst(author(aname), book(bauthor, btitle; indexes = [bix]))) ==
+          dmcode([DM.AddField("book", btitle), DM.AddIndex("book", bix)])
+    @test dmchanges(dmst(author(aname), book(bauthor, btitle; indexes = [bix])), dmst(author(aname), book(bauthor))) ==
+          dmcode([DM.RemoveIndex("book", "book_title_author_idx"), DM.RemoveField("book", "title")])
+    # test_create_model_with_check_constraint, test_add_constraints, test_remove_constraints
+    chk = Juango.ConstraintSpec(:check, "name_contains_bob"; condition = Q(name__contains = "Bob"))
+    @test dmchanges(dmst(), dmst(author(aname; constraints = [chk]))) == dmcode([author(aname; constraints = [chk])])
+    @test dmchanges(dmst(author(aname)), dmst(author(aname; constraints = [chk]))) == dmcode([DM.AddConstraint("author", chk)])
+    @test dmchanges(dmst(author(aname; constraints = [chk])), dmst(author(aname))) == dmcode([DM.RemoveConstraint("author", "name_contains_bob")])
+    # test_constraint_dropped_and_recreated
+    chk2 = Juango.ConstraintSpec(:check, "name_contains_bob"; condition = Q(name__contains = "Robert"))
+    @test dmchanges(dmst(author(aname; constraints = [chk])), dmst(author(aname; constraints = [chk2]))) ==
+          dmcode([DM.RemoveConstraint("author", "name_contains_bob"), DM.AddConstraint("author", chk2)])
+    # test_add_unique_together, test_remove_unique_together, test_unique_together_no_changes
+    @test dmchanges(dmst(author(aname), book(bauthor, btitle)), dmst(author(aname), book(bauthor, btitle; unique_together = [["author_id", "title"]]))) ==
+          dmcode([DM.AlterUniqueTogether("book", [["author_id", "title"]])])
+    @test dmchanges(dmst(author(aname), book(bauthor, btitle; unique_together = [["author_id", "title"]])), dmst(author(aname), book(bauthor, btitle))) ==
+          dmcode([DM.AlterUniqueTogether("book", [])])
+    @test isempty(dmchanges(dmst(book(bauthor, btitle; unique_together = [["author_id", "title"]])), dmst(book(bauthor, btitle; unique_together = [["author_id", "title"]]))))
+    # test_unique_together_ordering (the columns' order matters: it's the index's)
+    @test dmchanges(dmst(book(bauthor, btitle; unique_together = [["author_id", "title"]])), dmst(book(bauthor, btitle; unique_together = [["title", "author_id"]]))) ==
+          dmcode([DM.AlterUniqueTogether("book", [["title", "author_id"]])])
+    # test_add_field_and_unique_together
+    @test dmchanges(dmst(author(aname), book(bauthor, btitle)), dmst(author(aname), book(bauthor, btitle, dmcol("newfield"); unique_together = [["title", "newfield"]]))) ==
+          dmcode([DM.AddField("book", dmcol("newfield")), DM.AlterUniqueTogether("book", [["title", "newfield"]])])
+    # test_remove_field_and_unique_together
+    @test dmchanges(dmst(author(aname), book(bauthor, btitle, dmcol("newfield"); unique_together = [["title", "newfield"]])), dmst(author(aname), book(bauthor, btitle))) ==
+          dmcode([DM.AlterUniqueTogether("book", []), DM.RemoveField("book", "newfield")])
+    # test_partly_alter_unique_together_increase, _decrease
+    @test dmchanges(dmst(author(aname, dmcol("age"); unique_together = [["name"]])), dmst(author(aname, dmcol("age"); unique_together = [["name"], ["age"]]))) ==
+          dmcode([DM.AlterUniqueTogether("author", [["name"], ["age"]])])
+    @test dmchanges(dmst(author(aname, dmcol("age"); unique_together = [["name"], ["age"]])), dmst(author(aname, dmcol("age"); unique_together = [["name"]]))) ==
+          dmcode([DM.AlterUniqueTogether("author", [["name"]])])
+    # test_rename_field_and_unique_together (the rename first)
+    @test dmchanges(dmst(book(bauthor, btitle, dmcol("newfield"); unique_together = [["title", "newfield"]])),
+                    dmst(book(bauthor, btitle, dmcol("newfield2"); unique_together = [["title", "newfield2"]])); rename = true) ==
+          dmcode([DM.RenameField("book", "newfield", "newfield2")])
+    @test dmchanges(dmst(book(bauthor, btitle, dmcol("newfield"); unique_together = [["author_id", "newfield"]])),
+                    dmst(book(bauthor, btitle, dmcol("newfield2"); unique_together = [["title", "newfield2"]])); rename = true) ==
+          dmcode([DM.RenameField("book", "newfield", "newfield2"), DM.AlterUniqueTogether("book", [["title", "newfield2"]])])
+    # test_replace_string_with_foreignkey
+    @test dmchanges(dmst(author(aname), book(Juango.Column("author", :string; max_length = 200))), dmst(author(aname), book(bauthor))) ==
+          dmcode([DM.AddField("book", bauthor), DM.RemoveField("book", "author")])
+    # test_foreign_key_removed_before_target_model
+    @test dmchanges(dmst(author(aname), book(bauthor, btitle)), dmst(book(btitle))) ==
+          dmcode([DM.RemoveField("book", "author_id"), DM.DeleteModel("author")])
+    # test_non_circular_foreignkey_dependency_removal (the table pointing at the other goes first)
+    @test dmchanges(dmst(author(aname), book(bauthor)), dmst()) == dmcode([DM.DeleteModel("book"), DM.DeleteModel("author")])
+    # test_alter_fk_before_model_deletion
+    @test dmchanges(dmst(author(aname), DM.CreateModel("aardvark"; columns = [aname]), book(bauthor)),
+                    dmst(DM.CreateModel("aardvark"; columns = [aname]), book(dmcol("author_id", :fk; references = "aardvark")))) ==
+          dmcode([DM.AlterField("book", dmcol("author_id", :fk; references = "aardvark")), DM.DeleteModel("author")])
+    # test_mti_inheritance_model_removal
+    @test dmchanges(dmst(author(aname), DM.CreateModel("aardvark"; columns = [aname], parent = "author")), dmst(author(aname))) ==
+          dmcode([DM.DeleteModel("aardvark")])
+    # test_add_composite_pk, test_remove_composite_pk (#259: changing a table's primary key isn't supported)
+    @test_broken (try dmchanges(dmst(author(aname)), dmst(author(aname; pk = :composite, pk_columns = ["name"]))); true catch; false end)
+    # test_parse_number
+    for (name, n) in [("no_number", nothing), ("0001_initial", 1), ("0002_model3", 2), ("0002_auto_20380101_1112", 2), ("0002_squashed_0003", 3),
+                      ("0002_model2_squashed_0003_other4", 3), ("0002_squashed_0003_squashed_0004", 4),
+                      ("0002_model2_squashed_0003_other4_squashed_0005_other6", 5), ("0002_custom_name_20380101_1112_squashed_0003_model", 3),
+                      ("2_squashed_4", 4)]
+        @test DM.parse_number(name) == n
+    end
+    # not translated: the swappable, proxy, unmanaged, managers, options, order_with_respect_to,
+    # many-to-many and through-model tests (Juango's migrations have none of these: a join table is a
+    # table); the deconstruct tests (columns are plain values); the db_column and to_field rename
+    # tests; generated-field ordering (in migrations.jl); the dependency tests between apps
+    # (makemigrations' dependencies are tested in migrations.jl); test_arrange_for_graph, test_trim_apps,
+    # test_custom_migration_name (makemigrations' naming and numbering are in migrations.jl)
+end
+
+@testset "django migrations: test_autodetector (MigrationSuggestNameTests)" begin
+    # test_no_operations, test_no_operations_initial
+    @test startswith(DM.suggest_name([], false), "auto_") && DM.suggest_name([], true) == "initial"
+    # test_single_operation
+    @test DM.suggest_name([DM.CreateModel("person"; model = "Person")], false) == "person"
+    @test DM.suggest_name([DM.DeleteModel("person")], false) == "delete_person"
+    # test_single_operation_long_name
+    @test DM.suggest_name([DM.CreateModel("a"; model = "A"^53)], false) == "a"^53
+    # test_two_operations
+    @test DM.suggest_name([DM.CreateModel("person"; model = "Person"), DM.DeleteModel("animal")], false) == "person_delete_animal"
+    # test_two_create_models, test_two_create_models_with_initial_true
+    two = [DM.CreateModel("person"; model = "Person"), DM.CreateModel("animal"; model = "Animal")]
+    @test DM.suggest_name(two, false) == "person_animal" && DM.suggest_name(two, true) == "initial"
+    # test_many_operations_suffix
+    @test DM.suggest_name([DM.CreateModel("p1"; model = "Person1"), DM.CreateModel("p2"; model = "Person2"), DM.CreateModel("p3"; model = "Person3"),
+                           DM.DeleteModel("person4"), DM.DeleteModel("person5")], false) == "person1_person2_person3_delete_person4_and_more"
+    # test_operation_with_no_suggested_name, test_none_name, test_none_name_with_initial_true
+    @test startswith(DM.suggest_name([DM.CreateModel("person"; model = "Person"), DM.RunSQL("SELECT 1 FROM person;")], false), "auto_")
+    @test startswith(DM.suggest_name([DM.RunSQL("SELECT 1 FROM person;")], false), "auto_")
+    @test DM.suggest_name([DM.RunSQL("SELECT 1 FROM person;")], true) == "initial"
+    # test_operation_with_invalid_chars_in_suggested_name
+    @test DM.suggest_name([DM.AddConstraint("person", Juango.ConstraintSpec(:unique, "person.name-*~unique!"; columns = ["name"]))], false) ==
+          "person_person_name_unique_"
+    # (each operation's fragment, as Django's)
+    @test DM.suggest_name([DM.AddField("person", dmcol("age"))], false) == "person_age"
+    @test DM.suggest_name([DM.RenameField("person", "name", "title")], false) == "rename_name_person_title"
+end

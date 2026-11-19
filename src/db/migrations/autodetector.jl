@@ -15,8 +15,17 @@ its models describe. `questioner(question) -> Bool` decides whether a removed pl
 added table or column is really a rename.
 """
 function detect_changes(g::Graph, app; questioner = ask, deferred = nothing)
-    from = replay(g, keys(g.nodes))
-    to = models_state()
+    diff_states(replay(g, keys(g.nodes)), models_state(), app; questioner = questioner, deferred = deferred)
+end
+
+"""
+    diff_states(from, to, app; questioner = ask, deferred = nothing) -> Vector{Operation}
+
+The operations that take `app`'s tables in the migration state `from` to those in `to` (Django's
+`MigrationAutodetector(from_state, to_state).changes()`, for one app). `detect_changes` calls it
+with the state the migrations build and the models' state.
+"""
+function diff_states(from::SchemaState, to::SchemaState, app; questioner = ask, deferred = nothing)
     # a swapped-out User and its join tables are in neither state's comparison (as in Django)
     sw = swapped_tables()
     old = Dict(k => v for (k, v) in from if v.app == app && !(k in sw))
@@ -53,8 +62,9 @@ function detect_changes(g::Graph, app; questioner = ask, deferred = nothing)
     end
     for t in copy(added)
         for r in removed
-            same = sort(old[r].columns; by = c -> c.name) == sort(new[t].columns; by = c -> c.name) &&
-                   old[r].parent == new[t].parent && old[r].pk == new[t].pk
+            # the same column definitions, names aside (a renamed column is asked about later), as Django's
+            defs(tb) = sort([repr(Juango.with_column(c; name = "")) for c in tb.columns])
+            same = defs(old[r]) == defs(new[t]) && old[r].parent == new[t].parent && old[r].pk == new[t].pk
             if same && questioner("Was the table $(r) renamed to $(t) (model $(new[t].model))?")
                 op = RenameModel(r, t; model = new[t].model)
                 push!(ops, op)
