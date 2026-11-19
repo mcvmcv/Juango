@@ -770,3 +770,64 @@ end
     @test DM.suggest_name([DM.AddField("person", dmcol("age"))], false) == "person_age"
     @test DM.suggest_name([DM.RenameField("person", "name", "title")], false) == "rename_name_person_title"
 end
+
+# --- test_graph -----------------------------------------------------------------------------------
+
+"A migration graph from `node => [dependencies...]` pairs (nodes as \"app.name\")."
+function dmgraph(deps::Pair...)
+    k(s) = Tuple{String,String}(Tuple(split(s, '.')))
+    nodes = Dict{Tuple{String,String},DM.Migration}()
+    for (n, ds) in deps
+        m = DM.Migration(; dependencies = [k(d) for d in ds])
+        m.app, m.name = k(n)
+        nodes[k(n)] = m
+    end
+    DM.Graph(nodes)
+end
+dmk(s) = Tuple{String,String}(Tuple(split(s, '.')))
+# Django's forwards_plan / backwards_plan (Juango breaks ties by app and name, Django by depth-first order)
+forwards_plan(g, n) = DM.topo_order(g, DM.ancestors(g, dmk(n)))
+backwards_plan(g, n) = reverse(DM.topo_order(g, union(DM.descendants(g, dmk(n)), [dmk(n)])))
+"Every migration comes after the ones it depends on."
+valid_plan(g, plan) = all(i -> all(d -> !(d in plan) || findfirst(==(d), plan) < i, g.nodes[plan[i]].dependencies), eachindex(plan))
+
+@testset "django migrations: test_graph" begin
+    # test_simple_graph
+    g = dmgraph("app_a.0001" => [], "app_a.0002" => ["app_a.0001"], "app_a.0003" => ["app_a.0002", "app_b.0002"],
+                "app_a.0004" => ["app_a.0003"], "app_b.0001" => [], "app_b.0002" => ["app_b.0001"])
+    @test forwards_plan(g, "app_a.0001") == [dmk("app_a.0001")]
+    @test forwards_plan(g, "app_b.0002") == dmk.(["app_b.0001", "app_b.0002"])
+    whole = forwards_plan(g, "app_a.0004")
+    @test length(whole) == 6 && valid_plan(g, whole)
+    @test backwards_plan(g, "app_b.0002") == dmk.(["app_a.0004", "app_a.0003", "app_b.0002"])
+    @test [k for k in keys(g.nodes) if isempty(g.nodes[k].dependencies)] |> sort == dmk.(["app_a.0001", "app_b.0001"])   # root nodes
+    @test DM.leaf_nodes(g, "app_a") == [dmk("app_a.0004")] && DM.leaf_nodes(g, "app_b") == [dmk("app_b.0002")]
+    # test_complex_graph
+    g = dmgraph("app_a.0001" => [], "app_a.0002" => ["app_a.0001"], "app_a.0003" => ["app_a.0002", "app_b.0002"],
+                "app_a.0004" => ["app_a.0003", "app_c.0002"], "app_b.0001" => [], "app_b.0002" => ["app_b.0001"],
+                "app_c.0001" => ["app_b.0001"], "app_c.0002" => ["app_c.0001", "app_a.0002"])
+    p = forwards_plan(g, "app_c.0002")
+    @test Set(p) == Set(dmk.(["app_b.0001", "app_c.0001", "app_a.0001", "app_a.0002", "app_c.0002"])) && valid_plan(g, p)
+    p = forwards_plan(g, "app_a.0004")
+    @test length(p) == 8 && valid_plan(g, p)
+    @test Set(backwards_plan(g, "app_b.0001")) == Set(dmk.(["app_a.0004", "app_c.0002", "app_c.0001", "app_a.0003", "app_b.0002", "app_b.0001"]))
+    @test backwards_plan(g, "app_b.0001")[end] == dmk("app_b.0001") && backwards_plan(g, "app_b.0001")[1] == dmk("app_a.0004")
+    # test_circular_graph, test_circular_graph_2
+    g = dmgraph("app_a.0001" => ["app_b.0002"], "app_a.0002" => ["app_a.0001"], "app_a.0003" => ["app_a.0002"],
+                "app_b.0001" => ["app_a.0003"], "app_b.0002" => ["app_b.0001"])
+    @test_throws "circular dependency between migrations: app_a.0001, app_a.0002, app_a.0003, app_b.0001, app_b.0002" DM.topo_order(g)
+    g = dmgraph("A.0001" => ["C.0001"], "B.0001" => ["A.0001"], "C.0001" => ["B.0001"])
+    @test_throws DM.MigrationError DM.topo_order(g)
+    # test_iterative_dfs, test_iterative_dfs_complexity (a long chain: no recursion limit, and quick)
+    n = 1000
+    g = dmgraph(["app_a.$(lpad(i, 4, '0'))" => (i == 1 ? String[] : ["app_a.$(lpad(i - 1, 4, '0'))"]) for i in 1:n]...)
+    @test forwards_plan(g, "app_a.$(lpad(n, 4, '0'))") == [dmk("app_a.$(lpad(i, 4, '0'))") for i in 1:n]
+    @test backwards_plan(g, "app_a.0001") == [dmk("app_a.$(lpad(i, 4, '0'))") for i in n:-1:1]
+    @test (@elapsed DM.topo_order(g)) < 5
+    # test_plan_invalid_node
+    @test_throws KeyError forwards_plan(dmgraph("app_a.0001" => []), "app_b.0001")
+    # not translated: test_missing_parent_nodes, test_missing_child_nodes, test_validate_consistency_*
+    # (build_graph checks every dependency exists: "... depends on ..., which does not exist", in
+    # migrations.jl); test_remove_replaced_nodes, test_remove_replacement_node (squashing, in
+    # migrations.jl); test_stringify, test_dummynode_* (Python internals)
+end
