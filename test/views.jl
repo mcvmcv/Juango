@@ -66,7 +66,7 @@ end
     tok = match(r"name=\"csrfmiddlewaretoken\" value=\"(\w+)\"", text(r))[1]
     @test haskey(c.cookies, "csrftoken") && length(tok) == 64 && Juango.unmask_csrf(tok) == c.cookies["csrftoken"]   # masked
     r = post(c, "/contact/", Dict("csrfmiddlewaretoken" => tok, "name" => "Q", "email" => "q@x.io",
-                                  "password" => "p", "confirm" => "p"))
+                                  "password" => "p", "confirm" => "p", "agree" => "on"))
     @test r.status == 302
     @test post(c, "/contact/", Dict("csrfmiddlewaretoken" => "wrong")).status == 403
     @test request(c, "POST", "/contact/"; headers = Dict("X-CSRFToken" => tok), data = Dict("name" => "")).status == 200
