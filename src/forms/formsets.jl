@@ -48,6 +48,7 @@ mutable struct FormSet
     absolute_max::Int            # the most forms a bound formset makes, whatever TOTAL_FORMS says
     can_delete_extra::Bool       # false: only the initial forms get a DELETE box
     saved_forms::Vector{Form}    # model formsets: the forms save!(fs; commit = false) saved, for save_m2m!(fs)
+    edit_only::Bool              # model formsets: save! changes existing objects but makes no new ones
 end
 
 "The default `max_num`; `absolute_max` defaults to twice it (Django's DEFAULT_MAX_NUM)."
@@ -208,6 +209,7 @@ function is_valid(fs::FormSet)
     for (i, f) in enumerate(fs.forms)
         i - 1 >= n0 && !has_changed(f) && (empty += 1)
         is_valid(f)
+        i - 1 < n0 && check_row_id!(fs, f, i - 1)
     end
     total, deleted = length(fs.forms), count(f -> marked_delete(fs, f), fs.forms)
     submitted = something(management_count(fs, "TOTAL_FORMS"), 0)
@@ -217,8 +219,9 @@ function is_valid(fs::FormSet)
     elseif fs.validate_min && total - deleted - empty < fs.min_num
         push!(fs.non_form_errors, fs_message(fs, "too_few_forms",
             replace(ngettext("Please submit at least %d form.", "Please submit at least %d forms.", fs.min_num), "%d" => string(fs.min_num)), fs.min_num))
-    elseif fs.clean !== nothing
-        try
+    else
+        fs.model === nothing || model_formset_unique!(fs)
+        fs.clean === nothing || try
             fs.clean(fs)
         catch e
             e isa ValidationError || rethrow()
@@ -305,7 +308,7 @@ end
 function new_formset(make_form; prefix, data, initial, instances, extra, min_num, max_num, validate_min, validate_max,
                      can_delete, can_order, clean, model = nothing, fk = nothing, parent = nothing, name = "FormSet",
                      auto_id = nothing, form_kwargs = nothing, error_messages = nothing, absolute_max = nothing,
-                     can_delete_extra = true)
+                     can_delete_extra = true, edit_only::Bool = false)
     max_num = max_num === nothing ? DEFAULT_MAX_NUM : max_num
     absolute_max = absolute_max === nothing ? max_num + DEFAULT_MAX_NUM : absolute_max
     FormSet(make_form, string(prefix), data, Dict{Symbol,Any}[Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(d)) for d in initial],
@@ -313,12 +316,14 @@ function new_formset(make_form; prefix, data, initial, instances, extra, min_num
             Form[], String[], false, model, fk, parent, Any[], Any[], Any[], string(name), auto_id,
             Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(something(form_kwargs, Dict()))),
             Dict{String,String}(string(k) => string(v) for (k, v) in pairs_of(something(error_messages, Dict()))),
-            absolute_max, can_delete_extra, Form[])
+            absolute_max, can_delete_extra, Form[], edit_only)
 end
 "The forms for existing objects or initial data (Django's `initial_forms`)."
 initial_forms(fs::FormSet) = (fs_ = build_forms!(fs); fs_[1:min(initial_form_count(fs), length(fs_))])
 "The forms after the initial ones (Django's `extra_forms`)."
 extra_forms(fs::FormSet) = (fs_ = build_forms!(fs); fs_[min(initial_form_count(fs), length(fs_))+1:end])
+"A formset's form on its own, with no prefix (Django's `FormSet.form()`), bound to `data` if given."
+formset_form(fs::FormSet; data = nothing) = fs.make_form(data, "", Dict{Symbol,Any}(), nothing)
 "A model formset's objects, those its initial forms edit (Django's `get_queryset()`)."
 get_queryset(fs::FormSet) = fs.instances
 
@@ -373,13 +378,14 @@ function modelformset_factory(T::Type; fields = nothing, exclude = Symbol[], ext
                               validate_max = false, clean = nothing, widgets = Dict{Symbol,Symbol}(),
                               labels = Dict{Symbol,String}(), form = nothing, help_texts = Dict{Symbol,String}(),
                               field_classes = Dict{Symbol,Any}(), extra_fields = Pair{Symbol,Any}[],
-                              formfield_callback = nothing, error_messages = Dict{Symbol,Any}())
+                              formfield_callback = nothing, error_messages = Dict{Symbol,Any}(), edit_only::Bool = false,
+                              absolute_max = nothing, can_delete_extra::Bool = true)
     make = row_form(T, form; fields, exclude, widgets, labels, help_texts, field_classes, extra_fields, formfield_callback, error_messages)
     (data = nothing; queryset = objects(T), prefix = "form", initial = []) -> new_formset(
         make;
         prefix = prefix, data = data, initial = collect(initial), instances = collect(queryset), extra = extra,
         min_num = min_num, max_num = max_num, validate_min = validate_min, validate_max = validate_max,
-        can_delete = can_delete, can_order = can_order, clean = clean, model = T)
+        can_delete = can_delete, can_order = can_order, clean = clean, model = T, edit_only, absolute_max, can_delete_extra)
 end
 
 "How a model formset makes its rows: the `form` function, else a ModelForm with these options."
@@ -403,14 +409,16 @@ function inlineformset_factory(P::Type, T::Type; fk = nothing, fields = nothing,
                                validate_min = false, validate_max = false, clean = nothing,
                                widgets = Dict{Symbol,Symbol}(), labels = Dict{Symbol,String}(), form = nothing,
                                help_texts = Dict{Symbol,String}(), field_classes = Dict{Symbol,Any}(),
-                               extra_fields = Pair{Symbol,Any}[], formfield_callback = nothing, error_messages = Dict{Symbol,Any}())
-    if fk !== nothing         # (as Django's message for a fk_name that isn't a key to the parent)
+                               extra_fields = Pair{Symbol,Any}[], formfield_callback = nothing, error_messages = Dict{Symbol,Any}(),
+                               edit_only::Bool = false, absolute_max = nothing, can_delete_extra::Bool = true)
+    if fk !== nothing         # (Django's messages)
         g = findfield(modelmeta(T), Symbol(fk))
-        (g === nothing || g.kind !== :fk || !(P in lineage(related_model(g)))) &&
-            throw(ArgumentError("fk_name '$fk' is not a ForeignKey to '$(nameof(P))'."))
+        g === nothing && throw(ArgumentError("'$(nameof(T))' has no field named '$fk'."))
+        (g.kind !== :fk || !(P in lineage(related_model(g)))) && throw(ArgumentError("fk_name '$fk' is not a ForeignKey to '$(nameof(P))'."))
     end
     fks = [f for f in all_fields(T) if f.kind === :fk && P in lineage(related_model(f)) && (fk === nothing || f.name === Symbol(fk))]
-    length(fks) == 1 || throw(ArgumentError("$T needs exactly one foreign key to $P (pass fk=:name), found $(length(fks))"))
+    isempty(fks) && throw(ArgumentError("'$(nameof(T))' has no ForeignKey to '$(nameof(P))'."))
+    length(fks) > 1 && throw(ArgumentError("'$(nameof(T))' has more than one ForeignKey to '$(nameof(P))'. You must specify a 'fk_name' attribute."))
     fkf = only(fks)
     (fkf.unique || fkf.one_to_one) && (max_num = 1)        # (one child at most, as Django's)
     excl = vcat(Symbol.(collect(exclude)), [fkf.name])
@@ -439,7 +447,8 @@ function inlineformset_factory(P::Type, T::Type; fk = nothing, fields = nothing,
         new_formset(make;
                     prefix = prefix, data = data, initial = [], instances = collect(qs), extra = extra, min_num = min_num,
                     max_num = max_num, validate_min = validate_min, validate_max = validate_max, can_delete = can_delete,
-                    can_order = can_order, clean = clean, model = T, fk = fkf, parent = instance)
+                    can_order = can_order, clean = clean, model = T, fk = fkf, parent = instance, edit_only, absolute_max,
+                    can_delete_extra)
     end
 end
 
@@ -461,6 +470,8 @@ function save!(fs::FormSet; commit = true)
                 continue
             end
             blank_extra(fs, f, i - 1) && continue
+            # (an initial row for an object outside the queryset changes nothing, and edit_only makes no new objects)
+            f.instance === nothing && (i - 1 < initial_form_count(fs) || fs.edit_only) && continue
             (f.instance !== nothing && !has_changed(f)) && continue
             isnew = f.instance === nothing
             obj = save!(f; commit = false)
@@ -476,6 +487,95 @@ function save!(fs::FormSet; commit = true)
         end
     end
     saved
+end
+
+"""
+An initial row of a model formset must name an object (Django's hidden ModelChoiceField for the
+key): no id is "required", an id that isn't one of the model's objects isn't a valid choice. (An
+object outside the formset's queryset is valid, and left alone by `save!`.)
+"""
+function check_row_id!(fs::FormSet, f::Form, i)
+    (fs.model === nothing || row_pk_name(fs) !== :id) && return
+    raw = get(fs.data, "$(fs.prefix)-$i-id", nothing)
+    raw isa AbstractVector && (raw = isempty(raw) ? nothing : first(raw))
+    s = raw === nothing ? "" : strip(string(raw))
+    delete!(f.errors, :id)                 # (the key's own message, not the hidden number field's)
+    if isempty(s)
+        add_error!(f, :id, gettext("This field is required."))
+    else
+        id = parse_pk(fs.model, s)
+        (id === nothing || !exists(filter(base_objects(fs.model); id = id))) &&
+            add_error!(f, :id, gettext("Select a valid choice. That choice is not one of the available choices."))
+    end
+end
+
+"`a`, `a and b`, `a, b and c` (Django's get_text_list)."
+text_list(xs) = length(xs) <= 1 ? join(xs) : join(xs[1:end-1], ", ") * " " * gettext("and") * " " * xs[end]
+
+"""
+A model formset's rows mustn't repeat each other where the model says unique (Django's
+`BaseModelFormSet.validate_unique`): `unique_together` sets, unique fields and
+`unique_for_date`/`_month`/`_year`, among the valid rows not being deleted, for the fields the rows
+have. A repeat is a formset error naming the fields, and the row gets "Please correct the
+duplicate values below."
+"""
+function model_formset_unique!(fs::FormSet)
+    T = fs.model
+    rows = [f for f in fs.forms if !marked_delete(fs, f) && isempty(f.errors) && !isempty(f.cleaned_data)]
+    isempty(rows) && return
+    onform = Set(x.name for x in rows[1].fields)
+    function value(f, n)
+        j = findfirst(x -> x.name === n, f.fields)
+        if j !== nothing && (p = form_option(f.fields[j], :inline_fk)) !== false
+            return p === nothing ? nothing : something(p.id, objectid(p))   # (an inline formset's parent, itself if not saved yet)
+        end
+        v = get(f.cleaned_data, n, nothing)
+        v isa Model ? v.id : v
+    end
+    checks = Tuple{Vector{Symbol},String}[]
+    for M in unique!(Any[concrete_model(T); ancestors(T)]), u in modelmeta(M).unique_together
+        all(n -> n in onform, u) || continue
+        shown = [n for n in u if fs.fk === nothing || n !== fs.fk.name]      # (an inline formset's parent key isn't named, as Django's)
+        push!(checks, (u, interpolate(length(shown) == 1 ? gettext("Please correct the duplicate data for %(field)s.") :
+                                      gettext("Please correct the duplicate data for %(field)s, which must be unique."),
+                                      Dict("field" => text_list(string.(shown))))))
+    end
+    for g in all_fields(T)
+        (g.unique || g.primary_key) && g.name in onform || continue
+        push!(checks, ([g.name], interpolate(gettext("Please correct the duplicate data for %(field)s."), Dict("field" => string(g.name)))))
+    end
+    errors = String[]
+    function repeat!(f, names, msg)
+        msg in errors || push!(errors, msg)
+        f.errors[:__all__] = [gettext("Please correct the duplicate values below.")]
+        foreach(n -> delete!(f.cleaned_data, n), names)
+    end
+    for (names, msg) in checks
+        seen = Set{Any}()
+        for f in rows
+            all(n -> haskey(f.cleaned_data, n) || value(f, n) !== nothing, names) || continue
+            key = Any[value(f, n) for n in names]
+            any(v -> v === nothing || v == "", key) && continue
+            key in seen ? repeat!(f, names, msg) : push!(seen, key)
+        end
+    end
+    for g in all_fields(T)                      # unique_for_date, _month, _year
+        g.unique_for === nothing && continue
+        kind, dname = g.unique_for
+        (g.name in onform && dname in onform) || continue
+        seen = Set{Any}()
+        msg = interpolate(gettext("Please correct the duplicate data for %(field_name)s which must be unique for the %(lookup)s in %(date_field)s."),
+                          Dict("field_name" => string(g.name), "lookup" => string(kind), "date_field" => string(dname)))
+        for f in rows
+            v, d = get(f.cleaned_data, g.name, nothing), get(f.cleaned_data, dname, nothing)
+            (v === nothing || v == "" || d === nothing) && continue
+            key = Any[v, Dates.year(d)]
+            kind in (:date, :month) && push!(key, Dates.month(d))
+            kind === :date && push!(key, Dates.day(d))
+            key in seen ? repeat!(f, [g.name], msg) : push!(seen, key)
+        end
+    end
+    append!(fs.non_form_errors, errors)
 end
 
 """

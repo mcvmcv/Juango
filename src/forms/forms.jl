@@ -810,7 +810,10 @@ function model_form_constraint_errors!(f::Form)
         end
     end
     for (k, v) in f.cleaned_data
-        findfield(modelmeta(T), Symbol(k)) === nothing || (values[Symbol(k)] = v)
+        findfield(modelmeta(T), Symbol(k)) === nothing && continue
+        j = findfirst(x -> x.name === Symbol(k), f.fields)
+        j !== nothing && (p = form_option(f.fields[j], :inline_fk)) !== false && (v = p)     # (an inline formset's parent)
+        values[Symbol(k)] = v
     end
     id = inst === nothing ? nothing : inst.id
     for e in constraint_errors(T, values, id)

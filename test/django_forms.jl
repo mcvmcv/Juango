@@ -3654,3 +3654,264 @@ end
     @test length(saved) == 1 && saved[1].owner.id == owner1.id && saved[1].age == 55
   end
 end
+
+@testset "django model_formsets: ModelFormsetTest (has_changed, duplicates, row ids, edit_only)" begin
+  port_block() do
+    # test_model_formset_with_initial_model_instance (#18898): an object as initial is its key
+    john_milton = create(MfsPoet; name = "John Milton")
+    formset = modelformset_factory(MfsPoem; fields = "__all__")(Dict("form-TOTAL_FORMS" => 1, "form-INITIAL_FORMS" => 0, "form-MAX_NUM_FORMS" => "",
+                                                                    "form-0-name" => "", "form-0-poet" => string(john_milton.id));
+                                                               initial = [Dict(:poet => john_milton)])
+    @test !has_changed(Juango.extra_forms(formset)[1])
+    # test_model_formset_with_initial_queryset: objects as initial are their keys
+    create(MfsAuthor; name = "Charles Baudelaire")
+    formset = modelformset_factory(MfsAuthorMeeting; fields = "__all__")(Dict("form-TOTAL_FORMS" => 1, "form-INITIAL_FORMS" => 0, "form-MAX_NUM_FORMS" => "",
+                                                                             "form-0-name" => "", "form-0-created" => "",
+                                                                             "form-0-authors" => [string(a.id) for a in objects(MfsAuthor)]);
+                                                                        initial = [Dict(:authors => collect(objects(MfsAuthor)))])
+    @test !has_changed(Juango.extra_forms(formset)[1])
+    # (test_get_queryset_*: Django's query internals)
+    # test_prevent_duplicates_from_with_the_same_formset
+    dup(fs) = (!is_valid(fs), fs.non_form_errors)
+    formset = modelformset_factory(MfsProduct; fields = "__all__", extra = 2)(Dict("form-TOTAL_FORMS" => 2, "form-INITIAL_FORMS" => 0, "form-MAX_NUM_FORMS" => "",
+                                                                                 "form-0-slug" => "red_car", "form-1-slug" => "red_car"))
+    @test dup(formset) == (true, ["Please correct the duplicate data for slug."])
+    prices = Dict("form-TOTAL_FORMS" => 2, "form-INITIAL_FORMS" => 0, "form-MAX_NUM_FORMS" => "", "form-0-price" => "25", "form-0-quantity" => "7",
+                  "form-1-price" => "25", "form-1-quantity" => "7")
+    @test dup(modelformset_factory(MfsPrice; fields = "__all__", extra = 2)(prices)) ==
+          (true, ["Please correct the duplicate data for price and quantity, which must be unique."])
+    @test is_valid(modelformset_factory(MfsPrice; fields = (:price,), extra = 2)(Dict("form-TOTAL_FORMS" => 2, "form-INITIAL_FORMS" => 0, "form-MAX_NUM_FORMS" => "",
+                                                                                     "form-0-price" => "24", "form-1-price" => "24")))
+    author = create(MfsAuthor; name = "Charles Baudelaire")
+    books = [create(MfsBook; author, title = t) for t in ("Les Paradis Artificiels", "Les Fleurs du Mal", "Flowers of Evil")]
+    p = "mfsbook_set"
+    formset = inlineformset_factory(MfsAuthor, MfsBook; extra = 0, fields = "__all__")(
+        Dict("$p-TOTAL_FORMS" => "2", "$p-INITIAL_FORMS" => "2", "$p-MAX_NUM_FORMS" => "",
+             "$p-0-id" => string(books[1].id), "$p-0-title" => "The 2008 Election", "$p-1-id" => string(books[2].id), "$p-1-title" => "The 2008 Election");
+        instance = author)
+    @test dup(formset) == (true, ["Please correct the duplicate data for title."])
+    @test Juango.errors(formset) == [Dict(), Dict(:__all__ => ["Please correct the duplicate values below."])]
+    PostFormSet = modelformset_factory(MfsPost; fields = "__all__", extra = 2)
+    posts(k, v1, d1, v2, d2) = Dict("form-TOTAL_FORMS" => "2", "form-INITIAL_FORMS" => "0", "form-MAX_NUM_FORMS" => "",
+                                    "form-0-$k" => v1, "form-0-posted" => d1, "form-1-$k" => v2, "form-1-posted" => d2)
+    formset = PostFormSet(posts("title", "blah", "2009-01-01", "blah", "2009-01-01"))
+    @test dup(formset) == (true, ["Please correct the duplicate data for title which must be unique for the date in posted."])
+    @test Juango.errors(formset) == [Dict(), Dict(:__all__ => ["Please correct the duplicate values below."])]
+    @test dup(PostFormSet(posts("slug", "foo", "2009-01-01", "foo", "2009-08-02"))) ==
+          (true, ["Please correct the duplicate data for slug which must be unique for the year in posted."])
+    @test dup(PostFormSet(posts("subtitle", "foo", "2009-01-01", "foo", "2009-01-31"))) ==
+          (true, ["Please correct the duplicate data for subtitle which must be unique for the month in posted."])
+    # test_prevent_change_outer_model_and_create_invalid_data: a row for an object outside the queryset changes nothing
+    charles, walt = create(MfsAuthor; name = "Charles"), create(MfsAuthor; name = "Walt")
+    formset = modelformset_factory(MfsAuthor; fields = "__all__")(
+        Dict("form-TOTAL_FORMS" => "2", "form-INITIAL_FORMS" => "2", "form-MAX_NUM_FORMS" => "", "form-0-id" => string(charles.id),
+             "form-0-name" => "Charles", "form-1-id" => string(walt.id), "form-1-name" => "Changed name");
+        queryset = filter(objects(MfsAuthor); id__in = [charles.id]))
+    n = count(objects(MfsAuthor))
+    @test is_valid(formset)
+    save!(formset)
+    @test get(MfsAuthor; id = walt.id).name == "Walt" && count(objects(MfsAuthor)) == n
+    # (test_overridden_add_prefix, test_form_initialized_once_with_default_add_prefix: Django's form internals)
+    # test_validation_without_id, test_validation_with_invalid_id, test_validation_with_nonexistent_id
+    AuthorFormSet = modelformset_factory(MfsAuthor; fields = "__all__")
+    rows(id) = merge(Dict("form-TOTAL_FORMS" => "1", "form-INITIAL_FORMS" => "1", "form-MAX_NUM_FORMS" => "", "form-0-name" => "Charles"),
+                     id === nothing ? Dict() : Dict("form-0-id" => id))
+    @test Juango.errors(AuthorFormSet(rows(nothing))) == [Dict(:id => ["This field is required."])]
+    @test Juango.errors(AuthorFormSet(rows("abc"))) == [Dict(:id => ["Select a valid choice. That choice is not one of the available choices."])]
+    @test Juango.errors(AuthorFormSet(rows("12345"))) == [Dict(:id => ["Select a valid choice. That choice is not one of the available choices."])]
+    @test Juango.initial_form_count(AuthorFormSet(Dict{String,Any}())) == 0                        # test_initial_form_count_empty_data
+    for x in collect(objects(MfsAuthor)); delete!(x); end
+    # test_edit_only: no new objects
+    charles = create(MfsAuthor; name = "Charles Baudelaire")
+    EditOnly = modelformset_factory(MfsAuthor; fields = "__all__", edit_only = true)
+    formset = EditOnly(Dict("form-TOTAL_FORMS" => "2", "form-INITIAL_FORMS" => "0", "form-MAX_NUM_FORMS" => "0",
+                            "form-0-name" => "Arthur Rimbaud", "form-1-name" => "Walt Whitman"))
+    @test is_valid(formset)
+    save!(formset)
+    @test [a.id for a in objects(MfsAuthor)] == [charles.id]
+    formset = EditOnly(Dict("form-TOTAL_FORMS" => "2", "form-INITIAL_FORMS" => "1", "form-MAX_NUM_FORMS" => "0", "form-0-id" => string(charles.id),
+                            "form-0-name" => "Arthur Rimbaud", "form-1-name" => "Walt Whitman"))
+    @test is_valid(formset)
+    save!(formset)
+    @test get(MfsAuthor; id = charles.id).name == "Arthur Rimbaud" && [a.id for a in objects(MfsAuthor)] == [charles.id]
+    # test_edit_only_inlineformset_factory
+    book = create(MfsBook; author = charles, title = "Les Paradis Artificiels")
+    formset = inlineformset_factory(MfsAuthor, MfsBook; can_delete = false, fields = "__all__", edit_only = true)(
+        Dict("$p-TOTAL_FORMS" => "4", "$p-INITIAL_FORMS" => "1", "$p-MAX_NUM_FORMS" => "0", "$p-0-id" => string(book.id),
+             "$p-0-title" => "Les Fleurs du Mal", "$p-0-author" => string(charles.id), "$p-1-title" => "Flowers of Evil", "$p-1-author" => string(charles.id));
+        instance = charles)
+    @test is_valid(formset)
+    save!(formset)
+    @test get(MfsBook; id = book.id).title == "Les Fleurs du Mal" && [b.id for b in filter(objects(MfsBook); author = charles)] == [book.id]
+    # test_edit_only_object_outside_of_queryset
+    walt = create(MfsAuthor; name = "Walt Whitman")
+    formset = EditOnly(Dict("form-TOTAL_FORMS" => "1", "form-INITIAL_FORMS" => "1", "form-0-id" => string(walt.id), "form-0-name" => "Parth Patil");
+                       queryset = filter(objects(MfsAuthor); id = charles.id))
+    @test is_valid(formset)
+    save!(formset)
+    @test get(MfsAuthor; id = walt.id).name == "Walt Whitman" && count(objects(MfsAuthor)) == 2
+    # test_edit_only_editable_pk: a forged key in an initial row makes no object
+    formset = modelformset_factory(MfsCustomPrimaryKey; fields = "__all__")(
+        Dict("form-TOTAL_FORMS" => "1", "form-INITIAL_FORMS" => "1", "form-MAX_NUM_FORMS" => "0", "form-0-my_pk" => "forged", "form-0-some_field" => "value"))
+    @test is_valid(formset)
+    save!(formset)
+    @test !exists(filter(objects(MfsCustomPrimaryKey); my_pk = "forged"))
+    # (test_edit_only_formset_factory_with_basemodelformset: Django's BaseModelFormSet subclassing)
+  end
+end
+
+@testset "django model_formsets: TestModelFormsetOverridesTroughFormMeta" begin
+  port_block() do
+    row(factory; kw...) = Juango.formset_form(factory(); kw...)
+    for (factory, name) in ((modelformset_factory(MfsPoet; fields = "__all__", widgets = Dict(:name => Widget(:text; attrs = Dict("class" => "poet")))), :name),
+                            (inlineformset_factory(MfsAuthor, MfsBook; widgets = Dict(:title => Widget(:text; attrs = Dict("class" => "book"))), fields = "__all__"), :title))
+        cls = name === :name ? "poet" : "book"
+        @test html_eq(w(row(factory)[name]), "<input id=\"id_$name\" maxlength=\"100\" type=\"text\" class=\"$cls\" name=\"$name\" required>")
+    end
+    for factory in (modelformset_factory(MfsBook; fields = "__all__", labels = Dict(:title => "Name")),
+                    inlineformset_factory(MfsAuthor, MfsBook; fields = "__all__", labels = Dict(:title => "Name")))
+        @test html_eq(label_tag(row(factory)[:title]), "<label for=\"id_title\">Name:</label>") && legend_tag(row(factory)[:title]) == "<legend>Name:</legend>"
+    end
+    for factory in (modelformset_factory(MfsBook; fields = "__all__", help_texts = Dict(:title => "Choose carefully.")),
+                    inlineformset_factory(MfsAuthor, MfsBook; fields = "__all__", help_texts = Dict(:title => "Choose carefully.")))
+        @test row(factory)[:title].field.help_text == "Choose carefully."
+    end
+    author = create(MfsAuthor; name = "Charles Baudelaire")
+    data = Dict("title" => "Foo "^30, "author" => string(author.id))
+    for factory in (modelformset_factory(MfsBook; fields = "__all__", error_messages = Dict(:title => Dict("max_length" => "Title too long!!"))),
+                    inlineformset_factory(MfsAuthor, MfsBook; fields = "__all__", error_messages = Dict(:title => Dict("max_length" => "Title too long!!"))))
+        form = row(factory; data)
+        @test !is_valid(form) && form.errors[:title] == ["Title too long!!"]
+    end
+    for factory in (modelformset_factory(MfsBook; fields = "__all__", field_classes = Dict(:title => SlugField)),
+                    inlineformset_factory(MfsAuthor, MfsBook; fields = "__all__", field_classes = Dict(:title => SlugField)))
+        @test Juango.getfield_meta(MfsBook, :title).kind === :char && row(factory; data)[:title].field.kind === :slug
+    end
+    # absolute_max, with and without max_num
+    for (kw, total, nforms, msg) in (((absolute_max = 1500,), 1501, 1500, "Please submit at most 1000 forms."),
+                                     ((max_num = 20, absolute_max = 100), 101, 100, "Please submit at most 20 forms."))
+        formset = modelformset_factory(MfsAuthor; fields = "__all__", kw...)(Dict("form-TOTAL_FORMS" => string(total), "form-INITIAL_FORMS" => "0", "form-MAX_NUM_FORMS" => "0"))
+        @test !is_valid(formset) && length(formset.forms) == nforms && non_form_errors(formset) == [msg]
+        formset = inlineformset_factory(MfsAuthor, MfsBook; fields = "__all__", kw...)(
+            Dict("mfsbook_set-TOTAL_FORMS" => string(total), "mfsbook_set-INITIAL_FORMS" => "0", "mfsbook_set-MAX_NUM_FORMS" => "0"); instance = author)
+        @test !is_valid(formset) && length(formset.forms) == nforms && non_form_errors(formset) == [msg]
+    end
+    # can_delete_extra
+    for (extra_delete, has) in ((true, true), (false, false))
+        for formset in (modelformset_factory(MfsAuthor; fields = "__all__", can_delete = true, can_delete_extra = extra_delete, extra = 2)(; queryset = none(MfsAuthor)),
+                        inlineformset_factory(MfsAuthor, MfsBook; fields = "__all__", can_delete = true, can_delete_extra = extra_delete, extra = 2)())
+            @test length(formset) == 2 && all(f -> (:DELETE in mf_names(f)) == has, formset.forms)
+        end
+    end
+    # (test_*_passes_renderer, test_*_default_renderer: Django's renderers)
+  end
+end
+
+# --- tests/inline_formsets/models.py --------------------------------------------------------------------
+@model struct IfsSchool
+    name = CharField(max_length = 100)
+    Meta(table = "ifs_school")
+end
+@model struct IfsParent
+    name = CharField(max_length = 100)
+    Meta(table = "ifs_parent")
+end
+@model struct IfsChild
+    mother = ForeignKey(IfsParent, on_delete = :CASCADE, related_name = :mothers_children)
+    father = ForeignKey(IfsParent, on_delete = :CASCADE, related_name = :fathers_children)
+    school = ForeignKey(IfsSchool, on_delete = :CASCADE)
+    name = CharField(max_length = 100)
+    Meta(table = "ifs_child", constraints = [UniqueConstraint(F(:mother), F(:father); name = "ifs_unique_parents")])     # (expressions, as Django's)
+end
+@model struct IfsPoet
+    name = CharField(max_length = 100)
+    Meta(table = "ifs_poet")
+end
+@model struct IfsPoem
+    poet = ForeignKey(IfsPoet, on_delete = :CASCADE)
+    name = CharField(max_length = 100)
+    Meta(table = "ifs_poem", unique_together = [(:poet, :name)])
+end
+redirect_stdout(devnull) do
+    ms = [IfsSchool, IfsParent, IfsChild, IfsPoet, IfsPoem]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django inline_formsets: DeletionTests" begin
+  port_block() do
+    PoemFormSet = inlineformset_factory(IfsPoet, IfsPoem; can_delete = true, fields = "__all__")
+    p = "ifspoem_set"
+    # test_deletion
+    poet = create(IfsPoet; name = "test")
+    poem = create(IfsPoem; poet, name = "test poem")
+    formset = PoemFormSet(Dict("$p-TOTAL_FORMS" => "1", "$p-INITIAL_FORMS" => "1", "$p-MAX_NUM_FORMS" => "0", "$p-0-id" => string(poem.id),
+                               "$p-0-poet" => string(poet.id), "$p-0-name" => "test", "$p-0-DELETE" => "on"); instance = poet)
+    save!(formset)
+    @test is_valid(formset) && count(objects(IfsPoem)) == 0
+    # test_add_form_deletion_when_invalid
+    data = Dict("$p-TOTAL_FORMS" => "1", "$p-INITIAL_FORMS" => "0", "$p-MAX_NUM_FORMS" => "0", "$p-0-id" => "", "$p-0-poem" => "1", "$p-0-name" => "x"^1000)
+    @test !is_valid(PoemFormSet(data; instance = poet)) && count(objects(IfsPoem)) == 0
+    data["$p-0-DELETE"] = "on"
+    formset = PoemFormSet(data; instance = poet)
+    @test is_valid(formset)
+    save!(formset)
+    @test count(objects(IfsPoem)) == 0
+    # test_change_form_deletion_when_invalid
+    poem = create(IfsPoem; poet, name = "test poem")
+    data = Dict("$p-TOTAL_FORMS" => "1", "$p-INITIAL_FORMS" => "1", "$p-MAX_NUM_FORMS" => "0", "$p-0-id" => string(poem.id),
+                "$p-0-poem" => string(poem.id), "$p-0-name" => "x"^1000)
+    @test !is_valid(PoemFormSet(data; instance = poet)) && count(objects(IfsPoem)) == 1
+    data["$p-0-DELETE"] = "on"
+    formset = PoemFormSet(data; instance = poet)
+    @test is_valid(formset)
+    save!(formset)
+    @test count(objects(IfsPoem)) == 0
+    # test_save_new (#10750): save!(commit = false), the required fields left out of the form set by hand
+    ChildFormSet = inlineformset_factory(IfsSchool, IfsChild; exclude = [:father, :mother])
+    school = create(IfsSchool; name = "test")
+    mother, father = create(IfsParent; name = "mother"), create(IfsParent; name = "father")
+    formset = ChildFormSet(Dict("ifschild_set-TOTAL_FORMS" => "1", "ifschild_set-INITIAL_FORMS" => "0", "ifschild_set-MAX_NUM_FORMS" => "0",
+                                "ifschild_set-0-name" => "child"); instance = school)
+    @test is_valid(formset)
+    for obj in save!(formset; commit = false)
+        obj.mother, obj.father = mother, father
+        save!(obj)
+    end
+    @test count(filter(objects(IfsChild); school)) == 1
+    # (test_add_form_uuid_pk: a database-generated UUID key)
+  end
+end
+
+@testset "django inline_formsets: InlineFormsetFactoryTest, constraints" begin
+  port_block() do
+    # test_inline_formset_factory, test_any_iterable_allowed_as_argument_to_exclude (#9171)
+    @test inlineformset_factory(IfsParent, IfsChild; fk = :mother, fields = "__all__") isa Function
+    @test inlineformset_factory(IfsParent, IfsChild; fk = :father, fields = "__all__") isa Function
+    @test inlineformset_factory(IfsParent, IfsChild; exclude = [:school], fk = :mother) isa Function
+    @test inlineformset_factory(IfsParent, IfsChild; exclude = (:school,), fk = :mother) isa Function
+    msg(f) = try f(); "" catch e; e isa ArgumentError ? e.msg : rethrow() end
+    @test startswith(msg(() -> inlineformset_factory(IfsParent, IfsChild)), "'IfsChild' has more than one ForeignKey to 'IfsParent'.")
+    @test msg(() -> inlineformset_factory(IfsParent, IfsChild; fk = :school)) == "fk_name 'school' is not a ForeignKey to 'IfsParent'."
+    @test msg(() -> inlineformset_factory(IfsParent, IfsChild; fk = :test)) == "'IfsChild' has no field named 'test'."
+    # (test_zero_primary_key: an automatic key of 0)
+    # test_unsaved_fk_validate_unique: rows of an unsaved parent still mustn't repeat each other
+    PoemFormSet = inlineformset_factory(IfsPoet, IfsPoem; fields = [:name])
+    p = "ifspoem_set"
+    formset = PoemFormSet(Dict("$p-TOTAL_FORMS" => "2", "$p-INITIAL_FORMS" => "0", "$p-MAX_NUM_FORMS" => "2", "$p-0-name" => "Poem", "$p-1-name" => "Poem");
+                          instance = IfsPoet(name = "unsaved"))
+    @test (is_valid(formset), non_form_errors(formset), Juango.errors(formset)) == (false, ["Please correct the duplicate data for name."], [Dict(), Dict(:__all__ => ["Please correct the duplicate values below."])])
+    # test_fk_not_duplicated_in_form_fields (#21332), test_fk_in_all_formset_forms (#26538)
+    poet = create(IfsPoet; name = "test")
+    for n in ("first", "second", "third"); create(IfsPoem; poet, name = "$n test poem"); end
+    formset = inlineformset_factory(IfsPoet, IfsPoem; fields = (:name,), extra = 0)(; instance = poet)
+    @test length(formset.forms) == 3 && all(f -> count(x -> x.name === :poet, f.fields) == 1 && count(x -> x.name === :name, f.fields) == 1, formset.forms)
+    # test_constraint_refs_inline_foreignkey_field (#35676): a constraint on the parent's key is checked
+    ChildFormSet = inlineformset_factory(IfsParent, IfsChild; fk = :mother, fields = "__all__", extra = 1)
+    father, school, mother = create(IfsParent; name = "James"), create(IfsSchool; name = "Hogwarts"), create(IfsParent; name = "Lily")
+    create(IfsChild; name = "Harry", father, mother, school)
+    formset = ChildFormSet(Dict("mothers_children-TOTAL_FORMS" => "1", "mothers_children-INITIAL_FORMS" => "0", "mothers_children-MIN_NUM_FORMS" => "0",
+                                "mothers_children-MAX_NUM_FORMS" => "1000", "mothers_children-0-id" => "", "mothers_children-0-father" => string(father.id),
+                                "mothers_children-0-school" => string(school.id), "mothers_children-0-name" => "Mary"); instance = mother)
+    @test (is_valid(formset), Juango.errors(formset)) == (false, [Dict(:__all__ => ["Constraint “ifs_unique_parents” is violated."])])
+  end
+end
