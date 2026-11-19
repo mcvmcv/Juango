@@ -752,7 +752,7 @@ julia --project manage.jl migrate --plan          # what migrate would do, witho
 julia --project manage.jl sqlflush                # the SQL flush would run; sqlsequencereset <app> moves id sequences (PostgreSQL)
 ```
 
-`makemigrations` compares your models with the state the existing migration files describe and writes the difference as operations. These are `CreateModel`, `DeleteModel`, `RenameModel`, `AddField`, `RemoveField`, `AlterField` and `RenameField`. When a column (or table) disappears and an identical one appears under a new name, it asks whether you renamed it. With `--noinput` the answer is no. A generated file looks like this:
+`makemigrations` compares your models with the state the existing migration files describe and writes the difference as operations. These are `CreateModel`, `DeleteModel`, `RenameModel`, `AddField`, `RemoveField`, `AlterField` and `RenameField`. When a column (or table) disappears and an identical one appears under a new name, it asks whether you renamed it. With `--noinput` the answer is no. A model whose table name changed (a new `Meta(table = ...)`, or the default name) is renamed without asking. A model's table is `<app label>_<model name>` (`blog_post`), as Django's, unless `Meta(table = ...)` names one; many-to-many join tables add the field's name (`blog_post_tags`). A generated file looks like this:
 
 ```julia
 using Juango.Migrations

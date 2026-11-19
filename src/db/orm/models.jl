@@ -279,7 +279,10 @@ Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields:
     end
     name = string(get(meta, :name, nameof(T)))
     vname = get(meta, :verbose_name, lowercase(replace(name, r"(?<=[a-z])(?=[A-Z])" => " ")))
-    m = ModelMeta(T, name, string(get(meta, :table, lowercase(name))), fs,
+    # the table: Meta(table = ...), else <app label>_<model name> as Django's (#240), shortened with a
+    # hash past 63 bytes (PostgreSQL's limit for a name)
+    app_label = string(get(meta, :app_label, default_app_label(T)))
+    m = ModelMeta(T, name, string(get(meta, :table, constraint_name(lowercase(app_label), lowercase(name)))), fs,
                   Any[order_item(o) for o in get(meta, :ordering, String[])],
                   vname isa AbstractString ? vname : string(vname),
                   (vp = get(meta, :verbose_name_plural, nothing); vp === nothing ? string(vname) * "s" : vp isa AbstractString ? vp : string(vp)),

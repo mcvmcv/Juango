@@ -270,9 +270,10 @@ end
 @testset "many-to-many" begin
     nq(f) = last(count_queries(f))
     b = Juango.backend()
-    @test Juango.table_exists(b, "essay_topics")
-    @test Set(Juango.table_columns(b, "essay_topics")) == Set(["id", "essay_id", "topic_id"])
-    st = Juango.models_state()["essay_topics"]
+    # (the join table: the model's table and the field's name, project_essay_topics, as Django's, #240)
+    @test Juango.table_exists(b, "project_essay_topics")
+    @test Set(Juango.table_columns(b, "project_essay_topics")) == Set(["id", "essay_id", "topic_id"])
+    st = Juango.models_state()["project_essay_topics"]
     @test st.unique_together == [["essay_id", "topic_id"]] && st.app == "project"
 
     julia, web, db = create(Topic; name = "julia"), create(Topic; name = "web"), create(Topic; name = "db")
@@ -284,7 +285,7 @@ end
     add!(e2.topics, db.id, julia)                       # ids work too
     @test sort([t.name for t in e1.topics]) == ["julia", "web"]
     @test count(julia.essays) == 2 && count(db.essays) == 1
-    @test_throws IntegrityError Juango.execute("INSERT INTO \"essay_topics\" (\"essay_id\", \"topic_id\") VALUES (?, ?)", [e1.id, julia.id])
+    @test_throws IntegrityError Juango.execute("INSERT INTO " * Juango.qname("project_essay_topics") * " (" * Juango.qname("essay_id") * ", " * Juango.qname("topic_id") * ") VALUES (?, ?)", [e1.id, julia.id])
     @test_throws ArgumentError add!(filter(Topic; name = "x"), julia)
     @test_throws ArgumentError add!(Essay(title = "unsaved").topics, julia)
 
@@ -337,7 +338,7 @@ end
     @test [p.name for p in ann.friends] == ["Bob"] && count(bob.friends) == 0
     @test [p.name for p in bob.person_set] == ["Ann"]
     @test [p.name for p in filter(Person; friends__name = "Bob")] == ["Ann"]
-    @test Set(Juango.table_columns(b, "person_friends")) == Set(["id", "from_person_id", "to_person_id"])
+    @test Set(Juango.table_columns(b, "project_person_friends")) == Set(["id", "from_person_id", "to_person_id"])
 
     # self-referential and symmetrical (the default for :self)
     cy = create(Person; name = "Cy")
@@ -594,7 +595,7 @@ end
 
     # --- abstract base models ------------------------------------------------------------------
     @test [f.name for f in Juango.all_fields(Doc)] == [:created, :note, :owner, :title]
-    @test cols("doc") == Set(["id", "created", "note", "owner_id", "title"]) && !Juango.table_exists(b, "stamped")
+    @test cols("project_doc") == Set(["id", "created", "note", "owner_id", "title"]) && !Juango.table_exists(b, "project_stamped")
     @test Doc <: Owned <: Stamped <: Model
     @test Juango.modelmeta(Doc).ordering == ["-id"]
     ann = create(Author; name = "Inh Ann")
@@ -605,7 +606,7 @@ end
     @test [d.title for d in filter(Doc; owner__name = "Inh Ann")] == ["first"]
 
     # --- multi-table inheritance -----------------------------------------------------------------
-    @test cols("restaurant") == Set(["id", "serves_pizza"]) && cols("pizzeria") == Set(["id", "oven"])
+    @test cols("project_restaurant") == Set(["id", "serves_pizza"]) && cols("project_pizzeria") == Set(["id", "oven"])
     r = create(Restaurant; name = "Pizza Hut", serves_pizza = true)
     plain = create(Place; name = "Library")
     @test count(filter(Place; name = "Pizza Hut")) == 1                  # a Place row too, same id
@@ -660,7 +661,7 @@ end
     @test !exists(filter(Restaurant; id = nap.id)) && !exists(filter(Pizzeria; id = nap.id))
 
     # --- proxy models ------------------------------------------------------------------------------
-    @test !Juango.table_exists(b, "bigplace")
+    @test !Juango.table_exists(b, "project_bigplace")
     create(Place; name = "Sky Tower", city = "Auckland")
     create(Place; name = "Auckland Museum", city = "Auckland")
     bp = collect(objects(BigPlace))
@@ -798,7 +799,7 @@ end
         @test ids(filter(sv; search = SearchQuery("\"multiple dispatch\""; search_type = :websearch))) == ["Julia web apps"]
         ranked = order_by(annotate(gs; rank = SearchRank(SearchVector(:title; weight = "A") + SearchVector(:body), SearchQuery("julia"))), "-rank")
         @test first(ranked).title == "Julia web apps"
-        @test !isempty(Juango.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'gadget_data_gin'"))
+        @test !isempty(Juango.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'project_gadget_data_gin'"))     # (the table's name first, #240)
     else
         @test_throws ArgumentError collect(filter(sv; search = SearchQuery("dispatch")))
     end
@@ -832,10 +833,10 @@ end
 
     # migration snapshots know the new column kinds
     st_ = Juango.models_state()
-    @test Juango.Migrations.column_code(only(filter(c -> c.name == "tags", st_["gadget"].columns))) ==
+    @test Juango.Migrations.column_code(only(filter(c -> c.name == "tags", st_["project_gadget"].columns))) ==
           "Column(\"tags\", :array; max_length = 20, of = :string)"
-    @test st_["ticket"].pk === :uuid && only(filter(c -> c.name == "ticket_id", st_["stub"].columns)).of === :uuid
-    @test only(st_["gadget"].indexes).method === :gin
+    @test st_["project_ticket"].pk === :uuid && only(filter(c -> c.name == "ticket_id", st_["project_stub"].columns)).of === :uuid
+    @test only(st_["project_gadget"].indexes).method === :gin
 end
 
 @testset "hstore, exclusion constraints, trigram, unaccent" begin
@@ -984,7 +985,7 @@ end
 @testset "only/defer, distinct, latest/earliest, in_bulk, dates, raw, explain" begin
     au = create(Author; name = "QS Extra")
     mk(t, d; kw...) = (a = create(Article; title = t, body = "body of $t", author = au, views = length(t), kw...);
-                       Juango.execute("UPDATE " * Juango.qname("article") * " SET " * Juango.qname("created") * " = ? WHERE id = ?",
+                       Juango.execute("UPDATE " * Juango.qname(Juango.modelmeta(Article).table) * " SET " * Juango.qname("created") * " = ? WHERE id = ?",
                                       Any[d, a.id]); refresh!(a))
     a1 = mk("qx-one", DateTime(2024, 1, 15, 9, 30))
     a2 = mk("qx-two", DateTime(2024, 1, 20, 18, 5); status = "p")
@@ -1043,7 +1044,7 @@ end
     @test_throws ArgumentError dates(qs, :created, :hour)
 
     # raw SQL
-    t = Juango.qname("article")
+    t = Juango.qname(Juango.modelmeta(Article).table)
     rs = raw(Article, "SELECT id, title, views * 2 AS double_views FROM $t WHERE title LIKE ? ORDER BY id", ["qx-%"])
     @test [x.title for x in rs] == ["qx-one!", "qx-two", "qx-three"]
     @test rs[2].double_views == 12 && :body in deferred_fields(rs[2]) && rs[2].body == "body of qx-two"
@@ -1616,7 +1617,7 @@ end
         @test full_clean(Tally(count = -1))[:count] == ["Dieser Wert muss größer oder gleich 0 sein."]
     end
     # the database refuses negative values in positive fields too (CHECK, or UNSIGNED on MySQL)
-    @test_throws Exception Juango.execute("INSERT INTO " * Juango.qname("tally") * " (" *
+    @test_throws Exception Juango.execute("INSERT INTO " * Juango.qname(Juango.modelmeta(Tally).table) * " (" *
         join(Juango.qname.(["small", "big", "count", "tiny", "huge"]), ", ") * ") VALUES (0, 0, -1, 0, 0)")
     @test occursin("min=\"0\"", Juango.widget_html(ModelForm(Tally; fields = [:count])[:count]))
     f = ModelForm(Tally; fields = [:small, :count], data = Dict("small" => "99999", "count" => "3"))

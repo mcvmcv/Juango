@@ -964,7 +964,7 @@ function documented_view(req) HttpResponse("doc") end
         r = get(c, "/admin/doc/models/")
         @test occursin("project.Article", text(r)) || occursin(">Article<", text(r))
         r = get(c, "/admin/doc/models/project.article/")
-        @test r.status == 200 && occursin("ForeignKey to Author", text(r)) && occursin("<code>article</code>", text(r))
+        @test r.status == 200 && occursin("ForeignKey to Author", text(r)) && occursin("<code>project_article</code>", text(r))
         @test get(c, "/admin/doc/models/project.nosuch/").status == 404
         r = get(c, "/admin/doc/views/")
         @test occursin("/documented/", text(r)) && occursin("An essay about a topic", text(r))
@@ -2336,7 +2336,7 @@ const FINDER151_FILE = Ref("")
                             IS_MYSQL ? sql[1] == "SET FOREIGN_KEY_CHECKS = 0" && any(s -> startswith(s, "TRUNCATE TABLE"), sql) :
                             any(s -> startswith(s, "DELETE FROM"), sql))
     seqs = Juango.sequence_reset_sql(["project"])
-    @test IS_POSTGRES ? any(s -> occursin("setval", s) && occursin("\"article\"", s), seqs) : isempty(seqs)
+    @test IS_POSTGRES ? any(s -> occursin("setval", s) && occursin("\"project_article\"", s), seqs) : isempty(seqs)
     out = mktemp() do path, io                                       # (redirect_stdout needs a file, not an IOBuffer)
         redirect_stdout(io) do
             Juango.Migrations.migrate(; plan_only = true)

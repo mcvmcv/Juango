@@ -35,10 +35,22 @@ function detect_changes(g::Graph, app; questioner = ask, deferred = nothing)
         Juango.with_column(c; references = nothing, ref_column = nothing)
     end
 
-    # renamed tables: same columns, different name
+    # renamed tables: a model whose table name changed (Meta(table = ...), or the default name) is
+    # renamed without asking, as Django's AlterModelTable; then tables with the same columns, asked
     removed = sort(setdiff(collect(keys(old)), keys(new)))
     added = sort(setdiff(collect(keys(new)), keys(old)))
     work = copy_state(from)
+    for t in copy(added)
+        new[t].model === nothing && continue
+        i = findfirst(r -> old[r].model == new[t].model, removed)
+        i === nothing && continue
+        r = removed[i]
+        op = RenameModel(r, t; model = new[t].model)
+        push!(ops, op)
+        state_forwards!(op, work, app)
+        deleteat!(removed, i)
+        filter!(!=(t), added)
+    end
     for t in copy(added)
         for r in removed
             same = sort(old[r].columns; by = c -> c.name) == sort(new[t].columns; by = c -> c.name) &&

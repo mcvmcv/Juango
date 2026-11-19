@@ -125,10 +125,10 @@ end
     @test aggregate(filter(Author; id__gte = 5000), :avg, :id) == 5000.5
     if IS_POSTGRES
         # Postgres enforces foreign keys (deferred, so atomic blocks can insert in any order)
-        @test_throws IntegrityError Juango.execute("INSERT INTO \"tag\" (\"label\", \"article_id\") VALUES (?, ?)", ["x", 999999])
+        @test_throws IntegrityError Juango.execute("INSERT INTO \"project_tag\" (\"label\", \"article_id\") VALUES (?, ?)", ["x", 999999])
         @test_throws IntegrityError atomic(() -> create(Author; name = "Explicit Id"))
         @test exists(filter(Author; name = "After Explicit"))   # connection still usable after a failed transaction
-        @test !isempty(Juango.execute("SELECT 1 FROM pg_constraint WHERE contype = 'f' AND conname LIKE 'article_author_id_fk%'"))
+        @test !isempty(Juango.execute("SELECT 1 FROM pg_constraint WHERE contype = 'f' AND conname LIKE 'project_article_author_id_fk%'"))
     end
 
     # generic SQL defaults (what a new backend inherits)
@@ -213,7 +213,7 @@ Juango.allow_migrate(::TopicsElsewhere, db, app; model = nothing) = app == "auth
         @test exists(using_db(filter(Author; name = "Copied"), "other")) && !exists(filter(Author; name = "Copied"))
         @test update!(using_db(filter(Author; name = "Copied"), "other"); email = "c@x.io") == 1
         @test aggregate(using_db(objects(Author), "other"); n = Count())[:n] == 2
-        @test length(raw(Author, "SELECT id, name FROM " * Juango.qname("author"); db = "other")) == 2
+        @test length(raw(Author, "SELECT id, name FROM " * Juango.qname(Juango.modelmeta(Author).table); db = "other")) == 2
         # relating objects of two databases is refused
         mine = create(Author; name = "Local One")
         far = get(using_db(Article, "other"); id = art.id)
@@ -247,25 +247,25 @@ end
     quiet(f) = redirect_stdout(f, devnull)
     quiet(() -> migrate(verbose = false))
     create(Topic; name = "inspected")
-    code = inspectdb(["topic", "article"])
+    code = inspectdb(["project_topic", "project_article"])        # (the tables' default names, #240)
     # SQLite stores every string as TEXT, so there the length is unknown
-    @test occursin("@model struct Topic", code) && occursin(IS_POSTGRES || IS_MYSQL ? "name = CharField(max_length = 30)" : "name = TextField()", code)
-    @test occursin("Meta(table = \"topic\", app_label = \"project\", managed = false)", code)
-    @test occursin("author = ForeignKey(:Author; on_delete = :DO_NOTHING)", code)
+    @test occursin("@model struct ProjectTopic", code) && occursin(IS_POSTGRES || IS_MYSQL ? "name = CharField(max_length = 30)" : "name = TextField()", code)
+    @test occursin("Meta(table = \"project_topic\", app_label = \"project\", managed = false)", code)
+    @test occursin("author = ForeignKey(:ProjectAuthor; on_delete = :DO_NOTHING)", code)
     @test occursin("rating = FloatField(null = true, blank = true)", code)
     @test_throws ArgumentError inspectdb(["no_such_table"])
-    @test occursin("amount = DecimalField(max_digits = 8, decimal_places = 2)", inspectdb(["ledger"]))
-    shift = inspectdb(["shift"])
+    @test occursin("amount = DecimalField(max_digits = 8, decimal_places = 2)", inspectdb(["project_ledger"]))
+    shift = inspectdb(["project_shift"])
     (IS_POSTGRES || IS_MYSQL) && @test occursin("starts = TimeField()", shift)
     IS_POSTGRES && @test occursin("length = DurationField(null = true, blank = true)", shift)
-    @test "topic" in Juango.introspect_tables() && !("juango_migrations" in Juango.introspect_tables())
+    @test "project_topic" in Juango.introspect_tables() && !("juango_migrations" in Juango.introspect_tables())
     # the generated models work against the existing tables
     m = Module(:Inspected)
     Core.eval(m, :(using Juango))
     try
-        Base.include_string(m, replace(code, "@model struct Article" => "@model struct InspArticle",
-                                       "@model struct Topic" => "@model struct InspTopic",
-                                       "ForeignKey(:Author" => "ForeignKey(Juango.get_model(\"project.Author\")"))
+        Base.include_string(m, replace(code, "@model struct ProjectArticle" => "@model struct InspArticle",
+                                       "@model struct ProjectTopic" => "@model struct InspTopic",
+                                       "ForeignKey(:ProjectAuthor" => "ForeignKey(Juango.get_model(\"project.Author\")"))
         T = getfield(m, :InspTopic)
         @test count(objects(T)) == count(objects(Topic)) && exists(filter(T; name = "inspected"))
         @test isempty(Juango.models_state([T])) && !Juango.is_managed(T)          # migrations ignore it
