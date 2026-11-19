@@ -209,6 +209,18 @@ function makemigrations(; app = "project", name = nothing, empty = false, merge 
         isempty(ol) && (log("  Warning: $(c.references) belongs to app '$other', which has no migrations."); continue)
         union!(deps, ol)
     end
+    # a renamed table: other apps' migrations name it by its old name, so they must run first (#252);
+    # the rename depends on the latest migration of each app with a foreign key to it
+    if any(op -> op isa RenameModel, ops)
+        full = replay(g, keys(g.nodes))
+        for op in ops
+            op isa RenameModel || continue
+            for t in values(full)
+                (t.app == app || !any(c -> c.references == op.old, t.columns)) && continue
+                union!(deps, leaf_nodes(g, t.app))
+            end
+        end
+    end
     for op in ops
         if op isa AddField && !op.column.null && op.column.default === nothing
             bf = backfill_value(op.column)

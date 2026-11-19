@@ -1367,3 +1367,36 @@ end
     end
     @test occursin(Juango.qname("legacy_user"), sql) && !occursin(Juango.qname(meta.table), sql)
 end
+
+@testset "migrations: a renamed table's migration runs after the apps that refer to it (#252)" begin
+    configure!(MIGRATION_MODULES = Dict("rnb" => mktempdir(), "rna" => mktempdir()))
+    quiet(f) = redirect_stdout(f, devnull)
+    try
+        @eval @model struct RnFormat
+            name = CharField(max_length = 20)
+            Meta(table = "rn_format", app_label = "rnb")
+        end
+        @eval @model struct RnReport
+            format = ForeignKey(RnFormat; on_delete = :CASCADE)
+            Meta(table = "rn_report", app_label = "rna")
+        end
+        quiet(() -> makemigrations(app = "rnb", questioner = _ -> false))
+        pa = only(quiet(() -> makemigrations(app = "rna", questioner = _ -> false)))
+        Juango.unregister_model!(RnReport); Juango.unregister_model!(RnFormat)
+        @eval @model struct RnFormat2
+            name = CharField(max_length = 20)
+            Meta(table = "rnb_rnformat", name = "RnFormat", app_label = "rnb")
+        end
+        @eval @model struct RnReport2
+            format = ForeignKey(RnFormat2; on_delete = :CASCADE)
+            Meta(table = "rn_report", name = "RnReport", app_label = "rna")
+        end
+        # rna's 0001 names rn_format: the rename must not run before it, so it depends on rna's latest migration
+        src = read(only(quiet(() -> makemigrations(app = "rnb", questioner = _ -> false))), String)
+        @test occursin("RenameModel(\"rn_format\", \"rnb_rnformat\"", src)
+        @test occursin("(\"rna\", \"$(splitext(basename(pa))[1])\")", src)
+    finally
+        foreach(Juango.unregister_model!, filter(T -> Juango.modelmeta(T).app in ("rna", "rnb"), Juango.all_models()))
+        configure!(MIGRATION_MODULES = Dict{String,String}())
+    end
+end
