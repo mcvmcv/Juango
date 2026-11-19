@@ -52,7 +52,7 @@ end
 
     r = get(c, "/contact/")
     @test r.status == 200 && r.context["form"] isa Form
-    r = post(c, "/contact/", Dict("name" => "Zoe", "email" => "z@x.io", "password" => "p", "confirm" => "p"); follow = true)
+    r = post(c, "/contact/", Dict("name" => "Zoe", "email" => "z@x.io", "password" => "p", "confirm" => "p", "agree" => "on"); follow = true)   # (agree must be ticked, #247)
     @test r.status == 200 && occursin("<p class=\"success\">Thanks, Zoe!</p>", text(r))
     @test !occursin("Thanks", text(get(c, "/contact/")))                # messages are one-shot
     r = post(c, "/contact/", Dict("name" => "Zoe"))

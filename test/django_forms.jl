@@ -112,8 +112,9 @@ renders_to(f, html; kw...) = html_attrs(Juango.widget_html(Form([:f => f]; kw...
     @test Juango.clean(f, 1) === true && Juango.clean(f, 0) === false && Juango.clean(f, "1") === true && Juango.clean(f, "0") === false
     @test Juango.clean(f, "Django rocks") === true && Juango.clean(f, "False") === false && Juango.clean(f, "false") === false &&
           Juango.clean(f, "FaLsE") === false
-    # (a required BooleanField must be checked in Django; Juango's form BooleanField doesn't require it)
-    @test_broken raises(BooleanField(), false, "This field is required.")
+    # a required BooleanField must be checked (#247)
+    @test raises(BooleanField(), false, "This field is required.") && raises(BooleanField(), "", "This field is required.") &&
+          Juango.clean(BooleanField(), true) === true
 end
 
 @choices DffFirstNames begin
@@ -767,14 +768,13 @@ end
     signup(data = nothing; kw...) = Form([:email => EmailField(max_length = 320), :get_spam => BooleanField()]; data = data, kw...)
     f = signup(; auto_id = false)
     @test html_eq(w(f[:email]), "<input type=\"email\" name=\"email\" maxlength=\"320\" required>")
-    # (a required BooleanField has `required` in Django; Juango's checkbox never does, as it needn't be checked)
-    @test html_eq(w(f[:get_spam]), "<input type=\"checkbox\" name=\"get_spam\">")
+    @test html_eq(w(f[:get_spam]), "<input type=\"checkbox\" name=\"get_spam\" required>")
     f = signup(Dict("email" => "test@example.com", "get_spam" => true); auto_id = false)
     @test html_eq(w(f[:email]), "<input type=\"email\" name=\"email\" maxlength=\"320\" value=\"test@example.com\" required>")
-    @test html_eq(w(f[:get_spam]), "<input checked type=\"checkbox\" name=\"get_spam\">")
+    @test html_eq(w(f[:get_spam]), "<input checked type=\"checkbox\" name=\"get_spam\" required>")
     for v in ("True", "true")
         @test html_eq(w(signup(Dict("email" => "test@example.com", "get_spam" => v); auto_id = false)[:get_spam]),
-                      "<input checked type=\"checkbox\" name=\"get_spam\">")
+                      "<input checked type=\"checkbox\" name=\"get_spam\" required>")
     end
     for v in ("False", "false")
         @test !occursin("checked", w(signup(Dict("email" => "test@example.com", "get_spam" => v); auto_id = false)[:get_spam]))
@@ -1849,8 +1849,7 @@ end
     f = URLField(max_length = 17, error_messages = Dict("required" => "REQUIRED", "invalid" => "INVALID", "max_length" => "\"%(value)s\" has more than %(limit_value)d characters."))
     @test clean_errors(f, "") == ["REQUIRED"] && clean_errors(f, "abc.c") == ["INVALID"]
     @test clean_errors(f, "djangoproject.com") == ["\"https://djangoproject.com\" has more than 17 characters."]
-    # (a required BooleanField that is false: Juango doesn't require it to be true, see test_booleanfield above)
-    @test_broken clean_errors(BooleanField(error_messages = Dict("required" => "REQUIRED")), "") == ["REQUIRED"]
+    @test clean_errors(BooleanField(error_messages = Dict("required" => "REQUIRED")), "") == ["REQUIRED"]
     f = ChoiceField([("a", "aye")]; error_messages = Dict("required" => "REQUIRED", "invalid_choice" => "%(value)s IS INVALID CHOICE"))
     @test clean_errors(f, "") == ["REQUIRED"] && clean_errors(f, "b") == ["b IS INVALID CHOICE"]
     f = MultipleChoiceField([("a", "aye")]; error_messages = Dict("required" => "REQUIRED", "invalid_choice" => "%(value)s IS INVALID CHOICE", "invalid_list" => "NOT A LIST"))
@@ -2156,11 +2155,11 @@ unknown_fields(f) = try f(); "" catch e; e isa Juango.LookupError ? e.msg : reth
     @test mf_names(ModelForm(MfCategory; fields = [:name, :url], exclude = [:url])) == [:name]   # test_confused_form
     # test_mixmodel_form, test_article_form, test_bad_form, test_subcategory_form
     @test mf_names(ModelForm(MfArticle; fields = "__all__")) == [:headline, :slug, :pub_date, :writer, :article, :categories, :status]
-    # test_subclassmeta_form (Juango's checkbox is never required)
+    # test_subclassmeta_form
     @test html_eq(as_div(ModelForm(MfCategory; exclude = [:url], extra_fields = [:checkbox => BooleanField()])),
                   "<div><label for=\"id_name\">Name:</label><input type=\"text\" name=\"name\" maxlength=\"20\" required id=\"id_name\"></div>" *
                   "<div><label for=\"id_slug\">Slug:</label><input type=\"text\" name=\"slug\" maxlength=\"20\" required id=\"id_slug\"></div>" *
-                  "<div><label for=\"id_checkbox\">Checkbox:</label><input type=\"checkbox\" name=\"checkbox\" id=\"id_checkbox\"></div>")
+                  "<div><label for=\"id_checkbox\">Checkbox:</label><input type=\"checkbox\" name=\"checkbox\" required id=\"id_checkbox\"></div>")
     # test_orderfields_form, test_orderfields2_form
     form = ModelForm(MfCategory; fields = [:url, :name])
     @test mf_names(form) == [:url, :name]

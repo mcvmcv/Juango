@@ -412,7 +412,9 @@ function DecimalField(; max_digits::Union{Nothing,Integer} = nothing, decimal_pl
     Field(:decimal; max_digits = max_digits, decimal_places = decimal_places, kw...)
 end
 # a nullable one starts as NULL, as Django's (a non-nullable one as false, which Django leaves to the form)
-BooleanField(; null::Bool = false, default = null ? nothing : false, kw...) = Field(:bool; default = default, null = null, blank = true, kw...)
+# (in a form it must be checked unless required = false, as Django's forms.BooleanField; a model's
+# BooleanField in a ModelForm is optional, as Django's formfield())
+BooleanField(; null::Bool = false, default = null ? nothing : false, kw...) = Field(:bool; default = default, null = null, kw...)
 DateTimeField(; kw...) = Field(:datetime; kw...)
 DateField(; kw...) = Field(:date; kw...)
 """

@@ -15,7 +15,7 @@
 
     f = ContactForm(Dict("name" => "far too long name", "email" => "bad", "age" => "x", "password" => "a", "confirm" => "b"))
     @test !is_valid(f)
-    @test Set(keys(f.errors)) == Set([:name, :email, :age, :__all__])
+    @test Set(keys(f.errors)) == Set([:name, :email, :age, :agree, :__all__])      # (agree must be checked, #247)
     @test occursin("Passwords do not match.", as_p(f).s)
     @test occursin("value=\"far too long name\"", as_p(f).s)
     @test !occursin("value=\"a\"", as_p(f).s)                          # passwords never re-rendered

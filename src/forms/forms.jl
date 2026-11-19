@@ -313,6 +313,7 @@ Base.@nospecializeinfer function fields_for_model(@nospecialize(T::Type{<:Model}
         end
         mf = something(m2m_field(n), Some(nothing))
         f = deepcopy(mf === nothing ? getfield_meta(T, n) : mf)
+        f.kind === :bool && (f.blank = true)        # (a model's checkbox needn't be checked, as Django's BooleanField.formfield())
         # a default that's a function: its value is sent back in a hidden input, so has_changed compares
         # with the value the form was shown with (Django's show_hidden_initial for callable defaults)
         f.default isa Function && (f.form = something(f.form, Dict{Symbol,Any}()); f.form[:show_hidden_initial] = true)
@@ -716,15 +717,24 @@ function clean(fld::Field, value, initial = nothing)
     typed = typed_form_value(fld, value)
     v, err = typed === nothing ? to_julia(fld, value) : (typed, nothing)
     err === nothing || throw(ValidationError(err isa AbstractVector ? err : [parse_message(fld, err, value)]))
-    errs = fld.kind in MULTI_KINDS ? (isempty(v) && !fld.blank ? [field_message(fld, "required", gettext("This field is required."))] :
-                                      validator_errors(fld, v)) :
-           validate_field(fld, v isa Model ? v.id : v)
+    errs = form_value_errors(fld, v)
     isempty(errs) || throw(ValidationError(errs))
     v
 end
 
 "The message for a value `to_julia` couldn't convert: by its code (\"invalid\" unless `coded`), with the value as %(value)s."
 parse_message(fld::Field, err, raw) = field_message(fld, "invalid", err, Dict{String,Any}("value" => raw isa AbstractVector ? raw : string(something(raw, ""))))
+
+"""
+The checks of a form field's converted value: required (a list must have an item, a required
+checkbox must be checked, as Django's), then the field's own checks and validators.
+"""
+function form_value_errors(fld::Field, v)
+    required() = [field_message(fld, "required", gettext("This field is required."))]
+    fld.kind in MULTI_KINDS && return isempty(v) && !fld.blank ? required() : validator_errors(fld, v)
+    fld.kind === :bool && v === false && !fld.blank && return required()
+    validate_field(fld, v isa Model ? v.id : v)
+end
 
 function clean_file_value(fld::Field, value, initial)
     # false: clear the file (Django's ClearableFileInput); a required field can't be cleared, so it's as nothing
@@ -780,9 +790,7 @@ function is_valid(f::Form)
             err isa AbstractVector ? foreach(e -> add_error!(f, fld.name, e), err) : add_error!(f, fld.name, parse_message(fld, err, raw_value(f, fld)))
             continue
         end
-        errs = fld.kind in MULTI_KINDS ? (isempty(v) && !fld.blank ? [field_message(fld, "required", gettext("This field is required."))] :
-                                          validator_errors(fld, v)) :
-               validate_field(fld, v isa Model ? v.id : v)
+        errs = form_value_errors(fld, v)
         foreach(e -> add_error!(f, fld.name, e), errs)
         isempty(errs) && run_clean_field!(f, fld, v)
     end
@@ -1251,7 +1259,7 @@ function input_html(bf::BoundField)
     widget_kind(fld.widget) in (:radio, :checkboxes) && return choice_list_html(bf)
     name, id = escape_html(html_name(f, fld)), escape_html(html_id(f, fld))
     val = display_value(bf)
-    req = !fld.blank && fld.kind !== :bool && f.use_required_attribute ? " required" : ""
+    req = !fld.blank && f.use_required_attribute ? " required" : ""      # (a required checkbox too: it must be checked, #247)
     dis = form_option(fld, :disabled) ? " disabled" : ""
     attrs = " name=\"$name\"" * id_attr(html_id(f, fld)) * "$dis$req" * widget_attrs(fld.widget)
     haskey(f.errors, fld.name) && !is_hidden_field(fld) && (attrs *= " aria-invalid=\"true\"")
