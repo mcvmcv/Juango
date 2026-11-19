@@ -3007,3 +3007,650 @@ end
     @test !is_valid(full_form) && full_form.errors == Dict(:__all__ => ["Price must be greater than zero."])
   end
 end
+
+# --- tests/model_formsets/models.py ---------------------------------------------------------------------
+@model struct MfsAuthor
+    name = CharField(max_length = 100)
+    Meta(table = "mfs_author", ordering = ["name"])
+end
+Base.show(io::IO, a::MfsAuthor) = print(io, a.name)
+@model struct MfsBetterAuthor <: MfsAuthor
+    write_speed = IntegerField()
+    Meta(table = "mfs_betterauthor")
+end
+@model struct MfsBook
+    author = ForeignKey(MfsAuthor, on_delete = :CASCADE)
+    title = CharField(max_length = 100)
+    Meta(table = "mfs_book", unique_together = [(:author, :title)], ordering = ["id"])
+end
+Base.show(io::IO, b::MfsBook) = print(io, b.title)
+@model struct MfsCustomPrimaryKey
+    my_pk = CharField(max_length = 10, primary_key = true)
+    some_field = CharField(max_length = 100)
+    Meta(table = "mfs_customprimarykey")
+end
+@model struct MfsPlace
+    name = CharField(max_length = 50)
+    city = CharField(max_length = 50)
+    Meta(table = "mfs_place")
+end
+Base.show(io::IO, p::MfsPlace) = print(io, p.name)
+@model struct MfsOwner
+    name = CharField(max_length = 100)
+    place = ForeignKey(MfsPlace, on_delete = :CASCADE)
+    Meta(table = "mfs_owner", ordering = ["id"])
+end
+Base.show(io::IO, o::MfsOwner) = print(io, o.name, " at ", o.place)
+@model struct MfsOwnerProfile
+    owner = OneToOneField(MfsOwner, on_delete = :CASCADE)
+    age = PositiveIntegerField()
+    Meta(table = "mfs_ownerprofile")
+end
+@model struct MfsPoet
+    name = CharField(max_length = 100)
+    Meta(table = "mfs_poet")
+end
+Base.show(io::IO, p::MfsPoet) = print(io, p.name)
+@model struct MfsPoem
+    poet = ForeignKey(MfsPoet, on_delete = :CASCADE)
+    name = CharField(max_length = 100)
+    Meta(table = "mfs_poem")
+end
+redirect_stdout(devnull) do
+    ms = [MfsAuthor, MfsBetterAuthor, MfsBook, MfsCustomPrimaryKey, MfsPlace, MfsOwner, MfsOwnerProfile, MfsPoet, MfsPoem]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django model_formsets: DeletionTests" begin
+  port_block() do
+    PoetFormSet = modelformset_factory(MfsPoet; fields = "__all__", can_delete = true)
+    # test_deletion: save!(commit = false) deletes nothing
+    poet = create(MfsPoet; name = "test")
+    data = Dict("form-TOTAL_FORMS" => "1", "form-INITIAL_FORMS" => "1", "form-MAX_NUM_FORMS" => "0",
+                "form-0-id" => string(poet.id), "form-0-name" => "test", "form-0-DELETE" => "on")
+    formset = PoetFormSet(data; queryset = objects(MfsPoet))
+    save!(formset; commit = false)
+    @test count(objects(MfsPoet)) == 1
+    save!(formset)
+    @test is_valid(formset) && count(objects(MfsPoet)) == 0
+    # test_add_form_deletion_when_invalid: forms marked for deletion aren't validated
+    poet = create(MfsPoet; name = "test")
+    data = Dict("form-TOTAL_FORMS" => "3", "form-INITIAL_FORMS" => "1", "form-MAX_NUM_FORMS" => "0",
+                "form-0-id" => string(poet.id), "form-0-name" => "test", "form-1-id" => "", "form-1-name" => "x"^1000,
+                "form-2-id" => string(poet.id), "form-2-name" => "test2")
+    @test !is_valid(PoetFormSet(data; queryset = objects(MfsPoet))) && count(objects(MfsPoet)) == 1
+    merge!(data, Dict("form-0-DELETE" => "on", "form-1-DELETE" => "on", "form-2-DELETE" => "on"))
+    formset = PoetFormSet(data; queryset = objects(MfsPoet))
+    @test is_valid(formset)
+    save!(formset)
+    @test count(objects(MfsPoet)) == 0
+    # test_change_form_deletion_when_invalid
+    poet = create(MfsPoet; name = "test")
+    data = Dict("form-TOTAL_FORMS" => "1", "form-INITIAL_FORMS" => "1", "form-MAX_NUM_FORMS" => "0",
+                "form-0-id" => string(poet.id), "form-0-name" => "x"^1000)
+    @test !is_valid(PoetFormSet(data; queryset = objects(MfsPoet))) && count(objects(MfsPoet)) == 1
+    data["form-0-DELETE"] = "on"
+    formset = PoetFormSet(data; queryset = objects(MfsPoet))
+    @test is_valid(formset)
+    save!(formset)
+    @test count(objects(MfsPoet)) == 0
+    # test_outdated_deletion: a deleted form for an object that isn't there
+    poet = create(MfsPoet; name = "test")
+    poem = create(MfsPoem; name = "Brevity is the soul of wit", poet)
+    PoemFormSet = inlineformset_factory(MfsPoet, MfsPoem; fields = "__all__", can_delete = true)
+    data = Dict("form-TOTAL_FORMS" => "2", "form-INITIAL_FORMS" => "2", "form-0-id" => string(poem.id), "form-0-name" => "foo",
+                "form-1-id" => string(poem.id + 1), "form-1-name" => "bar", "form-1-DELETE" => "on")
+    formset = PoemFormSet(data; instance = poet, prefix = "form")
+    @test is_valid(formset)
+    save!(formset)
+    @test get(MfsPoem; id = poem.id).name == "foo" && count(filter(objects(MfsPoem); poet = poet)) == 1 && !exists(filter(objects(MfsPoem); id = poem.id + 1))
+    # test_deletion_not_allowed_outside_formset_queryset
+    OwnerProfileFormSet = inlineformset_factory(MfsOwner, MfsOwnerProfile; can_delete = true, fields = "__all__")
+    place = create(MfsPlace; name = "Sal's Place", city = "Cairo")
+    owner = create(MfsOwner; name = "Sal", place)
+    profile = create(MfsOwnerProfile; owner, age = 42)
+    data = Dict("ownerprofile-TOTAL_FORMS" => "1", "ownerprofile-INITIAL_FORMS" => "1", "ownerprofile-MAX_NUM_FORMS" => "0",
+                "ownerprofile-0-id" => string(profile.id), "ownerprofile-0-age" => string(profile.age), "ownerprofile-0-DELETE" => "on")
+    formset = OwnerProfileFormSet(data; instance = owner, queryset = exclude(objects(MfsOwnerProfile); id = profile.id), prefix = "ownerprofile")
+    @test is_valid(formset)
+    save!(formset)
+    @test exists(filter(objects(MfsOwnerProfile); id = profile.id))
+    # test_deletion_not_allowed_outside_formset_queryset_editable_pk
+    CustomPrimaryKeyFormSet = modelformset_factory(MfsCustomPrimaryKey; can_delete = true, fields = "__all__")
+    obj = create(MfsCustomPrimaryKey; my_pk = "pk", some_field = "data")
+    data = Dict("form-TOTAL_FORMS" => "1", "form-INITIAL_FORMS" => "1", "form-MAX_NUM_FORMS" => "0",
+                "form-0-my_pk" => obj.my_pk, "form-0-some_field" => obj.some_field, "form-0-DELETE" => "on")
+    formset = CustomPrimaryKeyFormSet(data; queryset = exclude(objects(MfsCustomPrimaryKey); my_pk = "pk"))
+    @test is_valid(formset)
+    save!(formset)
+    @test exists(filter(objects(MfsCustomPrimaryKey); my_pk = "pk"))
+  end
+end
+
+# Django's model formset rows have no `required` attributes (a formset's forms don't use them)
+mfs_author_p(i; name = nothing, id = nothing, delete = false) =
+    "<p><label for=\"id_form-$i-name\">Name:</label> <input id=\"id_form-$i-name\" type=\"text\" name=\"form-$i-name\"" *
+    (name === nothing ? "" : " value=\"$name\"") * " maxlength=\"100\">" *
+    # (Juango puts a checkbox before its label)
+    (delete ? "</p><p><input type=\"checkbox\" name=\"form-$i-DELETE\" id=\"id_form-$i-DELETE\"> <label for=\"id_form-$i-DELETE\">Delete:</label>" : "") *
+    "<input type=\"hidden\" name=\"form-$i-id\"" * (id === nothing ? "" : " value=\"$id\"") * " id=\"id_form-$i-id\"></p>"
+
+@testset "django model_formsets: ModelFormsetTest (simple save)" begin
+  port_block() do
+    # (test_modelformset_factory_without_fields: Juango takes all the editable fields)
+    qs = objects(MfsAuthor)
+    AuthorFormSet = modelformset_factory(MfsAuthor; fields = "__all__", extra = 3)
+    formset = AuthorFormSet(; queryset = qs)
+    @test length(formset.forms) == 3
+    @test all(i -> html_eq(as_p(formset.forms[i + 1]), mfs_author_p(i)), 0:2)
+    data = Dict("form-TOTAL_FORMS" => "3", "form-INITIAL_FORMS" => "0", "form-MAX_NUM_FORMS" => "",
+                "form-0-name" => "Charles Baudelaire", "form-1-name" => "Arthur Rimbaud", "form-2-name" => "")
+    formset = AuthorFormSet(data; queryset = qs)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 2
+    author1, author2 = saved
+    @test author1.id == get(MfsAuthor; name = "Charles Baudelaire").id && author2.id == get(MfsAuthor; name = "Arthur Rimbaud").id
+    @test [a.id for a in order_by(objects(MfsAuthor), "name")] == [author2.id, author1.id]
+    # editing them, with an extra form to add another
+    qs = order_by(objects(MfsAuthor), "name")
+    AuthorFormSet = modelformset_factory(MfsAuthor; fields = "__all__", extra = 1, can_delete = false)
+    formset = AuthorFormSet(; queryset = qs)
+    @test length(formset.forms) == 3
+    @test html_eq(as_p(formset.forms[1]), mfs_author_p(0; name = "Arthur Rimbaud", id = author2.id)) &&
+          html_eq(as_p(formset.forms[2]), mfs_author_p(1; name = "Charles Baudelaire", id = author1.id)) && html_eq(as_p(formset.forms[3]), mfs_author_p(2))
+    data = Dict("form-TOTAL_FORMS" => "3", "form-INITIAL_FORMS" => "2", "form-MAX_NUM_FORMS" => "",
+                "form-0-id" => string(author2.id), "form-0-name" => "Arthur Rimbaud", "form-1-id" => string(author1.id),
+                "form-1-name" => "Charles Baudelaire", "form-2-name" => "Paul Verlaine")
+    formset = AuthorFormSet(data; queryset = qs)
+    @test is_valid(formset)
+    saved = save!(formset)                      # (only new and changed objects)
+    @test length(saved) == 1
+    author3 = saved[1]
+    @test author3.id == get(MfsAuthor; name = "Paul Verlaine").id
+    @test [a.id for a in order_by(objects(MfsAuthor), "name")] == [author2.id, author1.id, author3.id]
+    # an add form marked for deletion isn't saved
+    AuthorFormSet = modelformset_factory(MfsAuthor; fields = "__all__", extra = 1, can_delete = true)
+    formset = AuthorFormSet(; queryset = qs)
+    @test length(formset.forms) == 4
+    @test html_eq(as_p(formset.forms[1]), mfs_author_p(0; name = "Arthur Rimbaud", id = author2.id, delete = true))
+    @test html_eq(as_p(formset.forms[4]), mfs_author_p(3; delete = true))
+    data = Dict("form-TOTAL_FORMS" => "4", "form-INITIAL_FORMS" => "3", "form-MAX_NUM_FORMS" => "",
+                "form-0-id" => string(author2.id), "form-0-name" => "Arthur Rimbaud", "form-1-id" => string(author1.id),
+                "form-1-name" => "Charles Baudelaire", "form-2-id" => string(author3.id), "form-2-name" => "Paul Verlaine",
+                "form-3-name" => "Walt Whitman", "form-3-DELETE" => "on")
+    formset = AuthorFormSet(data; queryset = qs)
+    @test is_valid(formset) && isempty(save!(formset))
+    @test [a.id for a in order_by(objects(MfsAuthor), "name")] == [author2.id, author1.id, author3.id]
+    # editing one record: only it is returned
+    data = merge(data, Dict("form-0-name" => "Walt Whitman", "form-3-name" => "", "form-3-DELETE" => ""))
+    formset = AuthorFormSet(data; queryset = qs)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1 && saved[1].id == get(MfsAuthor; name = "Walt Whitman").id
+  end
+end
+
+@model struct MfsAuthorMeeting
+    name = CharField(max_length = 100)
+    authors = ManyToManyField(MfsAuthor)
+    created = DateField(editable = false)
+    Meta(table = "mfs_authormeeting")
+end
+@model struct MfsPost
+    title = CharField(max_length = 50, unique_for_date = :posted, blank = true)
+    slug = CharField(max_length = 50, unique_for_year = :posted, blank = true)
+    subtitle = CharField(max_length = 50, unique_for_month = :posted, blank = true)
+    posted = DateField()
+    Meta(table = "mfs_post")
+end
+# Django's PoetForm whose save() renames the poet: a row form with its own save hook
+mfs_poet_form(; kw...) = (f = ModelForm(MfsPoet; fields = "__all__", kw...); f.name = "MfsJerkPoetForm"; f)
+Juango.form_save_hook(f::Juango.Form, ::Val{:MfsJerkPoetForm}, obj) = (obj.name = "Vladimir Mayakovsky"; nothing)
+redirect_stdout(devnull) do
+    ms = [MfsAuthorMeeting, through(MfsAuthorMeeting, :authors), MfsPost]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django model_formsets: ModelFormsetTest (commit = false, max_num, min_num, custom forms)" begin
+  port_block() do
+    # test_commit_false: save!(commit = false), then save_m2m!
+    author1, author2, author3 = (create(MfsAuthor; name = n) for n in ("Charles Baudelaire", "Paul Verlaine", "Walt Whitman"))
+    meeting = create(MfsAuthorMeeting; name = "meeting", created = Dates.today())
+    set!(meeting.authors, collect(objects(MfsAuthor)))
+    author4 = create(MfsAuthor; name = "John Steinbeck")
+    AuthorMeetingFormSet = modelformset_factory(MfsAuthorMeeting; fields = "__all__", extra = 1, can_delete = true)
+    data = Dict{String,Any}("form-TOTAL_FORMS" => "2", "form-INITIAL_FORMS" => "1", "form-MAX_NUM_FORMS" => "",
+                            "form-0-id" => string(meeting.id), "form-0-name" => "2nd Tuesday of the Week Meeting",
+                            "form-0-authors" => [string(a.id) for a in (author2, author1, author3, author4)],
+                            "form-1-name" => "", "form-1-authors" => "", "form-1-DELETE" => "")
+    formset = AuthorMeetingFormSet(data; queryset = objects(MfsAuthorMeeting))
+    @test is_valid(formset)
+    instances = save!(formset; commit = false)
+    for instance in instances
+        instance.created = Dates.today()
+        save!(instance)
+    end
+    save_m2m!(formset)
+    @test [a.id for a in instances[1].authors] == [author1.id, author4.id, author2.id, author3.id]     # (by the authors' ordering, name)
+    for x in collect(objects(MfsAuthor)); delete!(x); end
+    # test_max_num: all the objects are shown, but no more extra forms than max_num allows
+    a1, a2, a3 = (create(MfsAuthor; name = n) for n in ("Charles Baudelaire", "Paul Verlaine", "Walt Whitman"))
+    qs = order_by(objects(MfsAuthor), "name")
+    for (max_num, nforms, nextra) in ((nothing, 6, 3), (4, 4, 1), (0, 3, 0))
+        formset = modelformset_factory(MfsAuthor; fields = "__all__", max_num, extra = 3)(; queryset = qs)
+        @test (max_num, length(formset.forms), length(Juango.extra_forms(formset))) == (max_num, nforms, nextra)
+    end
+    for max_num in (nothing, 0, 4)
+        @test [a.id for a in Juango.get_queryset(modelformset_factory(MfsAuthor; fields = "__all__", max_num)(; queryset = qs))] == [a1.id, a2.id, a3.id]
+    end
+    # test_min_num: added to extra
+    for (min_num, extra, n) in ((0, 0, 0), (1, 0, 1), (1, 1, 2))
+        @test length(modelformset_factory(MfsAuthor; fields = "__all__", min_num, extra)(; queryset = none(MfsAuthor)).forms) == n
+    end
+    # test_min_num_with_existing
+    @test length(modelformset_factory(MfsAuthor; fields = "__all__", extra = 0, min_num = 1)(; queryset = filter(objects(MfsAuthor); id = a1.id)).forms) == 1
+    # test_custom_save_method: a row form whose save! changes the name (Juango: form_save_hook)
+    data = Dict("form-TOTAL_FORMS" => "3", "form-INITIAL_FORMS" => "0", "form-MAX_NUM_FORMS" => "",
+                "form-0-name" => "Walt Whitman", "form-1-name" => "Charles Baudelaire", "form-2-name" => "")
+    formset = modelformset_factory(MfsPoet; fields = "__all__", form = mfs_poet_form)(data; queryset = objects(MfsPoet))
+    @test is_valid(formset)
+    poets = save!(formset)
+    @test length(poets) == 2 && all(p -> p.name == "Vladimir Mayakovsky", poets)
+    # test_custom_form: the row form's own fields
+    post_form1(; kw...) = ModelForm(MfsPost; fields = (:title, :posted), kw...)
+    post_form2(; kw...) = ModelForm(MfsPost; exclude = (:subtitle,), kw...)
+    @test !(:subtitle in mf_names(modelformset_factory(MfsPost; form = post_form1)().forms[1]))
+    @test !(:subtitle in mf_names(modelformset_factory(MfsPost; form = post_form2)().forms[1]))
+    # test_custom_queryset_init (Juango: the queryset is the formset's keyword)
+    @test length(Juango.get_queryset(modelformset_factory(MfsAuthor; fields = "__all__")(; queryset = filter(objects(MfsAuthor); name__startswith = "Charles")))) == 1
+  end
+end
+
+@testset "django model_formsets: ModelFormsetTest (model inheritance)" begin
+  port_block() do
+    # (Django's child has a hidden author_ptr; Juango's model formset rows have a hidden id)
+    BetterAuthorFormSet = modelformset_factory(MfsBetterAuthor; fields = "__all__")
+    better_p(i; name = nothing, speed = nothing, id = nothing) =
+        "<p><label for=\"id_form-$i-name\">Name:</label> <input id=\"id_form-$i-name\" type=\"text\" name=\"form-$i-name\"" *
+        (name === nothing ? "" : " value=\"$name\"") * " maxlength=\"100\"></p>" *
+        "<p><label for=\"id_form-$i-write_speed\">Write speed:</label> <input type=\"number\" name=\"form-$i-write_speed\"" *
+        (speed === nothing ? "" : " value=\"$speed\"") * " id=\"id_form-$i-write_speed\">" *
+        "<input type=\"hidden\" name=\"form-$i-id\"" * (id === nothing ? "" : " value=\"$id\"") * " id=\"id_form-$i-id\"></p>"
+    formset = BetterAuthorFormSet()
+    @test length(formset.forms) == 1 && html_eq(as_p(formset.forms[1]), better_p(0))
+    formset = BetterAuthorFormSet(Dict("form-TOTAL_FORMS" => "1", "form-INITIAL_FORMS" => "0", "form-MAX_NUM_FORMS" => "",
+                                       "form-0-id" => "", "form-0-name" => "Ernest Hemingway", "form-0-write_speed" => "10"))
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1 && saved[1].id == get(MfsBetterAuthor; name = "Ernest Hemingway").id
+    hemingway_id = saved[1].id
+    formset = BetterAuthorFormSet()
+    @test length(formset.forms) == 2 && html_eq(as_p(formset.forms[1]), better_p(0; name = "Ernest Hemingway", speed = 10, id = hemingway_id)) &&
+          html_eq(as_p(formset.forms[2]), better_p(1))
+    formset = BetterAuthorFormSet(Dict("form-TOTAL_FORMS" => "2", "form-INITIAL_FORMS" => "1", "form-MAX_NUM_FORMS" => "",
+                                       "form-0-id" => string(hemingway_id), "form-0-name" => "Ernest Hemingway", "form-0-write_speed" => "10",
+                                       "form-1-id" => "", "form-1-name" => "", "form-1-write_speed" => ""))
+    @test is_valid(formset) && isempty(save!(formset))
+  end
+end
+
+@model struct MfsBookWithCustomPK
+    my_pk = DecimalField(max_digits = 5, decimal_places = 0, primary_key = true)
+    author = ForeignKey(MfsAuthor, on_delete = :CASCADE)
+    title = CharField(max_length = 100)
+    Meta(table = "mfs_bookwithcustompk")
+end
+@model struct MfsEditor
+    name = CharField(max_length = 100)
+    Meta(table = "mfs_editor")
+end
+@model struct MfsBookWithOptionalAltEditor
+    author = ForeignKey(MfsAuthor, on_delete = :CASCADE)
+    alt_editor = ForeignKey(MfsEditor, on_delete = :SET_NULL, blank = true, null = true)
+    title = CharField(max_length = 100)
+    Meta(table = "mfs_bookwithoptionalalteditor", unique_together = [(:author, :title, :alt_editor)])
+end
+@model struct MfsAlternateBook <: MfsBook
+    notes = CharField(max_length = 100)
+    Meta(table = "mfs_alternatebook")
+end
+redirect_stdout(devnull) do
+    ms = [MfsBookWithCustomPK, MfsEditor, MfsBookWithOptionalAltEditor, MfsAlternateBook]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+# a row of an inline formset of an author's books: its title, the parent's key and the row's id, hidden
+mfs_book_p(p, i, author_id; title = nothing, id = nothing) =
+    "<p><label for=\"id_$p-$i-title\">Title:</label> <input id=\"id_$p-$i-title\" type=\"text\" name=\"$p-$i-title\"" *
+    (title === nothing ? "" : " value=\"$title\"") * " maxlength=\"100\">" *
+    "<input type=\"hidden\" name=\"$p-$i-author\"" * (author_id === nothing ? "" : " value=\"$author_id\"") * " id=\"id_$p-$i-author\">" *
+    "<input type=\"hidden\" name=\"$p-$i-id\"" * (id === nothing ? "" : " value=\"$id\"") * " id=\"id_$p-$i-id\"></p>"
+
+@testset "django model_formsets: ModelFormsetTest (inline formsets)" begin
+  port_block() do
+    # test_inline_formsets (Juango's default prefix is the reverse name, mfsbook_set)
+    AuthorBooksFormSet = inlineformset_factory(MfsAuthor, MfsBook; can_delete = false, extra = 3, fields = "__all__")
+    author = create(MfsAuthor; name = "Charles Baudelaire")
+    formset = AuthorBooksFormSet(; instance = author)
+    @test length(formset.forms) == 3 && all(i -> html_eq(as_p(formset.forms[i + 1]), mfs_book_p("mfsbook_set", i, author.id)), 0:2)
+    data = Dict("mfsbook_set-TOTAL_FORMS" => "3", "mfsbook_set-INITIAL_FORMS" => "0", "mfsbook_set-MAX_NUM_FORMS" => "",
+                "mfsbook_set-0-title" => "Les Fleurs du Mal", "mfsbook_set-1-title" => "", "mfsbook_set-2-title" => "")
+    formset = AuthorBooksFormSet(data; instance = author)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1
+    book1 = saved[1]
+    @test book1.id == get(MfsBook; title = "Les Fleurs du Mal").id && [b.id for b in filter(objects(MfsBook); author)] == [book1.id]
+    # an edit form for each book, and extra forms to add more
+    AuthorBooksFormSet = inlineformset_factory(MfsAuthor, MfsBook; can_delete = false, extra = 2, fields = "__all__")
+    formset = AuthorBooksFormSet(; instance = author)
+    @test length(formset.forms) == 3 && html_eq(as_p(formset.forms[1]), mfs_book_p("mfsbook_set", 0, author.id; title = "Les Fleurs du Mal", id = book1.id)) &&
+          html_eq(as_p(formset.forms[2]), mfs_book_p("mfsbook_set", 1, author.id)) && html_eq(as_p(formset.forms[3]), mfs_book_p("mfsbook_set", 2, author.id))
+    data = Dict("mfsbook_set-TOTAL_FORMS" => "3", "mfsbook_set-INITIAL_FORMS" => "1", "mfsbook_set-MAX_NUM_FORMS" => "",
+                "mfsbook_set-0-id" => string(book1.id), "mfsbook_set-0-title" => "Les Fleurs du Mal",
+                "mfsbook_set-1-title" => "Les Paradis Artificiels", "mfsbook_set-2-title" => "")
+    formset = AuthorBooksFormSet(data; instance = author)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1
+    book2 = saved[1]
+    @test book2.id == get(MfsBook; title = "Les Paradis Artificiels").id
+    @test [b.id for b in order_by(filter(objects(MfsBook); author), "title")] == [book1.id, book2.id]
+    # a parent key that isn't the parent's is an error
+    bad = merge(data, Dict("mfsbook_set-0-author" => string(author.id + 1000)))
+    formset = AuthorBooksFormSet(bad; instance = author)
+    @test !is_valid(formset) && Juango.errors(formset)[1][:author] == ["The inline value did not match the parent instance."]
+    # test_inline_formsets_save_as_new: the rows are new objects for another parent
+    data = Dict("mfsbook_set-TOTAL_FORMS" => "3", "mfsbook_set-INITIAL_FORMS" => "2", "mfsbook_set-MAX_NUM_FORMS" => "",
+                "mfsbook_set-0-id" => string(book1.id), "mfsbook_set-0-title" => "Les Fleurs du Mal",
+                "mfsbook_set-1-id" => string(book2.id), "mfsbook_set-1-title" => "Les Paradis Artificiels", "mfsbook_set-2-title" => "")
+    @test is_valid(AuthorBooksFormSet(data; instance = MfsAuthor(), save_as_new = true))
+    new_author = create(MfsAuthor; name = "Charles Baudelaire")
+    saved = save!(AuthorBooksFormSet(data; instance = new_author, save_as_new = true))
+    @test length(saved) == 2 && [b.title for b in saved] == ["Les Fleurs du Mal", "Les Paradis Artificiels"] &&
+          all(b -> b.author.id == new_author.id && !(b.id in (book1.id, book2.id)), saved)
+    @test count(filter(objects(MfsBook); author)) == 2                        # (the old author's are as they were)
+    # a custom prefix, and no parent
+    formset = AuthorBooksFormSet(; prefix = "test")
+    @test length(formset.forms) == 2 && html_eq(as_p(formset.forms[1]), mfs_book_p("test", 0, nothing)) && html_eq(as_p(formset.forms[2]), mfs_book_p("test", 1, nothing))
+  end
+end
+
+@testset "django model_formsets: ModelFormsetTest (inline formsets with custom keys and inheritance)" begin
+  port_block() do
+    author = create(MfsAuthor; name = "Charles Baudelaire")
+    # test_inline_formsets_with_custom_pk: the primary key is a field on the form
+    AuthorBooksFormSet2 = inlineformset_factory(MfsAuthor, MfsBookWithCustomPK; can_delete = false, extra = 1, fields = "__all__")
+    formset = AuthorBooksFormSet2(; instance = author)
+    p = "mfsbookwithcustompk_set"
+    @test length(formset.forms) == 1
+    @test html_eq(as_p(formset.forms[1]),
+                  "<p><label for=\"id_$p-0-my_pk\">My pk:</label> <input id=\"id_$p-0-my_pk\" type=\"number\" name=\"$p-0-my_pk\" step=\"1\"></p>" *
+                  "<p><label for=\"id_$p-0-title\">Title:</label> <input id=\"id_$p-0-title\" type=\"text\" name=\"$p-0-title\" maxlength=\"100\">" *
+                  "<input type=\"hidden\" name=\"$p-0-author\" value=\"$(author.id)\" id=\"id_$p-0-author\"></p>")
+    formset = AuthorBooksFormSet2(Dict("$p-TOTAL_FORMS" => "1", "$p-INITIAL_FORMS" => "0", "$p-MAX_NUM_FORMS" => "",
+                                       "$p-0-my_pk" => "77777", "$p-0-title" => "Les Fleurs du Mal"); instance = author)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1 && saved[1].my_pk == Decimal("77777")
+    @test only(collect(filter(objects(MfsBookWithCustomPK); author))).title == "Les Fleurs du Mal"
+    # test_inline_formsets_with_multi_table_inheritance (Juango's row has a hidden id, Django's a book_ptr)
+    AuthorBooksFormSet3 = inlineformset_factory(MfsAuthor, MfsAlternateBook; can_delete = false, extra = 1, fields = "__all__")
+    formset = AuthorBooksFormSet3(; instance = author)
+    p = "mfsalternatebook_set"
+    @test length(formset.forms) == 1
+    @test html_eq(as_p(formset.forms[1]),
+                  "<p><label for=\"id_$p-0-title\">Title:</label> <input id=\"id_$p-0-title\" type=\"text\" name=\"$p-0-title\" maxlength=\"100\"></p>" *
+                  "<p><label for=\"id_$p-0-notes\">Notes:</label> <input id=\"id_$p-0-notes\" type=\"text\" name=\"$p-0-notes\" maxlength=\"100\">" *
+                  "<input type=\"hidden\" name=\"$p-0-author\" value=\"$(author.id)\" id=\"id_$p-0-author\">" *
+                  "<input type=\"hidden\" name=\"$p-0-id\" id=\"id_$p-0-id\"></p>")
+    formset = AuthorBooksFormSet3(Dict("$p-TOTAL_FORMS" => "1", "$p-INITIAL_FORMS" => "0", "$p-MAX_NUM_FORMS" => "",
+                                       "$p-0-title" => "Flowers of Evil", "$p-0-notes" => "English translation of Les Fleurs du Mal"); instance = author)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1 && saved[1].title == "Flowers of Evil" && saved[1].notes == "English translation of Les Fleurs du Mal"
+    # test_inline_formsets_with_nullable_unique_together: a null in a unique_together doesn't clash
+    AuthorBooksFormSet4 = inlineformset_factory(MfsAuthor, MfsBookWithOptionalAltEditor; can_delete = false, extra = 2, fields = "__all__")
+    p = "mfsbookwithoptionalalteditor_set"
+    formset = AuthorBooksFormSet4(Dict("$p-TOTAL_FORMS" => "2", "$p-INITIAL_FORMS" => "0", "$p-MAX_NUM_FORMS" => "",
+                                       "$p-0-author" => string(author.id), "$p-0-title" => "Les Fleurs du Mal",
+                                       "$p-1-author" => string(author.id), "$p-1-title" => "Les Fleurs du Mal"); instance = author)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 2 && all(b -> b.author.id == author.id && b.title == "Les Fleurs du Mal", saved)
+  end
+end
+
+# Django's PoemForm whose save() renames the poem
+mfs_poem_form(; kw...) = (f = ModelForm(MfsPoem; fields = "__all__", kw...); f.name = "MfsJerkPoemForm"; f)
+Juango.form_save_hook(f::Juango.Form, ::Val{:MfsJerkPoemForm}, obj) = (obj.name = "Brooklyn Bridge"; nothing)
+
+@testset "django model_formsets: ModelFormsetTest (inline formsets: custom save, custom queryset)" begin
+  port_block() do
+    AuthorBooksFormSet = inlineformset_factory(MfsAuthor, MfsBook; can_delete = false, extra = 2, fields = "__all__")
+    author = create(MfsAuthor; name = "Charles Baudelaire")
+    book1 = create(MfsBook; author, title = "Les Paradis Artificiels")
+    book2 = create(MfsBook; author, title = "Les Fleurs du Mal")
+    book3 = create(MfsBook; author, title = "Flowers of Evil")
+    # test_inline_formsets_with_custom_save_method
+    PoemFormSet = inlineformset_factory(MfsPoet, MfsPoem; form = mfs_poem_form, fields = "__all__")
+    poet = create(MfsPoet; name = "Vladimir Mayakovsky")
+    formset = PoemFormSet(Dict("mfspoem_set-TOTAL_FORMS" => "3", "mfspoem_set-INITIAL_FORMS" => "0", "mfspoem_set-MAX_NUM_FORMS" => "",
+                               "mfspoem_set-0-name" => "The Cloud in Trousers", "mfspoem_set-1-name" => "I", "mfspoem_set-2-name" => ""); instance = poet)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 2 && all(p -> p.name == "Brooklyn Bridge", saved)
+    # a custom queryset for the inline formset
+    p = "mfsbook_set"
+    custom_qs = order_by(objects(MfsBook), "-title")
+    formset = AuthorBooksFormSet(; instance = author, queryset = custom_qs)
+    @test length(formset.forms) == 5
+    bs = [book1, book2, book3]
+    @test all(i -> html_eq(as_p(formset.forms[i]), mfs_book_p(p, i - 1, author.id; title = bs[i].title, id = bs[i].id)), 1:3)
+    @test html_eq(as_p(formset.forms[4]), mfs_book_p(p, 3, author.id)) && html_eq(as_p(formset.forms[5]), mfs_book_p(p, 4, author.id))
+    data = Dict("$p-TOTAL_FORMS" => "5", "$p-INITIAL_FORMS" => "3", "$p-MAX_NUM_FORMS" => "",
+                "$p-0-id" => string(book1.id), "$p-0-title" => "Les Paradis Artificiels", "$p-1-id" => string(book2.id), "$p-1-title" => "Les Fleurs du Mal",
+                "$p-2-id" => string(book3.id), "$p-2-title" => "Flowers of Evil", "$p-3-title" => "Revue des deux mondes", "$p-4-title" => "")
+    @test is_valid(AuthorBooksFormSet(data; instance = author, queryset = custom_qs))
+    custom_qs = filter(objects(MfsBook); title__startswith = "F")
+    formset = AuthorBooksFormSet(; instance = author, queryset = custom_qs)
+    @test html_eq(as_p(formset.forms[1]), mfs_book_p(p, 0, author.id; title = "Flowers of Evil", id = book3.id)) &&
+          html_eq(as_p(formset.forms[2]), mfs_book_p(p, 1, author.id)) && html_eq(as_p(formset.forms[3]), mfs_book_p(p, 2, author.id))
+    data = Dict("$p-TOTAL_FORMS" => "3", "$p-INITIAL_FORMS" => "1", "$p-MAX_NUM_FORMS" => "", "$p-0-id" => string(book3.id),
+                "$p-0-title" => "Flowers of Evil", "$p-1-title" => "Revue des deux mondes", "$p-2-title" => "")
+    @test is_valid(AuthorBooksFormSet(data; instance = author, queryset = custom_qs))
+  end
+end
+
+@model struct MfsLocation
+    place = ForeignKey(MfsPlace, on_delete = :CASCADE, unique = true)
+    lat = CharField(max_length = 100)
+    lon = CharField(max_length = 100)
+    Meta(table = "mfs_location")
+end
+@model struct MfsProduct
+    slug = SlugField(unique = true)
+    Meta(table = "mfs_product", verbose_name = "product")
+end
+@model struct MfsPrice
+    price = DecimalField(max_digits = 10, decimal_places = 2)
+    quantity = PositiveIntegerField()
+    Meta(table = "mfs_price", unique_together = [(:price, :quantity)], verbose_name = "price")
+end
+@model struct MfsRepository
+    name = CharField(max_length = 25)
+    Meta(table = "mfs_repository")
+end
+@model struct MfsRevision
+    repository = ForeignKey(MfsRepository, on_delete = :CASCADE)
+    revision = CharField(max_length = 40)
+    Meta(table = "mfs_revision", unique_together = [(:repository, :revision)], verbose_name = "revision")
+end
+@model struct MfsPerson
+    name = CharField(max_length = 128)
+    Meta(table = "mfs_person")
+end
+@model struct MfsMembership
+    person = ForeignKey(MfsPerson, on_delete = :CASCADE)
+    date_joined = DateTimeField(default = () -> Dates.now())
+    karma = IntegerField()
+    Meta(table = "mfs_membership")
+end
+@model struct MfsTeam
+    name = CharField(max_length = 100)
+    Meta(table = "mfs_team")
+end
+@model struct MfsPlayer
+    team = ForeignKey(MfsTeam, on_delete = :SET_NULL, null = true)
+    name = CharField(max_length = 100)
+    Meta(table = "mfs_player")
+end
+redirect_stdout(devnull) do
+    ms = [MfsLocation, MfsProduct, MfsPrice, MfsRepository, MfsRevision, MfsPerson, MfsMembership, MfsTeam, MfsPlayer]
+    Juango.sync_models!(ms); append!(PORT_MODELS, ms)
+end
+
+@testset "django model_formsets: ModelFormsetTest (unique checks, limits, callable defaults)" begin
+  port_block() do
+    # test_inline_formsets_with_wrong_fk_name (#23451)
+    @test (try inlineformset_factory(MfsAuthor, MfsBook; fields = "__all__", fk = :title); "" catch e; e isa ArgumentError ? e.msg : rethrow() end) ==
+          "fk_name 'title' is not a ForeignKey to 'MfsAuthor'."
+    # test_unique_true_enforces_max_num_one: a unique foreign key has at most one row
+    place = create(MfsPlace; name = "Giordanos", city = "Chicago")
+    FormSet = inlineformset_factory(MfsPlace, MfsLocation; can_delete = false, fields = "__all__")
+    formset = FormSet(; instance = place)
+    p = "mfslocation_set"
+    @test formset.max_num == 1 && length(formset.forms) == 1
+    @test html_eq(as_p(formset.forms[1]),
+                  "<p><label for=\"id_$p-0-lat\">Lat:</label> <input id=\"id_$p-0-lat\" type=\"text\" name=\"$p-0-lat\" maxlength=\"100\"></p>" *
+                  "<p><label for=\"id_$p-0-lon\">Lon:</label> <input id=\"id_$p-0-lon\" type=\"text\" name=\"$p-0-lon\" maxlength=\"100\">" *
+                  "<input type=\"hidden\" name=\"$p-0-place\" value=\"$(place.id)\" id=\"id_$p-0-place\">" *
+                  "<input type=\"hidden\" name=\"$p-0-id\" id=\"id_$p-0-id\"></p>")
+    # test_unique_validation
+    FormSet = modelformset_factory(MfsProduct; fields = "__all__", extra = 1)
+    data = Dict("form-TOTAL_FORMS" => "1", "form-INITIAL_FORMS" => "0", "form-MAX_NUM_FORMS" => "", "form-0-slug" => "car-red")
+    formset = FormSet(data)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1 && saved[1].slug == "car-red"
+    formset = FormSet(data)
+    @test !is_valid(formset) && Juango.errors(formset) == [Dict(:slug => ["Product with this Slug already exists."])]
+    # test_modelformset_validate_max_flag (MAX_NUM_FORMS in the data is ignored)
+    data = Dict("form-TOTAL_FORMS" => "2", "form-INITIAL_FORMS" => "0", "form-MAX_NUM_FORMS" => "2",
+                "form-0-price" => "12.00", "form-0-quantity" => "1", "form-1-price" => "24.00", "form-1-quantity" => "2")
+    formset = modelformset_factory(MfsPrice; fields = "__all__", extra = 1, max_num = 1, validate_max = true)(data)
+    @test !is_valid(formset) && non_form_errors(formset) == ["Please submit at most 1 form."]
+    @test is_valid(modelformset_factory(MfsPrice; fields = "__all__", extra = 1, max_num = 1)(data))
+    # test_modelformset_min_num_equals_max_num_less_than, _more_than
+    minmax = modelformset_factory(MfsProduct; fields = "__all__", extra = 1, max_num = 2, validate_max = true, min_num = 2, validate_min = true)
+    formset = minmax(Dict("form-TOTAL_FORMS" => "3", "form-INITIAL_FORMS" => "0", "form-MAX_NUM_FORMS" => "2",
+                          "form-0-slug" => "car-red", "form-1-slug" => "car-blue", "form-2-slug" => "car-black"))
+    @test !is_valid(formset) && non_form_errors(formset) == ["Please submit at most 2 forms."]
+    formset = minmax(Dict("form-TOTAL_FORMS" => "1", "form-INITIAL_FORMS" => "0", "form-MAX_NUM_FORMS" => "2", "form-0-slug" => "car-red"))
+    @test !is_valid(formset) && non_form_errors(formset) == ["Please submit at least 2 forms."]
+    # test_unique_together_validation
+    FormSet = modelformset_factory(MfsPrice; fields = "__all__", extra = 1)
+    data = Dict("form-TOTAL_FORMS" => "1", "form-INITIAL_FORMS" => "0", "form-MAX_NUM_FORMS" => "", "form-0-price" => "12.00", "form-0-quantity" => "1")
+    formset = FormSet(data)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1 && saved[1].price == Decimal("12.00") && saved[1].quantity == 1
+    formset = FormSet(data)
+    @test !is_valid(formset) && Juango.errors(formset) == [Dict(:__all__ => ["Price with this Price and Quantity already exists."])]
+    # test_unique_together_with_inlineformset_factory (#8882, #9494: checked with the parent even when the form leaves the key out)
+    repository = create(MfsRepository; name = "Test Repo")
+    FormSet = inlineformset_factory(MfsRepository, MfsRevision; extra = 1, fields = "__all__")
+    p = "mfsrevision_set"
+    data = Dict("$p-TOTAL_FORMS" => "1", "$p-INITIAL_FORMS" => "0", "$p-MAX_NUM_FORMS" => "", "$p-0-repository" => string(repository.id),
+                "$p-0-revision" => "146239817507f148d448db38840db7c3cbf47c76", "$p-0-DELETE" => "")
+    formset = FormSet(data; instance = repository)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1 && saved[1].repository.id == repository.id && saved[1].revision == "146239817507f148d448db38840db7c3cbf47c76"
+    formset = FormSet(data; instance = repository)
+    @test !is_valid(formset) && Juango.errors(formset) == [Dict(:__all__ => ["Revision with this Repository and Revision already exists."])]
+    @test !is_valid(inlineformset_factory(MfsRepository, MfsRevision; fields = (:revision,), extra = 1)(data; instance = repository))
+    # test_callable_defaults (#7975): a callable default's initial value is in a hidden input, so an untouched extra form isn't changed
+    person = create(MfsPerson; name = "Ringo")
+    FormSet = inlineformset_factory(MfsPerson, MfsMembership; can_delete = false, extra = 1, fields = "__all__")
+    formset = FormSet(; instance = person)
+    @test length(formset.forms) == 1
+    html = as_p(formset.forms[1]).s
+    @test occursin("name=\"initial-mfsmembership_set-0-date_joined\"", html)
+    @test occursin(Regex("name=\"mfsmembership_set-0-person\"[^>]* value=\"$(person.id)\""), html)
+    now_ = Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS")
+    p = "mfsmembership_set"
+    data = Dict("$p-TOTAL_FORMS" => "1", "$p-INITIAL_FORMS" => "0", "$p-MAX_NUM_FORMS" => "", "$p-0-date_joined" => now_,
+                "initial-$p-0-date_joined" => now_, "$p-0-karma" => "")
+    @test is_valid(FormSet(data; instance = person))
+    later = Dates.format(Dates.now() + Day(1), "yyyy-mm-dd HH:MM:SS")
+    @test !is_valid(FormSet(merge(data, Dict("$p-0-date_joined" => later)); instance = person))
+    # test_inlineformset_factory_with_null_fk (#9462)
+    team = create(MfsTeam; name = "Red Vipers")
+    create(MfsPlayer; name = "Timmy")
+    create(MfsPlayer; name = "Bobby", team)
+    PlayerInlineFormSet = inlineformset_factory(MfsTeam, MfsPlayer; fields = "__all__")
+    @test isempty(Juango.get_queryset(PlayerInlineFormSet()))
+    players = Juango.get_queryset(PlayerInlineFormSet(; instance = team))
+    @test length(players) == 1 && players[1].team.id == team.id && players[1].name == "Bobby"
+  end
+end
+
+@testset "django model_formsets: ModelFormsetTest (custom primary keys)" begin
+  port_block() do
+    # test_custom_pk: a model's own primary key is a field on the form, with no hidden id
+    formset = modelformset_factory(MfsCustomPrimaryKey; fields = "__all__")()
+    @test length(formset.forms) == 1
+    @test html_eq(as_p(formset.forms[1]),
+                  "<p><label for=\"id_form-0-my_pk\">My pk:</label> <input id=\"id_form-0-my_pk\" type=\"text\" name=\"form-0-my_pk\" maxlength=\"10\"></p>" *
+                  "<p><label for=\"id_form-0-some_field\">Some field:</label> <input id=\"id_form-0-some_field\" type=\"text\" name=\"form-0-some_field\" maxlength=\"100\"></p>")
+    # (Django's Owner has an AutoField named auto_id; Juango's automatic key is always id)
+    place = create(MfsPlace; name = "Giordanos", city = "Chicago")
+    FormSet = inlineformset_factory(MfsPlace, MfsOwner; extra = 2, can_delete = false, fields = "__all__")
+    p = "mfsowner_set"
+    owner_p(i; name = nothing, id = nothing) =
+        "<p><label for=\"id_$p-$i-name\">Name:</label> <input id=\"id_$p-$i-name\" type=\"text\" name=\"$p-$i-name\"" *
+        (name === nothing ? "" : " value=\"$name\"") * " maxlength=\"100\">" *
+        "<input type=\"hidden\" name=\"$p-$i-place\" value=\"$(place.id)\" id=\"id_$p-$i-place\">" *
+        "<input type=\"hidden\" name=\"$p-$i-id\"" * (id === nothing ? "" : " value=\"$id\"") * " id=\"id_$p-$i-id\"></p>"
+    formset = FormSet(; instance = place)
+    @test length(formset.forms) == 2 && html_eq(as_p(formset.forms[1]), owner_p(0)) && html_eq(as_p(formset.forms[2]), owner_p(1))
+    formset = FormSet(Dict("$p-TOTAL_FORMS" => "2", "$p-INITIAL_FORMS" => "0", "$p-MAX_NUM_FORMS" => "",
+                           "$p-0-id" => "", "$p-0-name" => "Joe Perry", "$p-1-id" => "", "$p-1-name" => ""); instance = place)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1 && saved[1].name == "Joe Perry" && saved[1].place.name == "Giordanos"
+    owner1 = saved[1]
+    formset = FormSet(; instance = place)
+    @test length(formset.forms) == 3 && html_eq(as_p(formset.forms[1]), owner_p(0; name = "Joe Perry", id = owner1.id)) &&
+          html_eq(as_p(formset.forms[2]), owner_p(1)) && html_eq(as_p(formset.forms[3]), owner_p(2))
+    formset = FormSet(Dict("$p-TOTAL_FORMS" => "3", "$p-INITIAL_FORMS" => "1", "$p-MAX_NUM_FORMS" => "",
+                           "$p-0-id" => string(owner1.id), "$p-0-name" => "Joe Perry", "$p-1-id" => "", "$p-1-name" => "Jack Berry",
+                           "$p-2-id" => "", "$p-2-name" => ""); instance = place)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1 && saved[1].name == "Jack Berry" && saved[1].place.name == "Giordanos"
+    # a one-to-one child: one row at most (Django's OwnerProfile has the key as its primary key; Juango's has an id)
+    FormSet = inlineformset_factory(MfsOwner, MfsOwnerProfile; max_num = 1, can_delete = false, fields = "__all__")
+    p = "mfsownerprofile"
+    profile_p(age; id = nothing) = "<p><label for=\"id_$p-0-age\">Age:</label> <input type=\"number\" name=\"$p-0-age\"" *
+        (age === nothing ? "" : " value=\"$age\"") * " id=\"id_$p-0-age\" min=\"0\">" *
+        "<input type=\"hidden\" name=\"$p-0-owner\" value=\"$(owner1.id)\" id=\"id_$p-0-owner\">" *
+        "<input type=\"hidden\" name=\"$p-0-id\"" * (id === nothing ? "" : " value=\"$id\"") * " id=\"id_$p-0-id\"></p>"
+    formset = FormSet(; instance = owner1)
+    @test formset.max_num == 1 && length(formset.forms) == 1 && html_eq(as_p(formset.forms[1]), profile_p(nothing))
+    formset = FormSet(Dict("$p-TOTAL_FORMS" => "1", "$p-INITIAL_FORMS" => "0", "$p-MAX_NUM_FORMS" => "1", "$p-0-owner" => "", "$p-0-age" => "54");
+                      instance = owner1)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1 && saved[1].owner.id == owner1.id && saved[1].age == 54
+    profile1 = saved[1]
+    formset = FormSet(; instance = owner1)
+    @test length(formset.forms) == 1 && html_eq(as_p(formset.forms[1]), profile_p(54; id = profile1.id))
+    formset = FormSet(Dict("$p-TOTAL_FORMS" => "1", "$p-INITIAL_FORMS" => "1", "$p-MAX_NUM_FORMS" => "1", "$p-0-owner" => string(owner1.id),
+                           "$p-0-id" => string(profile1.id), "$p-0-age" => "55"); instance = owner1)
+    @test is_valid(formset)
+    saved = save!(formset)
+    @test length(saved) == 1 && saved[1].owner.id == owner1.id && saved[1].age == 55
+  end
+end

@@ -47,6 +47,7 @@ mutable struct FormSet
     error_messages::Dict{String,String}   # too_many_forms, too_few_forms, missing_management_form
     absolute_max::Int            # the most forms a bound formset makes, whatever TOTAL_FORMS says
     can_delete_extra::Bool       # false: only the initial forms get a DELETE box
+    saved_forms::Vector{Form}    # model formsets: the forms save!(fs; commit = false) saved, for save_m2m!(fs)
 end
 
 "The default `max_num`; `absolute_max` defaults to twice it (Django's DEFAULT_MAX_NUM)."
@@ -101,7 +102,7 @@ function instance_for(fs::FormSet, i)
     i < initial_form_count(fs) || return nothing
     if fs.data !== nothing
         # bound: match the submitted id against the queryset, never trust it blindly
-        raw = get(fs.data, "$(fs.prefix)-$i-id", nothing)
+        raw = get(fs.data, "$(fs.prefix)-$i-$(row_pk_name(fs))", nothing)
         raw isa AbstractVector && (raw = isempty(raw) ? nothing : first(raw))
         id = raw === nothing ? nothing : parse_pk(fs.model, strip(string(raw)))
         return id === nothing ? nothing : findfirst_instance(fs, id)
@@ -109,13 +110,27 @@ function instance_for(fs::FormSet, i)
     i < length(fs.instances) ? fs.instances[i+1] : nothing
 end
 findfirst_instance(fs, id) = (j = findfirst(o -> o.id == id, fs.instances); j === nothing ? nothing : fs.instances[j])
+"The field naming a model formset row's object: `id`, or a model's own primary key field (which is on the form)."
+row_pk_name(fs::FormSet) = natural_pk(fs.model) ? pk_fields(fs.model)[1].name : :id
 
 function add_formset_fields!(fs::FormSet, f::Form, i)
-    if fs.model !== nothing
+    if fs.model !== nothing && row_pk_name(fs) === :id     # (a model's own primary key field is on the form already)
         idf = IntegerField(blank = true, widget = :hidden, required = false)
         idf.name = :id
         f.instance === nothing || (f.initial[:id] = f.instance.id)
         pushfirst!(f.fields, idf)
+    end
+    # an inline formset's row has the parent's key in a hidden input, as Django's InlineForeignKeyField:
+    # a different value is an error, and the object gets the parent whatever is sent
+    if fs.fk !== nothing
+        filter!(x -> x.name !== fs.fk.name, f.fields)      # (a row form's own field for the key is replaced, as Django's)
+        pid = fs.parent === nothing || fs.parent.id === nothing ? "" : string(fs.parent.id)
+        bad = gettext("The inline value did not match the parent instance.")
+        ff = CharField(max_length = nothing, widget = :hidden, required = false, validators = Any[v -> (v == "" || v == pid) || bad])
+        ff.name = fs.fk.name
+        ff.form = Dict{Symbol,Any}(:inline_fk => fs.parent)
+        f.initial[fs.fk.name] = pid
+        pushfirst!(f.fields, ff)            # (its hidden input before the row's id, as Django's)
     end
     if fs.can_order
         o = IntegerField(blank = true, required = false, label = "Order")
@@ -298,8 +313,15 @@ function new_formset(make_form; prefix, data, initial, instances, extra, min_num
             Form[], String[], false, model, fk, parent, Any[], Any[], Any[], string(name), auto_id,
             Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(something(form_kwargs, Dict()))),
             Dict{String,String}(string(k) => string(v) for (k, v) in pairs_of(something(error_messages, Dict()))),
-            absolute_max, can_delete_extra)
+            absolute_max, can_delete_extra, Form[])
 end
+"The forms for existing objects or initial data (Django's `initial_forms`)."
+initial_forms(fs::FormSet) = (fs_ = build_forms!(fs); fs_[1:min(initial_form_count(fs), length(fs_))])
+"The forms after the initial ones (Django's `extra_forms`)."
+extra_forms(fs::FormSet) = (fs_ = build_forms!(fs); fs_[min(initial_form_count(fs), length(fs_))+1:end])
+"A model formset's objects, those its initial forms edit (Django's `get_queryset()`)."
+get_queryset(fs::FormSet) = fs.instances
+
 "The name a formset shows as: the form's name and \"FormSet\" (Django's), else \"FormSet\"."
 formset_name(F) = (n = try string(nameof(F)) catch; "" end; isempty(n) || startswith(n, "#") ? "FormSet" : n * "FormSet")
 "Django's check: `absolute_max` may not be below `max_num`."
@@ -382,16 +404,38 @@ function inlineformset_factory(P::Type, T::Type; fk = nothing, fields = nothing,
                                widgets = Dict{Symbol,Symbol}(), labels = Dict{Symbol,String}(), form = nothing,
                                help_texts = Dict{Symbol,String}(), field_classes = Dict{Symbol,Any}(),
                                extra_fields = Pair{Symbol,Any}[], formfield_callback = nothing, error_messages = Dict{Symbol,Any}())
+    if fk !== nothing         # (as Django's message for a fk_name that isn't a key to the parent)
+        g = findfield(modelmeta(T), Symbol(fk))
+        (g === nothing || g.kind !== :fk || !(P in lineage(related_model(g)))) &&
+            throw(ArgumentError("fk_name '$fk' is not a ForeignKey to '$(nameof(P))'."))
+    end
     fks = [f for f in all_fields(T) if f.kind === :fk && P in lineage(related_model(f)) && (fk === nothing || f.name === Symbol(fk))]
     length(fks) == 1 || throw(ArgumentError("$T needs exactly one foreign key to $P (pass fk=:name), found $(length(fks))"))
     fkf = only(fks)
+    (fkf.unique || fkf.one_to_one) && (max_num = 1)        # (one child at most, as Django's)
     excl = vcat(Symbol.(collect(exclude)), [fkf.name])
-    flds = fields === nothing ? nothing : [Symbol(f) for f in fields if Symbol(f) !== fkf.name]
+    flds = all_fields_option(fields) ? fields : [Symbol(f) for f in fields if Symbol(f) !== fkf.name]
     make = row_form(T, form; fields = flds, exclude = excl, widgets, labels, help_texts, field_classes, extra_fields,
                     formfield_callback, error_messages)
-    function (data = nothing; instance = nothing, prefix = string(reverse_name(fkf)), queryset = nothing)
+    # (a multi-table child's inherited key: the child's own name, as Django's alternatebook_set)
+    default_prefix = fkf.model === T ? string(reverse_name(fkf)) : lowercase(modelmeta(T).name) * "_set"
+    function (data = nothing; instance = nothing, prefix = default_prefix, queryset = nothing, save_as_new::Bool = false)
+        # (a queryset given is narrowed to the parent's objects too, as Django's)
         qs = instance === nothing || instance.id === nothing ? none(T) :
-             something(queryset, filter(objects(T), Q(attname(fkf) => instance.id)))
+             filter(something(queryset, objects(T)), Q(attname(fkf) => instance.id))
+        # save_as_new: every row is a new object for this parent (the admin's "save as new"); the data isn't changed
+        if save_as_new
+            qs = none(T)
+            if data !== nothing
+                d = Dict{String,Any}(k => data isa QueryDict ? getlist(data, k) : v for (k, v) in data)
+                foreach(k -> d[k] isa AbstractVector && length(d[k]) == 1 && (d[k] = d[k][1]), collect(keys(d)))
+                d["$prefix-INITIAL_FORMS"] = "0"
+                for k in collect(keys(d))
+                    endswith(k, "-id") && startswith(k, prefix * "-") && delete!(d, k)
+                end
+                data = d
+            end
+        end
         new_formset(make;
                     prefix = prefix, data = data, initial = [], instances = collect(qs), extra = extra, min_num = min_num,
                     max_num = max_num, validate_min = validate_min, validate_max = validate_max, can_delete = can_delete,
@@ -408,7 +452,7 @@ are also available as `formset.new_objects`, `changed_objects` and `deleted_obje
 function save!(fs::FormSet; commit = true)
     fs.model === nothing && error("save! needs a model formset")
     is_valid(fs) || error("cannot save a formset with errors")
-    empty!(fs.new_objects); empty!(fs.changed_objects); empty!(fs.deleted_objects)
+    empty!(fs.new_objects); empty!(fs.changed_objects); empty!(fs.deleted_objects); empty!(fs.saved_forms)
     saved = Any[]
     atomic() do
         for (i, f) in enumerate(fs.forms)
@@ -424,6 +468,8 @@ function save!(fs::FormSet; commit = true)
             if commit
                 save!(obj)
                 save_m2m!(f)
+            else
+                push!(fs.saved_forms, f)          # (their many-to-many fields: save_m2m!(fs) once the objects are saved)
             end
             push!(isnew ? fs.new_objects : fs.changed_objects, obj)
             push!(saved, obj)
@@ -431,3 +477,11 @@ function save!(fs::FormSet; commit = true)
     end
     saved
 end
+
+"""
+    save_m2m!(formset)
+
+After `save!(formset; commit = false)` and saving the objects, save their many-to-many fields
+(Django's `formset.save_m2m()`).
+"""
+save_m2m!(fs::FormSet) = (foreach(save_m2m!, fs.saved_forms); fs)

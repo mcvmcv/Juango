@@ -412,6 +412,7 @@ Base.@nospecializeinfer function construct_instance(f::Form, @nospecialize(obj);
             continue
         end
         mf.kind in FILE_KINDS && v isa AbstractString && (v = file_from_db(mf, v))       # (a stored file's name)
+        i !== nothing && (p = form_option(f.fields[i], :inline_fk)) !== false && (v = p)  # (an inline formset's parent)
         setproperty!(obj, k, v)
     end
     obj
@@ -831,6 +832,8 @@ function model_form_unique_errors!(f::Form)
     for (k, v) in f.cleaned_data
         mf = k === :__all__ ? nothing : findfield(meta, k)
         (mf === nothing || mf.kind === :m2m || mf.kind in FILE_KINDS) && continue
+        ff = findfirst(x -> x.name === k, f.fields)
+        ff !== nothing && (p = form_option(f.fields[ff], :inline_fk)) !== false && (v = p)     # (an inline formset's parent)
         setproperty!(obj, k, v)
     end
     formfields = Dict{Symbol,Field}(x.name => x for x in f.fields)
@@ -1016,6 +1019,7 @@ function changed_fields(f::Form)
     f.data === nothing && return out
     for fld in f.fields
         fld.name in (:DELETE, :ORDER, :id) && continue
+        form_option(fld, :inline_fk) === false || continue      # (an inline formset's parent key never changes, as Django's)
         if fld.kind in FILE_KINDS
             (file_upload(f, fld) !== nothing || file_cleared(f, fld)) && push!(out, fld.name)
             continue

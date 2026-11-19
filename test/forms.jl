@@ -110,7 +110,8 @@ end
     create(Article; title = "existing", author = a1)
     fs = ArtFS(; instance = a1)
     @test length(fs) == 3 && fs.prefix == "articles"
-    @test !occursin("articles-0-author", string(as_p(fs)))
+    # (the parent's key is in a hidden input, as Django's InlineForeignKeyField)
+    @test occursin(Regex("<input type=\"hidden\" name=\"articles-0-author\"[^>]* value=\"$(a1.id)\""), string(as_p(fs)))
     existing = only(filter(Article; author = a1))
     p2 = Dict("articles-TOTAL_FORMS" => "3", "articles-INITIAL_FORMS" => "1",
               "articles-0-id" => string(existing.id), "articles-0-title" => "existing (edited)",
