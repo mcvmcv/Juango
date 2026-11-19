@@ -82,6 +82,7 @@ function default_settings()
         :LOCALE_PATHS => String[],
         :LANGUAGE_COOKIE_NAME => "juango_language",
         :USE_THOUSAND_SEPARATOR => false,
+        :USE_BLANK_CHOICE_DASH => false,     # true: "---------" as the empty choice (Django 6.1's transitional setting), else "- Select an option -"
         :DATE_INPUT_FORMATS => nothing,                # strftime formats forms accept, for languages without their own (nothing: Django's English ones)
         :DATETIME_INPUT_FORMATS => nothing,            # nothing: each date format, with each time format
         :TIME_INPUT_FORMATS => nothing,                # nothing: %H:%M:%S, %H:%M:%S.%f, %H:%M

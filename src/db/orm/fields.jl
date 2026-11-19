@@ -217,12 +217,20 @@ normchoices(cs) = any(is_group, cs) ?
     Pair{Any,Any}[choice_pair(c) for c in cs]
 
 """
+    get_blank_choice_label() -> String
+
+The label of a select's empty choice (Django 6.1's): "- Select an option -" (translated), or
+"---------" with the `USE_BLANK_CHOICE_DASH` setting.
+"""
+get_blank_choice_label() = get(settings, :USE_BLANK_CHOICE_DASH, false) === true ? "---------" : gettext("- Select an option -")
+
+"""
     get_choices(field; include_blank = true, limit_choices_to = nothing, ordering = ())
 
 The choices a form would offer for a field, as `value => label` pairs (Django's `Field.get_choices`):
 its own choices, or for a foreign key the related objects (`pk => string(obj)`), filtered by
 `limit_choices_to` and ordered by `ordering` (else the related model's ordering). A blank choice
-`"" => "---------"` comes first with `include_blank`, unless the choices have one.
+(`"" => get_blank_choice_label()`) comes first with `include_blank`, unless the choices have one.
 """
 function get_choices(f::Field; include_blank::Bool = true, limit_choices_to = nothing, ordering = ())
     out = Pair{Any,Any}[]
@@ -236,7 +244,7 @@ function get_choices(f::Field; include_blank::Bool = true, limit_choices_to = no
         cs === nothing || append!(out, Any[c isa ChoiceGroup ? (c.label => c.choices) : c for c in cs])
     end
     has_blank = any(c -> c.first == "" || (c.second isa AbstractVector && any(x -> x.first == "", c.second)), out)
-    include_blank && !has_blank ? vcat(Pair{Any,Any}["" => "---------"], out) : out
+    include_blank && !has_blank ? vcat(Pair{Any,Any}["" => get_blank_choice_label()], out) : out
 end
 
 "A field's choices in groups: `(group label or nothing, value => label pairs)`."

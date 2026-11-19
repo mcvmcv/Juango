@@ -2109,7 +2109,7 @@ unknown_fields(f) = try f(); "" catch e; e isa Juango.LookupError ? e.msg : reth
     # test_blank_foreign_key_with_radio, test_non_blank_foreign_key_with_radio
     writer = create(MfWriter; name = "Joe Doe")
     form = ModelForm(MfBook; fields = [:author], widgets = Dict(:author => :radio))
-    @test [(w.value, w.label) for w in form[:author]] == [("", "---------"), (string(writer.id), "Joe Doe")]
+    @test [(w.value, w.label) for w in form[:author]] == [("", "- Select an option -"), (string(writer.id), "Joe Doe")]
     form = ModelForm(MfAward; fields = [:character], widgets = Dict(:character => :radio))
     @test [(w.value, w.label) for w in form[:character]] == [(string(char.id), "user")]
     # test_save_blank_false_with_required_false
@@ -2395,18 +2395,18 @@ end
 end
 
 # Django's expected HTML for an ArticleForm, with Juango's differences: dates are `type="date"` inputs, and the
-# empty choice is "---------" (Django 6.1's "- Select an option -" is #244)
+# empty choice is Django 6.1's "- Select an option -" (#244)
 function mf_article_ul(writers, cats; headline = "", slug = "", pub_date = "", writer = nothing, article = "", chosen = [], ids = false)
     v(x) = isempty(x) ? "" : " value=\"$x\""
     opt(val, label, sel) = "<option value=\"$val\"" * (sel ? " selected" : "") * ">" * Juango.escape_html(label) * "</option>"
     "<li>Headline: <input type=\"text\" name=\"headline\"$(v(headline)) maxlength=\"50\" required></li>" *
     "<li>Slug: <input type=\"text\" name=\"slug\"$(v(slug)) maxlength=\"50\" required></li>" *
     "<li>Pub date: <input type=\"date\" name=\"pub_date\"$(v(pub_date)) required></li>" *
-    "<li>Writer: <select name=\"writer\" required>" * opt("", "---------", writer === nothing) *
+    "<li>Writer: <select name=\"writer\" required>" * opt("", "- Select an option -", writer === nothing) *
         join(opt(w.id, w.name, writer !== nothing && w.id == writer.id) for w in writers) * "</select></li>" *
     "<li>Article: <textarea rows=\"10\" cols=\"40\" name=\"article\" required>$article</textarea></li>" *
     "<li>Categories: <select multiple name=\"categories\">" * join(opt(c.id, c.name, c.id in chosen) for c in cats) * "</select></li>" *
-    "<li>Status: <select name=\"status\">" * opt("", "---------", true) * opt(1, "Draft", false) * opt(2, "Pending", false) * opt(3, "Live", false) * "</select></li>"
+    "<li>Status: <select name=\"status\">" * opt("", "- Select an option -", true) * opt(1, "Draft", false) * opt(2, "Pending", false) * opt(3, "Live", false) * "</select></li>"
 end
 MfArticleForm(data = nothing; kw...) = ModelForm(MfArticle; data, fields = "__all__", kw...)
 function mf_basic_data()
@@ -2659,7 +2659,7 @@ end
     profile_form(data = nothing; kw...) = ModelForm(MfWriterProfile; data, fields = "__all__", kw...)
     # (the writers made above are there too)
     profile_p(sel, age) = "<p><label for=\"id_writer\">Writer:</label> <select name=\"writer\" id=\"id_writer\" required>" *
-        "<option value=\"\"$(sel === nothing ? " selected" : "")>---------</option>" *
+        "<option value=\"\"$(sel === nothing ? " selected" : "")>- Select an option -</option>" *
         join("<option value=\"$(x.id)\"$(sel !== nothing && x.id == sel.id ? " selected" : "")>$(x.name)</option>" for x in objects(MfWriter)) * "</select></p>" *
         "<p><label for=\"id_age\">Age:</label> <input type=\"number\" name=\"age\"$(age === nothing ? "" : " value=\"$age\"") id=\"id_age\" min=\"0\" required></p>"
     @test html_eq(as_p(profile_form()), profile_p(nothing, nothing))
@@ -2836,7 +2836,7 @@ end
     @test mf_choices(field) == [("86", "Apple"), ("87", "Core"), ("22", "Pear")]
     inventory_form(; kw...) = ModelForm(MfInventory; fields = "__all__", kw...)
     @test html_eq(w(inventory_form(; instance = core)[:parent]),
-                  "<select name=\"parent\" id=\"id_parent\"><option value=\"\">---------</option><option value=\"86\" selected>Apple</option>" *
+                  "<select name=\"parent\" id=\"id_parent\"><option value=\"\">- Select an option -</option><option value=\"86\" selected>Apple</option>" *
                   "<option value=\"87\">Core</option><option value=\"22\">Pear</option></select>")
     data = Dict{String,Any}(string(k) => (v === nothing ? "" : string(v)) for (k, v) in model_to_dict(core))
     data["parent"] = "22"

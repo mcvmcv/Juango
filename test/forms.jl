@@ -315,7 +315,15 @@ end
     blank = PickForm()
     many_html = Juango.widget_html(blank[:many])
     @test occursin("multiple", many_html) && occursin(">MC ANN<", many_html) && !occursin("Elsewhere", many_html)
-    @test occursin("<option value=\"\" selected>---------</option>", Juango.widget_html(blank[:author]))
+    @test occursin("<option value=\"\" selected>- Select an option -</option>", Juango.widget_html(blank[:author]))
+    # USE_BLANK_CHOICE_DASH: Django 6.1's transitional setting keeps "---------" (#244)
+    configure!(USE_BLANK_CHOICE_DASH = true)
+    try
+        @test occursin("<option value=\"\" selected>---------</option>", Juango.widget_html(blank[:author])) &&
+              Juango.get_blank_choice_label() == "---------"
+    finally
+        configure!(USE_BLANK_CHOICE_DASH = false)
+    end
     @test occursin("value=\"MC Bob\"", Juango.widget_html(blank[:byname]))
     t(s, ctx) = render(Template(s), ctx)
     @test occursin("<div class=\"custom\">Code: <input", t("{{ form.code.as_field_group }}", Dict("form" => blank)))

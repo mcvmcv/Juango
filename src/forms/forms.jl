@@ -80,18 +80,21 @@ struct ModelChoiceSpec
     empty_label::Union{Nothing,String}
     label_from_instance::Any         # nothing (string(obj)) or obj -> label
 end
+"A ModelChoiceField's empty choice label: its own, or the blank choice label when it's \"\"."
+empty_choice_label(s::ModelChoiceSpec) = s.empty_label == "" || s.empty_label === nothing ? get_blank_choice_label() : s.empty_label
 choice_queryset(s::ModelChoiceSpec) = s.queryset isa Type ? objects(s.queryset) : s.queryset
 choice_key(s::ModelChoiceSpec, o) = s.to_field_name === nothing ? pk_string(o) : string(getproperty(o, s.to_field_name))
 instance_label(s::ModelChoiceSpec, o) = s.label_from_instance === nothing ? string(o) : string(s.label_from_instance(o))
 
 """
-    ModelChoiceField(queryset; to_field_name = nothing, empty_label = "---------", label_from_instance = nothing, kw...)
+    ModelChoiceField(queryset; to_field_name = nothing, empty_label = "", label_from_instance = nothing, kw...)
 
 A select of model objects for any form (a `ModelForm` makes these for foreign keys itself). The
 cleaned value is the object; `to_field_name` submits another unique field instead of the primary
-key. The queryset is read when the form is rendered and validated.
+key. The queryset is read when the form is rendered and validated. `empty_label` is the empty
+choice's label: "" for `get_blank_choice_label()`, `nothing` for no empty choice.
 """
-Base.@nospecializeinfer ModelChoiceField(@nospecialize(qs); to_field_name = nothing, empty_label = "---------", label_from_instance = nothing, kw...) =
+Base.@nospecializeinfer ModelChoiceField(@nospecialize(qs); to_field_name = nothing, empty_label = "", label_from_instance = nothing, kw...) =
     Field(:modelchoice; related = ModelChoiceSpec(qs, to_field_name === nothing ? nothing : Symbol(to_field_name),
                                                   empty_label === nothing ? nothing : string(empty_label), label_from_instance), kw...)
 "A multiple select of model objects; the cleaned value is a vector of objects."
@@ -1276,7 +1279,7 @@ function input_html(bf::BoundField)
         end
         # autocomplete: a select holding the current choice, filled by searching (admin JavaScript)
         opt = cur === nothing ? "" : "<option value=\"$(escape_html(string(cur.id)))\" selected>$(escape_html(string(cur)))</option>"
-        return "<select$attrs data-autocomplete=\"$(modelmeta(R).app)/$(model_name(R))\"><option value=\"\">---------</option>$opt</select>"
+        return "<select$attrs data-autocomplete=\"$(modelmeta(R).app)/$(model_name(R))\"><option value=\"\">" * escape_html(get_blank_choice_label()) * "</option>$opt</select>"
     elseif fld.kind in FILE_KINDS
         cur = initial_for(f, fld)
         io = IOBuffer()
@@ -1316,7 +1319,7 @@ function input_html(bf::BoundField)
             sp = fld.related
             opts = Pair{Any,Any}[choice_key(sp, o) => instance_label(sp, o) for o in choice_queryset(sp)]
             !multiple && sp.empty_label !== nothing &&
-                print(io, "<option value=\"\"", val === nothing || val == "" ? " selected" : "", ">", escape_html(sp.empty_label), "</option>")
+                print(io, "<option value=\"\"", val === nothing || val == "" ? " selected" : "", ">", escape_html(empty_choice_label(sp)), "</option>")
         end
         for (k, lbl) in opts
             print(io, "<option value=\"", escape_html(string(k)), "\"", string(k) in chosen ? " selected" : "",
@@ -1338,7 +1341,7 @@ function input_html(bf::BoundField)
         print(io, "<select$attrs>")
         # (selected when there's no value, as Django's)
         (fld.blank || fld.kind === :fk) && !nb &&
-            print(io, "<option value=\"\"", val === nothing || val == "" ? " selected" : "", ">---------</option>")
+            print(io, "<option value=\"\"", val === nothing || val == "" ? " selected" : "", ">", escape_html(get_blank_choice_label()), "</option>")
         for (glabel, opts) in groups
             glabel === nothing || print(io, "<optgroup label=\"", escape_html(string(glabel)), "\">")
             for (k, lbl) in opts
@@ -1473,7 +1476,7 @@ function subwidgets(bf::BoundField)
     fld = bf.field
     opts = choice_options(fld)
     if !is_multiple_choice(fld) && fld.blank && fld.kind !== :bool && !any(o -> isempty(o.first), opts)
-        el = fld.kind === :modelchoice ? something(fld.related.empty_label, "---------") : "---------"
+        el = fld.kind === :modelchoice ? empty_choice_label(fld.related) : get_blank_choice_label()
         opts = vcat(Pair{String,String}["" => el], opts)
     end
     chosen = chosen_values(bf)

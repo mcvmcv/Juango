@@ -7387,7 +7387,7 @@ end
     # get_choices: a blank first unless there's one; a key's related objects, ordered and limited
     @test Juango.get_choices(CharField(max_length = 1, choices = Pair{String,String}[]); include_blank = false) == []
     @test Juango.get_choices(CharField(max_length = 1, choices = ["" => "<><>", "a" => "A"]); include_blank = true) == ["" => "<><>", "a" => "A"]
-    @test first(Juango.get_choices(CharField(max_length = 1, choices = ["a" => "A"]))) == ("" => "---------")
+    @test first(Juango.get_choices(CharField(max_length = 1, choices = ["a" => "A"]))) == ("" => "- Select an option -")      # (Django 6.1's, #244)
     delete!(objects(DmfBar)); delete!(objects(DmfFoo))
     foo1, foo2 = create(DmfFoo; a = "a", d = "12.35"), create(DmfFoo; a = "b", d = "12.34")
     create(DmfBar; a = foo1, b = "b"); create(DmfBar; a = foo2, b = "a")
