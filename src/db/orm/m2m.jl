@@ -78,7 +78,9 @@ end
     add!(post.tags, tag1, tag2; through_defaults=Dict())
 
 Add objects (or ids) to a many-to-many relation. Already related objects are skipped.
-`through_defaults` fills extra fields of a custom `through` model.
+`through_defaults` fills extra fields of a custom `through` model. The new through rows are
+inserted together, as Django's `bulk_create`: `m2m_changed` is sent (`:pre_add`, `:post_add`), not
+`pre_save`/`post_save` for each row.
 """
 function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}(), bulk::Bool = true)
     # (on the database the owner came from: an object of another database relates there)
@@ -100,17 +102,16 @@ function m2m_add_ids!(o, ids, through_defaults)
         new = [id for id in ids if !(id in have)]
         isempty(new) && return
         m2m_signal(o, :pre_add, new)
-        for id in new
-            save!(o.through(; attname(o.mine) => stored_value(o.mine, o.id), attname(o.other) => stored_value(o.other, id),
-                            (Symbol(k) => v for (k, v) in pairs(through_defaults))...))
-        end
+        # the through rows in one insert, as Django's bulk_create: no pre_save/post_save for them, only m2m_changed (#253)
+        rows = [o.through(; attname(o.mine) => stored_value(o.mine, o.id), attname(o.other) => stored_value(o.other, id),
+                          (Symbol(k) => v for (k, v) in pairs(through_defaults))...) for id in new]
         if o.symmetrical          # and the other way round
             back = Set(values_list(filter(base_objects(o.through), Q(idkey(o.other) => o.id), Q(idkeys(o.mine) => new)),
                                    idkey(o.mine); flat = true))
-            for id in new
-                id in back || id == o.id || save!(o.through(; attname(o.mine) => stored_value(o.mine, id), attname(o.other) => stored_value(o.other, o.id)))
-            end
+            append!(rows, [o.through(; attname(o.mine) => stored_value(o.mine, id), attname(o.other) => stored_value(o.other, o.id))
+                           for id in new if !(id in back || id == o.id)])
         end
+        bulk_create(rows)
         m2m_signal(o, :post_add, new)
     end
     m2m_changed!(o)
