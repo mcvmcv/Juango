@@ -1351,3 +1351,19 @@ end
         configure!(MIGRATION_MODULES = Dict{String,String}())
     end
 end
+
+@testset "a reference to the user model in a migration: its table as that migration's state names it (#252)" begin
+    meta = Juango.modelmeta(Juango.get_user_model())
+    st = Dict{String,Juango.Table}("legacy_user" => Juango.Table("legacy_user", meta.app, meta.name, Juango.Column[]))
+    @test Juango.state_user_table(st) == "legacy_user" && Juango.state_user_table(Dict{String,Juango.Table}()) === nothing
+    @test Juango.ref_table("__user_model__", st) == "legacy_user" && Juango.ref_table("__user_model__") == meta.table   # (outside a migration: today's)
+    # the SQL of an operation, made as migration_actions makes it: a foreign key to the user model points at the
+    # table as the state then names it, not at a name a later migration gives it (the table doesn't exist yet)
+    op = Juango.Migrations.CreateModel("lg_note"; model = "Note", columns = [Juango.Column("user_id", :fk; null = true, references = "__user_model__")])
+    to = merge(st, Dict("lg_note" => Juango.Migrations.to_table(op, "lg")))
+    deferred = String[]
+    sql = Base.ScopedValues.with(Juango.STATE_USER_TABLE => Juango.state_user_table(st)) do
+        join(string.(vcat(Juango.Migrations.forwards(op, Juango.backend(), st, to, deferred), deferred)), "\n")
+    end
+    @test occursin(Juango.qname("legacy_user"), sql) && !occursin(Juango.qname(meta.table), sql)
+end

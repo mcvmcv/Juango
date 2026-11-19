@@ -201,8 +201,25 @@ copy_state(s::SchemaState) = SchemaState(k => copy(v) for (k, v) in s)
 
 schema_kind(kind::Symbol) = kind in STRING_KINDS || kind in (:file, :image, :filepath) ? :string : kind
 
-"The table a column references: `\"__user_model__\"` (a `ForeignKey(USER_MODEL)`) is the AUTH_USER_MODEL's."
-ref_table(name) = name == "__user_model__" ? modelmeta(get_user_model()).table : name
+"""
+The user model's table as the state of the migration being run names it (#252): its table may
+have been renamed by a later migration, so the current name would be wrong for an earlier one.
+"""
+const STATE_USER_TABLE = Base.ScopedValues.ScopedValue{Union{Nothing,String}}(nothing)
+"""
+The table a column references: `\"__user_model__\"` (a `ForeignKey(USER_MODEL)`) is the
+AUTH_USER_MODEL's: in `state`, or the migration's being run (`STATE_USER_TABLE`), else its current table.
+"""
+ref_table(name) = name == "__user_model__" ? something(STATE_USER_TABLE[], modelmeta(get_user_model()).table) : name
+ref_table(name, state) = name == "__user_model__" ? something(state_user_table(state), Some(ref_table(name))) : name
+"The user model's table in a migration state, or `nothing` while its app's migrations haven't made it."
+function state_user_table(state)
+    meta = modelmeta(get_user_model())
+    for t in values(state)
+        t.app == meta.app && t.model == meta.name && return t.name
+    end
+    nothing
+end
 
 "`Column.of` for a foreign key: the target's key type when it isn't the default 64-bit integer."
 Base.@nospecializeinfer function fk_of(@nospecialize(R))

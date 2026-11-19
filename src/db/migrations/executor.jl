@@ -30,12 +30,17 @@ function migration_actions(g::Graph, k; backwards = false)
     if backwards
         for i in length(m.operations):-1:1
             skips_database(m.operations[i], swapped) && continue
-            append!(actions, Migrations.backwards(m.operations[i], b, states[i], states[i+1], deferred))
+            Base.ScopedValues.with(Juango.STATE_USER_TABLE => Juango.state_user_table(states[i+1])) do
+                append!(actions, Migrations.backwards(m.operations[i], b, states[i], states[i+1], deferred))
+            end
         end
     else
         for (i, op) in enumerate(m.operations)
             skips_database(op, swapped) && continue
-            append!(actions, forwards(op, b, states[i], states[i+1], deferred))
+            # (a reference to the user model is to its table as this point in history names it, #252)
+            Base.ScopedValues.with(Juango.STATE_USER_TABLE => Juango.state_user_table(states[i])) do
+                append!(actions, forwards(op, b, states[i], states[i+1], deferred))
+            end
         end
     end
     append!(actions, deferred)

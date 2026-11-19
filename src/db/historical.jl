@@ -208,7 +208,7 @@ fk_columns(t::Table) = [c for c in t.columns if c.kind === :fk && c.references !
 references(c::Column, t::Table) = ref_table(c.references) == t.name
 
 function related_model(m::HistoricalModel, c::Column)
-    t = get(m.state, ref_table(c.references), nothing)
+    t = get(m.state, ref_table(c.references, m.state), nothing)
     t === nothing && throw(ArgumentError("$(m.table.model).$(c.name) references table '$(c.references)', which didn't exist at this point in history"))
     HistoricalModel(t, m.state)
 end
@@ -274,9 +274,9 @@ function join_columns(t::Table, state)
     fks = fk_columns(t)
     length(fks) == 2 && length(t.columns) == 2 || return nothing
     for (a, b) in ((fks[1], fks[2]), (fks[2], fks[1]))
-        owner = ref_table(a.references)
+        owner = ref_table(a.references, state)
         startswith(t.name, owner * "_") && haskey(state, owner) || continue
-        ref_table(a.references) == ref_table(b.references) && startswith(b.name, "from_") && ((a, b) = (b, a))   # self-referential
+        ref_table(a.references, state) == ref_table(b.references, state) && startswith(b.name, "from_") && ((a, b) = (b, a))   # self-referential
         return a, b
     end
     nothing
@@ -302,7 +302,7 @@ function historical_relation(r::HistoricalRow, s::Symbol)
         for o in values(m.state)
             jc = join_columns(o, m.state)
             if jc !== nothing
-                owner = m.state[ref_table(jc[1].references)]
+                owner = m.state[ref_table(jc[1].references, m.state)]
                 lowercase(owner.model) * "_set" == name && references(jc[2], t) &&
                     push!(found, HistoricalManyToMany(HistoricalModel(o, m.state), Symbol(jc[2].name), Symbol(jc[1].name),
                                                       HistoricalModel(owner, m.state), id))
