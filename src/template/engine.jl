@@ -59,14 +59,27 @@ struct Token
     line::Int
 end
 
-const TAG_RE = r"{%.*?%}|{{.*?}}|{#.*?#}"s
+# A {% tag %} may run over several lines, a {{ variable }} or {# comment #} may not (Django's tag_re).
+const TAG_RE = r"{%[\s\S]*?%}|{{.*?}}|{#.*?#}"
+
+# The tag that ends a {% comment %} or {% verbatim [name] %} block, which is text up to it (Django's
+# Lexer._raw_end_tag_re); nothing for other tags.
+function raw_end_re(inner::AbstractString)
+    bits = split(inner)
+    (isempty(bits) || !(bits[1] in ("comment", "verbatim"))) && return nothing
+    bits[1] == "comment" && return r"{%\s*endcomment\s*%}"
+    Regex("{%\\s*" * join((Base.wrap_string(b, UInt32(0)) for b in ["endverbatim"; bits[2:end]]), "\\s*") * "\\s*%}")
+end
 
 function tokenize(src::AbstractString)
     tokens = Token[]
     pos = 1
     line = 1
-    verbatim = nothing
-    for m in eachmatch(TAG_RE, src)
+    raw = nothing                     # the end of the comment or verbatim block we're in
+    rawname = ""
+    while pos <= ncodeunits(src)
+        m = match(something(raw, TAG_RE), src, pos)
+        m === nothing && break
         if m.offset > pos
             t = src[pos:prevind(src, m.offset)]
             push!(tokens, Token(:text, t, line))
@@ -74,20 +87,16 @@ function tokenize(src::AbstractString)
         end
         tag = m.match
         inner = strip(tag[3:end-2])
-        if verbatim !== nothing
-            if startswith(tag, "{%") && inner == verbatim
-                verbatim = nothing
-                push!(tokens, Token(:block, inner, line))
-            else
-                push!(tokens, Token(:text, tag, line))
-            end
+        if raw !== nothing
+            push!(tokens, Token(:block, rawname, line))       # (normalised: "endverbatim name")
+            raw = nothing
         elseif startswith(tag, "{{")
             push!(tokens, Token(:var, inner, line))
         elseif startswith(tag, "{%")
             push!(tokens, Token(:block, inner, line))
-            if startswith(inner, "verbatim")
-                verbatim = "end" * inner
-            end
+            raw = raw_end_re(inner)
+            raw === nothing || (rawname = "end" * join(split(inner), " "))
+            startswith(rawname, "endcomment") && (rawname = "endcomment")
         else
             push!(tokens, Token(:comment, inner, line))
         end
@@ -151,6 +160,12 @@ end
 struct Literal
     value::Any
 end
+"`_(\"text\")` in a template: translated where it's shown, and safe (as Django's literals)."
+struct Translated
+    msgid::String
+end
+"A template string literal's text, as Django's unescape_string_literal: only \\\" (or \\') and \\\\ are escapes."
+unescape_literal(s::AbstractString, q::Char) = replace(s, "\\" * q => string(q), "\\\\" => "\\")
 """
 A variable path `a.b.0`. The attribute steps are prepared when the template is parsed: their
 Symbol, a `Val` instance for `tattr`, and the index for numeric steps (-1 otherwise).
@@ -175,9 +190,9 @@ function parse_operand(s::AbstractString)
     s = strip(s)
     isempty(s) && throw(TemplateSyntaxError("empty variable"))
     if length(s) >= 2 && (s[1] == '"' || s[1] == '\'') && s[end] == s[1]
-        return Literal(SafeString(unescape_string(s[2:prevind(s, end)])))
+        return Literal(SafeString(unescape_literal(s[2:prevind(s, end)], s[1])))
     elseif (m = match(r"^_\((\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*')\)$"s, s)) !== nothing
-        return Literal(gettext_lazy(unescape_string(m[1][2:end-1])))     # _("text"): translated where it's shown, as Django's
+        return Literal(Translated(unescape_literal(m[1][2:end-1], m[1][1])))     # _("text"): translated where it's shown, as Django's
     elseif s in ("True", "true")
         return Literal(true)
     elseif s in ("False", "false")
@@ -190,6 +205,8 @@ function parse_operand(s::AbstractString)
     f = tryparse(Float64, s)
     (f !== nothing && occursin(r"^-?[0-9.]+(e-?[0-9]+)?$", s)) && return Literal(f)
     occursin(r"^[\w.]+$", s) || throw(TemplateSyntaxError("could not parse '$s'"))
+    # (as Django's: no private attributes from templates)
+    any(p -> startswith(p, "_"), split(s, '.')) && throw(TemplateSyntaxError("Variables and attributes may not begin with underscores: '$s'"))
     Variable(split(s, '.'))
 end
 
@@ -240,6 +257,9 @@ function parse_filter_expr(s::AbstractString)
         i > n && break
         s[i] == '|' || throw(TemplateSyntaxError("could not parse the remainder: '$(s[i:end])' from '$s'"))
         i = nextind(s, i)
+        while i <= n && isspace(s[i])            # (a space after the pipe is allowed, as Django's)
+            i = nextind(s, i)
+        end
         j = i
         while j <= n && (isletter(s[j]) || isdigit(s[j]) || s[j] == '_')
             j = nextind(s, j)
@@ -318,6 +338,10 @@ function getattr(obj::Dict{K,V}, part::AbstractString, sym::Symbol, @nospecializ
         v = get(obj, sym, NOTFOUND)
         v === NOTFOUND || return v
     end
+    if idx > 0 && Int <: K                  # {{ d.1 }}: an integer key too, as Django's
+        v = get(obj, idx - 1, NOTFOUND)
+        v === NOTFOUND || return v
+    end
     getattr_other(obj, part, sym, val, idx)
 end
 getattr(@nospecialize(obj), part::AbstractString, sym::Symbol, @nospecialize(val), idx::Int) =
@@ -332,6 +356,9 @@ Base.@nospecializeinfer function getattr_other(@nospecialize(obj), part::Abstrac
     r === NOTFOUND || return r
     if idx > 0 && (obj isa AbstractVector || obj isa Tuple || obj isa NamedTuple)   # {{ pair.0 }}
         return 1 <= idx <= length(obj) ? obj[idx] : UNDEF
+    end
+    if idx > 0 && obj isa AbstractString                       # {{ word.0 }}: a character, as Python's indexing
+        return idx <= length(obj) ? string(obj[nextind(obj, 0, idx)]) : UNDEF
     end
     if obj isa AbstractDict
         part == "items" && return collect(pairs(obj))
@@ -355,11 +382,13 @@ function resolve_var(v::Variable, ctx::Context)
     end
     val
 end
-resolve_var(l::Literal, ::Context) = l.value
+resolve_var(l::Literal, ::Context) = l.value isa Translated ? SafeString(gettext(l.value.msgid)) : l.value
 
-function eval_fe(fe::FilterExpr, ctx::Context)
+# An unknown variable is nothing; given to filters it's string_if_invalid ("" by default), except in
+# a condition (`ignore_failures`, as Django's `{% if %}`), where it's still nothing.
+function eval_fe(fe::FilterExpr, ctx::Context; ignore_failures::Bool = false)
     val = resolve_var(fe.base, ctx)
-    val === UNDEF && (val = nothing)
+    val === UNDEF && (val = isempty(fe.filters) || ignore_failures ? nothing : STRING_IF_INVALID[])
     for (f, arg) in fe.filters
         a = arg === nothing ? nothing : resolve_var(arg, ctx)
         a === UNDEF && (a = nothing)
@@ -697,7 +726,8 @@ gen_node(n::Node) = :($(GlobalRef(@__MODULE__, :render!))(io, $(QuoteNode(n)), c
 # `{{ var|filter:arg }}`: the variable's parts and the filter functions are constants, so the
 # lookups and filter calls aren't looped over or dispatched through `Function` fields.
 const _M = @__MODULE__
-gen_var(l::Literal) = QuoteNode(l.value)
+gen_var(l::Literal) = l.value isa Translated ? :($(GlobalRef(@__MODULE__, :SafeString))($(GlobalRef(@__MODULE__, :gettext))($(l.value.msgid)))) :
+                      QuoteNode(l.value)
 function gen_var(v::Variable)
     ex = :($(GlobalRef(_M, :lookup))(ctx, $(v.parts[1])))
     length(v.parts) == 1 && return ex
@@ -709,9 +739,10 @@ function gen_var(v::Variable)
     push!(body, val)
     Expr(:let, Expr(:block), Expr(:block, body...))
 end
-function gen_fe(fe::FilterExpr)
+function gen_fe(fe::FilterExpr; ignore_failures::Bool = false)
     val = gensym("val")
-    body = Any[:($val = $(gen_var(fe.base))), :($val === $(GlobalRef(_M, :UNDEF)) && ($val = nothing))]
+    body = Any[:($val = $(gen_var(fe.base))),
+               :($val === $(GlobalRef(_M, :UNDEF)) && ($val = $(isempty(fe.filters) || ignore_failures ? nothing : :($(GlobalRef(_M, :STRING_IF_INVALID))[]))))]
     for (f, arg) in fe.filters
         a = gensym("arg")
         push!(body, arg === nothing ? :($a = nothing) :
@@ -816,6 +847,22 @@ function engine_template(e::JuangoTemplates, name::AbstractString, tried)
         TEMPLATE_BY_NAME[key] = t
         t
     end
+end
+
+"""
+    LocMemTemplates(templates::Dict{String,String})
+
+Juango templates kept in memory, by name (Django's locmem loader), for tests and generated
+templates: `configure!(TEMPLATES = [LocMemTemplates(Dict("base.html" => "...", "page.html" => "{% extends 'base.html' %}..."))])`.
+"""
+struct LocMemTemplates
+    templates::Dict{String,String}
+end
+LocMemTemplates(templates::AbstractDict) = LocMemTemplates(Dict{String,String}(string(k) => string(v) for (k, v) in templates))
+function engine_template(e::LocMemTemplates, name::AbstractString, tried)
+    src = get(e.templates, String(name), nothing)
+    src === nothing && (push!(tried, "locmem:" * String(name)); return nothing)
+    Template(src; name = String(name), origin = "locmem:" * String(name))
 end
 
 """

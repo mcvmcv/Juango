@@ -27,15 +27,16 @@ function tag_ifchanged(p::Parser, t::Token)
     otherwise = endtag == "else" ? first(parse_nodes(p, ["endifchanged"])) : Node[]
     IfChangedNode(exprs, body, otherwise)
 end
+# what it last saw is kept for each run of the loop it's in (as Django's, which keeps it in the forloop)
 function render!(io::IO, n::IfChangedNode, ctx::Context)
     state = get!(Dict{UInt,Any}, ctx.render_ctx, :ifchanged)
     loop = lookup(ctx, "forloop")
-    first_iteration = loop isa ForLoop && loop.first
     rendered = isempty(n.exprs) ? render_nodes(n.body, ctx) : nothing
     current = isempty(n.exprs) ? rendered : Any[eval_fe(fe, ctx) for fe in n.exprs]
     k = objectid(n)
-    if first_iteration || !haskey(state, k) || state[k] != current
-        state[k] = current
+    last = get(state, k, nothing)
+    if last === nothing || last[1] !== loop || last[2] != current
+        state[k] = (loop, current)
         rendered === nothing ? render_nodes(io, n.body, ctx) : write(io, rendered)
     else
         render_nodes(io, n.otherwise, ctx)
@@ -52,16 +53,17 @@ end
 function tag_regroup(p::Parser, t::Token)
     m = match(r"^regroup\s+(.+?)\s+by\s+(.+?)\s+as\s+(\w+)$"s, t.contents)
     m === nothing && throw(TemplateSyntaxError("'regroup' should be 'regroup <list> by <attribute> as <name>'"))
-    RegroupNode(parse_filter_expr(m[1]), parse_filter_expr("__regroup_item." * m[2]), m[3])
+    RegroupNode(parse_filter_expr(m[1]), parse_filter_expr("juango_regroup_item." * m[2]), m[3])
 end
+# each group has .grouper and .list, and unpacks: {% for grouper, items in groups %} (Django's GroupedResult)
 function render!(io::IO, n::RegroupNode, ctx::Context)
-    groups = Dict{String,Any}[]
+    groups = NamedTuple{(:grouper, :list),Tuple{Any,Vector{Any}}}[]
     for item in to_iterable(eval_fe(n.list, ctx))
-        key = with_scope(() -> eval_fe(n.by, ctx), ctx, Dict{String,Any}("__regroup_item" => item))
-        if !isempty(groups) && isequal(groups[end]["grouper"], key)
-            push!(groups[end]["list"], item)
+        key = with_scope(() -> eval_fe(n.by, ctx), ctx, Dict{String,Any}("juango_regroup_item" => item))
+        if !isempty(groups) && isequal(groups[end].grouper, key)
+            push!(groups[end].list, item)
         else
-            push!(groups, Dict{String,Any}("grouper" => key, "list" => Any[item]))
+            push!(groups, (grouper = key, list = Any[item]))
         end
     end
     ctx[n.asvar] = groups
@@ -83,9 +85,22 @@ function tag_widthratio(p::Parser, t::Token)
     length(bits) == 3 || throw(TemplateSyntaxError("'widthratio' takes three arguments (and optionally 'as name')"))
     WidthRatioNode(parse_filter_expr(bits[1]), parse_filter_expr(bits[2]), parse_filter_expr(bits[3]), asvar)
 end
+# as Django's: Python's float() of the value and maximum and int() of the width; "" for a value it can't
+# use, "0" for a maximum of 0, and Python's round (half to even)
 function render!(io::IO, n::WidthRatioNode, ctx::Context)
-    v, m, w = (Float64(tonum(eval_fe(fe, ctx))) for fe in (n.value, n.max, n.width))
-    r = m == 0 ? "0" : string(round(Int, v / m * w, RoundNearestTiesAway))
+    wv = eval_fe(n.width, ctx)
+    w = wv isa Real && !(wv isa Bool) ? (isfinite(wv) ? trunc(Int, wv) : nothing) : wv isa AbstractString || wv isa SafeString ? tryparse(Int, strip(str(wv))) : nothing
+    w === nothing && throw(TemplateSyntaxError("widthratio final argument must be a number"))
+    pyfloat(x) = x isa Real ? Float64(x) : x isa AbstractString || x isa SafeString ? tryparse(Float64, strip(str(x))) : nothing
+    v, m = pyfloat(eval_fe(n.value, ctx)), pyfloat(eval_fe(n.max, ctx))
+    r = if v === nothing || m === nothing
+        ""
+    elseif m == 0
+        "0"
+    else
+        x = v / m * w
+        isfinite(x) ? string(round(Int, x, RoundNearest)) : ""
+    end
     n.asvar === nothing ? write(io, r) : (ctx[n.asvar] = r; nothing)
 end
 
@@ -149,6 +164,7 @@ end
 struct DebugNode <: Node end
 tag_debug(p::Parser, t::Token) = DebugNode()
 function render!(io::IO, ::DebugNode, ctx::Context)
+    settings.DEBUG || return nothing                 # (nothing unless DEBUG, as Django's)
     merged = Dict{String,Any}()
     for d in ctx.stack
         merge!(merged, d)
@@ -165,6 +181,12 @@ end
 function tag_resetcycle(p::Parser, t::Token)
     bits = split_contents(t.contents)
     length(bits) <= 2 || throw(TemplateSyntaxError("'resetcycle' takes at most one argument"))
+    # (a cycle it can reset must come before it, as Django's)
+    if length(bits) == 2
+        haskey(get(p.extra, :named_cycles, Dict()), bits[2]) || throw(TemplateSyntaxError("Named cycle '$(bits[2])' does not exist."))
+    else
+        haskey(p.extra, :last_cycle) || throw(TemplateSyntaxError("No cycles in template."))
+    end
     ResetCycleNode(length(bits) == 2 ? bits[2] : nothing)
 end
 function render!(io::IO, n::ResetCycleNode, ctx::Context)
@@ -187,11 +209,11 @@ function tag_filter(p::Parser, t::Token)
     length(bits) == 2 || throw(TemplateSyntaxError("'filter' needs at least one filter"))
     any(f -> strip(first(split(f, ':'))) in ("escape", "safe"), split(bits[2], '|')) &&
         throw(TemplateSyntaxError("use {% autoescape %} instead of the 'escape' or 'safe' filters in 'filter'"))
-    FilterBlockNode(parse_filter_expr("__filter_content|" * bits[2]), first(parse_nodes(p, ["endfilter"])))
+    FilterBlockNode(parse_filter_expr("juango_filter_content|" * bits[2]), first(parse_nodes(p, ["endfilter"])))
 end
 function render!(io::IO, n::FilterBlockNode, ctx::Context)
     content = render_nodes(n.body, ctx)
-    v = with_scope(() -> eval_fe(n.fe, ctx), ctx, Dict{String,Any}("__filter_content" => SafeString(content)))
+    v = with_scope(() -> eval_fe(n.fe, ctx), ctx, Dict{String,Any}("juango_filter_content" => SafeString(content)))
     write(io, display_string(v))          # the content was escaped as it was rendered
 end
 
@@ -215,7 +237,9 @@ end
 function render!(io::IO, n::QueryStringNode, ctx::Context)
     params = Dict{String,Vector{String}}()
     order = String[]
-    src = n.base !== nothing ? eval_fe(n.base, ctx) : ctx.request === nothing ? nothing : ctx.request.GET
+    # (with no QueryDict given it needs the request, as Django's)
+    n.base === nothing && ctx.request === nothing && throw(TemplateSyntaxError("'querystring' needs the request in the context, or a QueryDict"))
+    src = n.base !== nothing ? eval_fe(n.base, ctx) : ctx.request.GET
     if src isa QueryDict
         for k in keys(src.data)
             params[k] = copy(src.data[k]); push!(order, k)

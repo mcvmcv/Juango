@@ -649,11 +649,17 @@ make_template_fragment_key(name, vary_on = []) =
 
 function render!(io::IO, n::CacheNode, ctx::Context)
     t = eval_fe(n.timeout, ctx)
+    # (an unknown variable is string_if_invalid, not None, as Django's: not a timeout)
+    t === nothing && !(n.timeout.base isa Literal && isempty(n.timeout.filters)) && (t = "")
+    # (None: no expiry; otherwise a whole number of seconds, as Django's)
+    timeout = t === nothing ? nothing : t isa Integer ? t : t isa Real && isfinite(t) ? floor(Int, t) : t isa AbstractString ? tryparse(Int, t) : missing
+    (timeout === missing || (t !== nothing && timeout === nothing)) &&
+        throw(TemplateSyntaxError("\"cache\" tag got a non-integer timeout value: $(repr(t))"))
     k = make_template_fragment_key(n.name, [eval_fe(v, ctx) for v in n.vary])
     hit = cache_get(k)
     hit === nothing || return write(io, hit)
     s = render_nodes(n.nodes, ctx)
-    cache_set(k, s; timeout = t isa Number ? t : something(tryparse(Float64, string(t)), 300.0))
+    cache_set(k, s; timeout = timeout)
     write(io, s)
 end
 register_tag!("cache", tag_cache)

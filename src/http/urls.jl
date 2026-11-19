@@ -124,7 +124,7 @@ end
     re_path(regex, view; name=nothing)
 
 Pattern from a raw regular expression; named groups become keyword arguments
-(as strings). Reversing `re_path` patterns is not supported.
+(as strings). Reversing fills in its groups: named ones from keyword arguments, others from positional ones.
 """
 function re_path(rx::AbstractString, view; name = nothing, kwargs...)
     r = startswith(rx, "^") ? Regex(rx) : Regex("^" * rx)
@@ -296,6 +296,10 @@ function build_reverse_index!(idx, patterns, prefix, ns)
     for pat in patterns
         if pat isa URLPattern
             pat.name === nothing && continue
+            if is_regex_route(pat.route)          # a re_path: its groups are the parameters
+                push!(get!(idx, joinns(ns, pat.name), ReverseEntry[]), regex_reverse_entry(prefix, pat.route))
+                continue
+            end
             _, params = compile_route(prefix * pat.route; endpoint = true)
             push!(get!(idx, joinns(ns, pat.name), ReverseEntry[]), ReverseEntry(prefix * pat.route, params))
         elseif pat isa URLResolver
@@ -307,6 +311,49 @@ function build_reverse_index!(idx, patterns, prefix, ns)
         end
     end
     idx
+end
+
+"Whether a route is a `re_path`'s regular expression rather than a `path` route."
+is_regex_route(r::AbstractString) = startswith(r, "^") || endswith(r, "\$") || occursin('(', r) || occursin('\\', r)
+"""
+A `re_path` for reversing, as Django's: the literal text around its groups (escapes removed,
+percent-encoded) and a parameter per group, named groups by their names (keyword arguments),
+the others positional.
+"""
+function regex_reverse_entry(prefix::AbstractString, rx::AbstractString)
+    cs = collect(rx)
+    !isempty(cs) && cs[1] == '^' && popfirst!(cs)
+    !isempty(cs) && cs[end] == '$' && (length(cs) < 2 || cs[end-1] != '\\') && pop!(cs)
+    pieces, params, buf, i, npos = String[], Tuple{Symbol,String}[], IOBuffer(), 1, 0
+    quote_piece(p) = join(path_quote.(split(p, '/')), '/')
+    while i <= length(cs)
+        c = cs[i]
+        if c == '\\' && i < length(cs)
+            print(buf, cs[i+1]); i += 2
+        elseif c == '('
+            depth, j = 0, i
+            while j <= length(cs)
+                cs[j] == '\\' && (j += 2; continue)
+                cs[j] == '(' && (depth += 1)
+                cs[j] == ')' && (depth -= 1; depth == 0 && break)
+                j += 1
+            end
+            grp = String(cs[i:min(j, length(cs))])
+            if startswith(grp, "(?:")
+                i = j + 1                          # (a non-capturing group: nothing to fill in)
+                continue
+            end
+            m = match(r"^\(\?P?<(\w+)>", grp)
+            push!(pieces, quote_piece(String(take!(buf))))
+            push!(params, (m === nothing ? Symbol("_", npos += 1) : Symbol(m[1]), "str"))
+            i = j + 1
+        else
+            print(buf, c); i += 1
+        end
+    end
+    push!(pieces, quote_piece(String(take!(buf))))
+    pieces[1] = prefix * pieces[1]
+    ReverseEntry(prefix * rx, params, pieces)
 end
 
 struct NoReverseMatch <: Exception

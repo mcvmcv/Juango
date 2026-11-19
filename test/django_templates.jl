@@ -8,13 +8,50 @@
 
 # Django's engine.render_to_string(template, context) for a template given as a string
 rt(src, ctx = Dict{Any,Any}()) = render(Template(src), Dict{String,Any}(string(k) => v for (k, v) in ctx))
+# several templates by name (Django's locmem loader): render `name`, which can extend or include the others
+# (configured only when the templates change: a change of settings empties the caches, which
+# {% cache %} tests rely on between renders; the old TEMPLATES come back at the end of the file)
+const DJT_OLD_TEMPLATES = get(Juango.settings, :TEMPLATES, nothing)
+const DJT_CURRENT = Ref{Any}(nothing)
+function rtn(templates, name, ctx = Dict{Any,Any}())
+    if DJT_CURRENT[] != templates
+        configure!(TEMPLATES = Any[Juango.LocMemTemplates(templates)])
+        DJT_CURRENT[] = templates
+    end
+    render(get_template(name), Dict{String,Any}(string(k) => v for (k, v) in ctx))
+end
 # a filter called as a function, as Django's tests import them from defaultfilters
 function filt(name, v, args...; autoescape = true)
     f = Juango.FILTERS[name]
     arg = isempty(args) ? nothing : args[1]
     f.needs_autoescape ? f.fn(v, arg, autoescape) : f.fn(v, arg)
 end
+# Python's float(): of text too ("inf")
+pyfloat(x) = x isa AbstractString ? parse(Float64, x) : Float64(x)
 html_eq(a, b) = try assert_html_equal(string(a), string(b)) catch; false end
+
+# Django's test tag libraries (template_tests/templatetags): testtags' echo, other_echo and upper, custom's noop,
+# minusone and minustwo, and subpackage.echo's echo2
+let lib = get(Juango.TAG_LIBRARIES, "testtags", nothing)
+    lib === nothing && (lib = Juango.TagLibrary("testtags"))
+    for name in ("echo", "other_echo")
+        Juango.tag!(lib, name, (p, t) -> Juango.TextNode(join(Juango.split_contents(t.contents)[2:end], " ")))
+    end
+    filter!(lib, "upper", (v, _) -> uppercase(string(v)))
+    custom = Juango.TagLibrary("custom")
+    filter!(custom, "noop", (v, _) -> v)
+    Juango.simple_tag!(x -> x - 1, custom, "minusone")
+    Juango.simple_tag!(x -> x - 2, custom, "minustwo")
+    Juango.simple_tag!(x -> x, Juango.TagLibrary("subpackage.echo"), "echo2")
+end
+# Django's template_tests/urls.py, for {% url %}
+djt_view(req; kw...) = HttpResponse("")
+const DJT_URLS = [path("", djt_view; name = "index"), re_path(raw"^client/([0-9,]+)/$", djt_view; name = "client"),
+                  re_path(raw"^client/(?P<id>[0-9]+)/(?P<action>[^/]+)/$", djt_view; name = "client_action"),
+                  re_path(raw"^client/(?P<client_id>[0-9]+)/(?P<action>[^/]+)/$", djt_view; name = "client_action"),
+                  re_path(raw"^named-client/([0-9]+)/$", djt_view; name = "named.client"),
+                  re_path(raw"^Юникод/(\w+)/$", djt_view; name = "метка_оператора"),
+                  re_path(raw"^Юникод/(?P<tag>\S+)/$", djt_view; name = "метка_оператора_2")]
 
 @testset "django template_tests: test_add" begin
     # test_add01
@@ -1040,3 +1077,1237 @@ end
     # not translated: test_invalid_value (method assertIsNone)
 end
 
+@testset "django template_tests: test_autoescape" begin
+    # test_autoescape_tag01
+    @test rt("{% autoescape off %}hello{% endautoescape %}", Dict{Any,Any}()) == "hello"
+    # test_autoescape_tag02
+    @test rt("{% autoescape off %}{{ first }}{% endautoescape %}", Dict{Any,Any}("first" => "<b>hello</b>")) == "<b>hello</b>"
+    # test_autoescape_tag03
+    @test rt("{% autoescape on %}{{ first }}{% endautoescape %}", Dict{Any,Any}("first" => "<b>hello</b>")) == "&lt;b&gt;hello&lt;/b&gt;"
+    # test_autoescape_tag04
+    @test rt("{% autoescape off %}{{ first }} {% autoescape on %}{{ first }}{% endautoescape %}{% endautoescape %}", Dict{Any,Any}("first" => "<a>")) == "<a> &lt;a&gt;"
+    # test_autoescape_tag05
+    @test rt("{% autoescape on %}{{ first }}{% endautoescape %}", Dict{Any,Any}("first" => "<b>first</b>")) == "&lt;b&gt;first&lt;/b&gt;"
+    # test_autoescape_tag06
+    @test rt("{{ first }}", Dict{Any,Any}("first" => mark_safe("<b>first</b>"))) == "<b>first</b>"
+    # test_autoescape_tag07
+    @test rt("{% autoescape on %}{{ first }}{% endautoescape %}", Dict{Any,Any}("first" => mark_safe("<b>Apple</b>"))) == "<b>Apple</b>"
+    # test_autoescape_tag08
+    @test rt("{% autoescape on %}{{ var|default_if_none:\" endquote\\\" hah\" }}{% endautoescape %}", Dict{Any,Any}("var" => nothing)) == " endquote\" hah"
+    # test_autoescape_filtertag01
+    @test_throws Juango.TemplateSyntaxError rt("{{ first }}{% filter safe %}{{ first }} x<y{% endfilter %}", Dict{Any,Any}("first" => "<a>"))
+    # test_autoescape_filters01
+    @test rt("{{ var|cut:\"&\" }}", Dict{Any,Any}("var" => "this & that")) == "this  that"
+    # test_autoescape_filters02
+    @test rt("{{ var|join:\" & \" }}", Dict{Any,Any}("var" => ("Tom", "Dick", "Harry"))) == "Tom & Dick & Harry"
+    # test_autoescape_literals01
+    @test rt("{{ \"this & that\" }}", Dict{Any,Any}()) == "this & that"
+    # test_autoescape_stringiterations01
+    @test rt("{% for l in var %}{{ l }},{% endfor %}", Dict{Any,Any}("var" => "K&R")) == "K,&amp;,R,"
+    # test_autoescape_lookup01
+    @test rt("{{ var.key }}", Dict{Any,Any}("var" => Dict{Any,Any}("key" => "this & that"))) == "this &amp; that"
+    # test_invalid_arg
+    @test_throws Juango.TemplateSyntaxError rt("{% autoescape true %}{{ var.key }}{% endautoescape %}", Dict{Any,Any}("var" => Dict{Any,Any}("key" => "this & that")))
+    # test_no_arg
+    @test_throws Juango.TemplateSyntaxError rt("{% autoescape %}{{ var.key }}{% endautoescape %}", Dict{Any,Any}("var" => Dict{Any,Any}("key" => "this & that")))
+    # not translated: test_autoescape_tag09 (call UnsafeClass); test_autoescape_tag10 (call SafeClass)
+end
+
+@testset "django template_tests: test_basic" begin
+    # test_basic_syntax01
+    @test rtn(Dict("basic-syntax01" => "something cool", "basic-syntax02" => "{{ headline }}", "basic-syntax03" => "{{ first }} --- {{ second }}"), "basic-syntax01", Dict{Any,Any}()) == "something cool"
+    # test_basic_syntax02
+    @test rtn(Dict("basic-syntax01" => "something cool", "basic-syntax02" => "{{ headline }}", "basic-syntax03" => "{{ first }} --- {{ second }}"), "basic-syntax02", Dict{Any,Any}("headline" => "Success")) == "Success"
+    # test_basic_syntax03
+    @test rtn(Dict("basic-syntax01" => "something cool", "basic-syntax02" => "{{ headline }}", "basic-syntax03" => "{{ first }} --- {{ second }}"), "basic-syntax03", Dict{Any,Any}("first" => 1, "second" => 2)) == "1 --- 2"
+    # test_basic_syntax04
+    @test rt("as{{ missing }}df", Dict{Any,Any}()) == "asdf"
+    # test_basic_syntax06
+    @test_throws Juango.TemplateSyntaxError rt("{{ multi word variable }}", Dict{Any,Any}())
+    # test_basic_syntax07
+    @test_throws Juango.TemplateSyntaxError rt("{{ }}", Dict{Any,Any}())
+    # test_basic_syntax08
+    @test_throws Juango.TemplateSyntaxError rt("{{        }}", Dict{Any,Any}())
+    # test_basic_syntax12
+    @test_throws Juango.TemplateSyntaxError rt("{{ var.__dict__ }}", Dict{Any,Any}())
+    # test_basic_syntax13
+    @test_throws Juango.TemplateSyntaxError rt("{{ va>r }}", Dict{Any,Any}())
+    # test_basic_syntax14
+    @test_throws Juango.TemplateSyntaxError rt("{{ (var.r) }}", Dict{Any,Any}())
+    # test_basic_syntax15
+    @test_throws Juango.TemplateSyntaxError rt("{{ sp%am }}", Dict{Any,Any}())
+    # test_basic_syntax16
+    @test_throws Juango.TemplateSyntaxError rt("{{ eggs! }}", Dict{Any,Any}())
+    # test_basic_syntax17
+    @test_throws Juango.TemplateSyntaxError rt("{{ moo? }}", Dict{Any,Any}())
+    # test_basic_syntax18
+    @test rt("{{ foo.bar }}", Dict{Any,Any}("foo" => Dict{Any,Any}("bar" => "baz"))) == "baz"
+    # test_basic_syntax19
+    @test rt("{{ foo.spam }}", Dict{Any,Any}("foo" => Dict{Any,Any}("bar" => "baz"))) == ""
+    # test_basic_syntax21
+    @test rt("a {{ moo %} b", Dict{Any,Any}()) == "a {{ moo %} b"
+    # test_basic_syntax22
+    @test rt("{{ moo #}", Dict{Any,Any}()) == "{{ moo #}"
+    # test_basic_syntax23
+    @test_throws Juango.TemplateSyntaxError rt("{{ moo #} {{ cow }}", Dict{Any,Any}())
+    # test_basic_syntax24
+    @test rt("{{ moo\n }}", Dict{Any,Any}()) == "{{ moo\n }}"
+    # test_basic_syntax25
+    @test rt("{{ \"fred\" }}", Dict{Any,Any}()) == "fred"
+    # test_basic_syntax26
+    @test rt("{{ \"\\\"fred\\\"\" }}", Dict{Any,Any}()) == "\"fred\""
+    # test_basic_syntax27
+    @test rt("{{ _(\"\\\"fred\\\"\") }}", Dict{Any,Any}()) == "\"fred\""
+    # test_basic_syntax30
+    @test rt("{{ 1.2.3 }}", Dict{Any,Any}("1" => Dict{Any,Any}("2" => Dict{Any,Any}("3" => "d")))) == "d"
+    # test_basic_syntax31
+    @test rt("{{ 1.2.3 }}", Dict{Any,Any}("1" => Dict{Any,Any}("2" => ("a", "b", "c", "d")))) == "d"
+    # test_basic_syntax32
+    @test rt("{{ 1.2.3 }}", Dict{Any,Any}("1" => (("x", "x", "x", "x"), ("y", "y", "y", "y"), ("a", "b", "c", "d")))) == "d"
+    # test_basic_syntax33
+    @test rt("{{ 1.2.3 }}", Dict{Any,Any}("1" => ("xxxx", "yyyy", "abcd"))) == "d"
+    # test_basic_syntax34
+    @test rt("{{ 1.2.3 }}", Dict{Any,Any}("1" => (Dict{Any,Any}("x" => "x"), Dict{Any,Any}("y" => "y"), Dict{Any,Any}("z" => "z", "3" => "d")))) == "d"
+    # test_basic_syntax35
+    @test rt("{{ 1 }}", Dict{Any,Any}("1" => "abc")) == "1"
+    # test_basic_syntax36
+    @test rt("{{ 1.2 }}", Dict{Any,Any}("1" => "abc")) == "1.2"
+    # test_unclosed_multiline_block_tag_error_suggests_templatetag
+    @test_throws Juango.TemplateSyntaxError rt("The open tag: {%\nif user %}", Dict{Any,Any}())
+    # test_multiline_block_tag_error_inside_block
+    @test_throws Juango.TemplateSyntaxError rt("{% if user %}\n<p>The open tag: {%</p>\n<p>The close tag: %}</p>\n{% endif %}", Dict{Any,Any}())
+    # test_multiline_block_tag_error_message
+    @test_throws Juango.TemplateSyntaxError rt("<p>The open tag: {%</p>\n<p>The close tag: %}</p>", Dict{Any,Any}())
+    # test_block_tags_rendered_as_text
+    @test rt("<p>The open tag: {% templatetag openblock %}</p>\n<p>The close tag: {% templatetag closeblock %}</p>", Dict{Any,Any}()) == "<p>The open tag: {%</p>\n<p>The close tag: %}</p>"
+    # test_unclosed_block
+    @test_throws Juango.TemplateSyntaxError rt("{% block content %}", Dict{Any,Any}())
+    # test_unclosed_block2
+    @test_throws Juango.TemplateSyntaxError rt("{% if a %}", Dict{Any,Any}())
+    # test_ignores_strings_that_look_like_format_interpolation
+    @test rtn(Dict("tpl-str" => "%s", "tpl-percent" => "%%", "tpl-weird-percent" => "% %s"), "tpl-str", Dict{Any,Any}()) == "%s"
+    @test rtn(Dict("tpl-str" => "%s", "tpl-percent" => "%%", "tpl-weird-percent" => "% %s"), "tpl-percent", Dict{Any,Any}()) == "%%"
+    @test rtn(Dict("tpl-str" => "%s", "tpl-percent" => "%%", "tpl-weird-percent" => "% %s"), "tpl-weird-percent", Dict{Any,Any}()) == "% %s"
+    # not translated: test_basic_syntax09 (call SomeClass); test_basic_syntax10 (call SomeClass); test_basic_syntax11 (call SomeClass); test_basic_syntax20 (call SomeClass); test_basic_syntax20b (call get_template); test_basic_syntax28 (call SilentGetItemClass); test_basic_syntax29 (call SilentAttrClass); test_basic_syntax37 (Lambda); test_basic_syntax38 (Lambda); test_multiline_block_tags (for body); test_multiline_block_tag_between_literal_braces (for body); test_multiline_block_tag_message_truncates_source (malformed node or string on line 412: <ast.BinOp object at 0x7f618d45a250>); test_multiline_block_tag_debug_info (call keywords); test_allow_multiline_tags_disabled (for body); test_subscriptable_class (ClassDef); test_access_class_property_if_getitem_is_defined_in_metaclass (ClassDef); test_double_dot_lookup (for body); test_double_dot_in_literal (call Engine); test_repr (call BlockContext); test_template_name_in_error_message (f-string); test_template_name_not_in_debug_view (Try); test_unknown_source_template (Try); test_double_dot_lookup (call Context)
+end
+
+@testset "django template_tests: test_builtins" begin
+    # test_builtins01
+    @test_broken rt("{{ True }}", Dict{Any,Any}()) == "True"      # (a Juango difference)
+    # test_builtins02
+    @test_broken rt("{{ False }}", Dict{Any,Any}()) == "False"      # (a Juango difference)
+    # test_builtins03
+    @test_broken rt("{{ None }}", Dict{Any,Any}()) == "None"      # (a Juango difference)
+end
+
+@testset "django template_tests: test_cache" begin
+    # test_cache03
+    @test rt("{% load cache %}{% cache 2 test %}cache03{% endcache %}", Dict{Any,Any}()) == "cache03"
+    # test_cache05
+    @test rt("{% load cache %}{% cache 2 test foo %}cache05{% endcache %}", Dict{Any,Any}("foo" => 1)) == "cache05"
+    # test_cache06
+    @test rt("{% load cache %}{% cache 2 test foo %}cache06{% endcache %}", Dict{Any,Any}("foo" => 2)) == "cache06"
+    # test_cache11
+    @test_throws Juango.TemplateSyntaxError rt("{% load cache %}{% cache %}{% endcache %}", Dict{Any,Any}())
+    # test_cache12
+    @test_throws Juango.TemplateSyntaxError rt("{% load cache %}{% cache 1 %}{% endcache %}", Dict{Any,Any}())
+    # test_cache13
+    @test_throws Juango.TemplateSyntaxError rt("{% load cache %}{% cache foo bar %}{% endcache %}", Dict{Any,Any}())
+    # test_cache14
+    @test_throws Juango.TemplateSyntaxError rt("{% load cache %}{% cache foo bar %}{% endcache %}", Dict{Any,Any}("foo" => "fail"))
+    # test_cache15
+    @test_throws Juango.TemplateSyntaxError rt("{% load cache %}{% cache foo bar %}{% endcache %}", Dict{Any,Any}("foo" => Any[]))
+    # test_cache16
+    @test rt("{% load cache %}{% cache 1 foo bar %}{% endcache %}", Dict{Any,Any}("foo" => "foo", "bar" => "with spaces")) == ""
+    # test_cache17
+    @test rt("{% load cache %}{% cache 10 long_cache_key poem %}Some Content{% endcache %}", Dict{Any,Any}("poem" => "Oh freddled gruntbuggly/Thy micturations are to me/As plurdled gabbleblotchits/On a lurgid bee/That mordiously hath bitled out/Its earted jurtles/Into a rancid festering/Or else I shall rend thee in the gobberwarts with my blurglecruncheon/See if I don't.")) == "Some Content"
+    # test_cache18
+    @test rt("{% load cache custom %}{% cache 2|noop:\"x y\" cache18 %}cache18{% endcache %}", Dict{Any,Any}()) == "cache18"
+    # test_none_timeout
+    @test rtn(Dict("first" => "{% load cache %}{% cache None fragment19 %}content{% endcache %}", "second" => "{% load cache %}{% cache None fragment19 %}not rendered{% endcache %}"), "first", Dict{Any,Any}()) == "content"
+    @test rtn(Dict("first" => "{% load cache %}{% cache None fragment19 %}content{% endcache %}", "second" => "{% load cache %}{% cache None fragment19 %}not rendered{% endcache %}"), "second", Dict{Any,Any}()) == "content"
+    # not translated: test_cache04 (method render_to_string); test_cache07 (method render_to_string); test_cache08 (method render_to_string); test_cache_regression_20130 (call from_string); test_cache_fragment_cache (call from_string); test_cache_missing_backend (call from_string)
+end
+
+@testset "django template_tests: test_comment" begin
+    # test_comment_syntax01
+    @test rt("{# this is hidden #}hello", Dict{Any,Any}()) == "hello"
+    # test_comment_syntax02
+    @test rt("{# this is hidden #}hello{# foo #}", Dict{Any,Any}()) == "hello"
+    # test_comment_syntax03
+    @test rt("foo{#  {% if %}  #}", Dict{Any,Any}()) == "foo"
+    # test_comment_syntax04
+    @test rt("foo{#  {% endblock %}  #}", Dict{Any,Any}()) == "foo"
+    # test_comment_syntax05
+    @test rt("foo{#  {% somerandomtag %}  #}", Dict{Any,Any}()) == "foo"
+    # test_comment_syntax06
+    @test rt("foo{# {% #}", Dict{Any,Any}()) == "foo"
+    # test_comment_syntax07
+    @test rt("foo{# %} #}", Dict{Any,Any}()) == "foo"
+    # test_comment_syntax08
+    @test rt("foo{# %} #}bar", Dict{Any,Any}()) == "foobar"
+    # test_comment_syntax09
+    @test rt("foo{# {{ #}", Dict{Any,Any}()) == "foo"
+    # test_comment_syntax10
+    @test rt("foo{# }} #}", Dict{Any,Any}()) == "foo"
+    # test_comment_syntax11
+    @test rt("foo{# { #}", Dict{Any,Any}()) == "foo"
+    # test_comment_syntax12
+    @test rt("foo{# } #}", Dict{Any,Any}()) == "foo"
+    # test_comment_tag01
+    @test rt("{% comment %}this is hidden{% endcomment %}hello", Dict{Any,Any}()) == "hello"
+    # test_comment_tag02
+    @test rt("{% comment %}this is hidden{% endcomment %}hello{% comment %}foo{% endcomment %}", Dict{Any,Any}()) == "hello"
+    # test_comment_tag03
+    @test rt("foo{% comment %} {% if %} {% endcomment %}", Dict{Any,Any}()) == "foo"
+    # test_comment_tag04
+    @test rt("foo{% comment %} {% endblock %} {% endcomment %}", Dict{Any,Any}()) == "foo"
+    # test_comment_tag05
+    @test rt("foo{% comment %} {% somerandomtag %} {% endcomment %}", Dict{Any,Any}()) == "foo"
+    # test_closing_tag_after_literal_opening_brace
+    @test rt("{% comment %}{{% endcomment %}visible", Dict{Any,Any}()) == "visible"
+    # test_multiline_raw_block_closing_tags
+    @test rt("{% comment %}content{%\nendcomment\n%}", Dict{Any,Any}()) == ""
+    # test_template_syntax_in_raw_blocks
+    @test rt("{% comment %}\n{% if user %}Hello, {{ user }}{% endif %}\n{% endcomment %}", Dict{Any,Any}()) == ""
+    # test_literal_multiline_block_opener_in_raw_blocks
+    @test rt("{% comment %}\n{%\n{% endcomment %}", Dict{Any,Any}()) == ""
+    # not translated: test_tags_without_spaces (for body)
+end
+
+@testset "django template_tests: test_csp_nonce_attr" begin
+
+    # not translated: test_with_nonce_in_context (call Template); test_without_csp_nonce_in_context (call Template); test_with_csp_nonce_none (call Template); test_nonce_is_escaped (call Template); test_with_nonce_in_context (call keywords); test_without_csp_nonce_in_context (call keywords); test_with_csp_nonce_none (call keywords); test_css_and_js (call keywords); test_with_script_object (call keywords); test_output_is_safe (call keywords); test_script_with_conflicting_nonce_raises (call keywords)
+end
+
+@testset "django template_tests: test_cycle" begin
+    # test_cycle01
+    @test_throws Juango.TemplateSyntaxError rt("{% cycle a %}", Dict{Any,Any}())
+    # test_cycle05
+    @test_throws Juango.TemplateSyntaxError rt("{% cycle %}", Dict{Any,Any}())
+    # test_cycle07
+    @test_throws Juango.TemplateSyntaxError rt("{% cycle a,b,c as foo %}{% cycle bar %}", Dict{Any,Any}())
+    # test_cycle10
+    @test rt("{% cycle 'a' 'b' 'c' as abc %}{% cycle abc %}", Dict{Any,Any}()) == "ab"
+    # test_cycle11
+    @test rt("{% cycle 'a' 'b' 'c' as abc %}{% cycle abc %}{% cycle abc %}", Dict{Any,Any}()) == "abc"
+    # test_cycle12
+    @test rt("{% cycle 'a' 'b' 'c' as abc %}{% cycle abc %}{% cycle abc %}{% cycle abc %}", Dict{Any,Any}()) == "abca"
+    # test_cycle14
+    @test rt("{% cycle one two as foo %}{% cycle foo %}", Dict{Any,Any}("one" => "1", "two" => "2")) == "12"
+    # test_cycle16
+    @test rt("{% cycle one|lower two as foo %}{% cycle foo %}", Dict{Any,Any}("one" => "A", "two" => "2")) == "a2"
+    # test_cycle17
+    @test rt("{% cycle 'a' 'b' 'c' as abc silent %}{% cycle abc %}{% cycle abc %}{% cycle abc %}{% cycle abc %}", Dict{Any,Any}()) == ""
+    # test_cycle18
+    @test_throws Juango.TemplateSyntaxError rt("{% cycle 'a' 'b' 'c' as foo invalid_flag %}", Dict{Any,Any}())
+    # test_cycle19
+    @test rt("{% cycle 'a' 'b' as silent %}{% cycle silent %}", Dict{Any,Any}()) == "ab"
+    # test_cycle20
+    @test rt("{% cycle one two as foo %} &amp; {% cycle foo %}", Dict{Any,Any}("two" => "C & D", "one" => "A & B")) == "A &amp; B &amp; C &amp; D"
+    # test_cycle21
+    @test rt("{% filter force_escape %}{% cycle one two as foo %} & {% cycle foo %}{% endfilter %}", Dict{Any,Any}("two" => "C & D", "one" => "A & B")) == "A &amp;amp; B &amp; C &amp;amp; D"
+    # test_cycle22
+    @test rt("{% for x in values %}{% cycle 'a' 'b' 'c' as abc silent %}{{ x }}{% endfor %}", Dict{Any,Any}("values" => Any[1, 2, 3, 4])) == "1234"
+    # test_cycle23
+    @test rt("{% for x in values %}{% cycle 'a' 'b' 'c' as abc silent %}{{ abc }}{{ x }}{% endfor %}", Dict{Any,Any}("values" => Any[1, 2, 3, 4])) == "a1b2c3a4"
+    # test_cycle24
+    @test rtn(Dict("cycle24" => "{% for x in values %}{% cycle 'a' 'b' 'c' as abc silent %}{% include 'included-cycle' %}{% endfor %}", "included-cycle" => "{{ abc }}"), "cycle24", Dict{Any,Any}("values" => Any[1, 2, 3, 4])) == "abca"
+    # test_cycle25
+    @test rt("{% cycle a as abc %}", Dict{Any,Any}("a" => "<")) == "&lt;"
+    # test_cycle26
+    @test rt("{% cycle a b as ab %}{% cycle ab %}", Dict{Any,Any}("a" => "<", "b" => ">")) == "&lt;&gt;"
+    # test_cycle27
+    @test rt("{% autoescape off %}{% cycle a b as ab %}{% cycle ab %}{% endautoescape %}", Dict{Any,Any}("a" => "<", "b" => ">")) == "<>"
+    # test_cycle28
+    @test rt("{% cycle a|safe b as ab %}{% cycle ab %}", Dict{Any,Any}("a" => "<", "b" => ">")) == "<&gt;"
+    # test_cycle29
+    @test rt("{% cycle 'a' 'b' 'c' as cycler silent %}{% for x in values %}{% ifchanged x %}{% cycle cycler %}{{ cycler }}{% else %}{{ cycler }}{% endifchanged %}{% endfor %}", Dict{Any,Any}("values" => Any[1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 9, 9])) == "bcabcabcccaa"
+    # test_cycle30
+    @test rt("{% cycle 'a' 'b' 'c' as cycler silent %}{% for x in values %}{% with doesnothing=irrelevant %}{% ifchanged x %}{% cycle cycler %}{{ cycler }}{% else %}{{ cycler }}{% endifchanged %}{% endwith %}{% endfor %}", Dict{Any,Any}("irrelevant" => 1, "values" => Any[1, 2, 3, 4, 5, 6, 7, 8, 8, 8, 9, 9])) == "bcabcabcccaa"
+    # test_cycle_undefined
+    @test_throws Juango.TemplateSyntaxError rt("{% cycle 'a' 'b' 'c' as cycler silent %}{% for x in values %}{% cycle undefined %}{{ cycler }}{% endfor %}", Dict{Any,Any}())
+    # not translated: test_cycle13 (call list); test_cycle15 (call list)
+end
+
+@testset "django template_tests: test_debug" begin
+    # test_non_debug
+    let old = Juango.settings.DEBUG
+        configure!(DEBUG = false)
+        try
+    @test rt("{% debug %}", Dict{Any,Any}()) == ""
+        finally
+            configure!(DEBUG = old)
+        end
+    end
+    # not translated: test_modules (method assertIn); test_plain (method assertTrue); test_non_ascii (call keywords); test_script (method assertTrue)
+end
+
+@testset "django template_tests: test_exceptions" begin
+    # test_exception01
+    @test_throws Juango.TemplateDoesNotExist rt("{% extends 'nonexistent' %}", Dict{Any,Any}())
+    # test_exception02
+    @test_throws Juango.TemplateSyntaxError rt("{% extends nonexistent %}", Dict{Any,Any}())
+    # test_exception05
+    @test_throws Juango.TemplateSyntaxError rt("{% block first %}{{ block.super }}{% endblock %}", Dict{Any,Any}())
+    # not translated: test_exception03 (setup arg); test_exception04 (setup arg); test_unknown_origin_relative_path (For)
+end
+
+@testset "django template_tests: test_extends" begin
+    # test_inheritance01
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance01", Dict{Any,Any}()) == "1&3_"
+    # test_inheritance02
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance02", Dict{Any,Any}()) == "1234"
+    # test_inheritance03
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance03", Dict{Any,Any}()) == "1234"
+    # test_inheritance04
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance04", Dict{Any,Any}()) == "1&3_"
+    # test_inheritance05
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance05", Dict{Any,Any}()) == "1234"
+    # test_inheritance06
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance06", Dict{Any,Any}("foo" => "inheritance02")) == "1234"
+    # test_inheritance07
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance07", Dict{Any,Any}()) == "1&35"
+    # test_inheritance08
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance08", Dict{Any,Any}()) == "1235"
+    # test_inheritance09
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance09", Dict{Any,Any}()) == "1&3_"
+    # test_inheritance10
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance10", Dict{Any,Any}()) == "1&3_"
+    # test_inheritance11
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance11", Dict{Any,Any}()) == "1234"
+    # test_inheritance12
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance12", Dict{Any,Any}()) == "1235"
+    # test_inheritance13
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance13", Dict{Any,Any}()) == "1a3b"
+    # test_inheritance14
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance14", Dict{Any,Any}()) == "1&3_"
+    # test_inheritance15
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance15", Dict{Any,Any}()) == "12inner3_"
+    # test_inheritance16
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance16", Dict{Any,Any}()) == "12out3_"
+    # test_inheritance17
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance17", Dict{Any,Any}()) == "1234"
+    # test_inheritance18
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance18", Dict{Any,Any}()) == "this that theother5678"
+    # test_inheritance19
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance19", Dict{Any,Any}()) == "140056783_"
+    # test_inheritance20
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance20", Dict{Any,Any}()) == "1&a3_"
+    # test_inheritance21
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance21", Dict{Any,Any}()) == "12a34"
+    # test_inheritance22
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance22", Dict{Any,Any}()) == "1&a3_"
+    # test_inheritance23
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance23", Dict{Any,Any}()) == "1&ab3_"
+    # test_inheritance26
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance26", Dict{Any,Any}()) == "no tags"
+    # test_inheritance27
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance27", Dict{Any,Any}()) == "no tags"
+    # test_inheritance_28
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance 28", Dict{Any,Any}()) == "!"
+    # test_inheritance29
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance29", Dict{Any,Any}()) == "!"
+    # test_inheritance30
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance30", Dict{Any,Any}("optional" => true)) == "123"
+    # test_inheritance31
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance31", Dict{Any,Any}("optional" => true)) == "1two3"
+    # test_inheritance32
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance32", Dict{Any,Any}()) == "13"
+    # test_inheritance33
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance33", Dict{Any,Any}("optional" => 1)) == "123"
+    # test_inheritance34
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance34", Dict{Any,Any}("optional" => 1)) == "1two3"
+    # test_inheritance35
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance35", Dict{Any,Any}("optional" => 2)) == "13"
+    # test_inheritance36
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance36", Dict{Any,Any}("numbers" => "123")) == "_1_2_3_"
+    # test_inheritance37
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance37", Dict{Any,Any}("numbers" => "123")) == "_X_X_X_"
+    # test_inheritance38
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance38", Dict{Any,Any}()) == "_"
+    # test_inheritance39
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance39", Dict{Any,Any}("optional" => true)) == "1new23"
+    # test_inheritance40
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance40", Dict{Any,Any}("optional" => 1)) == "1new23"
+    # test_inheritance41
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance41", Dict{Any,Any}("numbers" => "123")) == "_new1_new2_new3_"
+    # test_inheritance42
+    @test rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance42", Dict{Any,Any}()) == "1234"
+    # test_inheritance_empty
+    @test_throws Juango.TemplateSyntaxError rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "inheritance_empty", Dict{Any,Any}())
+    # test_extends_duplicate
+    @test_throws Juango.TemplateSyntaxError rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "extends_duplicate", Dict{Any,Any}())
+    # test_duplicate_block
+    @test_throws Juango.TemplateSyntaxError rtn(Dict("inheritance01" => "1{% block first %}&{% endblock %}3{% block second %}_{% endblock %}", "inheritance02" => "{% extends 'inheritance01' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance03" => "{% extends 'inheritance02' %}", "inheritance04" => "{% extends 'inheritance01' %}", "inheritance05" => "{% extends 'inheritance02' %}", "inheritance06" => "{% extends foo %}", "inheritance07" => "{% extends 'inheritance01' %}{% block second %}5{% endblock %}", "inheritance08" => "{% extends 'inheritance02' %}{% block second %}5{% endblock %}", "inheritance09" => "{% extends 'inheritance04' %}", "inheritance10" => "{% extends 'inheritance04' %}      ", "inheritance11" => "{% extends 'inheritance04' %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance12" => "{% extends 'inheritance07' %}{% block first %}2{% endblock %}", "inheritance13" => "{% extends 'inheritance02' %}{% block first %}a{% endblock %}{% block second %}b{% endblock %}", "inheritance14" => "{% extends 'inheritance01' %}{% block newblock %}NO DISPLAY{% endblock %}", "inheritance15" => "{% extends 'inheritance01' %}{% block first %}2{% block inner %}inner{% endblock %}{% endblock %}", "inheritance16" => "{% extends 'inheritance15' %}{% block inner %}out{% endblock %}", "inheritance17" => "{% load testtags %}{% block first %}1234{% endblock %}", "inheritance18" => "{% load testtags %}{% echo this that theother %}5678", "inheritance19" => "{% extends 'inheritance01' %}{% block first %}{% load testtags %}{% echo 400 %}5678{% endblock %}", "inheritance20" => "{% extends 'inheritance01' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance21" => "{% extends 'inheritance02' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance22" => "{% extends 'inheritance04' %}{% block first %}{{ block.super }}a{% endblock %}", "inheritance23" => "{% extends 'inheritance20' %}{% block first %}{{ block.super }}b{% endblock %}", "inheritance24" => "{% extends context_template %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance25" => "{% extends context_template.1 %}{% block first %}2{% endblock %}{% block second %}4{% endblock %}", "inheritance26" => "no tags", "inheritance27" => "{% extends 'inheritance26' %}", "inheritance 28" => "{% block first %}!{% endblock %}", "inheritance29" => "{% extends 'inheritance 28' %}", "inheritance30" => "1{% if optional %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance31" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance32" => "{% extends 'inheritance30' %}{% block opt %}two{% endblock %}", "inheritance33" => "1{% if optional == 1 %}{% block opt %}2{% endblock %}{% endif %}3", "inheritance34" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance35" => "{% extends 'inheritance33' %}{% block opt %}two{% endblock %}", "inheritance36" => "{% for n in numbers %}_{% block opt %}{{ n }}{% endblock %}{% endfor %}_", "inheritance37" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance38" => "{% extends 'inheritance36' %}{% block opt %}X{% endblock %}", "inheritance39" => "{% extends 'inheritance30' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance40" => "{% extends 'inheritance33' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance41" => "{% extends 'inheritance36' %}{% block opt %}new{{ block.super }}{% endblock %}", "inheritance42" => "{% extends 'inheritance02'|cut:' ' %}", "inheritance_empty" => "{% extends %}", "extends_duplicate" => "{% extends 'base.html' %}{% extends 'base.html' %}", "duplicate_block" => "{% extends 'base.html' %}{% block content %}2{% endblock %}{% block content %}4{% endblock %}"), "duplicate_block", Dict{Any,Any}())
+    # not translated: test_inheritance24 (call from_string); test_inheritance25 (call from_string); test_extends_node_repr (call keywords)
+end
+
+@testset "django template_tests: test_filter_syntax" begin
+    # test_filter_syntax01
+    @test rt("{{ var|upper }}", Dict{Any,Any}("var" => "Django is the greatest!")) == "DJANGO IS THE GREATEST!"
+    # test_filter_syntax02
+    @test rt("{{ var|upper|lower }}", Dict{Any,Any}("var" => "Django is the greatest!")) == "django is the greatest!"
+    # test_filter_syntax03
+    @test rt("{{ var |upper }}", Dict{Any,Any}("var" => "Django is the greatest!")) == "DJANGO IS THE GREATEST!"
+    # test_filter_syntax04
+    @test rt("{{ var| upper }}", Dict{Any,Any}("var" => "Django is the greatest!")) == "DJANGO IS THE GREATEST!"
+    # test_filter_syntax05
+    @test_throws Juango.TemplateSyntaxError rt("{{ var|does_not_exist }}", Dict{Any,Any}())
+    # test_filter_syntax06
+    @test_throws Juango.TemplateSyntaxError rt("{{ var|fil(ter) }}", Dict{Any,Any}())
+    # test_filter_syntax07
+    @test_throws Juango.TemplateSyntaxError rt("{% nothing_to_see_here %}", Dict{Any,Any}())
+    # test_filter_syntax08
+    @test_throws Juango.TemplateSyntaxError rt("{% %}", Dict{Any,Any}())
+    # test_filter_syntax08_multi_line
+    @test_throws Juango.TemplateSyntaxError rt("line 1\nline 2\nline 3{% %}\nline 4\nline 5", Dict{Any,Any}())
+    # test_filter_syntax09
+    @test rt("{{ var|cut:\"o\"|upper|lower }}", Dict{Any,Any}("var" => "Foo")) == "f"
+    # test_filter_syntax10
+    @test rt("{{ var|default_if_none:\" endquote\\\" hah\" }}", Dict{Any,Any}("var" => nothing)) == " endquote\" hah"
+    # test_filter_syntax11
+    @test rt("{{ var|default_if_none:var2 }}", Dict{Any,Any}("var" => nothing, "var2" => "happy")) == "happy"
+    # test_filter_syntax15
+    @test rt("{{ var|default_if_none:\"foo\\bar\" }}", Dict{Any,Any}("var" => nothing)) == "foo\\bar"
+    # test_filter_syntax16
+    @test rt("{{ var|default_if_none:\"foo\\now\" }}", Dict{Any,Any}("var" => nothing)) == "foo\\now"
+    # test_filter_syntax17
+    @test rt("{{ var|join:\"\" }}", Dict{Any,Any}("var" => Any["a", "b", "c"])) == "abc"
+    # test_filter_syntax19
+    @test rt("{{ var|truncatewords:1 }}", Dict{Any,Any}("var" => "hello world")) == "hello …"
+    # test_filter_syntax20
+    @test rt("{{ \"\"|default_if_none:\"was none\" }}", Dict{Any,Any}()) == ""
+    # not translated: test_filter_syntax13 (call SomeClass); test_filter_syntax14 (call SomeClass); test_filter_syntax18 (call UTF8Class); test_filter_syntax21 (call SomeClass); test_filter_syntax22 (call SomeClass); test_filter_syntax23 (call SomeClass); test_filter_syntax24 (call SomeClass); test_filter_syntax25 (call SomeClass); test_type_error_attribute (call SomeClass)
+end
+
+@testset "django template_tests: test_filter_tag" begin
+    # test_filter01
+    @test rt("{% filter upper %}{% endfilter %}", Dict{Any,Any}()) == ""
+    # test_filter02
+    @test rt("{% filter upper %}django{% endfilter %}", Dict{Any,Any}()) == "DJANGO"
+    # test_filter03
+    @test rt("{% filter upper|lower %}django{% endfilter %}", Dict{Any,Any}()) == "django"
+    # test_filter04
+    @test rt("{% filter cut:remove %}djangospam{% endfilter %}", Dict{Any,Any}("remove" => "spam")) == "django"
+    # test_filter05
+    @test_throws Juango.TemplateSyntaxError rt("{% filter safe %}fail{% endfilter %}", Dict{Any,Any}())
+    # test_filter05bis
+    @test_throws Juango.TemplateSyntaxError rt("{% filter upper|safe %}fail{% endfilter %}", Dict{Any,Any}())
+    # test_filter06
+    @test_throws Juango.TemplateSyntaxError rt("{% filter escape %}fail{% endfilter %}", Dict{Any,Any}())
+    # test_filter06bis
+    @test_throws Juango.TemplateSyntaxError rt("{% filter upper|escape %}fail{% endfilter %}", Dict{Any,Any}())
+end
+
+@testset "django template_tests: test_firstof" begin
+    # test_firstof01
+    @test rt("{% firstof a b c %}", Dict{Any,Any}("a" => 0, "c" => 0, "b" => 0)) == ""
+    # test_firstof02
+    @test rt("{% firstof a b c %}", Dict{Any,Any}("a" => 1, "c" => 0, "b" => 0)) == "1"
+    # test_firstof03
+    @test rt("{% firstof a b c %}", Dict{Any,Any}("a" => 0, "c" => 0, "b" => 2)) == "2"
+    # test_firstof04
+    @test rt("{% firstof a b c %}", Dict{Any,Any}("a" => 0, "c" => 3, "b" => 0)) == "3"
+    # test_firstof05
+    @test rt("{% firstof a b c %}", Dict{Any,Any}("a" => 1, "c" => 3, "b" => 2)) == "1"
+    # test_firstof06
+    @test rt("{% firstof a b c %}", Dict{Any,Any}("c" => 3, "b" => 0)) == "3"
+    # test_firstof07
+    @test rt("{% firstof a b \"c\" %}", Dict{Any,Any}("a" => 0)) == "c"
+    # test_firstof08
+    @test rt("{% firstof a b \"c and d\" %}", Dict{Any,Any}("a" => 0, "b" => 0)) == "c and d"
+    # test_firstof09
+    @test_throws Juango.TemplateSyntaxError rt("{% firstof %}", Dict{Any,Any}())
+    # test_firstof_asvar_no_args
+    @test_throws Juango.TemplateSyntaxError rt("{% firstof as myvar %}", Dict{Any,Any}())
+    # test_firstof10
+    @test rt("{% firstof a %}", Dict{Any,Any}("a" => "<")) == "&lt;"
+    # test_firstof11
+    @test rt("{% firstof a b %}", Dict{Any,Any}("a" => "<", "b" => ">")) == "&lt;"
+    # test_firstof12
+    @test rt("{% firstof a b %}", Dict{Any,Any}("a" => "", "b" => ">")) == "&gt;"
+    # test_firstof13
+    @test rt("{% autoescape off %}{% firstof a %}{% endautoescape %}", Dict{Any,Any}("a" => "<")) == "<"
+    # test_firstof14
+    @test rt("{% firstof a|safe b %}", Dict{Any,Any}("a" => "<")) == "<"
+    # not translated: test_firstof15 (Subscript); test_all_false_arguments_asvar (Subscript)
+end
+
+@testset "django template_tests: test_for" begin
+    # test_for_tag01
+    @test rt("{% for val in values %}{{ val }}{% endfor %}", Dict{Any,Any}("values" => Any[1, 2, 3])) == "123"
+    # test_for_tag02
+    @test rt("{% for val in values reversed %}{{ val }}{% endfor %}", Dict{Any,Any}("values" => Any[1, 2, 3])) == "321"
+    # test_for_tag_vars01
+    @test rt("{% for val in values %}{{ forloop.counter }}{% endfor %}", Dict{Any,Any}("values" => Any[6, 6, 6])) == "123"
+    # test_for_tag_vars02
+    @test rt("{% for val in values %}{{ forloop.counter0 }}{% endfor %}", Dict{Any,Any}("values" => Any[6, 6, 6])) == "012"
+    # test_for_tag_vars03
+    @test rt("{% for val in values %}{{ forloop.revcounter }}{% endfor %}", Dict{Any,Any}("values" => Any[6, 6, 6])) == "321"
+    # test_for_tag_vars04
+    @test rt("{% for val in values %}{{ forloop.revcounter0 }}{% endfor %}", Dict{Any,Any}("values" => Any[6, 6, 6])) == "210"
+    # test_for_tag_vars05
+    @test rt("{% for val in values %}{% if forloop.first %}f{% else %}x{% endif %}{% endfor %}", Dict{Any,Any}("values" => Any[6, 6, 6])) == "fxx"
+    # test_for_tag_vars06
+    @test rt("{% for val in values %}{% if forloop.last %}l{% else %}x{% endif %}{% endfor %}", Dict{Any,Any}("values" => Any[6, 6, 6])) == "xxl"
+    # test_for_tag_unpack01
+    @test rt("{% for key,value in items %}{{ key }}:{{ value }}/{% endfor %}", Dict{Any,Any}("items" => (("one", 1), ("two", 2)))) == "one:1/two:2/"
+    # test_for_tag_unpack03
+    @test rt("{% for key, value in items %}{{ key }}:{{ value }}/{% endfor %}", Dict{Any,Any}("items" => (("one", 1), ("two", 2)))) == "one:1/two:2/"
+    # test_for_tag_unpack04
+    @test rt("{% for key , value in items %}{{ key }}:{{ value }}/{% endfor %}", Dict{Any,Any}("items" => (("one", 1), ("two", 2)))) == "one:1/two:2/"
+    # test_for_tag_unpack05
+    @test rt("{% for key ,value in items %}{{ key }}:{{ value }}/{% endfor %}", Dict{Any,Any}("items" => (("one", 1), ("two", 2)))) == "one:1/two:2/"
+    # test_for_tag_unpack06
+    @test_throws Juango.TemplateSyntaxError rt("{% for key value in items %}{{ key }}:{{ value }}/{% endfor %}", Dict{Any,Any}("items" => (("one", 1), ("two", 2))))
+    # test_for_tag_unpack07
+    @test_throws Juango.TemplateSyntaxError rt("{% for key,,value in items %}{{ key }}:{{ value }}/{% endfor %}", Dict{Any,Any}("items" => (("one", 1), ("two", 2))))
+    # test_for_tag_unpack08
+    @test_throws Juango.TemplateSyntaxError rt("{% for key,value, in items %}{{ key }}:{{ value }}/{% endfor %}", Dict{Any,Any}("items" => (("one", 1), ("two", 2))))
+    # test_unpack_double_quote
+    @test_throws Juango.TemplateSyntaxError rt("{% for \"k\" in items %}{{ \"k\" }}/{% endfor %}", Dict{Any,Any}("items" => (1, 2)))
+    # test_unpack_single_quote
+    @test_throws Juango.TemplateSyntaxError rt("{% for 'k' in items %}{{ k }}/{% endfor %}", Dict{Any,Any}("items" => (1, 2)))
+    # test_unpack_vertical_bar
+    @test_throws Juango.TemplateSyntaxError rt("{% for k|upper in items %}{{ k|upper }}/{% endfor %}", Dict{Any,Any}("items" => (1, 2)))
+    # test_for_tag_unpack09
+    @test rt("{% for val in items %}{{ val.0 }}:{{ val.1 }}/{% endfor %}", Dict{Any,Any}("items" => (("one", 1), ("two", 2)))) == "one:1/two:2/"
+    # test_for_tag_unpack13
+    @test rt("{% for x,y,z in items %}{{ x }}:{{ y }},{{ z }}/{% endfor %}", Dict{Any,Any}("items" => (("one", 1, "carrot"), ("two", 2, "cheese")))) == "one:1,carrot/two:2,cheese/"
+    # test_for_tag_empty01
+    @test rt("{% for val in values %}{{ val }}{% empty %}empty text{% endfor %}", Dict{Any,Any}("values" => Any[1, 2, 3])) == "123"
+    # test_for_tag_empty02
+    @test rt("{% for val in values %}{{ val }}{% empty %}values array empty{% endfor %}", Dict{Any,Any}("values" => Any[])) == "values array empty"
+    # test_for_tag_empty03
+    @test rt("{% for val in values %}{{ val }}{% empty %}values array not found{% endfor %}", Dict{Any,Any}()) == "values array not found"
+    # test_for_tag_filter_ws
+    @test rt("{% load custom %}{% for x in s|noop:'x y' %}{{ x }}{% endfor %}", Dict{Any,Any}("s" => "abc")) == "abc"
+    # test_for_tag_unpack_strs
+    @test rt("{% for x,y in items %}{{ x }}:{{ y }}/{% endfor %}", Dict{Any,Any}("items" => ("ab", "ac"))) == "a:b/a:c/"
+    # test_for_tag_unpack10
+    @test_throws Exception rt("{% for x,y in items %}{{ x }}:{{ y }}/{% endfor %}", Dict{Any,Any}("items" => (("one", 1, "carrot"), ("two", 2, "orange"))))
+    # test_for_tag_unpack11
+    @test_throws Exception rt("{% for x,y,z in items %}{{ x }}:{{ y }},{{ z }}/{% endfor %}", Dict{Any,Any}("items" => (("one", 1), ("two", 2))))
+    # test_for_tag_unpack12
+    @test_throws Exception rt("{% for x,y,z in items %}{{ x }}:{{ y }},{{ z }}/{% endfor %}", Dict{Any,Any}("items" => (("one", 1, "carrot"), ("two", 2))))
+    # test_for_tag_unpack14
+    @test_throws Exception rt("{% for x,y in items %}{{ x }}:{{ y }}/{% endfor %}", Dict{Any,Any}("items" => (1, 2)))
+    # test_for_tag_context
+    @test rtn(Dict("main" => "{% with alpha=alpha.values %}{% include \"base\" %}{% endwith %}_{% with alpha=alpha.extra %}{% include \"base\" %}{% endwith %}", "base" => "{% for x, y in alpha %}{{ x }}:{{ y }},{% endfor %}"), "main", Dict{Any,Any}("alpha" => Dict{Any,Any}("values" => Any[("two", 2), ("four", 4)], "extra" => Any[("six", 6), ("eight", 8)]))) == "two:2,four:4,_six:6,eight:8,"
+    # test_invalid_arg
+    @test_throws Juango.TemplateSyntaxError rt("{% for x items %}{{ x }}{% endfor %}", Dict{Any,Any}("items" => (1, 2)))
+    # test_invalid_in_keyword
+    @test_throws Juango.TemplateSyntaxError rt("{% for x from items %}{{ x }}{% endfor %}", Dict{Any,Any}("items" => (1, 2)))
+    # not translated: test_forloop_length (For); test_repr (call keywords)
+end
+
+@testset "django template_tests: test_if_changed" begin
+    # test_ifchanged01
+    @test rt("{% for n in num %}{% ifchanged %}{{ n }}{% endifchanged %}{% endfor %}", Dict{Any,Any}("num" => (1, 2, 3))) == "123"
+    # test_ifchanged02
+    @test rt("{% for n in num %}{% ifchanged %}{{ n }}{% endifchanged %}{% endfor %}", Dict{Any,Any}("num" => (1, 1, 3))) == "13"
+    # test_ifchanged03
+    @test rt("{% for n in num %}{% ifchanged %}{{ n }}{% endifchanged %}{% endfor %}", Dict{Any,Any}("num" => (1, 1, 1))) == "1"
+    # test_ifchanged04
+    @test rt("{% for n in num %}{% ifchanged %}{{ n }}{% endifchanged %}{% for x in numx %}{% ifchanged %}{{ x }}{% endifchanged %}{% endfor %}{% endfor %}", Dict{Any,Any}("num" => (1, 2, 3), "numx" => (2, 2, 2))) == "122232"
+    # test_ifchanged05
+    @test rt("{% for n in num %}{% ifchanged %}{{ n }}{% endifchanged %}{% for x in numx %}{% ifchanged %}{{ x }}{% endifchanged %}{% endfor %}{% endfor %}", Dict{Any,Any}("num" => (1, 1, 1), "numx" => (1, 2, 3))) == "1123123123"
+    # test_ifchanged06
+    @test rt("{% for n in num %}{% ifchanged %}{{ n }}{% endifchanged %}{% for x in numx %}{% ifchanged %}{{ x }}{% endifchanged %}{% endfor %}{% endfor %}", Dict{Any,Any}("num" => (1, 1, 1), "numx" => (2, 2, 2))) == "1222"
+    # test_ifchanged07
+    @test rt("{% for n in num %}{% ifchanged %}{{ n }}{% endifchanged %}{% for x in numx %}{% ifchanged %}{{ x }}{% endifchanged %}{% for y in numy %}{% ifchanged %}{{ y }}{% endifchanged %}{% endfor %}{% endfor %}{% endfor %}", Dict{Any,Any}("num" => (1, 1, 1), "numx" => (2, 2, 2), "numy" => (3, 3, 3))) == "1233323332333"
+    # test_ifchanged08
+    @test rt("{% for data in datalist %}{% for c,d in data %}{% if c %}{% ifchanged %}{{ d }}{% endifchanged %}{% endif %}{% endfor %}{% endfor %}", Dict{Any,Any}("datalist" => Any[Any[(1, "a"), (1, "a"), (0, "b"), (1, "c")], Any[(0, "a"), (1, "c"), (1, "d"), (1, "d"), (0, "e")]])) == "accd"
+    # test_ifchanged_param01
+    @test rt("{% for n in num %}{% ifchanged n %}..{% endifchanged %}{{ n }}{% endfor %}", Dict{Any,Any}("num" => (1, 2, 3))) == "..1..2..3"
+    # test_ifchanged_param02
+    @test rt("{% for n in num %}{% for x in numx %}{% ifchanged n %}..{% endifchanged %}{{ x }}{% endfor %}{% endfor %}", Dict{Any,Any}("num" => (1, 2, 3), "numx" => (5, 6, 7))) == "..567..567..567"
+    # test_ifchanged_param03
+    @test rt("{% for n in num %}{{ n }}{% for x in numx %}{% ifchanged x n %}{{ x }}{% endifchanged %}{% endfor %}{% endfor %}", Dict{Any,Any}("num" => (1, 1, 2), "numx" => (5, 6, 6))) == "156156256"
+    # test_ifchanged_param04
+    @test rt("{% for d in days %}{% ifchanged %}{{ d.day }}{% endifchanged %}{% for h in d.hours %}{% ifchanged d h %}{{ h }}{% endifchanged %}{% endfor %}{% endfor %}", Dict{Any,Any}("days" => Any[Dict{Any,Any}("hours" => Any[1, 2, 3], "day" => 1), Dict{Any,Any}("hours" => Any[3], "day" => 2)])) == "112323"
+    # test_ifchanged_param05
+    @test rt("{% for d in days %}{% ifchanged d.day %}{{ d.day }}{% endifchanged %}{% for h in d.hours %}{% ifchanged d.day h %}{{ h }}{% endifchanged %}{% endfor %}{% endfor %}", Dict{Any,Any}("days" => Any[Dict{Any,Any}("hours" => Any[1, 2, 3], "day" => 1), Dict{Any,Any}("hours" => Any[3], "day" => 2)])) == "112323"
+    # test_ifchanged_else01
+    @test rt("{% for id in ids %}{{ id }}{% ifchanged id %}-first{% else %}-other{% endifchanged %},{% endfor %}", Dict{Any,Any}("ids" => Any[1, 1, 2, 2, 2, 3])) == "1-first,1-other,2-first,2-other,2-other,3-first,"
+    # test_ifchanged_else02
+    @test rt("{% for id in ids %}{{ id }}-{% ifchanged id %}{% cycle \"red\" \"blue\" %}{% else %}gray{% endifchanged %},{% endfor %}", Dict{Any,Any}("ids" => Any[1, 1, 2, 2, 2, 3])) == "1-red,1-gray,2-blue,2-gray,2-gray,3-red,"
+    # test_ifchanged_else03
+    @test rt("{% for id in ids %}{{ id }}{% ifchanged id %}-{% cycle \"red\" \"blue\" %}{% else %}{% endifchanged %},{% endfor %}", Dict{Any,Any}("ids" => Any[1, 1, 2, 2, 2, 3])) == "1-red,1,2-blue,2,2,3-red,"
+    # test_ifchanged_else04
+    @test rt("{% for id in ids %}{% ifchanged %}***{{ id }}*{% else %}...{% endifchanged %}{{ forloop.counter }}{% endfor %}", Dict{Any,Any}("ids" => Any[1, 1, 2, 2, 2, 3, 4])) == "***1*1...2***2*3...4...5***3*6***4*7"
+    # test_ifchanged_filter_ws
+    @test rt("{% load custom %}{% for n in num %}{% ifchanged n|noop:\"x y\" %}..{% endifchanged %}{{ n }}{% endfor %}", Dict{Any,Any}("num" => (1, 2, 3))) == "..1..2..3"
+    # not translated: test_ifchanged_concurrency (call from_string); test_ifchanged_render_once (call from_string); test_include (call keywords); test_include_state (call keywords)
+end
+
+@testset "django template_tests: test_if" begin
+    # test_if_tag01
+    @test rt("{% if foo %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true)) == "yes"
+    # test_if_tag02
+    @test rt("{% if foo %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false)) == "no"
+    # test_if_tag03
+    @test rt("{% if foo %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
+    # test_if_tag04
+    @test rt("{% if foo %}foo{% elif bar %}bar{% endif %}", Dict{Any,Any}("foo" => true)) == "foo"
+    # test_if_tag05
+    @test rt("{% if foo %}foo{% elif bar %}bar{% endif %}", Dict{Any,Any}("bar" => true)) == "bar"
+    # test_if_tag06
+    @test rt("{% if foo %}foo{% elif bar %}bar{% endif %}", Dict{Any,Any}()) == ""
+    # test_if_tag07
+    @test rt("{% if foo %}foo{% elif bar %}bar{% else %}nothing{% endif %}", Dict{Any,Any}("foo" => true)) == "foo"
+    # test_if_tag08
+    @test rt("{% if foo %}foo{% elif bar %}bar{% else %}nothing{% endif %}", Dict{Any,Any}("bar" => true)) == "bar"
+    # test_if_tag09
+    @test rt("{% if foo %}foo{% elif bar %}bar{% else %}nothing{% endif %}", Dict{Any,Any}()) == "nothing"
+    # test_if_tag10
+    @test rt("{% if foo %}foo{% elif bar %}bar{% elif baz %}baz{% else %}nothing{% endif %}", Dict{Any,Any}("foo" => true)) == "foo"
+    # test_if_tag11
+    @test rt("{% if foo %}foo{% elif bar %}bar{% elif baz %}baz{% else %}nothing{% endif %}", Dict{Any,Any}("bar" => true)) == "bar"
+    # test_if_tag12
+    @test rt("{% if foo %}foo{% elif bar %}bar{% elif baz %}baz{% else %}nothing{% endif %}", Dict{Any,Any}("baz" => true)) == "baz"
+    # test_if_tag13
+    @test rt("{% if foo %}foo{% elif bar %}bar{% elif baz %}baz{% else %}nothing{% endif %}", Dict{Any,Any}()) == "nothing"
+    # test_if_tag_filter01
+    @test rt("{% if foo|length == 5 %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => "abcde")) == "yes"
+    # test_if_tag_filter02
+    @test rt("{% if foo|upper == 'ABC' %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
+    # test_if_tag_eq01
+    @test rt("{% if foo == bar %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "yes"
+    # test_if_tag_eq02
+    @test rt("{% if foo == bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => 1)) == "no"
+    # test_if_tag_eq03
+    @test rt("{% if foo == bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => 1, "bar" => 1)) == "yes"
+    # test_if_tag_eq04
+    @test rt("{% if foo == bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => 1, "bar" => 2)) == "no"
+    # test_if_tag_eq05
+    @test rt("{% if foo == '' %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
+    # test_if_tag_noteq01
+    @test rt("{% if foo != bar %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
+    # test_if_tag_noteq02
+    @test rt("{% if foo != bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => 1)) == "yes"
+    # test_if_tag_noteq03
+    @test rt("{% if foo != bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => 1, "bar" => 1)) == "no"
+    # test_if_tag_noteq04
+    @test rt("{% if foo != bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => 1, "bar" => 2)) == "yes"
+    # test_if_tag_noteq05
+    @test rt("{% if foo != \"\" %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "yes"
+    # test_if_tag_gt_01
+    @test rt("{% if 2 > 1 %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "yes"
+    # test_if_tag_gt_02
+    @test rt("{% if 1 > 1 %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
+    # test_if_tag_gte_01
+    @test rt("{% if 1 >= 1 %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "yes"
+    # test_if_tag_gte_02
+    @test rt("{% if 1 >= 2 %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
+    # test_if_tag_lt_01
+    @test rt("{% if 1 < 2 %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "yes"
+    # test_if_tag_lt_02
+    @test rt("{% if 1 < 1 %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
+    # test_if_tag_lte_01
+    @test rt("{% if 1 <= 1 %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "yes"
+    # test_if_tag_lte_02
+    @test rt("{% if 2 <= 1 %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
+    # test_if_tag_in_01
+    @test rt("{% if 1 in x %}yes{% else %}no{% endif %}", Dict{Any,Any}("x" => Any[1])) == "yes"
+    # test_if_tag_in_02
+    @test rt("{% if 2 in x %}yes{% else %}no{% endif %}", Dict{Any,Any}("x" => Any[1])) == "no"
+    # test_if_tag_not_in_01
+    @test rt("{% if 1 not in x %}yes{% else %}no{% endif %}", Dict{Any,Any}("x" => Any[1])) == "no"
+    # test_if_tag_not_in_02
+    @test rt("{% if 2 not in x %}yes{% else %}no{% endif %}", Dict{Any,Any}("x" => Any[1])) == "yes"
+    # test_if_tag_and01
+    @test rt("{% if foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => true)) == "yes"
+    # test_if_tag_and02
+    @test rt("{% if foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => false)) == "no"
+    # test_if_tag_and03
+    @test rt("{% if foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => true)) == "no"
+    # test_if_tag_and04
+    @test rt("{% if foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => false)) == "no"
+    # test_if_tag_and05
+    @test rt("{% if foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false)) == "no"
+    # test_if_tag_and06
+    @test rt("{% if foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("bar" => false)) == "no"
+    # test_if_tag_and07
+    @test rt("{% if foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true)) == "no"
+    # test_if_tag_and08
+    @test rt("{% if foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("bar" => true)) == "no"
+    # test_if_tag_or01
+    @test rt("{% if foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => true)) == "yes"
+    # test_if_tag_or02
+    @test rt("{% if foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => false)) == "yes"
+    # test_if_tag_or03
+    @test rt("{% if foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => true)) == "yes"
+    # test_if_tag_or04
+    @test rt("{% if foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => false)) == "no"
+    # test_if_tag_or05
+    @test rt("{% if foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false)) == "no"
+    # test_if_tag_or06
+    @test rt("{% if foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("bar" => false)) == "no"
+    # test_if_tag_or07
+    @test rt("{% if foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true)) == "yes"
+    # test_if_tag_or08
+    @test rt("{% if foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("bar" => true)) == "yes"
+    # test_if_tag_or09
+    @test rt("{% if foo or bar or baz %}yes{% else %}no{% endif %}", Dict{Any,Any}("baz" => true)) == "yes"
+    # test_if_tag_not01
+    @test rt("{% if not foo %}no{% else %}yes{% endif %}", Dict{Any,Any}("foo" => true)) == "yes"
+    # test_if_tag_not02
+    @test rt("{% if not not foo %}no{% else %}yes{% endif %}", Dict{Any,Any}("foo" => true)) == "no"
+    # test_if_tag_not06
+    @test rt("{% if foo and not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
+    # test_if_tag_not07
+    @test rt("{% if foo and not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => true)) == "no"
+    # test_if_tag_not08
+    @test rt("{% if foo and not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => false)) == "yes"
+    # test_if_tag_not09
+    @test rt("{% if foo and not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => true)) == "no"
+    # test_if_tag_not10
+    @test rt("{% if foo and not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => false)) == "no"
+    # test_if_tag_not11
+    @test rt("{% if not foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
+    # test_if_tag_not12
+    @test rt("{% if not foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => true)) == "no"
+    # test_if_tag_not13
+    @test rt("{% if not foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => false)) == "no"
+    # test_if_tag_not14
+    @test rt("{% if not foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => true)) == "yes"
+    # test_if_tag_not15
+    @test rt("{% if not foo and bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => false)) == "no"
+    # test_if_tag_not16
+    @test rt("{% if foo or not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "yes"
+    # test_if_tag_not17
+    @test rt("{% if foo or not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => true)) == "yes"
+    # test_if_tag_not18
+    @test rt("{% if foo or not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => false)) == "yes"
+    # test_if_tag_not19
+    @test rt("{% if foo or not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => true)) == "no"
+    # test_if_tag_not20
+    @test rt("{% if foo or not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => false)) == "yes"
+    # test_if_tag_not21
+    @test rt("{% if not foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "yes"
+    # test_if_tag_not22
+    @test rt("{% if not foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => true)) == "yes"
+    # test_if_tag_not23
+    @test rt("{% if not foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => false)) == "no"
+    # test_if_tag_not24
+    @test rt("{% if not foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => true)) == "yes"
+    # test_if_tag_not25
+    @test rt("{% if not foo or bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => false)) == "yes"
+    # test_if_tag_not26
+    @test rt("{% if not foo and not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "yes"
+    # test_if_tag_not27
+    @test rt("{% if not foo and not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => true)) == "no"
+    # test_if_tag_not28
+    @test rt("{% if not foo and not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => false)) == "no"
+    # test_if_tag_not29
+    @test rt("{% if not foo and not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => true)) == "no"
+    # test_if_tag_not30
+    @test rt("{% if not foo and not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => false)) == "yes"
+    # test_if_tag_not31
+    @test rt("{% if not foo or not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "yes"
+    # test_if_tag_not32
+    @test rt("{% if not foo or not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => true)) == "no"
+    # test_if_tag_not33
+    @test rt("{% if not foo or not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true, "bar" => false)) == "yes"
+    # test_if_tag_not34
+    @test rt("{% if not foo or not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => true)) == "yes"
+    # test_if_tag_not35
+    @test rt("{% if not foo or not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false, "bar" => false)) == "yes"
+    # test_if_tag_error01
+    @test_throws Juango.TemplateSyntaxError rt("{% if %}yes{% endif %}", Dict{Any,Any}())
+    # test_if_tag_error02
+    @test_throws Juango.TemplateSyntaxError rt("{% if foo and %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true))
+    # test_if_tag_error03
+    @test_throws Juango.TemplateSyntaxError rt("{% if foo or %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true))
+    # test_if_tag_error04
+    @test_throws Juango.TemplateSyntaxError rt("{% if not foo and %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true))
+    # test_if_tag_error05
+    @test_throws Juango.TemplateSyntaxError rt("{% if not foo or %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true))
+    # test_if_tag_error06
+    @test_throws Juango.TemplateSyntaxError rt("{% if abc def %}yes{% endif %}", Dict{Any,Any}())
+    # test_if_tag_error07
+    @test_throws Juango.TemplateSyntaxError rt("{% if not %}yes{% endif %}", Dict{Any,Any}())
+    # test_if_tag_error08
+    @test_throws Juango.TemplateSyntaxError rt("{% if and %}yes{% endif %}", Dict{Any,Any}())
+    # test_if_tag_error09
+    @test_throws Juango.TemplateSyntaxError rt("{% if or %}yes{% endif %}", Dict{Any,Any}())
+    # test_if_tag_error10
+    @test_throws Juango.TemplateSyntaxError rt("{% if == %}yes{% endif %}", Dict{Any,Any}())
+    # test_if_tag_error11
+    @test_throws Juango.TemplateSyntaxError rt("{% if 1 == %}yes{% endif %}", Dict{Any,Any}())
+    # test_if_tag_error12
+    @test_throws Juango.TemplateSyntaxError rt("{% if a not b %}yes{% endif %}", Dict{Any,Any}())
+    # test_else_if_tag_error01
+    @test_throws Juango.TemplateSyntaxError rt("{% if foo is bar %} yes {% else if foo is not bar %} no {% endif %}", Dict{Any,Any}())
+    # test_if_tag_badarg01
+    @test rt("{% if x|default_if_none:y %}yes{% endif %}", Dict{Any,Any}()) == ""
+    # test_if_tag_badarg02
+    @test rt("{% if x|default_if_none:y %}yes{% endif %}", Dict{Any,Any}("y" => 0)) == ""
+    # test_if_tag_badarg03
+    @test rt("{% if x|default_if_none:y %}yes{% endif %}", Dict{Any,Any}("y" => 1)) == "yes"
+    # test_if_tag_badarg04
+    @test rt("{% if x|default_if_none:y %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
+    # test_if_tag_single_eq
+    @test_broken (try; rt("{% if foo = bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => 1)); false; catch e; e isa Juango.TemplateSyntaxError; end)      # (a Juango difference)
+    # test_if_is_match
+    @test rt("{% if foo is True %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true)) == "yes"
+    # test_if_is_no_match
+    @test rt("{% if foo is True %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => 1)) == "no"
+    # test_if_is_variable_missing
+    @test rt("{% if foo is bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => 1)) == "no"
+    # test_if_is_both_variables_missing
+    @test rt("{% if foo is bar %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "yes"
+    # test_if_is_not_match
+    @test rt("{% if foo is not None %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false)) == "yes"
+    # test_if_is_not_no_match
+    @test rt("{% if foo is not None %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => nothing)) == "no"
+    # test_if_is_not_variable_missing
+    @test rt("{% if foo is not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => false)) == "yes"
+    # test_if_is_not_both_variables_missing
+    @test rt("{% if foo is not bar %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
+    # not translated: test_if_tag_shortcircuit01 (call TestObj); test_if_tag_shortcircuit02 (call TestObj); test_repr (call keywords)
+end
+
+@testset "django template_tests: test_include" begin
+    # test_include06
+    @test rtn(Dict("include 05" => "template with a space", "include06" => "{% include \"include 05\"%}"), "include06", Dict{Any,Any}()) == "template with a space"
+    # test_include_error01
+    @test_throws Juango.TemplateSyntaxError rt("{% include \"basic-syntax01\" with %}", Dict{Any,Any}())
+    # test_include_error02
+    @test_throws Juango.TemplateSyntaxError rt("{% include \"basic-syntax01\" with \"no key\" %}", Dict{Any,Any}())
+    # test_include_error03
+    @test_throws Juango.TemplateSyntaxError rt("{% include \"basic-syntax01\" with dotted.arg=\"error\" %}", Dict{Any,Any}())
+    # test_include_error04
+    @test_throws Juango.TemplateSyntaxError rt("{% include \"basic-syntax01\" something_random %}", Dict{Any,Any}())
+    # test_include_error05
+    @test_throws Juango.TemplateSyntaxError rt("{% include \"basic-syntax01\" foo=\"duplicate\" foo=\"key\" %}", Dict{Any,Any}())
+    # test_include_error06
+    @test_throws Juango.TemplateSyntaxError rt("{% include \"basic-syntax01\" only only %}", Dict{Any,Any}())
+    # test_include_fail1
+    @test_throws Exception rtn(Dict("include-fail1" => "{% load bad_tag %}{% badtag %}", "include-fail2" => "{% load broken_tag %}"), "include-fail1", Dict{Any,Any}())
+    # test_include_fail2
+    @test_throws Juango.TemplateSyntaxError rtn(Dict("include-fail1" => "{% load bad_tag %}{% badtag %}", "include-fail2" => "{% load broken_tag %}"), "include-fail2", Dict{Any,Any}())
+    # test_include_empty
+    @test_throws Juango.TemplateSyntaxError rt("{% include %}", Dict{Any,Any}())
+    # not translated: test_include01 (setup arg); test_include02 (setup arg); test_include03 (setup arg); test_include04 (call get_template); test_include07 (setup arg); test_include08 (setup arg); test_include09 (setup arg); test_include10 (setup arg); test_include11 (setup arg); test_include12 (setup arg); test_include13 (setup arg); test_include14 (setup arg); test_include_error07 (call get_template); test_include_error08 (call get_template); test_include_error09 (call Context); test_include_error10 (call Context); test_include_missing_template (call keywords); test_extends_include_missing_baseloader (call keywords); test_extends_include_missing_cachedloader (call keywords); test_include_template_argument (call Engine); test_include_template_iterable (call get_default); test_include_template_none (call get_default); test_include_from_loader_get_template (call get_template); test_include_immediate_missing (method from_string); test_include_recursive (with); test_include_cache (call keywords); test_repr (call IncludeNode)
+end
+
+@testset "django template_tests: test_invalid_string" begin
+    # test_invalidstr01
+    @test rt("{{ var|default:\"Foo\" }}", Dict{Any,Any}()) == "Foo"
+    # test_invalidstr02
+    @test rt("{{ var|default_if_none:\"Foo\" }}", Dict{Any,Any}()) == ""
+    # test_invalidstr03
+    @test rt("{% for v in var %}({{ v }}){% endfor %}", Dict{Any,Any}()) == ""
+    # test_invalidstr04
+    @test rt("{% if var %}Yes{% else %}No{% endif %}", Dict{Any,Any}()) == "No"
+    # test_invalidstr04_2
+    @test rt("{% if var|default:\"Foo\" %}Yes{% else %}No{% endif %}", Dict{Any,Any}()) == "Yes"
+    # test_invalidstr05
+    @test rt("{{ var }}", Dict{Any,Any}()) == ""
+    # test_invalidstr06
+    @test rt("{{ var.prop }}", Dict{Any,Any}()) == ""
+    # test_invalidstr07
+    @test rt("{% load i18n %}{% blocktranslate %}{{ var }}{% endblocktranslate %}", Dict{Any,Any}()) == ""
+end
+
+@testset "django template_tests: test_list_index" begin
+    # test_list_index01
+    @test rt("{{ var.1 }}", Dict{Any,Any}("var" => Any["first item", "second item"])) == "second item"
+    # test_list_index02
+    @test rt("{{ var.5 }}", Dict{Any,Any}("var" => Any["first item", "second item"])) == ""
+    # test_list_index03
+    @test rt("{{ var.1 }}", Dict{Any,Any}("var" => nothing)) == ""
+    # test_list_index04
+    @test rt("{{ var.1 }}", Dict{Any,Any}("var" => Dict{Any,Any}())) == ""
+    # test_list_index05
+    @test rt("{{ var.1 }}", Dict{Any,Any}("var" => Dict{Any,Any}("1" => "hello"))) == "hello"
+    # test_list_index06
+    @test rt("{{ var.1 }}", Dict{Any,Any}("var" => Dict{Any,Any}(1 => "hello"))) == "hello"
+    # test_list_index07
+    @test rt("{{ var.1 }}", Dict{Any,Any}("var" => Dict{Any,Any}("1" => "hello", 1 => "world"))) == "hello"
+end
+
+@testset "django template_tests: test_load" begin
+    # test_load01
+    @test rt("{% load testtags subpackage.echo %}{% echo test %} {% echo2 \"test\" %}", Dict{Any,Any}()) == "test test"
+    # test_load02
+    @test rt("{% load subpackage.echo %}{% echo2 \"test\" %}", Dict{Any,Any}()) == "test"
+    # test_load03
+    @test rt("{% load echo from testtags %}{% echo this that theother %}", Dict{Any,Any}()) == "this that theother"
+    # test_load04
+    @test rt("{% load echo other_echo from testtags %}{% echo this that theother %} {% other_echo and another thing %}", Dict{Any,Any}()) == "this that theother and another thing"
+    # test_load05
+    @test rt("{% load echo upper from testtags %}{% echo this that theother %} {{ statement|upper }}", Dict{Any,Any}("statement" => "not shouting")) == "this that theother NOT SHOUTING"
+    # test_load06
+    @test rt("{% load echo2 from subpackage.echo %}{% echo2 \"test\" %}", Dict{Any,Any}()) == "test"
+    # test_load07
+    @test_throws Juango.TemplateSyntaxError rt("{% load echo other_echo bad_tag from testtags %}", Dict{Any,Any}())
+    # test_load08
+    @test_throws Juango.TemplateSyntaxError rt("{% load echo other_echo bad_tag from %}", Dict{Any,Any}())
+    # test_load09
+    @test_throws Juango.TemplateSyntaxError rt("{% load from testtags %}", Dict{Any,Any}())
+    # test_load10
+    @test_throws Juango.TemplateSyntaxError rt("{% load echo from bad_library %}", Dict{Any,Any}())
+    # test_load12
+    @test_throws Juango.TemplateSyntaxError rt("{% load subpackage.missing %}", Dict{Any,Any}())
+end
+
+@testset "django template_tests: test_lorem" begin
+    # test_lorem1
+    @test rt("{% lorem 3 w %}", Dict{Any,Any}()) == "lorem ipsum dolor"
+    # test_lorem_syntax
+    @test_throws Juango.TemplateSyntaxError rt("{% lorem 1 2 3 4 %}", Dict{Any,Any}())
+    # not translated: test_lorem_random (call split); test_lorem_default (name COMMON_P); test_lorem_multiple_paragraphs (call count); test_lorem_incorrect_count (call count)
+end
+
+@testset "django template_tests: test_multiline" begin
+
+    # not translated: test_multiline01 (malformed node or string on line 16: <ast.Name object at 0x7f618d5d3050>)
+end
+
+@testset "django template_tests: test_named_endblock" begin
+    # test_namedendblocks01
+    @test rt("1{% block first %}_{% block second %}2{% endblock second %}_{% endblock first %}3", Dict{Any,Any}()) == "1_2_3"
+    # test_namedendblocks02
+    @test_throws Juango.TemplateSyntaxError rt("1{% block first %}_{% block second %}2{% endblock first %}_{% endblock second %}3", Dict{Any,Any}())
+    # test_namedendblocks03
+    @test_throws Juango.TemplateSyntaxError rt("1{% block first %}_{% block second %}2{% endblock %}_{% endblock second %}3", Dict{Any,Any}())
+    # test_namedendblocks04
+    @test_throws Juango.TemplateSyntaxError rt("1{% block first %}_{% block second %}2{% endblock second %}_{% endblock third %}3", Dict{Any,Any}())
+    # test_namedendblocks05
+    @test_throws Juango.TemplateSyntaxError rt("1{% block first %}_{% block second %}2{% endblock first %}", Dict{Any,Any}())
+    # test_namedendblocks06
+    @test rt("1{% block first %}_{% block second %}2{% endblock %}_{% endblock first %}3", Dict{Any,Any}()) == "1_2_3"
+    # test_namedendblocks07
+    @test rt("1{% block first %}_{% block second %}2{% endblock second %}_{% endblock %}3", Dict{Any,Any}()) == "1_2_3"
+    # not translated: test_namedendblock_multiline (call strip)
+end
+
+@testset "django template_tests: test_now" begin
+    # test_now_args
+    @test_throws Juango.TemplateSyntaxError rt("{% now %}", Dict{Any,Any}())
+    # not translated: test_now01 (Attribute); test_now02 (call date_format); test_now03 (Attribute); test_now04 (call date_format); test_now05 (Attribute); test_now06 (Attribute); test_now07 (Attribute); test_now_variable (Attribute); test_now_variable_as (Attribute); test_now_format_escaping (call render_to_string)
+end
+
+@testset "django template_tests: test_numpy" begin
+
+    # not translated: test_numpy_array_index01 (call array); test_numpy_array_index02 (call array)
+end
+
+@testset "django template_tests: test_partials" begin
+    # test_partial_inline_and_used_once
+    @test rt("{% partialdef testing-name inline %}HERE IS THE TEST CONTENT{% endpartialdef testing-name %}\n{% partial testing-name %}", Dict{Any,Any}()) == "HERE IS THE TEST CONTENT\nHERE IS THE TEST CONTENT"
+    # test_partial_used_before_definition
+    @test rt("TEMPLATE START\n{% partial testing-name %}\nMIDDLE CONTENT\n{% partialdef testing-name %}\nTHIS IS THE PARTIAL CONTENT\n{% endpartialdef %}\nTEMPLATE END", Dict{Any,Any}()) == "TEMPLATE START\n\nTHIS IS THE PARTIAL CONTENT\n\nMIDDLE CONTENT\n\nTEMPLATE END"
+    # test_partial_in_included_template
+    @test rtn(Dict("partial_with_include" => "MAIN TEMPLATE START\n{% include 'partial_included.html' %}\nMAIN TEMPLATE END", "partial_base.html" => "<main>{% block main %}Default main content.{% endblock main %}</main>", "partial_included.html" => "INCLUDED TEMPLATE START\n{% partialdef included-partial %}\nTHIS IS CONTENT FROM THE INCLUDED PARTIAL\n{% endpartialdef %}\n\nNow using the partial: {% partial included-partial %}\nINCLUDED TEMPLATE END\n"), "partial_with_include", Dict{Any,Any}()) == "MAIN TEMPLATE START\nINCLUDED TEMPLATE START\n\n\nNow using the partial: \nTHIS IS CONTENT FROM THE INCLUDED PARTIAL\n\nINCLUDED TEMPLATE END\n\nMAIN TEMPLATE END"
+    # test_partial_as_include_in_template
+    @test rtn(Dict("partial_as_include_in_other_template" => "MAIN TEMPLATE START\n{% include 'partial_included.html#included-partial' %}\nMAIN TEMPLATE END", "partial_base.html" => "<main>{% block main %}Default main content.{% endblock main %}</main>", "partial_included.html" => "INCLUDED TEMPLATE START\n{% partialdef included-partial %}\nTHIS IS CONTENT FROM THE INCLUDED PARTIAL\n{% endpartialdef %}\n\nNow using the partial: {% partial included-partial %}\nINCLUDED TEMPLATE END\n"), "partial_as_include_in_other_template", Dict{Any,Any}()) == "MAIN TEMPLATE START\n\nTHIS IS CONTENT FROM THE INCLUDED PARTIAL\n\nMAIN TEMPLATE END"
+    # test_multiline_named_closing_tag
+    @test rt("{% partialdef greeting %}Hello!{%\n    endpartialdef\n    greeting\n%}{% partial greeting %}", Dict{Any,Any}()) == "Hello!"
+    # not translated: test_valid_partialdef_names (setup arg); test_basic_usage (for body); test_partial_inline_only_with_before_and_after_content (call strip); test_partial_inline_and_used_once_with_before_and_after_content (call strip); test_partial_defined_outside_main_block (method assertIn); test_partial_used_with_block_super (method assertIn); test_nested_partials (with); test_basic_parse_errors (malformed node or string on line 290: <ast.Call object at 0x7f618d5ccc10>); test_partialdef_invalid_inline (for body); test_broken_partial_unclosed_exception_info (method assertIn); test_partial_runtime_exception_has_debug_info (call get_template); test_partial_template_get_exception_info_delegation (If); test_undefined_partial_exception_info (call get_template); test_undefined_partial_exception_info_template_does_not_exist (template); test_partial_with_syntax_error_exception_info (If); test_partial_runtime_error_exception_info (call get_template); test_nested_partial_error_exception_info (call get_template); test_partial_in_extended_template_error (method assertIn); test_broken_partial_nesting (method assertIn); test_broken_partial_nesting_mixed (method assertIn)
+end
+
+@testset "django template_tests: test_querystring" begin
+    # test_querystring_without_request_or_explicit_query_dict
+    @test_throws Exception rt("{% querystring %}", Dict{Any,Any}())
+    # not translated: test_querystring_empty_get_params (call RequestContext); test_querystring_remove_all_params (call RequestContext); test_querystring_remove_all_params_custom_querydict (call QueryDict); test_querystring_non_empty_get_params (call get); test_querystring_multiple (call get); test_querystring_multiple_lists (call get); test_querystring_lists_with_replacement (call get); test_querystring_empty_params (call QueryDict); test_querystring_replace (call get); test_querystring_add (call get); test_querystring_remove (call get); test_querystring_remove_nonexistent (call get); test_querystring_remove_from_dict (call get); test_querystring_remove_querydict (call get); test_querystring_remove_querydict_many (call get); test_querystring_variable (call get); test_querystring_dict (method assertRenderEqual); test_querystring_dict_list_values (method assertRenderEqual); test_querystring_multiple_args_override (call QueryDict); test_querystring_request_get_ignored (call get); test_querystring_same_arg (method assertTemplateSyntaxError); test_querystring_non_mapping_args (call get); test_querystring_non_string_dict_keys (method assertTemplateSyntaxError); test_querystring_add_list (call get); test_querystring_add_dict (call get); test_querystring_with_explicit_query_dict (call get); test_querystring_with_explicit_query_dict_and_no_request (call QueryDict)
+end
+
+@testset "django template_tests: test_regroup" begin
+    # test_regroup01
+    @test rt("{% regroup data by bar as grouped %}{% for group in grouped %}{{ group.grouper }}:{% for item in group.list %}{{ item.foo }}{% endfor %},{% endfor %}", Dict{Any,Any}("data" => Any[Dict{Any,Any}("foo" => "c", "bar" => 1), Dict{Any,Any}("foo" => "d", "bar" => 1), Dict{Any,Any}("foo" => "a", "bar" => 2), Dict{Any,Any}("foo" => "b", "bar" => 2), Dict{Any,Any}("foo" => "x", "bar" => 3)])) == "1:cd,2:ab,3:x,"
+    # test_regroup02
+    @test rt("{% regroup data by bar as grouped %}{% for group in grouped %}{{ group.grouper }}:{% for item in group.list %}{{ item.foo }}{% endfor %}{% endfor %}", Dict{Any,Any}()) == ""
+    # test_regroup03
+    @test rt("{% regroup data by at|date:\"m\" as grouped %}{% for group in grouped %}{{ group.grouper }}:{% for item in group.list %}{{ item.at|date:\"d\" }}{% endfor %},{% endfor %}", Dict{Any,Any}("data" => Any[Dict{Any,Any}("at" => Date(2012, 2, 14)), Dict{Any,Any}("at" => Date(2012, 2, 28)), Dict{Any,Any}("at" => Date(2012, 7, 4))])) == "02:1428,07:04,"
+    # test_regroup04
+    @test rt("{% regroup data by bar|join:\"\" as grouped %}{% for group in grouped %}{{ group.grouper }}:{% for item in group.list %}{{ item.foo|first }}{% endfor %},{% endfor %}", Dict{Any,Any}("data" => Any[Dict{Any,Any}("foo" => "x", "bar" => Any["ab", "c"]), Dict{Any,Any}("foo" => "y", "bar" => Any["a", "bc"]), Dict{Any,Any}("foo" => "z", "bar" => Any["a", "d"])])) == "abc:xy,ad:z,"
+    # test_regroup05
+    @test_throws Juango.TemplateSyntaxError rt("{% regroup data by bar as %}", Dict{Any,Any}())
+    # test_regroup06
+    @test_throws Juango.TemplateSyntaxError rt("{% regroup data by bar thisaintright grouped %}", Dict{Any,Any}())
+    # test_regroup07
+    @test_throws Juango.TemplateSyntaxError rt("{% regroup data thisaintright bar as grouped %}", Dict{Any,Any}())
+    # test_regroup08
+    @test_throws Juango.TemplateSyntaxError rt("{% regroup data by bar as grouped toomanyargs %}", Dict{Any,Any}())
+    # test_regroup_unpack
+    @test rt("{% regroup data by bar as grouped %}{% for grouper, group in grouped %}{{ grouper }}:{% for item in group %}{{ item.foo }}{% endfor %},{% endfor %}", Dict{Any,Any}("data" => Any[Dict{Any,Any}("foo" => "c", "bar" => 1), Dict{Any,Any}("foo" => "d", "bar" => 1), Dict{Any,Any}("foo" => "a", "bar" => 2), Dict{Any,Any}("foo" => "b", "bar" => 2), Dict{Any,Any}("foo" => "x", "bar" => 3)])) == "1:cd,2:ab,3:x,"
+end
+
+@testset "django template_tests: test_resetcycle" begin
+    # test_resetcycle01
+    @test_throws Juango.TemplateSyntaxError rt("{% resetcycle %}", Dict{Any,Any}())
+    # test_resetcycle02
+    @test_throws Juango.TemplateSyntaxError rt("{% resetcycle undefinedcycle %}", Dict{Any,Any}())
+    # test_resetcycle03
+    @test_throws Juango.TemplateSyntaxError rt("{% cycle 'a' 'b' %}{% resetcycle undefinedcycle %}", Dict{Any,Any}())
+    # test_resetcycle04
+    @test_throws Juango.TemplateSyntaxError rt("{% cycle 'a' 'b' as ab %}{% resetcycle undefinedcycle %}", Dict{Any,Any}())
+    # not translated: test_resetcycle05 (call list); test_resetcycle06 (call list); test_resetcycle07 (call list); test_resetcycle08 (call list); test_resetcycle09 (call list); test_resetcycle10 (call list); test_resetcycle11 (call list)
+end
+
+@testset "django template_tests: test_setup" begin
+
+    # not translated: test_setup (FunctionDef)
+end
+
+@testset "django template_tests: test_simple_tag" begin
+    # test_simpletag_renamed01
+    @test rt("{% load custom %}{% minusone 7 %}", Dict{Any,Any}()) == "6"
+    # test_simpletag_renamed02
+    @test rt("{% load custom %}{% minustwo 7 %}", Dict{Any,Any}()) == "5"
+    # test_simpletag_renamed03
+    @test_throws Juango.TemplateSyntaxError rt("{% load custom %}{% minustwo_overridden_name 7 %}", Dict{Any,Any}())
+end
+
+@testset "django template_tests: test_spaceless" begin
+    # test_spaceless01
+    @test rt("{% spaceless %} <b>    <i> text </i>    </b> {% endspaceless %}", Dict{Any,Any}()) == "<b><i> text </i></b>"
+    # test_spaceless02
+    @test rt("{% spaceless %} <b> \n <i> text </i> \n </b> {% endspaceless %}", Dict{Any,Any}()) == "<b><i> text </i></b>"
+    # test_spaceless03
+    @test rt("{% spaceless %}<b><i>text</i></b>{% endspaceless %}", Dict{Any,Any}()) == "<b><i>text</i></b>"
+    # test_spaceless04
+    @test rt("{% spaceless %}<b>   <i>{{ text }}</i>  </b>{% endspaceless %}", Dict{Any,Any}("text" => "This & that")) == "<b><i>This &amp; that</i></b>"
+    # test_spaceless05
+    @test rt("{% autoescape off %}{% spaceless %}<b>   <i>{{ text }}</i>  </b>{% endspaceless %}{% endautoescape %}", Dict{Any,Any}("text" => "This & that")) == "<b><i>This & that</i></b>"
+    # test_spaceless06
+    @test rt("{% spaceless %}<b>   <i>{{ text|safe }}</i>  </b>{% endspaceless %}", Dict{Any,Any}("text" => "This & that")) == "<b><i>This & that</i></b>"
+end
+
+@testset "django template_tests: test_static" begin
+    # test_static_prefixtag_without_as
+    @test_throws Juango.TemplateSyntaxError rt("{% load static %}{% get_media_prefix ad media_prefix %}{{ media_prefix }}", Dict{Any,Any}())
+    # test_static_statictag_without_path
+    @test_throws Juango.TemplateSyntaxError rt("{% load static %}{% static %}", Dict{Any,Any}())
+    # not translated: test_static_prefixtag01 (Attribute); test_static_prefixtag02 (Attribute); test_static_prefixtag03 (Attribute); test_static_prefixtag04 (Attribute); test_static_statictag01 (call urljoin); test_static_statictag02 (call urljoin); test_static_statictag03 (call urljoin); test_static_statictag04 (call urljoin); test_static_quotes_urls (call urljoin); test_repr (call keywords)
+end
+
+@testset "django template_tests: test_template_tag" begin
+    # test_templatetag01
+    @test rt("{% templatetag openblock %}", Dict{Any,Any}()) == "{%"
+    # test_templatetag02
+    @test rt("{% templatetag closeblock %}", Dict{Any,Any}()) == "%}"
+    # test_templatetag03
+    @test rt("{% templatetag openvariable %}", Dict{Any,Any}()) == "{{"
+    # test_templatetag04
+    @test rt("{% templatetag closevariable %}", Dict{Any,Any}()) == "}}"
+    # test_templatetag05
+    @test_throws Juango.TemplateSyntaxError rt("{% templatetag %}", Dict{Any,Any}())
+    # test_templatetag06
+    @test_throws Juango.TemplateSyntaxError rt("{% templatetag foo %}", Dict{Any,Any}())
+    # test_templatetag07
+    @test rt("{% templatetag openbrace %}", Dict{Any,Any}()) == "{"
+    # test_templatetag08
+    @test rt("{% templatetag closebrace %}", Dict{Any,Any}()) == "}"
+    # test_templatetag09
+    @test rt("{% templatetag openbrace %}{% templatetag openbrace %}", Dict{Any,Any}()) == "{{"
+    # test_templatetag10
+    @test rt("{% templatetag closebrace %}{% templatetag closebrace %}", Dict{Any,Any}()) == "}}"
+    # test_templatetag11
+    @test rt("{% templatetag opencomment %}", Dict{Any,Any}()) == "{#"
+    # test_templatetag12
+    @test rt("{% templatetag closecomment %}", Dict{Any,Any}()) == "#}"
+end
+
+@testset "django template_tests: test_url" begin
+  old_urls = Juango.settings.ROOT_URLCONF
+  configure!(ROOT_URLCONF = DJT_URLS)
+  try
+    # test_url01
+    @test rt("{% url \"client\" client.id %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1))) == "/client/1/"
+    # test_url02
+    @test rt("{% url \"client_action\" id=client.id action=\"update\" %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1))) == "/client/1/update/"
+    # test_url02a
+    @test rt("{% url \"client_action\" client.id \"update\" %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1))) == "/client/1/update/"
+    # test_url02b
+    @test rt("{% url 'client_action' id=client.id action='update' %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1))) == "/client/1/update/"
+    # test_url02c
+    @test rt("{% url 'client_action' client.id 'update' %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1))) == "/client/1/update/"
+    # test_url03
+    @test rt("{% url \"index\" %}", Dict{Any,Any}()) == "/"
+    # test_url04
+    @test rt("{% url \"named.client\" client.id %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1))) == "/named-client/1/"
+    # test_url05
+    @test rt("{% url \"метка_оператора\" v %}", Dict{Any,Any}("v" => "Ω")) == "/%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4/%CE%A9/"
+    # test_url06
+    @test rt("{% url \"метка_оператора_2\" tag=v %}", Dict{Any,Any}("v" => "Ω")) == "/%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4/%CE%A9/"
+    # test_url08
+    @test rt("{% url \"метка_оператора\" v %}", Dict{Any,Any}("v" => "Ω")) == "/%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4/%CE%A9/"
+    # test_url09
+    @test rt("{% url \"метка_оператора_2\" tag=v %}", Dict{Any,Any}("v" => "Ω")) == "/%D0%AE%D0%BD%D0%B8%D0%BA%D0%BE%D0%B4/%CE%A9/"
+    # test_url10
+    @test rt("{% url \"client_action\" id=client.id action=\"two words\" %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1))) == "/client/1/two%20words/"
+    # test_url11
+    @test rt("{% url \"client_action\" id=client.id action=\"==\" %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1))) == "/client/1/==/"
+    # test_url12
+    @test rt("{% url \"client_action\" id=client.id action=\"!\$&'()*+,;=~:@,\" %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1))) == "/client/1/!\$&amp;&#x27;()*+,;=~:@,/"
+    # test_url13
+    @test rt("{% url \"client_action\" id=client.id action=arg|join:\"-\" %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1), "arg" => Any["a", "b"])) == "/client/1/a-b/"
+    # test_url14
+    @test rt("{% url \"client_action\" client.id arg|join:\"-\" %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1), "arg" => Any["a", "b"])) == "/client/1/a-b/"
+    # test_url15
+    @test rt("{% url \"client_action\" 12 \"test\" %}", Dict{Any,Any}()) == "/client/12/test/"
+    # test_url18
+    @test rt("{% url \"client\" \"1,2\" %}", Dict{Any,Any}()) == "/client/1,2/"
+    # test_url19
+    @test rt("{% url named_url client.id %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1), "named_url" => "client")) == "/client/1/"
+    # test_url20
+    @test rt("{% url url_name_in_var client.id %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1), "url_name_in_var" => "named.client")) == "/named-client/1/"
+    # test_url21
+    @test rt("{% autoescape off %}{% url \"client_action\" id=client.id action=\"!\$&'()*+,;=~:@,\" %}{% endautoescape %}", Dict{Any,Any}("client" => Dict{Any,Any}("id" => 1))) == "/client/1/!\$&'()*+,;=~:@,/"
+    # test_url_fail01
+    @test_throws Juango.TemplateSyntaxError rt("{% url %}", Dict{Any,Any}())
+    # test_url_fail02
+    @test_throws Exception rt("{% url \"no_such_view\" %}", Dict{Any,Any}())
+    # test_url_fail03
+    @test_throws Exception rt("{% url \"client\" %}", Dict{Any,Any}())
+    # test_url_fail04
+    @test_throws Juango.TemplateSyntaxError rt("{% url \"view\" id, %}", Dict{Any,Any}())
+    # test_url_fail05
+    @test_throws Juango.TemplateSyntaxError rt("{% url \"view\" id= %}", Dict{Any,Any}())
+    # test_url_fail06
+    @test_throws Juango.TemplateSyntaxError rt("{% url \"view\" a.id=id %}", Dict{Any,Any}())
+    # test_url_fail07
+    @test_throws Juango.TemplateSyntaxError rt("{% url \"view\" a.id!id %}", Dict{Any,Any}())
+    # test_url_fail08
+    @test_throws Juango.TemplateSyntaxError rt("{% url \"view\" id=\"unterminatedstring %}", Dict{Any,Any}())
+    # test_url_fail09
+    @test_throws Juango.TemplateSyntaxError rt("{% url \"view\" id=\", %}", Dict{Any,Any}())
+    # test_url_fail11
+    @test_throws Exception rt("{% url named_url %}", Dict{Any,Any}())
+    # test_url_fail12
+    @test_throws Exception rt("{% url named_url %}", Dict{Any,Any}("named_url" => "no_such_view"))
+    # test_url_fail13
+    @test_throws Exception rt("{% url named_url %}", Dict{Any,Any}("named_url" => "template_tests.views.client"))
+    # test_url_fail14
+    @test_throws Juango.TemplateSyntaxError rt("{% url named_url id, %}", Dict{Any,Any}("named_url" => "view"))
+    # test_url_fail15
+    @test_throws Juango.TemplateSyntaxError rt("{% url named_url id= %}", Dict{Any,Any}("named_url" => "view"))
+    # test_url_fail16
+    @test_throws Juango.TemplateSyntaxError rt("{% url named_url a.id=id %}", Dict{Any,Any}("named_url" => "view"))
+    # test_url_fail17
+    @test_throws Juango.TemplateSyntaxError rt("{% url named_url a.id!id %}", Dict{Any,Any}("named_url" => "view"))
+    # test_url_fail18
+    @test_throws Juango.TemplateSyntaxError rt("{% url named_url id=\"unterminatedstring %}", Dict{Any,Any}("named_url" => "view"))
+    # test_url_fail19
+    @test_throws Juango.TemplateSyntaxError rt("{% url named_url id=\", %}", Dict{Any,Any}("named_url" => "view"))
+    # test_url_asvar01
+    @test rt("{% url \"index\" as url %}", Dict{Any,Any}()) == ""
+    # test_url_asvar02
+    @test rt("{% url \"index\" as url %}{{ url }}", Dict{Any,Any}()) == "/"
+    # test_url_asvar03
+    @test rt("{% url \"no_such_view\" as url %}{{ url }}", Dict{Any,Any}()) == ""
+    # not translated: test_url_namespace01 (call get); test_url_namespace02 (call get); test_url_namespace03 (call get); test_url_namespace_no_current_app (call get); test_url_namespace_explicit_current_app (call get); test_repr (call keywords)
+  finally
+    configure!(ROOT_URLCONF = old_urls)
+  end
+end
+
+@testset "django template_tests: test_verbatim" begin
+    # test_verbatim_tag01
+    @test rt("{% verbatim %}{{bare   }}{% endverbatim %}", Dict{Any,Any}()) == "{{bare   }}"
+    # test_verbatim_tag02
+    @test rt("{% verbatim %}{% endif %}{% endverbatim %}", Dict{Any,Any}()) == "{% endif %}"
+    # test_verbatim_tag03
+    @test rt("{% verbatim %}It's the {% verbatim %} tag{% endverbatim %}", Dict{Any,Any}()) == "It's the {% verbatim %} tag"
+    # test_verbatim_tag04
+    @test_throws Juango.TemplateSyntaxError rt("{% verbatim %}{% verbatim %}{% endverbatim %}{% endverbatim %}", Dict{Any,Any}())
+    # test_verbatim_tag05
+    @test rt("{% verbatim %}{% endverbatim %}{% verbatim %}{% endverbatim %}", Dict{Any,Any}()) == ""
+    # test_verbatim_tag06
+    @test rt("{% verbatim special %}Don't {% endverbatim %} just yet{% endverbatim special %}", Dict{Any,Any}()) == "Don't {% endverbatim %} just yet"
+    # test_literal_multiline_opener_in_named_verbatim
+    @test rt("{% verbatim example %}\n{%\n{% endverbatim %}\n{% endverbatim example %}", Dict{Any,Any}()) == "\n{%\n{% endverbatim %}\n"
+    # test_multiline_raw_block_closing_tags
+    @test rt("{% verbatim %}content{%\nendverbatim\n%}", Dict{Any,Any}()) == "content"
+    # test_named_verbatim_name_whitespace_not_preserved
+    @test_throws Juango.TemplateSyntaxError rt("{% verbatim a  b %}{% endverbatim a b %}{% endverbatim a  b %}", Dict{Any,Any}())
+    # test_template_syntax_in_raw_blocks
+    @test rt("{% verbatim %}\n{% if user %}Hello, {{ user }}{% endif %}\n{% endverbatim %}", Dict{Any,Any}()) == "\n{% if user %}Hello, {{ user }}{% endif %}\n"
+    # test_literal_multiline_block_opener_in_raw_blocks
+    @test rt("{% verbatim %}\n{%\n{% endverbatim %}", Dict{Any,Any}()) == "\n{%\n"
+    # test_multiline_named_closing_tag
+    @test rt("{% verbatim example %}content{%\n    endverbatim\n    example\n%}", Dict{Any,Any}()) == "content"
+    # not translated: test_multiple_verbatim_tags_on_same_line (For); test_named_verbatim_preserves_name_whitespace_legacy (call keywords); test_tags_without_spaces (for body)
+end
+
+@testset "django template_tests: test_width_ratio" begin
+    # test_widthratio01
+    @test rt("{% widthratio a b 0 %}", Dict{Any,Any}("a" => 50, "b" => 100)) == "0"
+    # test_widthratio02
+    @test rt("{% widthratio a b 100 %}", Dict{Any,Any}("a" => 0, "b" => 0)) == "0"
+    # test_widthratio03
+    @test rt("{% widthratio a b 100 %}", Dict{Any,Any}("a" => 0, "b" => 100)) == "0"
+    # test_widthratio04
+    @test rt("{% widthratio a b 100 %}", Dict{Any,Any}("a" => 50, "b" => 100)) == "50"
+    # test_widthratio05
+    @test rt("{% widthratio a b 100 %}", Dict{Any,Any}("a" => 100, "b" => 100)) == "100"
+    # test_widthratio06
+    @test rt("{% widthratio a b 100 %}", Dict{Any,Any}("a" => 50, "b" => 80)) == "62"
+    # test_widthratio07
+    @test rt("{% widthratio a b 100 %}", Dict{Any,Any}("a" => 50, "b" => 70)) == "71"
+    # test_widthratio08
+    @test_throws Juango.TemplateSyntaxError rt("{% widthratio %}", Dict{Any,Any}())
+    # test_widthratio09
+    @test_throws Juango.TemplateSyntaxError rt("{% widthratio a b %}", Dict{Any,Any}("a" => 50, "b" => 100))
+    # test_widthratio10
+    @test rt("{% widthratio a b 100.0 %}", Dict{Any,Any}("a" => 50, "b" => 100)) == "50"
+    # test_widthratio11
+    @test rt("{% widthratio a b c %}", Dict{Any,Any}("a" => 50, "c" => 100, "b" => 100)) == "50"
+    # test_widthratio12a
+    @test rt("{% widthratio a b c %}", Dict{Any,Any}("a" => "a", "c" => 100, "b" => 100)) == ""
+    # test_widthratio12b
+    @test rt("{% widthratio a b c %}", Dict{Any,Any}("a" => nothing, "c" => 100, "b" => 100)) == ""
+    # test_widthratio13a
+    @test rt("{% widthratio a b c %}", Dict{Any,Any}("a" => 0, "c" => 100, "b" => "b")) == ""
+    # test_widthratio13b
+    @test rt("{% widthratio a b c %}", Dict{Any,Any}("a" => 0, "c" => 100, "b" => nothing)) == ""
+    # test_widthratio14a
+    @test_throws Juango.TemplateSyntaxError rt("{% widthratio a b c %}", Dict{Any,Any}("a" => 0, "c" => "c", "b" => 100))
+    # test_widthratio14b
+    @test_throws Juango.TemplateSyntaxError rt("{% widthratio a b c %}", Dict{Any,Any}("a" => 0, "c" => nothing, "b" => 100))
+    # test_widthratio15
+    @test rt("{% load custom %}{% widthratio a|noop:\"x y\" b 0 %}", Dict{Any,Any}("a" => 50, "b" => 100)) == "0"
+    # test_widthratio16
+    @test rt("{% widthratio a b 100 as variable %}-{{ variable }}-", Dict{Any,Any}("a" => 50, "b" => 100)) == "-50-"
+    # test_widthratio17
+    @test rt("{% widthratio a b 100 as variable %}-{{ variable }}-", Dict{Any,Any}("a" => 100, "b" => 100)) == "-100-"
+    # test_widthratio18
+    @test_throws Juango.TemplateSyntaxError rt("{% widthratio a b 100 as %}", Dict{Any,Any}())
+    # test_widthratio19
+    @test_throws Juango.TemplateSyntaxError rt("{% widthratio a b 100 not_as variable %}", Dict{Any,Any}())
+    # test_widthratio20
+    @test rt("{% widthratio a b 100 %}", Dict{Any,Any}("a" => pyfloat("inf"), "b" => pyfloat("inf"))) == ""
+    # test_widthratio21
+    @test rt("{% widthratio a b 100 %}", Dict{Any,Any}("a" => pyfloat("inf"), "b" => 2)) == ""
+    # test_zerodivisionerror_as_var
+    @test rt("{% widthratio a b 100 as variable %}-{{ variable }}-", Dict{Any,Any}("a" => 0, "b" => 0)) == "-0-"
+    # test_typeerror_as_var
+    @test rt("{% widthratio a b c as variable %}-{{ variable }}-", Dict{Any,Any}("a" => "a", "c" => 100, "b" => 100)) == "--"
+end
+
+@testset "django template_tests: test_with" begin
+    # test_with01
+    @test rt("{% with key=dict.key %}{{ key }}{% endwith %}", Dict{Any,Any}("dict" => Dict{Any,Any}("key" => 50))) == "50"
+    # test_legacywith01
+    @test rt("{% with dict.key as key %}{{ key }}{% endwith %}", Dict{Any,Any}("dict" => Dict{Any,Any}("key" => 50))) == "50"
+    # test_with02
+    @test rt("{{ key }}{% with key=dict.key %}{{ key }}-{{ dict.key }}-{{ key }}{% endwith %}{{ key }}", Dict{Any,Any}("dict" => Dict{Any,Any}("key" => 50))) == "50-50-50"
+    # test_legacywith02
+    @test rt("{{ key }}{% with dict.key as key %}{{ key }}-{{ dict.key }}-{{ key }}{% endwith %}{{ key }}", Dict{Any,Any}("dict" => Dict{Any,Any}("key" => 50))) == "50-50-50"
+    # test_with03
+    @test rt("{% with a=alpha b=beta %}{{ a }}{{ b }}{% endwith %}", Dict{Any,Any}("alpha" => "A", "beta" => "B")) == "AB"
+    # test_with_error01
+    @test_throws Juango.TemplateSyntaxError rt("{% with dict.key xx key %}{{ key }}{% endwith %}", Dict{Any,Any}("dict" => Dict{Any,Any}("key" => 50)))
+    # test_with_error02
+    @test_throws Juango.TemplateSyntaxError rt("{% with dict.key as %}{{ key }}{% endwith %}", Dict{Any,Any}("dict" => Dict{Any,Any}("key" => 50)))
+    # not translated: test_repr (call keywords)
+end
+
+
+configure!(TEMPLATES = DJT_OLD_TEMPLATES)

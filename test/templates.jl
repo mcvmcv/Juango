@@ -92,7 +92,7 @@ end
     @test qs("{% querystring tag=tags new='a b' as u %}<a href=\"{{ u }}\">", Dict("tags" => ["z"])) ==
           "<a href=\"?page=2&amp;q=x&amp;tag=z&amp;new=a%20b\">"
     @test qs("{% querystring d page=1 %}", Dict("d" => Dict("only" => "1"))) == "?only=1&amp;page=1"
-    @test tr("{% querystring a=1 %}") == "?a=1"
+    @test_throws Juango.TemplateSyntaxError tr("{% querystring a=1 %}")      # (no request: an error, as Django's)
 
     # partials
     @test tr("{% partialdef card %}<b>{{ x }}</b>{% endpartialdef %}{% partial card %}{% with x=2 %}{% partial card %}{% endwith %}",

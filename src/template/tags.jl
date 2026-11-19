@@ -98,7 +98,7 @@ function value_in(a, b)
 end
 
 function eval_cond(c::CondValue, ctx)
-    v = eval_fe(c.fe, ctx)
+    v = eval_fe(c.fe, ctx; ignore_failures = true)
     v === UNDEF ? nothing : v
 end
 function eval_cond(c::CondOp, ctx)
@@ -144,6 +144,7 @@ function tag_if(p::Parser, t::Token)
         if cmd == "elif"
             cond = parse_cond(split_contents(endtag)[2:end])
         elseif cmd == "else"
+            strip(endtag) == "else" || throw(TemplateSyntaxError("Malformed template tag: '$(endtag)'"))     # ({% else if %}, as Django's)
             nodes, _ = parse_nodes(p, ["endif"])
             push!(branches, (nothing, nodes))
             break
@@ -163,7 +164,7 @@ function render!(io::IO, n::IfNode, ctx::Context)
 end
 
 # Compiled conditions: `and`/`or`/`not` become Julia's, values and comparisons are inlined.
-gen_cond(c::CondValue) = (v = gensym("c"); :(let $v = $(gen_fe(c.fe)); $v === $(GlobalRef(_M, :UNDEF)) ? nothing : $v end))
+gen_cond(c::CondValue) = (v = gensym("c"); :(let $v = $(gen_fe(c.fe; ignore_failures = true)); $v === $(GlobalRef(_M, :UNDEF)) ? nothing : $v end))
 function gen_cond(c::CondOp)
     t(x) = :($(GlobalRef(_M, :truthy))($(gen_cond(x))))
     c.op === :not && return :(!$(t(c.args[1])))
@@ -201,7 +202,10 @@ function tag_for(p::Parser, t::Token)
     reversed && pop!(bits)
     inpos = findlast(==("in"), bits)
     inpos === nothing && throw(TemplateSyntaxError("'for' statements should use the format 'for x in y'"))
-    loopvars = String.(filter(!isempty, strip.(split(join(bits[1:inpos-1], " "), ','))))
+    loopvars = String.(split(join(bits[1:inpos-1], " "), r" *, *"))
+    # (as Django's: names, not empty, quoted or filtered)
+    any(v -> isempty(v) || any(c -> c in " \"'|", v), loopvars) &&
+        throw(TemplateSyntaxError("'for' tag received an invalid argument: $(t.contents)"))
     iterable = parse_filter_expr(join(bits[inpos+1:end], " "))
     body, endtag = parse_nodes(p, ["empty", "endfor"])
     empty = Node[]
@@ -291,9 +295,13 @@ function for_items(io::IO, n::ForNode, ctx::Context, body::F, items::V, loop::Fo
         if single
             scope[var] = item
         else
-            vals = item isa Pair ? (item.first, item.second) : item
+            vals = item isa Pair ? (item.first, item.second) : item isa Union{Tuple,NamedTuple,AbstractVector} ? item :
+                   item isa AbstractString ? collect(item) : (item,)
+            # (as Django's: the item must have one value for each name)
+            length(vals) == length(n.loopvars) ||
+                throw(ArgumentError("Need $(length(n.loopvars)) values to unpack in for loop; got $(length(vals)). "))
             for (j, v) in enumerate(n.loopvars)
-                scope[v] = j <= length(vals) ? vals[j] : nothing
+                scope[v] = vals[j]
             end
         end
         body(io, ctx)
@@ -334,7 +342,9 @@ struct BlockRef
 end
 function tattr(b::BlockRef, ::Val{:super})
     bc = get(b.ctx.render_ctx, :block_context, nothing)
-    (bc === nothing || get_block(bc, b.node.name) === nothing) && return SafeString("")
+    # (in a template that extends nothing there's no parent block, an error as Django's)
+    bc === nothing && throw(TemplateSyntaxError("{{ block.super }} used in '$(b.node.name)', a block of a base template, which extends nothing"))
+    get_block(bc, b.node.name) === nothing && return SafeString("")
     io = IOBuffer()
     render_block(io, b.node, b.ctx)
     SafeString(String(take!(io)))
@@ -343,6 +353,9 @@ end
 function tag_block(p::Parser, t::Token)
     bits = split(t.contents)
     length(bits) == 2 || throw(TemplateSyntaxError("'block' tag takes exactly one argument"))
+    seen = get!(() -> Set{String}(), p.extra, :block_names)::Set{String}
+    bits[2] in seen && throw(TemplateSyntaxError("'block' tag with name '$(bits[2])' appears more than once"))   # (as Django's)
+    push!(seen, String(bits[2]))
     nodes, endtag = parse_nodes(p, ["endblock"])
     eb = split(endtag)
     length(eb) > 1 && eb[2] != bits[2] &&
@@ -375,6 +388,7 @@ function tag_extends(p::Parser, t::Token)
     length(bits) == 2 || throw(TemplateSyntaxError("'extends' takes one argument"))
     parent = parse_filter_expr(bits[2])
     nodes, _ = parse_nodes(p)
+    any(x -> x isa ExtendsNode, nodes) && throw(TemplateSyntaxError("'extends' cannot appear more than once in the same template"))
     blocks = Dict{String,BlockNode}(b.name => b for b in nodes_of_type(BlockNode, nodes))
     ExtendsNode(parent, nodes, blocks)
 end
@@ -383,6 +397,8 @@ function render!(io::IO, n::ExtendsNode, ctx::Context)
     bc = get!(BlockContext, ctx.render_ctx, :block_context)
     add_blocks!(bc, n.blocks)
     pname = eval_fe(n.parent, ctx)
+    (pname === nothing || pname === UNDEF || (pname isa AbstractString && isempty(pname))) &&
+        throw(TemplateSyntaxError("Invalid template name in 'extends' tag: ''."))           # (as Django's)
     parent = pname isa Template ? pname : get_template(display_string(pname))
     rec = current_debug_record()
     rec === nothing || record_template!(rec, parent.name, "extends", nothing)
@@ -420,6 +436,7 @@ function tag_include(p::Parser, t::Token)
     extra = Tuple{String,FilterExpr}[]
     if !isempty(rest)
         rest[1] == "with" || throw(TemplateSyntaxError("expected 'with' in include tag"))
+        length(rest) >= 2 || throw(TemplateSyntaxError("\"with\" in 'include' tag needs at least one keyword argument."))
         extra = parse_kwargs(rest[2:end])
     end
     IncludeNode(parse_filter_expr(bits[2]), extra, only)
@@ -556,16 +573,21 @@ tag_load(p, t) = load_libraries!(p, t)       # templatetags.jl
 
 # --- comment / verbatim / spaceless / autoescape ----------------------------------------
 
+# (its content isn't parsed, as Django's: anything up to {% endcomment %} goes)
 function tag_comment(p::Parser, t::Token)
-    parse_nodes(p, ["endcomment"])
-    nothing
+    while p.pos <= length(p.tokens)
+        tok = p.tokens[p.pos]
+        p.pos += 1
+        tok.kind === :block && tok.contents == "endcomment" && return nothing
+    end
+    throw(TemplateSyntaxError("Unclosed tag 'comment'. Looking for one of: endcomment."))
 end
 
 struct VerbatimNode <: Node
     s::String
 end
 function tag_verbatim(p::Parser, t::Token)
-    endname = "end" * t.contents
+    endname = "end" * join(split(t.contents), " ")
     io = IOBuffer()
     while p.pos <= length(p.tokens)
         tok = p.tokens[p.pos]
@@ -612,17 +634,39 @@ struct CycleNode <: Node
     asvar::Union{Nothing,String}
     silent::Bool
 end
+# as Django's: {% cycle a b c %}, {% cycle a b as name [silent] %}, and {% cycle name %} for the named one
+# (the same node, so it moves on the same cycle)
 function tag_cycle(p, t)
-    bits = split_contents(t.contents)[2:end]
-    silent = !isempty(bits) && bits[end] == "silent"
-    silent && pop!(bits)
-    asvar = nothing
-    if length(bits) >= 3 && bits[end-1] == "as"
-        asvar = bits[end]
-        bits = bits[1:end-2]
+    args = split_contents(t.contents)
+    length(args) < 2 && throw(TemplateSyntaxError("'cycle' tag requires at least two arguments"))
+    named = get!(Dict{String,CycleNode}, p.extra, :named_cycles)
+    if length(args) == 2
+        isempty(named) && throw(TemplateSyntaxError("No named cycles in template. '$(args[2])' is not defined"))
+        haskey(named, args[2]) || throw(TemplateSyntaxError("Named cycle '$(args[2])' does not exist"))
+        return named[args[2]]
     end
-    isempty(bits) && throw(TemplateSyntaxError("'cycle' tag requires at least one argument"))
-    CycleNode([parse_filter_expr(b) for b in bits], asvar, silent)
+    silent, as_form = false, false
+    if length(args) > 4
+        if args[end-2] == "as"
+            args[end] == "silent" || throw(TemplateSyntaxError("Only 'silent' flag is allowed after cycle's name, not '$(args[end])'."))
+            silent, as_form = true, true
+            args = args[1:end-1]
+        elseif args[end-1] == "as"
+            as_form = true
+        end
+    end
+    node = as_form ? CycleNode([parse_filter_expr(b) for b in args[2:end-2]], args[end], silent) :
+                     CycleNode([parse_filter_expr(b) for b in args[2:end]], nothing, false)
+    as_form && (named[args[end]] = node)
+    p.extra[:last_cycle] = node
+    node
+end
+"Set a variable in the innermost scope that has it, or the outermost (Django's `Context.set_upward`)."
+function set_upward!(ctx::Context, k::String, v)
+    for d in Iterators.reverse(ctx.stack)
+        haskey(d, k) && return (d[k] = v)
+    end
+    ctx.stack[1][k] = v
 end
 function render!(io::IO, n::CycleNode, ctx::Context)
     counters = get!(Dict{UInt,Int}, ctx.render_ctx, :cycles)
@@ -632,28 +676,47 @@ function render!(io::IO, n::CycleNode, ctx::Context)
     i = get(counters, k, 0)
     counters[k] = i + 1
     v = eval_fe(n.values[mod(i, length(n.values))+1], ctx)
-    n.asvar === nothing || (ctx[n.asvar] = v)
+    n.asvar === nothing || set_upward!(ctx, n.asvar, v)
     n.silent || write(io, ctx.autoescape ? conditional_escape(v) : display_string(v))
 end
 
 struct FirstOfNode <: Node
     values::Vector{FilterExpr}
 end
-tag_firstof(p, t) = FirstOfNode([parse_filter_expr(b) for b in split_contents(t.contents)[2:end]])
-function render!(io::IO, n::FirstOfNode, ctx::Context)
-    for fe in n.values
-        v = eval_fe(fe, ctx)
-        if truthy(v)
-            write(io, ctx.autoescape ? conditional_escape(v) : display_string(v))
-            return
-        end
-    end
+struct FirstOfAsNode <: Node
+    values::Vector{FilterExpr}
+    asvar::String
 end
+function tag_firstof(p, t)
+    bits = split_contents(t.contents)[2:end]
+    asvar = length(bits) >= 2 && bits[end-1] == "as" ? bits[end] : nothing
+    asvar === nothing || (bits = bits[1:end-2])
+    isempty(bits) && throw(TemplateSyntaxError("'firstof' statement requires at least one argument"))
+    fes = [parse_filter_expr(b) for b in bits]
+    asvar === nothing ? FirstOfNode(fes) : FirstOfAsNode(fes, asvar)
+end
+function firstof_value(values, ctx)
+    for fe in values
+        v = eval_fe(fe, ctx)
+        truthy(v) && return v
+    end
+    ""
+end
+function render!(io::IO, n::FirstOfNode, ctx::Context)
+    v = firstof_value(n.values, ctx)
+    write(io, ctx.autoescape ? conditional_escape(v) : display_string(v))
+end
+# {% firstof a b as name %}: the value in name, nothing written (as Django's)
+render!(io::IO, n::FirstOfAsNode, ctx::Context) = (ctx[n.asvar] = firstof_value(n.values, ctx); nothing)
 
 struct NowNode <: Node
     fmt::FilterExpr
 end
-tag_now(p, t) = NowNode(parse_filter_expr(split_contents(t.contents)[2]))
+function tag_now(p, t)
+    bits = split_contents(t.contents)
+    length(bits) == 2 || throw(TemplateSyntaxError("'now' statement takes one argument"))
+    NowNode(parse_filter_expr(bits[2]))
+end
 render!(io::IO, n::NowNode, ctx::Context) =
     write(io, escape_html(format_date(now(), display_string(eval_fe(n.fmt, ctx)))))
 
