@@ -699,7 +699,7 @@ end
         @test tr("{% timezone \"Europe/London\" %}{{ t|date:\"H:i T\" }}{% endtimezone %} {{ t|date:\"H:i\" }}", ctx) == "01:00 BST 12:00"
         @test tr("{% load tz %}{% localtime off %}{{ t|date:\"H:i\" }}{% endlocaltime %} {{ t|utc|date:\"H:i e\" }}", ctx) == "00:00 00:00 UTC"
         @test tr("{% load timezone from tz %}{{ t|timezone:\"Asia/Tokyo\"|date:\"H:i\" }}", ctx) == "09:00"
-        @test Juango.timesince(timezone_now() - Dates.Hour(3)) == "3 hours"
+        @test Juango.timesince(timezone_now() - Dates.Hour(3)) == "3\u00a0hours"      # (a no-break space, as Django's)
         @test make_naive(TZ.ZonedDateTime(2024, 6, 1, 0, utc)) == DateTime(2024, 6, 1, 12)
         @test make_aware(DateTime(2024, 6, 1, 12)) == TZ.ZonedDateTime(2024, 6, 1, 12, akl)
         @test get_current_timezone() == akl && with_timezone(get_current_timezone, tokyo) == tokyo && get_current_timezone() == akl

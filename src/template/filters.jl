@@ -59,6 +59,8 @@ function write_padded(io::IO, n::Integer, width::Int)
     write_int(io, n)
 end
 
+"The ISO 8601 year of a date (the year its ISO week belongs to)."
+isoyear(d::Date) = (w = Dates.week(d); m = Dates.month(d); w >= 52 && m == 1 ? Dates.year(d) - 1 : w == 1 && m == 12 ? Dates.year(d) + 1 : Dates.year(d))
 "Format a date with Django `date` filter format characters."
 function format_date(d, fmt::AbstractString)
     dt = todatetime(d)
@@ -104,6 +106,24 @@ function format_date(d, fmt::AbstractString)
                 off = Dates.value(Second(z.zone.offset.std + z.zone.offset.dst))
                 print(io, off < 0 ? "-" : "+", lpad(abs(off) ÷ 3600, 2, '0'), lpad((abs(off) % 3600) ÷ 60, 2, '0'))
             end
+        elseif c == 'o'; print(io, isoyear(Date(dt)))
+        elseif c == 'W'; print(io, Dates.week(dt))
+        elseif c == 'w'; print(io, Dates.dayofweek(dt) % 7)
+        elseif c == 'z'; print(io, Dates.dayofyear(dt))
+        elseif c == 't'; print(io, Dates.daysinmonth(dt))
+        elseif c == 'L'; print(io, Dates.isleapyear(dt) ? "True" : "False")
+        elseif c == 'E'; print(io, pgettext("alt. month", monthname(dt)))
+        elseif c == 'u'; write_padded(io, Dates.millisecond(dt) * 1000, 6)
+        elseif c == 'f'; print(io, h12, minute(dt) == 0 ? "" : ":" * lpad(minute(dt), 2, '0'))
+        elseif c == 'P'      # 1 a.m., 1:30 p.m., noon, midnight
+            print(io, minute(dt) == 0 && h == 0 ? gettext("midnight") : minute(dt) == 0 && h == 12 ? gettext("noon") :
+                      string(h12, minute(dt) == 0 ? "" : ":" * lpad(minute(dt), 2, '0'), " ", h < 12 ? "a.m." : "p.m."))
+        elseif c == 'Z'
+            z === nothing || print(io, Dates.value(Second(z.zone.offset.std + z.zone.offset.dst)))
+        elseif c == 'I'
+            z === nothing || print(io, Dates.value(z.zone.offset.dst) != 0 ? "1" : "0")
+        elseif c == 'c'; print(io, format_date(d, "Y-m-d\\TH:i:s"), z === nothing ? "" : format_date(d, "O")[1:3] * ":" * format_date(d, "O")[4:5])
+        elseif c == 'r'; print(io, format_date(d, "D, d M Y H:i:s"), z === nothing ? "" : " " * format_date(d, "O"))
         elseif c == 'S'
             dd = day(dt)
             print(io, dd in (11, 12, 13) ? "th" : dd % 10 == 1 ? "st" : dd % 10 == 2 ? "nd" : dd % 10 == 3 ? "rd" : "th")
@@ -124,18 +144,25 @@ function timesince(d, ref = nothing)
     end
     dt === nothing && return ""
     secs = max(0, round(Int, Dates.value(ref - dt) / 1000))
-    for (n, unit) in ((365 * 86400, "year"), (30 * 86400, "month"), (7 * 86400, "week"),
-                      (86400, "day"), (3600, "hour"), (60, "minute"))
-        if secs >= n
-            k = secs ÷ n
-            return "$k $(unit)$(k == 1 ? "" : "s")"
+    units = ((365 * 86400, "year"), (30 * 86400, "month"), (7 * 86400, "week"), (86400, "day"), (3600, "hour"), (60, "minute"))
+    # (as Django's: up to two adjacent units, "4 days, 6 hours", each number and unit kept together by a no-break space)
+    part(k, unit) = "$k\u00a0$(unit)$(k == 1 ? "" : "s")"
+    for (i, (n, unit)) in enumerate(units)
+        secs >= n || continue
+        k = secs ÷ n
+        out = part(k, unit)
+        if i < length(units)
+            n2, unit2 = units[i+1]
+            k2 = (secs - k * n) ÷ n2
+            k2 > 0 && (out *= ", " * part(k2, unit2))
         end
+        return out
     end
-    "0 minutes"
+    part(0, "minute")
 end
 
 function linebreaks_html(s::AbstractString, autoescape::Bool)
-    s = replace(s, "\r\n" => "\n")
+    s = replace(s, "\r\n" => "\n", "\r" => "\n")
     paras = split(s, r"\n{2,}")
     join(["<p>" * replace(autoescape ? escape_html(strip(p)) : strip(p), "\n" => "<br>") * "</p>" for p in paras if !isempty(strip(p))], "\n\n")
 end
@@ -155,88 +182,24 @@ function get_text_list(items, last_word::AbstractString = "or")
 end
 
 let F = register_filter!
-    F("upper", (v, _) -> uppercase(str(v)); is_safe = true)
     F("text_list", (v, a) -> get_text_list(v isa AbstractString ? [v] : v, a === nothing ? "or" : display_string(a)))
     F("lower", (v, _) -> lowercase(str(v)); is_safe = true)
-    F("title", (v, _) -> titlecase(str(v)); is_safe = true)
     F("capfirst", (v, _) -> uppercasefirst(str(v)); is_safe = true)
-    F("length", (v, _) -> v === nothing ? 0 : v isa SafeString ? length(v.s) : length(v isa QuerySet ? collect(v) : v))
     F("default", (v, a) -> truthy(v) ? v : a)
     F("default_if_none", (v, a) -> v === nothing ? a : v)
     F("safe", (v, _) -> SafeString(str(v)))
     F("escape", (v, _) -> SafeString(conditional_escape(v)))     # already-safe text isn't escaped twice
     F("force_escape", (v, _) -> SafeString(escape_html(str(v))))
     F("striptags", (v, _) -> replace(str(v), r"<[^>]*>" => ""))
-    F("truncatechars", (v, a) -> (s = str(v); n = tonum(a); length(s) <= n ? s : first(s, max(n - 1, 0)) * "…"); is_safe = true)
-    F("truncatewords", (v, a) -> (w = split(str(v)); n = tonum(a); length(w) <= n ? join(w, " ") : join(w[1:n], " ") * " …"); is_safe = true)
     F("join", join_filter; needs_autoescape = true)
-    F("first", (v, _) -> v === nothing ? "" : (it = to_iterable(v); isempty(it) ? nothing : first(it)))
-    F("last", (v, _) -> v === nothing ? "" : (it = to_iterable(v); isempty(it) ? nothing : last(it)))
-    F("random", (v, _) -> v === nothing ? "" : (it = to_iterable(v); isempty(it) ? nothing : rand(it)))
-    F("slice", (v, a) -> begin
-        v === nothing && return ""                  # a missing value: nothing to slice (Django gives "")
-        it = v isa AbstractString || v isa SafeString ? str(v) : to_iterable(v)
-        m = match(r"^(-?\d*):(-?\d*)$", str(a))
-        m === nothing && return it
-        n = length(it)
-        lo = isempty(m[1]) ? 0 : parse(Int, m[1]); lo < 0 && (lo += n)
-        hi = isempty(m[2]) ? n : parse(Int, m[2]); hi < 0 && (hi += n)
-        lo, hi = clamp(lo, 0, n), clamp(hi, 0, n)
-        it isa AbstractString ? join(collect(it)[lo+1:hi]) : it[lo+1:hi]
-    end)
-    F("date", (v, a) -> format_date(v, a === nothing ? get_format().date : str(a)))
-    F("time", (v, a) -> format_date(v, a === nothing ? "g:i a" : str(a)))
-    F("timesince", (v, _) -> timesince(v))
-    F("linebreaksbr", (v, _, ae) -> SafeString(replace(ae && !(v isa SafeString) ? escape_html(str(v)) : str(v), r"\r?\n" => "<br>"));
-      needs_autoescape = true)
     F("linebreaks", (v, _, ae) -> SafeString(linebreaks_html(str(v), ae && !(v isa SafeString))); needs_autoescape = true)
-    F("pluralize", (v, a) -> begin
-        n = v isa Number ? v : (v isa AbstractString || v === nothing) ? tonum(v) : length(to_iterable(v))
-        sfx = a === nothing ? ["", "s"] : split(str(a), ',')
-        length(sfx) == 1 && (sfx = ["", sfx[1]])
-        n == 1 ? sfx[1] : sfx[2]
-    end)
-    F("add", (v, a) -> begin
-        try
-            x, y = tonum(v), tonum(a)
-            (v isa Number || tryparse(Float64, str(v)) !== nothing) && (a isa Number || tryparse(Float64, str(a)) !== nothing) && return x + y
-        catch
-        end
-        (v isa AbstractVector && a isa AbstractVector) ? vcat(v, a) : str(v) * str(a)
-    end)
     F("yesno", (v, a) -> begin
         opts = split(a === nothing ? "yes,no,maybe" : str(a), ',')
         v === nothing ? (length(opts) > 2 ? opts[3] : opts[2]) : truthy(v) ? opts[1] : opts[2]
     end)
     F("slugify", (v, _) -> slugify(str(v)); is_safe = true)
-    F("urlencode", (v, _) -> urlquote(str(v)))
-    F("floatformat", (v, a) -> begin
-        d = a === nothing ? -1 : tonum(a)
-        if v isa Decimal                  # exact, rounding half up as Django does
-            return d < 0 && isinteger(v) ? string(Int(v)) : string(round(v, RoundNearestTiesAway; digits = abs(d)))
-        end
-        x = Float64(tonum(v))
-        if d < 0
-            isinteger(x) ? string(round(Int, x)) : Printf.format(Printf.Format("%.$(abs(d))f"), x)
-        else
-            Printf.format(Printf.Format("%.$(d)f"), x)
-        end
-    end)
-    F("cut", (v, a) -> replace(str(v), str(a) => ""))
     F("wordcount", (v, _) -> length(split(str(v))))
     F("divisibleby", (v, a) -> tonum(v) % tonum(a) == 0)
-    F("stringformat", (v, a) -> Printf.format(Printf.Format("%" * str(a)), v))
-    F("center", (v, a) -> (s = str(v); n = tonum(a); p = max(n - length(s), 0); " "^(p ÷ 2) * s * " "^(p - p ÷ 2)))
-    F("ljust", (v, a) -> rpad(str(v), tonum(a)))
-    F("rjust", (v, a) -> lpad(str(v), tonum(a)))
-    F("make_list", (v, _) -> collect(str(v)))
-    F("dictsort", (v, a) -> sort(collect(v); by = x -> getattr(x, str(a))))
-    F("dictsortreversed", (v, a) -> sort(collect(v); by = x -> getattr(x, str(a)), rev = true))
-    F("json_script", (v, a) -> SafeString("<script id=\"" * escape_html(str(a)) * "\" type=\"application/json\">" *
-                                          replace(JSON.json(v), "<" => "\\u003C", ">" => "\\u003E", "&" => "\\u0026") * "</script>"))
-    F("urlize", (v, _, ae) -> SafeString(replace(ae ? escape_html(str(v)) : str(v),
-                                                 r"(https?://[^\s<]+)" => s"<a href=\"\1\" rel=\"nofollow\">\1</a>"));
-      needs_autoescape = true)
     F("filesizeformat", (v, _) -> begin
         b = Float64(tonum(v))
         for (u, n) in (("PB", 1024.0^5), ("TB", 1024.0^4), ("GB", 1024.0^3), ("MB", 1024.0^2), ("KB", 1024.0))

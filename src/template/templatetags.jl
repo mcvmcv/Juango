@@ -446,70 +446,6 @@ end
 const PHONE_LETTERS = Dict(c => d for (d, cs) in ('2' => "abc", '3' => "def", '4' => "ghi", '5' => "jkl", '6' => "mno",
                                                    '7' => "pqrs", '8' => "tuv", '9' => "wxyz") for c in cs)
 
-"Text length of HTML in characters (entities count as one) or words."
-function html_text_length(s, words)
-    txt = replace(replace(s, r"<[^>]*>" => " "), r"&#?\w{1,8};" => "x")
-    words ? length(split(txt)) : length(replace(replace(s, r"<[^>]*>" => ""), r"&#?\w{1,8};" => "x"))
-end
-
-"Truncate HTML to `n` characters (the ellipsis included) or `n` words of text, closing the tags left open."
-function truncate_html(s::AbstractString, n::Int; words::Bool)
-    html_text_length(s, words) <= n && return String(s)
-    limit = words ? n : n - 1
-    out = IOBuffer()
-    open_tags = String[]
-    count = 0
-    in_word = false
-    cut, cut_tags = 0, String[]               # output length and open tags just after the last kept text
-    i = firstindex(s)
-    while i <= lastindex(s)
-        c = s[i]
-        if c == '<'
-            j = findnext('>', s, i)
-            j === nothing && break
-            tagtxt = s[i:j]
-            m = match(r"^<\s*(/)?\s*([a-zA-Z][a-zA-Z0-9]*)[^>]*?(/)?>$"s, tagtxt)
-            if m !== nothing
-                name = lowercase(m[2])
-                if m[1] !== nothing
-                    k = findlast(==(name), open_tags)
-                    k === nothing || deleteat!(open_tags, k:length(open_tags))
-                elseif m[3] === nothing && !(name in ("br", "hr", "img", "input", "meta", "link", "area", "base", "col", "wbr", "source"))
-                    push!(open_tags, name)
-                end
-            end
-            print(out, tagtxt)
-            i = nextind(s, j)
-            continue
-        end
-        if words
-            if isspace(c)
-                in_word = false
-            elseif !in_word
-                in_word = true
-                count += 1
-                count > limit && break
-            end
-        else
-            j = c == '&' ? findnext(';', s, i) : nothing
-            ent = j !== nothing && j - i <= 9 && occursin(r"^&#?\w+;$", s[i:j])
-            count += 1
-            count > limit && break
-            if ent
-                print(out, s[i:j]); i = nextind(s, j)
-                cut, cut_tags = position(out), copy(open_tags)
-                continue
-            end
-        end
-        print(out, c)
-        (words ? !isspace(c) : true) && ((cut, cut_tags) = (position(out), copy(open_tags)))
-        i = nextind(s, i)
-    end
-    res = String(take!(out)[1:cut])
-    res = words ? res * " …" : res * "…"
-    res * join(["</$t>" for t in Iterators.reverse(cut_tags)])
-end
-
 function unordered_list_html(items, ae)
     io = IOBuffer()
     function walk(list, indent)
@@ -534,46 +470,16 @@ function unordered_list_html(items, ae)
     rstrip(String(take!(io)), '\n')
 end
 
-function wordwrap(s::AbstractString, width::Int)
-    out = String[]
-    for line in split(s, '\n')
-        cur = ""
-        for w in split(line, ' ')
-            if isempty(cur)
-                cur = w
-            elseif length(cur) + 1 + length(w) <= width
-                cur *= " " * w
-            else
-                push!(out, cur); cur = w
-            end
-        end
-        push!(out, cur)
-    end
-    join(out, "\n")
-end
 
 let F(name, f; kw...) = register_filter!(name, f; kw...)
-    F("phone2numeric", (v, _) -> map(c -> get(PHONE_LETTERS, lowercase(c), c), str(v)))
     F("get_digit", (v, a) -> begin
         n = v isa Integer ? v : tryparse(Int, str(v)); k = tonum(a)
         (n === nothing || !(k isa Integer) || k < 1) && return v
         s = string(abs(n)); k > length(s) ? 0 : parse(Int, s[end-k+1])
     end)
     F("unordered_list", (v, _, ae) -> SafeString(unordered_list_html(to_iterable(v), ae)); needs_autoescape = true)
-    F("wordwrap", (v, a) -> wordwrap(str(v), Int(tonum(a))))
-    F("iriencode", (v, _) -> join(!isascii(c) || isletter(c) || isdigit(c) || c in "/#%[]=:;\$&()+,!?*@'~._-" ? string(c) :
-                                  join("%" * uppercase(string(b, base = 16, pad = 2)) for b in codeunits(string(c))) for c in str(v)))
-    F("addslashes", (v, _) -> replace(str(v), "\\" => "\\\\", "\"" => "\\\"", "'" => "\\'"))
     F("escapejs", (v, _) -> join(c in "\\'\"<>&=-;`\u2028\u2029" || c < ' ' ? "\\u" * uppercase(string(UInt32(c), base = 16, pad = 4)) : string(c)
                                  for c in str(v)))
-    F("truncatechars_html", (v, a) -> truncate_html(str(v), Int(tonum(a)); words = false); is_safe = true)   # safe only if the input was
-    F("truncatewords_html", (v, a) -> truncate_html(str(v), Int(tonum(a)); words = true); is_safe = true)
-    F("urlizetrunc", (v, a, ae) -> begin
-        n = Int(tonum(a))
-        s = ae ? escape_html(str(v)) : str(v)
-        SafeString(replace(s, r"(https?://[^\s<]+)" => u -> "<a href=\"$u\" rel=\"nofollow\">" *
-                                                         (length(u) > n ? first(u, max(n - 1, 0)) * "…" : u) * "</a>"))
-    end; needs_autoescape = true)
     F("timeuntil", (v, a) -> begin
         d = v isa TimeZones.ZonedDateTime ? DateTime(TimeZones.astimezone(v, UTC_TZ)) : todatetime(v)
         d === nothing && return ""
@@ -583,9 +489,5 @@ let F(name, f; kw...) = register_filter!(name, f; kw...)
     end)
     F("escapeseq", (v, _) -> [SafeString(conditional_escape(x)) for x in to_iterable(v)])
     F("safeseq", (v, _) -> [SafeString(display_string(x)) for x in to_iterable(v)])
-    F("linenumbers", (v, _, ae) -> begin
-        lines = split(str(v), '\n'); w = length(string(length(lines)))
-        SafeString(join(["$(lpad(i, w, '0')). $(ae ? escape_html(l) : l)" for (i, l) in enumerate(lines)], "\n"))
-    end; needs_autoescape = true)
     F("pprint", (v, _) -> sprint(show, MIME"text/plain"(), v))
 end

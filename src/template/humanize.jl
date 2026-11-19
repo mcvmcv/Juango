@@ -98,16 +98,17 @@ function naturaltime(v)
     secs = round(Int, Dates.value(ref - t) / 1000)
     future = secs < 0
     s = abs(secs)
+    # (a no-break space between a number and its unit, as Django's)
     phrase = if s == 0
         return gettext("now")
     elseif s < 60
-        s == 1 ? gettext("a second") : interpolate(ngettext("%(count)s second", "%(count)s seconds", s), Dict("count" => s))
+        s == 1 ? gettext("a second") : interpolate(ngettext("%(count)s\u00a0second", "%(count)s\u00a0seconds", s), Dict("count" => s))
     elseif s < 3600
         m = s ÷ 60
-        m == 1 ? gettext("a minute") : interpolate(ngettext("%(count)s minute", "%(count)s minutes", m), Dict("count" => m))
+        m == 1 ? gettext("a minute") : interpolate(ngettext("%(count)s\u00a0minute", "%(count)s\u00a0minutes", m), Dict("count" => m))
     elseif s < 86400
         h = s ÷ 3600
-        h == 1 ? gettext("an hour") : interpolate(ngettext("%(count)s hour", "%(count)s hours", h), Dict("count" => h))
+        h == 1 ? gettext("an hour") : interpolate(ngettext("%(count)s\u00a0hour", "%(count)s\u00a0hours", h), Dict("count" => h))
     else
         future ? timesince(ref, t) : timesince(t, ref)
     end

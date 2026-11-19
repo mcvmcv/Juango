@@ -114,14 +114,15 @@ end
     @test tr("{{ s|wordwrap:5 }}", Dict("s" => "Joel is a slug")) == "Joel\nis a\nslug"
     h = Dict("h" => "<p>Joel is a <b>slug</b> &amp; more</p>")
     @test tr("{{ h|safe|truncatechars_html:7 }}", h) == "<p>Joel i…</p>"
-    @test tr("{{ h|safe|truncatewords_html:4 }}", h) == "<p>Joel is a <b>slug …</b></p>"
+    @test tr("{{ h|safe|truncatewords_html:4 }}", h) == "<p>Joel is a <b>slug</b> …</p>"      # (after the tag closes, as Django's)
     @test tr("{{ h|safe|truncatewords_html:9 }}", h) == h["h"]
     @test tr("{{ s|safe|truncatechars_html:4 }}", Dict("s" => "<i>héllo</i>")) == "<i>hél…</i>"
     @test tr("{{ u|urlizetrunc:15 }}", Dict("u" => "see http://example.com/a/long/path")) ==
           "see <a href=\"http://example.com/a/long/path\" rel=\"nofollow\">http://example…</a>"
-    @test tr("{{ d|timeuntil }}", Dict("d" => now() + Day(3) + Hour(1))) == "3 days"
-    @test tr("{{ d|timeuntil:ref }}", Dict("d" => DateTime(2024, 1, 10), "ref" => DateTime(2024, 1, 1))) == "1 week"
-    @test tr("{{ s|iriencode }}", Dict("s" => "?a=1&b=x y/é")) == "?a=1&amp;b=x%20y/é"
+    # (as Django's: two adjacent units at most, a no-break space between number and unit)
+    @test startswith(tr("{{ d|timeuntil }}", Dict("d" => now() + Day(3) + Hour(1))), "3\u00a0days")
+    @test tr("{{ d|timeuntil:ref }}", Dict("d" => DateTime(2024, 1, 10), "ref" => DateTime(2024, 1, 1))) == "1\u00a0week, 2\u00a0days"
+    @test tr("{{ s|iriencode }}", Dict("s" => "?a=1&b=x y/é")) == "?a=1&amp;b=x%20y/%C3%A9"
     @test tr("{{ l|escapeseq|join:',' }}", Dict("l" => ["<a>", "b"])) == "&lt;a&gt;,b"
     @test tr("{{ s|linenumbers }}", Dict("s" => "a\n<b>")) == "1. a\n2. &lt;b&gt;"
     @test tr("{{ s|center:7 }}|{{ s|ljust:5 }}|{{ s|rjust:5 }}|{{ l|slice:'1:' }}|{{ l|slice:'-2:' }}|{{ l|slice:':2' }}",
@@ -195,9 +196,10 @@ end
                          "f" => n - Hour(1) - Second(1), "g" => n - Hour(5) - Second(1), "i" => n - Day(3) - Second(1),
                          "j" => n + Minute(10) + Second(5), "k" => n + Day(2) + Second(5))
     out = split(h("{{ a|naturaltime }}|{{ b|naturaltime }}|{{ c|naturaltime }}|{{ e|naturaltime }}|{{ f|naturaltime }}|{{ g|naturaltime }}|{{ i|naturaltime }}|{{ j|naturaltime }}|{{ k|naturaltime }}", d), '|')
-    @test out[1] in ("now", "a second ago") && out[2] in ("30 seconds ago", "31 seconds ago")
-    @test out[3:7] == ["a minute ago", "14 minutes ago", "an hour ago", "5 hours ago", "3 days ago"]
-    @test out[8] in ("10 minutes from now", "9 minutes from now") && out[9] == "2 days from now"
+    nb = "\u00a0"               # (a no-break space between a number and its unit, as Django's)
+    @test out[1] in ("now", "a second ago") && out[2] in ("30$(nb)seconds ago", "31$(nb)seconds ago")
+    @test out[3:7] == ["a minute ago", "14$(nb)minutes ago", "an hour ago", "5$(nb)hours ago", "3$(nb)days ago"]
+    @test out[8] in ("10$(nb)minutes from now", "9$(nb)minutes from now") && out[9] == "2$(nb)days from now"
 end
 
 @testset "escaping and lookups" begin

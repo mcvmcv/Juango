@@ -176,6 +176,8 @@ function parse_operand(s::AbstractString)
     isempty(s) && throw(TemplateSyntaxError("empty variable"))
     if length(s) >= 2 && (s[1] == '"' || s[1] == '\'') && s[end] == s[1]
         return Literal(SafeString(unescape_string(s[2:prevind(s, end)])))
+    elseif (m = match(r"^_\((\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*')\)$"s, s)) !== nothing
+        return Literal(gettext_lazy(unescape_string(m[1][2:end-1])))     # _("text"): translated where it's shown, as Django's
     elseif s in ("True", "true")
         return Literal(true)
     elseif s in ("False", "false")
@@ -195,7 +197,20 @@ end
 function read_operand(s::AbstractString, i::Int)
     n = ncodeunits(s)
     start = i
-    if i <= n && (s[i] == '"' || s[i] == '\'')
+    if i < n && s[i] == '_' && s[nextind(s, i)] == '('      # _("text"), a translated literal
+        i = nextind(s, nextind(s, i))
+        if i <= n && (s[i] == '"' || s[i] == '\'')
+            q = s[i]
+            i = nextind(s, i)
+            while i <= n && s[i] != q
+                s[i] == '\\' && (i = nextind(s, i))
+                i = nextind(s, i)
+            end
+            i = nextind(s, i)
+        end
+        i <= n && s[i] == ')' || throw(TemplateSyntaxError("could not parse '$(s[start:end])'"))
+        i = nextind(s, i)
+    elseif i <= n && (s[i] == '"' || s[i] == '\'')
         q = s[i]
         i = nextind(s, i)
         while i <= n && s[i] != q
