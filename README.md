@@ -766,7 +766,7 @@ Migration(
 )
 ```
 
-- **Data migrations.** `makemigrations --empty --name backfill` writes a file to fill in with `RunSQL(forward, backward)` or `RunJulia(forward_fn, backward_fn)`. A `RunJulia` function that takes an argument gets the models as they were at that point in history, so it doesn't depend on today's model structs:
+- **Data migrations.** `makemigrations --empty --name backfill` writes a file to fill in with `RunSQL(forward, backward)` or `RunJulia(forward_fn, backward_fn)`. A `RunSQL` string may hold several statements separated by `;`, or give a vector of statements and `(sql, params)` pairs with `?` placeholders. A `RunJulia` function that takes an argument gets the models as they were at that point in history, so it doesn't depend on today's model structs:
 
   ```julia
   RunJulia(apps -> begin

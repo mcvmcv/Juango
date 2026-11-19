@@ -15,11 +15,17 @@ struct CreateModel <: Operation
     pk_columns::Vector{String}        # pk = :composite
     comment::Union{Nothing,String}    # db_table_comment
 end
-CreateModel(table; model = table, columns = Column[], unique_together = [], parent = nothing, pk = :auto, indexes = Index[],
-            constraints = ConstraintSpec[], pk_columns = String[], comment = nothing) =
+function CreateModel(table; model = table, columns = Column[], unique_together = [], parent = nothing, pk = :auto, indexes = Index[],
+                     constraints = ConstraintSpec[], pk_columns = String[], comment = nothing)
+    seen = Set{String}()
+    for c in columns                   # (as Django's)
+        c.name in seen && throw(ArgumentError("Found duplicate value $(c.name) in CreateModel fields argument."))
+        push!(seen, c.name)
+    end
     CreateModel(string(table), string(model), collect(Column, columns), Juango.normalize_unique(unique_together),
                 parent === nothing ? nothing : string(parent), Symbol(pk), collect(Index, indexes), collect(ConstraintSpec, constraints),
                 collect(String, pk_columns), comment === nothing ? nothing : string(comment))
+end
 to_table(op::CreateModel, app) = Table(op.table, app, op.model, copy(op.columns), [copy(u) for u in op.unique_together];
                                        parent = op.parent, pk = op.pk, indexes = copy(op.indexes), constraints = copy(op.constraints),
                                        pk_columns = copy(op.pk_columns), comment = op.comment)
@@ -179,16 +185,67 @@ op_code(op::CreateExtension) = "CreateExtension($(jl(op.name)))"
 """
     RunSQL(forward, backward=nothing)
 
-Raw SQL (a string or a vector of strings) with `?`-free statements. Without `backward` the
-migration can't be unapplied; pass `\"\"` for a no-op reverse.
+Raw SQL. Each of `forward` and `backward` is a string, which may hold several statements
+separated by `;` (they're run one by one), or a vector whose items are statements or
+`(sql, params)` pairs with `?` placeholders: `("UPDATE t SET x = ? WHERE id = ?", [1, 2])`
+(as Django's). Without `backward` the migration can't be unapplied; pass `\"\"` for a no-op reverse.
 """
 struct RunSQL <: Operation
-    forward::Vector{String}
-    backward::Union{Nothing,Vector{String}}
+    forward::Vector{Any}                      # SQL strings and (sql, params) tuples
+    backward::Union{Nothing,Vector{Any}}
     RunSQL(forward, backward = nothing) = new(sqllist(forward), backward === nothing ? nothing : sqllist(backward))
 end
-sqllist(x::AbstractString) = isempty(x) ? String[] : [String(x)]
-sqllist(x) = String[string(s) for s in x]
+sqllist(x::AbstractString) = Any[s for s in split_sql(x)]
+sqllist(x) = Any[sql_item(s) for s in x]
+sql_item(s::AbstractString) = String(s)
+function sql_item(s)
+    length(s) == 2 || throw(ArgumentError("Expected a 2-tuple but got $(length(s))"))
+    s[2] === nothing ? String(s[1]) : (String(s[1]), collect(Any, s[2]))
+end
+"The action that runs one RunSQL statement: the SQL, or a function running it with its parameters."
+sql_action(s::String) = s
+sql_action(s::Tuple) = () -> Juango.execute(s[1], s[2])
+
+"""
+    split_sql(s) -> Vector{String}
+
+The statements of a string of SQL, split at the `;`s outside quotes (`'…'`, `"…"`, `` `…` ``),
+PostgreSQL dollar quotes (`\$\$…\$\$`, `\$body\$…\$body\$`) and comments; empty ones dropped.
+"""
+function split_sql(s::AbstractString)
+    out = String[]
+    buf = IOBuffer()
+    i, n = firstindex(s), lastindex(s)
+    while i <= n
+        c = s[i]
+        if c in ('\'', '"', '`')
+            j = nextind(s, i)
+            while j <= n && !(s[j] == c && !(j < n && s[nextind(s, j)] == c))
+                s[j] == c && (j = nextind(s, j))         # a doubled quote inside
+                j = nextind(s, j)
+            end
+            print(buf, SubString(s, i, min(j, n))); i = nextind(s, min(j, n))
+        elseif c == '-' && i < n && s[nextind(s, i)] == '-'
+            j = something(findnext('\n', s, i), n)
+            print(buf, SubString(s, i, j)); i = nextind(s, j)
+        elseif c == '/' && i < n && s[nextind(s, i)] == '*'
+            r = findnext("*/", s, i)
+            j = r === nothing ? n : last(r)
+            print(buf, SubString(s, i, j)); i = nextind(s, j)
+        elseif c == '$' && (m = match(r"^\$(\w*)\$", SubString(s, i))) !== nothing
+            tag = m.match
+            r = findnext(tag, s, i + ncodeunits(tag))
+            j = r === nothing ? n : last(r)
+            print(buf, SubString(s, i, j)); i = nextind(s, j)
+        elseif c == ';'
+            push!(out, strip(String(take!(buf)))); i = nextind(s, i)
+        else
+            print(buf, c); i = nextind(s, i)
+        end
+    end
+    push!(out, strip(String(take!(buf))))
+    filter!(x -> !isempty(x) && !all(l -> isempty(strip(l)) || startswith(strip(l), "--"), split(x, '\n')), out)
+end
 
 """
     RunJulia(forward, backward=nothing)
@@ -309,6 +366,15 @@ function state_forwards!(op::RenameField, st, app)
     getcolumn(t, op.old)
     t.columns = [c.name == op.old ? with_column(c; name = op.new) : c for c in t.columns]
     t.unique_together = Juango.normalize_unique([[x == op.old ? op.new : x for x in u] for u in t.unique_together])
+    # named indexes and constraints follow the column (the database renames it in them); an unnamed
+    # index keeps the name it was created with, so it stays as it is and the autodetector replaces it
+    ren(x) = x == op.old ? op.new : x
+    t.indexes = [ix.name === nothing ? ix :
+                 Juango.Index(ren.(ix.columns), ix.name, ix.unique, ix.method, [(f, ren(c)) for (f, c) in ix.expressions],
+                              ix.condition, ren.(ix.include), ix.opclasses) for ix in t.indexes]
+    t.constraints = [Juango.ConstraintSpec(c.kind, c.name, ren.(c.columns),
+                                           [c.kind === :exclusion ? (ren(f), x) : (f, ren(x)) for (f, x) in c.expressions],
+                                           c.condition, c.index_type) for c in t.constraints]
     st
 end
 state_forwards!(::Union{RunSQL,RunJulia}, st, app) = st
@@ -345,8 +411,9 @@ backwards(op::RemoveConstraint, b, from, to, deferred) =
 backwards(op::RemoveIndex, b, from, to, deferred) =
     Juango.index_spec_sql(b, op.table, only(filter(i -> i.name == op.name, from[op.table].indexes)))
 
-forwards(op::RenameModel, b, from, to, deferred) = rename_table_sql(b, from[op.old], to[op.new])
-backwards(op::RenameModel, b, from, to, deferred) = rename_table_sql(b, to[op.new], from[op.old])
+# (to the same name: nothing to do, as Django's AlterModelTable)
+forwards(op::RenameModel, b, from, to, deferred) = op.old == op.new ? Any[] : rename_table_sql(b, from[op.old], to[op.new])
+backwards(op::RenameModel, b, from, to, deferred) = op.old == op.new ? Any[] : rename_table_sql(b, to[op.new], from[op.old])
 
 forwards(op::AddField, b, from, to, deferred) = add_column_sql(b, to[op.table], op.column, deferred)
 backwards(op::AddField, b, from, to, deferred) = drop_column_sql(b, to[op.table], from[op.table], op.column.name)
@@ -383,10 +450,10 @@ function backwards(op::SeparateDatabaseAndState, b, from, to, deferred)
           for a in backwards(op.database_operations[i], b, states[i], states[i+1], deferred)]
 end
 
-forwards(op::RunSQL, b, from, to, deferred) = op.forward
+forwards(op::RunSQL, b, from, to, deferred) = Any[sql_action(s) for s in op.forward]
 function backwards(op::RunSQL, b, from, to, deferred)
     op.backward === nothing && throw(IrreversibleError("RunSQL has no reverse SQL"))
-    op.backward
+    Any[sql_action(s) for s in op.backward]
 end
 "A RunJulia function as an action: one that takes an argument gets the historical models."
 function julia_action(f, st)

@@ -154,6 +154,110 @@ function introspect_foreign_keys(table)
     Dict(r.c => r.t for r in rows)
 end
 
+"""
+    introspect_constraints(table) -> Dict{String,NamedTuple}
+
+A table's constraints and indexes in the database, by name (Django's
+`connection.introspection.get_constraints`): each has `columns` (column names; an expression is
+`""`), `primary_key`, `unique`, `foreign_key` (`(table, column)` or `nothing`), `check`, `index`
+and `type` (the index method, e.g. "btree", or `nothing`). A primary key with no name of its own
+(SQLite) is `"__primary__"`; SQLite's unnamed foreign keys are `"fk_<n>"`.
+"""
+function introspect_constraints(table)
+    b = backend()
+    out = Dict{String,NamedTuple{(:columns, :primary_key, :unique, :foreign_key, :check, :index, :type),
+                                 Tuple{Vector{String},Bool,Bool,Union{Nothing,Tuple{String,String}},Bool,Bool,Union{Nothing,String}}}}()
+    entry(cols; pk = false, unique = false, fk = nothing, check = false, index = false, type = nothing) =
+        (columns = collect(String, cols), primary_key = pk, unique = unique, foreign_key = fk, check = check, index = index, type = type)
+    splitcols(x) = x === nothing || x === missing ? String[] : String.(split(String(x), ','; keepempty = true))
+    if b isa SQLiteBackend
+        q = quote_name(b, table)
+        pk = [String(r[:name]) for r in sort(execute("PRAGMA table_info($q)"); by = r -> r[:pk]) if r[:pk] != 0]
+        isempty(pk) || (out["__primary__"] = entry(pk; pk = true, unique = true))
+        for r in execute("PRAGMA index_list($q)")
+            name = String(r[:name])
+            cols = [r2[:name] === nothing || r2[:name] === missing ? "" : String(r2[:name]) for r2 in execute("PRAGMA index_info($(quote_name(b, name)))")]
+            if String(r[:origin]) == "pk"
+                out["__primary__"] = entry(cols; pk = true, unique = true); continue
+            end
+            out[name] = entry(cols; unique = r[:unique] != 0, index = true, type = "btree")
+        end
+        for r in execute("PRAGMA foreign_key_list($q)")
+            name = "fk_$(r[:id])"
+            prev = get(out, name, nothing)
+            cols = prev === nothing ? String[String(r[:from])] : [prev.columns; String(r[:from])]
+            out[name] = entry(cols; fk = (String(r[:table]), r[:to] === nothing || r[:to] === missing ? "id" : String(r[:to])))
+        end
+        # named CHECK and UNIQUE constraints, from the CREATE TABLE statement
+        rows = execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", [table])
+        if !isempty(rows) && rows[1][:sql] !== nothing
+            sql = String(rows[1][:sql])
+            for m in eachmatch(r"CONSTRAINT\s+[\"`]?(\w+)[\"`]?\s+(CHECK|UNIQUE)\s*\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)"i, sql)
+                if uppercase(m[2]) == "CHECK"
+                    out[m[1]] = entry(String[]; check = true)
+                else
+                    out[m[1]] = entry([strip(c, ['"', '`', ' ']) for c in split(m[3], ',')]; unique = true)
+                end
+            end
+        end
+    elseif b isa PostgresBackend
+        for r in execute("SELECT con.conname AS name, con.contype AS type, ft.relname AS ftable, " *
+                         "(SELECT string_agg(a.attname, ',' ORDER BY u.ord) FROM unnest(con.conkey) WITH ORDINALITY u(attnum, ord) " *
+                         " JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = u.attnum) AS cols, " *
+                         "(SELECT string_agg(a.attname, ',' ORDER BY u.ord) FROM unnest(con.confkey) WITH ORDINALITY u(attnum, ord) " *
+                         " JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = u.attnum) AS fcols " *
+                         "FROM pg_constraint con JOIN pg_class cl ON cl.oid = con.conrelid JOIN pg_namespace n ON n.oid = cl.relnamespace " *
+                         "LEFT JOIN pg_class ft ON ft.oid = con.confrelid WHERE cl.relname = ? AND n.nspname = current_schema()", [table])
+            t = String(r[:type])
+            out[String(r[:name])] = entry(splitcols(r[:cols]); pk = t == "p", unique = t in ("p", "u"), check = t == "c",
+                                          fk = t == "f" ? (String(r[:ftable]), first(splitcols(r[:fcols]))) : nothing)
+        end
+        for r in execute("SELECT ic.relname AS name, ix.indisunique AS uniq, ix.indisprimary AS pk, am.amname AS method, " *
+                         "(SELECT string_agg(COALESCE(a.attname, ''), ',' ORDER BY u.ord) FROM unnest(ix.indkey::int2[]) WITH ORDINALITY u(attnum, ord) " *
+                         " LEFT JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = u.attnum) AS cols " *
+                         "FROM pg_index ix JOIN pg_class ic ON ic.oid = ix.indexrelid JOIN pg_class t ON t.oid = ix.indrelid " *
+                         "JOIN pg_namespace n ON n.oid = t.relnamespace JOIN pg_am am ON am.oid = ic.relam " *
+                         "WHERE t.relname = ? AND n.nspname = current_schema()", [table])
+            name = String(r[:name])
+            prev = get(out, name, nothing)
+            if prev === nothing
+                out[name] = entry(splitcols(r[:cols]); pk = r[:pk] == true, unique = r[:uniq] == true, index = true, type = String(r[:method]))
+            else                                       # the index behind a primary key or unique constraint
+                out[name] = merge(prev, (index = true, type = String(r[:method])))
+            end
+        end
+    else
+        for r in execute("SELECT tc.constraint_name AS name, tc.constraint_type AS type, kcu.column_name AS col, " *
+                         "kcu.referenced_table_name AS ftable, kcu.referenced_column_name AS fcol " *
+                         "FROM information_schema.table_constraints tc LEFT JOIN information_schema.key_column_usage kcu " *
+                         "ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema AND kcu.table_name = tc.table_name " *
+                         "WHERE tc.table_schema = DATABASE() AND tc.table_name = ? ORDER BY tc.constraint_name, kcu.ordinal_position", [table])
+            name, t = String(r[:name]), uppercase(String(r[:type]))
+            prev = get(out, name, nothing)
+            col = r[:col] === nothing || r[:col] === missing ? String[] : String[String(r[:col])]
+            cols = prev === nothing ? col : [prev.columns; col]
+            out[name] = entry(cols; pk = t == "PRIMARY KEY", unique = t in ("PRIMARY KEY", "UNIQUE"), check = t == "CHECK",
+                              fk = t == "FOREIGN KEY" ? (String(r[:ftable]), String(r[:fcol])) : nothing)
+        end
+        keyed = Set(keys(out))                         # constraints whose columns are known already
+        for r in execute("SELECT index_name AS name, non_unique AS nu, column_name AS col, index_type AS method " *
+                         "FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? " *
+                         "ORDER BY index_name, seq_in_index", [table])
+            name = String(r[:name])
+            col = r[:col] === nothing || r[:col] === missing ? "" : String(r[:col])
+            prev = get(out, name, nothing)
+            if name in keyed                           # the index behind a key constraint
+                out[name] = merge(prev, (index = true, type = lowercase(String(r[:method]))))
+            elseif prev === nothing
+                out[name] = entry([col]; pk = name == "PRIMARY", unique = r[:nu] == 0, index = true, type = lowercase(String(r[:method])))
+            else
+                out[name] = merge(prev, (columns = [prev.columns; col],))
+            end
+        end
+    end
+    out
+end
+
 model_name_for(table) = join(uppercasefirst.(split(replace(table, r"[^A-Za-z0-9]+" => "_"), '_'; keepempty = false)))
 
 "The field definition for an introspected column (and a note when the type is a guess)."

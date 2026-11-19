@@ -245,13 +245,45 @@ end
     optimize_operations(ops, before, app) -> Vector{Operation}
 
 Fewer operations with the same effect: tables created along the way become one `CreateModel`
-with their final definition (and vanish if they're deleted again), and on other tables an
-`AddField` absorbs later `AlterField`s of its column, an `AddField` followed by a `RemoveField`
-cancels out, and only the last of several `AlterField`s is kept. `RunSQL`, `RunJulia` and
-`SeparateDatabaseAndState` are barriers: nothing is moved across them.
+with their final definition (and vanish if they're deleted again). On other tables an
+`AddField` absorbs later `AlterField`s and `RenameField`s of its column, an `AddField` followed
+by a `RemoveField` cancels out, only the last of several `AlterField`s is kept (a `RenameField`
+moves before it), renames of a column or a table in a row become one, an `AddIndex` or
+`AddConstraint` that's removed again vanishes, and only the last `AlterUniqueTogether` or
+`AlterModelTableComment` of a table is kept. `RunSQL`, `RunJulia` and `SeparateDatabaseAndState`
+are barriers: nothing is moved or folded across them, so their code sees the tables as
+they were at that point.
 """
 function optimize_operations(ops::Vector{Operation}, before::SchemaState, app)
-    after = copy_state(before)
+    state = copy_state(before)
+    out = Operation[]
+    seg = Operation[]
+    flush!() = (append!(out, optimize_segment(seg, state, app)); empty!(seg))
+    seg_start = copy_state(state)
+    for op in ops
+        if op isa Union{RunSQL,RunJulia,SeparateDatabaseAndState}
+            flush!()
+            state_forwards!(op, state, app)
+            push!(out, op)
+            seg_start = copy_state(state)
+            continue
+        end
+        # a table created again under a name the segment started with (deleted or renamed away
+        # first): the creates move to the front of a segment, so start a new one
+        if op isa CreateModel && haskey(seg_start, op.table)
+            flush!()
+            seg_start = copy_state(state)
+        end
+        push!(seg, op)
+    end
+    flush!()
+    out
+end
+
+"One stretch of operations without barriers, optimized; `state` moves on past them."
+function optimize_segment(ops::Vector{Operation}, state::SchemaState, app)
+    isempty(ops) && return Operation[]
+    after = copy_state(state)
     created = Set{String}()            # tables created by these operations, by their current name
     kept = Operation[]
     for op in ops
@@ -262,7 +294,7 @@ function optimize_operations(ops::Vector{Operation}, before::SchemaState, app)
             delete!(created, op.old); push!(created, op.new)
         elseif op isa DeleteModel && op.table in created
             delete!(created, op.table)
-        elseif hasfield(typeof(op), :table) && getfield(op, :table) in created && !(op isa SeparateDatabaseAndState)
+        elseif hasfield(typeof(op), :table) && getfield(op, :table) in created
             # folded into the table's CreateModel
         else
             push!(kept, op)
@@ -272,22 +304,67 @@ function optimize_operations(ops::Vector{Operation}, before::SchemaState, app)
                                     parent = t.parent, pk = t.pk, indexes = t.indexes, constraints = t.constraints,
                                     pk_columns = t.pk_columns, comment = t.comment)
                         for t in creation_order(Table[after[n] for n in created])]
+    for (k, v) in after                # (the caller's state, moved past the segment)
+        state[k] = v
+    end
+    for k in collect(keys(state))
+        haskey(after, k) || delete!(state, k)
+    end
     vcat(creates, reduce_field_ops(kept))
 end
 
-"Merge operations on the same column (between barriers)."
+"The table an operation works on (a RenameModel: its new name), or nothing."
+op_table(op) = op isa RenameModel ? op.new : hasfield(typeof(op), :table) ? getfield(op, :table) : nothing
+op_tables(op) = op isa RenameModel ? (op.old, op.new) : (op_table(op),)
+
+"Merge operations on the same column, index, constraint or table (barriers are handled by the caller)."
 function reduce_field_ops(ops::Vector{Operation})
     out = Operation[]
-    barrier = 0                        # operations before this index in `out` are final
     col(op) = op isa Union{AddField,AlterField} ? (op.table, op.column.name) : op isa RemoveField ? (op.table, op.name) : nothing
+    # nothing after out[i] works on `table`
+    untouched_after(i, table) = !any(x -> table in op_tables(x), @view out[i+1:end])
     for op in ops
-        if op isa Union{RunSQL,RunJulia,SeparateDatabaseAndState}
-            push!(out, op); barrier = length(out); continue
+        if op isa RenameField
+            i = findlast(x -> x isa Union{AddField,AlterField,RenameField} && x.table == op.table &&
+                              (x isa RenameField ? x.new : x.column.name) == op.old, out)
+            if i !== nothing && untouched_after(i, op.table)
+                prev = out[i]
+                if prev isa AddField                                   # added under the new name
+                    out[i] = AddField(prev.table, Juango.with_column(prev.column; name = op.new)); continue
+                elseif prev isa RenameField                            # renamed in one go (or back)
+                    prev.old == op.new ? deleteat!(out, i) : (out[i] = RenameField(op.table, prev.old, op.new)); continue
+                else                                                   # the rename moves before the AlterField
+                    deleteat!(out, i)
+                    r = i - 1           # (and joins a rename just before it)
+                    if r >= 1 && out[r] isa RenameField && out[r].table == op.table && out[r].new == op.old
+                        out[r].old == op.new ? deleteat!(out, r) : (out[r] = RenameField(op.table, out[r].old, op.new))
+                    else
+                        insert!(out, i, RenameField(op.table, op.old, op.new))
+                    end
+                    push!(out, AlterField(prev.table, Juango.with_column(prev.column; name = op.new))); continue
+                end
+            end
+        elseif op isa RenameModel
+            i = findlast(x -> x isa RenameModel && x.new == op.old, out)
+            if i !== nothing && untouched_after(i, op.old)
+                prev = out[i]
+                prev.old == op.new ? deleteat!(out, i) : (out[i] = RenameModel(prev.old, op.new; model = something(op.model, prev.model, Some(nothing))))
+                continue
+            end
+        elseif op isa Union{RemoveIndex,RemoveConstraint}
+            add = op isa RemoveIndex ? AddIndex : AddConstraint
+            i = findlast(x -> x isa add && x.table == op.table && (x isa AddIndex ? x.index.name : x.constraint.name) == op.name, out)
+            if i !== nothing
+                deleteat!(out, i); continue
+            end
+        elseif op isa Union{AlterUniqueTogether,AlterModelTableComment}
+            i = findlast(x -> x isa typeof(op) && x.table == op.table, out)
+            i === nothing || deleteat!(out, i)
         end
         c = col(op)
         # an earlier op on the same column, with nothing that renames columns of that table in between
         i = c === nothing ? nothing : findlast(x -> col(x) == c, out)
-        if i !== nothing && i > barrier && !any(x -> x isa RenameField && x.table == c[1], out[i+1:end])
+        if i !== nothing && !any(x -> x isa RenameField && x.table == c[1], out[i+1:end])
             prev = out[i]
             if prev isa AddField && op isa AlterField
                 out[i] = AddField(prev.table, op.column); continue
