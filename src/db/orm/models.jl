@@ -289,6 +289,7 @@ Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields:
                   Dict{Symbol,Any}(k => v for (k, v) in pairs(meta)
                                    if !(k in (:table, :name, :verbose_name, :verbose_name_plural, :ordering, :app_label,
                                               :unique_together, :_parent, :proxy))))
+    m.extra[:field_order] = Symbol[name for (name, _) in fields]     # (as declared, many-to-many fields among them)
     isempty(gfks) || (m.extra[:generic_fks] = gfks)
     isempty(grels) || (m.extra[:generic_relations] = grels)
     isempty(fobjs) || (m.extra[:foreign_objects] = fobjs)
@@ -497,7 +498,11 @@ function default_value(f::Field)
     f.generated === nothing || return nothing
     d = f.default
     d isa NoDefault && f.db_default !== nothing && return DB_DEFAULT
-    d isa NoDefault || return d isa Function || d isa Type ? d() : d
+    if !(d isa NoDefault)
+        v = d isa Function || d isa Type ? d() : d
+        # (a file field's default names a stored file: FileField(default = "default.txt"))
+        return f.kind in FILE_KINDS && v isa AbstractString ? file_from_db(f, v) : v
+    end
     f.null && return nothing
     (f.kind in STRING_KINDS || f.kind === :filepath) && return ""
     f.kind === :bool && return false

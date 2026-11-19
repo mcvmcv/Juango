@@ -87,7 +87,9 @@ function validation_error(v::URLValidator, x)
     m === nothing && return bad
     lowercase(m[1]) in v.schemes || return bad
     host = lowercase(m[2])
-    ok = host == "localhost" || startswith(host, "[") ||
+    length(host) > 253 && return bad                     # (a domain name's limit, as Django's)
+    startswith(host, "[") && return clean_ip(host[2:end-1], "ipv6", false) isa Tuple ? bad : nothing
+    ok = host == "localhost" ||
          occursin(r"^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$", host) ||
          occursin(r"^(?:[a-z0-9\u00a1-\uffff](?:[a-z0-9\u00a1-\uffff-]{0,61}[a-z0-9\u00a1-\uffff])?\.)+(?:[a-z\u00a1-\uffff-]{2,63}|xn--[a-z0-9]{1,59})\.?$"i, host)
     ok ? nothing : bad
@@ -203,6 +205,14 @@ function validation_error(v::DecimalValidator, x)
     nothing
 end
 
+function validator_params(v::DecimalValidator, x)
+    r = validation_error(v, x)
+    md, dp = v.max_digits, v.decimal_places
+    max = r === nothing ? nothing : r[1] == "max_digits" ? md : r[1] == "max_decimal_places" ? dp :
+          r[1] == "max_whole_digits" ? md - dp : nothing
+    Dict{String,Any}("value" => x, "max" => max)
+end
+
 "`ProhibitNullCharactersValidator()`: no NUL characters (code \"null_characters_not_allowed\"), which PostgreSQL refuses."
 struct ProhibitNullCharactersValidator <: Validator
     message::Any
@@ -227,6 +237,7 @@ const validate_unicode_slug = RegexValidator(r"^[-\p{L}\p{N}_]+\z";
 const validate_ipv4_address = IPAddressValidator("ipv4")
 const validate_ipv6_address = IPAddressValidator("ipv6")
 const validate_ipv46_address = IPAddressValidator("both")
+const validate_integer = RegexValidator(r"^-?\d+\z"; message = gettext_lazy("Enter a valid integer."))
 
 """
     int_list_validator(; sep = ",", allow_negative = false, message, code = "invalid")
@@ -241,10 +252,40 @@ end
 const validate_comma_separated_integer_list = int_list_validator()
 
 """
+    coded(code, message, params = nothing)
+
+A message that knows its error code and parameters: it reads as the message (with the
+parameters filled in), and `field_message` replaces it by the field's `error_messages` entry
+for its code, as Django's `ValidationError(message, code, params)`.
+"""
+struct CodedMessage <: AbstractString
+    code::String
+    text::String
+    template::String
+    params::Union{Nothing,Dict{String,Any}}
+end
+coded(code, template, params = nothing) =
+    CodedMessage(string(code), params === nothing ? string(template) : interpolate(string(template), params), string(template),
+                 params === nothing ? nothing : Dict{String,Any}(string(k) => v for (k, v) in params))
+Base.String(m::CodedMessage) = m.text
+Base.string(m::CodedMessage) = m.text
+Base.ncodeunits(m::CodedMessage) = ncodeunits(m.text)
+Base.codeunit(::CodedMessage) = UInt8
+Base.codeunit(m::CodedMessage, i::Integer) = codeunit(m.text, i)
+Base.isvalid(m::CodedMessage, i::Integer) = isvalid(m.text, i)
+Base.iterate(m::CodedMessage, i::Integer = 1) = iterate(m.text, i)
+
+"""
 A message of field `f` for error `code`: its `error_messages` entry if it has one, else `default`,
-with `%(name)s` parameters filled in.
+with `%(name)s` parameters filled in. A `coded` default brings its own code and parameters.
 """
 function field_message(f, code::AbstractString, default::AbstractString, params = nothing)
+    if default isa CodedMessage
+        code = default.code
+        # (its own parameters win: they name the value that's wrong, not all that was submitted)
+        params = params === nothing ? default.params : merge(Dict{String,Any}(string(k) => v for (k, v) in params), something(default.params, Dict{String,Any}()))
+        default = default.template
+    end
     em = f.error_messages
     m = em !== nothing && haskey(em, code) ? em[code] : default
     params === nothing ? String(m) : interpolate(m, params)

@@ -40,7 +40,7 @@ export Model, @model, @abstract_model, Field, CharField, TextField, EmailField, 
        Validator, RegexValidator, EmailValidator, URLValidator, MinValueValidator, MaxValueValidator, MinLengthValidator,
        MaxLengthValidator, StepValueValidator, DecimalValidator, ProhibitNullCharactersValidator, validate_email, validate_slug,
        validate_unicode_slug, validate_ipv4_address, validate_ipv6_address, validate_ipv46_address, int_list_validator,
-       validate_comma_separated_integer_list,
+       validate_comma_separated_integer_list, validate_integer, validate_image_file_extension,
        MaxFileSizeValidator, ForeignKey, OneToOneField, ManyToManyField, ForeignObject, GeneratedField,
        DB_DEFAULT, CompositePrimaryKey, CheckConstraint, UniqueConstraint, Index, get_absolute_url,
        Decimal, @dec_str, @choices, Choice, ChoiceSet, get_display
@@ -75,7 +75,8 @@ export Form, @form, ModelForm, is_valid, add_widget_attrs!, add_error!, as_p, cl
        Widget, MultiWidget, MultiValueField, SplitDateTimeField, Media, ModelChoiceField,
        ModelMultipleChoiceField, ChoiceField, TypedChoiceField, TypedMultipleChoiceField, MultipleChoiceField, MultipleFileField, RegexField,
        ComboField, as_field_group, as_div, as_ul, as_table, NullBooleanField, SelectDateWidget, SplitHiddenDateTimeWidget,
-       order_fields!, non_field_errors, has_error, hidden_fields, visible_fields, errors_json_data, errors_as_json, legend_tag, label_tag, css_classes, is_multipart, aria_describedby, ErrorList, set_field!, delete_field!
+       order_fields!, non_field_errors, has_error, hidden_fields, visible_fields, errors_json_data, errors_as_json, legend_tag, label_tag, css_classes, is_multipart, aria_describedby, ErrorList, flatatt, pretty_name,
+       modelform_factory, fields_for_model, construct_instance, model_to_dict, ErrorDict, non_form_errors, total_error_count, all_valid, set_field!, delete_field!
 # views
 export recording, recorded, undo_recorded!, undo_problem, UndoProblem, not_recording, undoing, undoing_recorded, has_changes,
        render, redirect, query_param, component!, get_text_list, ModelResource, export_data, export_rows, export_download, import_data,

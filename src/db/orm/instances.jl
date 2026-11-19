@@ -533,28 +533,28 @@ function validate_field(f::Field, v)
     end
     if f.kind === :ipaddress
         r = clean_ip(string(v), f.related.protocol, f.related.unpack_ipv4)
-        r isa Tuple && return [field_message(f, "invalid", r[1])]
+        r isa Tuple && return [field_message(f, "invalid", r[1], Dict("value" => v))]
     end
     if f.kind === :binary && f.max_length !== nothing && v isa AbstractVector{UInt8} && length(v) > f.max_length
         push!(errs, field_message(f, "max_length", gettext("Ensure this value has at most %(max)d bytes (it has %(len)d)."),
-                                  Dict("max" => f.max_length, "len" => length(v), "limit_value" => f.max_length, "show_value" => length(v))))
+                                  Dict("max" => f.max_length, "len" => length(v), "limit_value" => f.max_length, "show_value" => length(v), "value" => v)))
     end
     if f.max_length !== nothing && v isa AbstractString && f.kind !== :ipaddress && length(v) > f.max_length
         push!(errs, field_message(f, "max_length", gettext("Ensure this value has at most %(max)d characters (it has %(len)d)."),
-                                  Dict("max" => f.max_length, "len" => length(v), "limit_value" => f.max_length, "show_value" => length(v))))
+                                  Dict("max" => f.max_length, "len" => length(v), "limit_value" => f.max_length, "show_value" => length(v), "value" => v)))
     end
     f.kind === :email && validation_error(EmailValidator(), string(v)) !== nothing &&
-        push!(errs, field_message(f, "invalid", gettext("Enter a valid email address.")))
+        push!(errs, field_message(f, "invalid", gettext("Enter a valid email address."), Dict("value" => v)))
     if f.kind === :slug
         uni = f.related isa NamedTuple && get(f.related, :allow_unicode, false)
         occursin(uni ? UNICODE_SLUG_RE : SLUG_RE, string(v)) ||
             push!(errs, field_message(f, "invalid", uni ? gettext("Enter a valid “slug” consisting of Unicode letters, numbers, underscores, or hyphens.") :
-                                                         gettext("Enter a valid “slug” consisting of letters, numbers, underscores or hyphens.")))
+                                                         gettext("Enter a valid “slug” consisting of letters, numbers, underscores or hyphens."), Dict("value" => v)))
     end
-    f.kind === :url && validation_error(URLValidator(), string(v)) !== nothing && push!(errs, field_message(f, "invalid", gettext("Enter a valid URL.")))
+    f.kind === :url && validation_error(URLValidator(), string(v)) !== nothing && push!(errs, field_message(f, "invalid", gettext("Enter a valid URL."), Dict("value" => v)))
     if f.kind === :decimal
         r = validation_error(DecimalValidator(f.max_digits, f.decimal_places), v)
-        r === nothing || push!(errs, field_message(f, r[1], r[2]))
+        r === nothing || push!(errs, field_message(f, r[1], r[2], validator_params(DecimalValidator(f.max_digits, f.decimal_places), v)))
     end
     if f.kind in INT_KINDS && v isa Integer
         lo, hi = INT_RANGES[f.kind]
@@ -586,9 +586,19 @@ end
 ValidationError(errors::Dict{Symbol,Vector{String}}) = ValidationError(errors, nothing)
 ValidationError(msg::AbstractString; code = nothing, params = nothing) =
     ValidationError(Dict(:__all__ => [params === nothing ? String(msg) : interpolate(msg, params)]), code === nothing ? nothing : string(code))
-ValidationError(msgs::AbstractVector) = ValidationError(Dict(:__all__ => String[string(m) for m in msgs]))
+# (a dict in the list adds its messages, as Django's)
+ValidationError(msgs::AbstractVector) =
+    ValidationError(Dict(:__all__ => String[s for m in msgs for s in (m isa AbstractDict ? ValidationError(m).messages :
+                                                                      m isa ValidationError ? m.messages : (string(m),))]))
+# (a field's messages: a string, a ValidationError, or a list of them, as Django's)
+validation_messages(v) = v isa AbstractString ? String[String(v)] : v isa ValidationError ? v.messages :
+                         String[m for x in v for m in (x isa ValidationError ? x.messages : (string(x),))]
 ValidationError(d::AbstractDict) =
-    ValidationError(Dict{Symbol,Vector{String}}(Symbol(k) => (v isa AbstractString ? [String(v)] : String[string(x) for x in v]) for (k, v) in d))
+    ValidationError(Dict{Symbol,Vector{String}}(Symbol(k) => validation_messages(v) for (k, v) in d))
+# e.messages: all the messages, as Django's ValidationError.messages
+Base.getproperty(e::ValidationError, s::Symbol) =
+    s === :messages ? String[m for k in sort!(collect(keys(getfield(e, :errors)))) for m in getfield(e, :errors)[k]] : getfield(e, s)
+Base.propertynames(::ValidationError) = (:errors, :code, :messages)
 Base.showerror(io::IO, e::ValidationError) =
     print(io, "ValidationError: ", join([k === :__all__ ? join(v, " ") : "$k: " * join(v, " ") for (k, v) in e.errors], "; "))
 
@@ -684,6 +694,14 @@ Base.@nospecializeinfer function clean_fields(@nospecialize(obj::Model); exclude
         v = getproperty(obj, attname(f))
         !f.editable && (v === nothing || isempty(v)) && continue      # (a non-editable BinaryField: only its length)
         v === DB_DEFAULT && continue                  # the database supplies it
+        # (the model's own messages, as Django's Field.validate: a form says "This field is required.")
+        if v === nothing && !f.null
+            errors[f.name] = [field_message(f, "null", gettext("This field cannot be null."))]
+            continue
+        elseif v isa AbstractString && isempty(v) && !f.blank
+            errors[f.name] = [field_message(f, "blank", gettext("This field cannot be blank."))]
+            continue
+        end
         errs = validate_field(f, v)
         isempty(errs) || (errors[f.name] = errs)
     end
@@ -695,20 +713,27 @@ end
 
 Check `unique` fields, `unique_together` and `unique_for_date` / `_month` / `_year` against the
 other rows (Django's `Model.validate_unique`). Errors of whole-row checks are under `:__all__`.
+A field's messages can be replaced by code ("unique", "unique_for_date") through its
+`error_messages`, with Django's parameters (%(model_name)s, %(field_label)s,
+%(date_field_label)s, %(lookup_type)s); `message_fields` gives other fields' `error_messages` to
+use (a ModelForm's), and `unique_together_message` replaces the `unique_together` one
+(%(model_name)s, %(field_labels)s).
 """
-Base.@nospecializeinfer function validate_unique(@nospecialize(obj::Model); exclude = Symbol[])
+Base.@nospecializeinfer function validate_unique(@nospecialize(obj::Model); exclude = Symbol[], message_fields = nothing,
+                                                 unique_together_message = nothing)
     T = typeof(obj)
     errors = Dict{Symbol,Vector{String}}()
     others(q) = obj.id === nothing ? q : filter(q, !Q(id = obj.id))
-    vname = uppercasefirst(string(modelmeta(T).verbose_name))
+    msgf(f) = message_fields !== nothing && haskey(message_fields, f.name) ? message_fields[f.name] : f
     for f in all_fields(T)
         f.name in exclude && continue
         v = field_data(obj, attname(f))
         (v === nothing || v === DB_DEFAULT) && continue
+        vname = uppercasefirst(string(modelmeta(something(f.model, T)).verbose_name))     # (the model with the field: a parent's)
         # (a natural primary key is unique too)
         if (f.unique || f.primary_key) && exists(others(filter(base_objects(f.model), Q(attname(f) => v))))
-            push!(get!(errors, f.name, String[]), interpolate(gettext("%(model)s with this %(field)s already exists."),
-                                                              Dict("model" => vname, "field" => label(f))))
+            push!(get!(errors, f.name, String[]), field_message(msgf(f), "unique", gettext("%(model_name)s with this %(field_label)s already exists."),
+                Dict("model_name" => vname, "field_label" => label(f), "model" => vname, "field" => label(f))))
         end
         if f.unique_for !== nothing
             kind, dname = f.unique_for
@@ -721,13 +746,13 @@ Base.@nospecializeinfer function validate_unique(@nospecialize(obj::Model); excl
             kind in (:date, :month) && push!(parts, Symbol(dname, "__month") => Dates.month(d))
             kind === :date && push!(parts, Symbol(dname, "__day") => Dates.day(d))
             if exists(others(filter(base_objects(f.model), Q(attname(f) => v), Q(:AND, parts, false))))
-                push!(get!(errors, f.name, String[]), interpolate(gettext("%(field_label)s must be unique for %(date_field_label)s %(lookup_type)s."),
-                    Dict("field_label" => label(f), "date_field_label" => label(df), "lookup_type" => string(kind))))
+                push!(get!(errors, f.name, String[]), field_message(msgf(f), "unique_for_date", gettext("%(field_label)s must be unique for %(date_field_label)s %(lookup_type)s."),
+                    Dict("model_name" => vname, "field_label" => label(f), "date_field_label" => label(df), "lookup_type" => string(kind))))
             end
         end
     end
     values = Dict{Symbol,Any}(f.name => field_data(obj, attname(f)) for f in all_fields(T) if !(f.name in exclude))
-    errs = unique_together_errors(T, values, obj.id)
+    errs = unique_together_errors(T, values, obj.id; message = unique_together_message)
     isempty(errs) || append!(get!(errors, :__all__, String[]), errs)
     errors
 end
@@ -772,7 +797,7 @@ Base.@nospecializeinfer function adjacent_by(@nospecialize(obj::Model), field::S
 end
 
 "Messages for `Meta(unique_together = ...)` sets that `values` would duplicate."
-Base.@nospecializeinfer function unique_together_errors(@nospecialize(T::Type{<:Model}), values, id)
+Base.@nospecializeinfer function unique_together_errors(@nospecialize(T::Type{<:Model}), values, id; message = nothing)
     errs = String[]
     # a multi-table child is checked against its parents' sets too (in their tables), as Django
     for M in unique!(Any[concrete_model(T); ancestors(T)]), u in modelmeta(M).unique_together
@@ -781,9 +806,11 @@ Base.@nospecializeinfer function unique_together_errors(@nospecialize(T::Type{<:
         any(isnothing, vals) && continue
         qs = filter(base_objects(M), Q(:AND, Any[n => v for (n, v) in zip(u, vals)], false))
         id === nothing || (qs = filter(qs, !Q(id = id)))
-        exists(qs) && push!(errs, interpolate(gettext("%(model)s with this %(fields)s already exists."),
-            Dict("model" => uppercasefirst(string(modelmeta(M).verbose_name)),
-                 "fields" => join([label(findfield(modelmeta(M), n)) for n in u], " and "))))
+        if exists(qs)
+            mname, labels = uppercasefirst(string(modelmeta(M).verbose_name)), join([label(findfield(modelmeta(M), n)) for n in u], " and ")
+            push!(errs, interpolate(something(message, gettext("%(model_name)s with this %(field_labels)s already exists.")),
+                                    Dict("model_name" => mname, "field_labels" => labels, "model" => mname, "fields" => labels)))
+        end
     end
     unique!(errs)
 end

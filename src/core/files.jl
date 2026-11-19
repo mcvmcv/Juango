@@ -20,6 +20,8 @@ Juango has `FileSystemStorage` and `InMemoryStorage`; others (e.g. a cloud bucke
 by defining those methods and being named in the `STORAGES` setting.
 """
 abstract type Storage end
+# (a field given a storage shares it, as Django's: @model and forms copy their fields, but not the files)
+Base.deepcopy_internal(s::Storage, ::IdDict) = s
 
 """
     FileSystemStorage(location=settings.MEDIA_ROOT, base_url=settings.MEDIA_URL)
@@ -333,13 +335,39 @@ file_from_db(f::Field, v) = (s = string(v); isempty(s) ? nothing : FieldFile(s, 
 
 # --- validators -------------------------------------------------------------------------------------------
 
-"`FileExtensionValidator([\"pdf\", \"txt\"])`: only allow these file extensions."
-FileExtensionValidator(allowed) = v -> begin
-    v isa UploadedFile || return true
-    ext = lowercase(lstrip(splitext(v.name)[2], '.'))
-    ext in lowercase.(string.(allowed)) ||
-        "File extension “$(ext)” is not allowed. Allowed extensions are: $(join(lowercase.(string.(allowed)), ", "))."
+"""
+    FileExtensionValidator(["pdf", "txt"]; message, code = "invalid_extension")
+
+Only allow these file extensions (any, with `nothing`). A field's `error_messages` can name
+%(extension)s, %(allowed_extensions)s and %(value)s (the file name).
+"""
+struct FileExtensionValidator <: Validator
+    allowed::Union{Nothing,Vector{String}}
+    message::Any
+    code::String
 end
+FileExtensionValidator(allowed = nothing; message = nothing, code = "invalid_extension") =
+    FileExtensionValidator(allowed === nothing ? nothing : lowercase.(string.(allowed)), message, string(code))
+file_name(v) = v isa UploadedFile || v isa FieldFile ? v.name : nothing
+file_extension(name) = lowercase(lstrip(splitext(name)[2], '.'))
+function validator_params(v::FileExtensionValidator, x)
+    name = something(file_name(x), string(x))
+    Dict{String,Any}("extension" => file_extension(name), "value" => name,
+                     "allowed_extensions" => v.allowed === nothing ? "" : join(v.allowed, ", "))
+end
+function validation_error(v::FileExtensionValidator, x)
+    name = file_name(x)
+    (name === nothing || v.allowed === nothing || file_extension(name) in v.allowed) && return nothing
+    (v.code, interpolate(msg_or(v, gettext("File extension “%(extension)s” is not allowed. Allowed extensions are: %(allowed_extensions)s.")),
+                         validator_params(v, x)))
+end
+"The image file extensions (Pillow's), for `validate_image_file_extension`."
+const IMAGE_EXTENSIONS = ["apng", "avif", "blp", "bmp", "bufr", "bw", "cur", "dcx", "dds", "dib", "emf", "eps", "fit", "fits",
+    "flc", "fli", "ftc", "ftu", "gbr", "gif", "grib", "h5", "hdf", "icb", "icns", "ico", "iim", "im", "j2c", "j2k", "jfif",
+    "jp2", "jpc", "jpe", "jpeg", "jpf", "jpg", "jpx", "mpeg", "mpg", "msp", "pbm", "pcd", "pcx", "pfm", "pgm", "png", "pnm",
+    "ppm", "ps", "psd", "pxr", "qoi", "ras", "rgb", "rgba", "sgi", "tga", "tif", "tiff", "vda", "vst", "webp", "wmf", "xbm", "xpm"]
+"Django's `validate_image_file_extension`: a `FileExtensionValidator` for image file extensions."
+const validate_image_file_extension = FileExtensionValidator(IMAGE_EXTENSIONS)
 "`MaxFileSizeValidator(2_000_000)`: reject uploads larger than this many bytes."
 MaxFileSizeValidator(n::Integer) = v -> !(v isa UploadedFile) || v.size <= n ||
     "Ensure this file is at most $(n) bytes (it is $(v.size) bytes)."

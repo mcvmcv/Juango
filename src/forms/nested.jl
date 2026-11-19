@@ -120,6 +120,7 @@ function is_valid(s::NestedFormSet)
         row_active(s, i) || continue
         if blank_extra(s.formset, row.form, i - 1)          # an extra row whose children were filled in: it counts
             row.form.validated = false
+            row.form.empty_permitted = false
             ok = is_valid(row.form) & ok
         end
         for (_, c) in row.children

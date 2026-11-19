@@ -7,30 +7,6 @@
 # so it turns into an unexpected pass when the gap is closed.
 @isdefined(TEST_SETUP_DONE) || include("setup.jl")
 
-# Each block runs outside a transaction and then empties the port's tables: a test of a gap may
-# expect a database error, and on PostgreSQL an error inside a transaction (rollback_after's)
-# aborts it, failing every query after it. Tables are emptied children first (the reverse of the
-# order they're created in).
-const PORT_MODELS = Any[]
-function port_block(f)
-    try
-        f()
-    finally
-        IS_MYSQL && Juango.execute("SET FOREIGN_KEY_CHECKS = 0")     # rows that refer to rows of their own table (Tag.parent)
-        try
-            # in one transaction: PostgreSQL's foreign keys are deferred, so tables that refer to each other
-            # (House.main_room, Room.house) can be emptied in any order
-            atomic() do
-                for T in reverse(PORT_MODELS)
-                    Juango.execute("DELETE FROM " * Juango.qname(Juango.modelmeta(T).table))
-                end
-            end
-        finally
-            IS_MYSQL && Juango.execute("SET FOREIGN_KEY_CHECKS = 1")
-        end
-    end
-end
-
 # --- tests/lookup/models.py ---------------------------------------------------------------------------
 @model struct DlAuthor
     name = CharField(max_length = 100)

@@ -39,6 +39,7 @@ mutable struct Form
     empty_permitted::Bool                 # an unchanged form is valid (with no cleaned data), as a formset's extra forms
     error_css_class::Union{Nothing,String}      # a class on the rows (and labels) of fields with errors, as Django's
     required_css_class::Union{Nothing,String}   # a class on the rows and labels of required fields
+    nonfield_error_messages::Dict{String,String}  # a ModelForm's Meta.error_messages[NON_FIELD_ERRORS]: code => message
 end
 
 """
@@ -50,7 +51,7 @@ end
 function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
               name = "Form", model = nothing, instance = nothing, files = nothing, media = nothing,
               use_required_attribute::Bool = true, field_order = nothing, auto_id = "id_%s", label_suffix = nothing,
-              empty_permitted::Bool = false, error_css_class = nothing, required_css_class = nothing)
+              empty_permitted::Bool = false, error_css_class = nothing, required_css_class = nothing, nonfield_error_messages = nothing)
     empty_permitted && use_required_attribute &&
         throw(ArgumentError("The empty_permitted and use_required_attribute arguments may not both be True."))
     fs = Field[]
@@ -63,7 +64,9 @@ function Form(fields::Vector; data = nothing, initial = Dict{Symbol,Any}(), pref
                 Dict{Symbol,Vector{String}}(), Dict{Symbol,Any}(), model, instance, string(prefix), false, clean, files,
                 media === nothing ? Media() : media, use_required_attribute, auto_id, label_suffix === nothing ? nothing : string(label_suffix),
                 empty_permitted, error_css_class === nothing ? nothing : string(error_css_class),
-                required_css_class === nothing ? nothing : string(required_css_class))
+                required_css_class === nothing ? nothing : string(required_css_class),
+                nonfield_error_messages === nothing ? Dict{String,String}() :
+                    Dict{String,String}(string(k) => string(v) for (k, v) in nonfield_error_messages))
     field_order === nothing || order_fields!(form, field_order)
     form
 end
@@ -135,8 +138,7 @@ surrounding whitespace unless `strip = true`.
 """
 RegexField(rx; max_length = nothing, error_message = nothing, validators = Any[], strip::Bool = false, kw...) =
     Field(:char; max_length = max_length, strip = strip,
-          validators = vcat(Any[v -> occursin(rx isa Regex ? rx : Regex(string(rx)), string(v)) ||
-                                     something(error_message, gettext("Enter a valid value."))], collect(Any, validators)), kw...)
+          validators = vcat(Any[RegexValidator(rx; message = error_message)], collect(Any, validators)), kw...)
 
 """
     ComboField(fields; kw...)
@@ -208,7 +210,8 @@ A form generated from a model's fields. `save!(form)` writes the cleaned data
 into the instance (creating one if needed) and saves it.
 
 `error_messages = Dict(:title => Dict("required" => "Give it a title."))` replaces messages by
-code, over the model field's own `error_messages`.
+code, over the model field's own `error_messages`. Other keywords (`auto_id`, `media`,
+`label_suffix`, ...) are the `Form`'s.
 
 `extra_fields = [:scope => TypedChoiceField(...)]` adds fields that aren't on the model: placed
 where `fields` lists their names (else at the end), cleaned into `cleaned_data`, and left alone
@@ -218,11 +221,87 @@ Base.@nospecializeinfer function ModelForm(@nospecialize(T::Type{<:Model}); data
                    initial = Dict{Symbol,Any}(), prefix = "", clean = nothing,
                    labels = Dict{Symbol,String}(), help_texts = Dict{Symbol,String}(),
                    widgets = Dict{Symbol,Symbol}(), field_classes = Dict{Symbol,Any}(),
-                   formfield_callback = nothing, extra_fields = Pair{Symbol,Any}[], error_messages = Dict{Symbol,Any}())
+                   formfield_callback = nothing, extra_fields = Pair{Symbol,Any}[], error_messages = Dict{Symbol,Any}(),
+                   localized_fields = nothing, kw...)
+    fs = fields_for_model(T; fields, exclude, labels, help_texts, widgets, field_classes, formfield_callback, extra_fields, error_messages,
+                          localized_fields)
+    meta = modelmeta(T)
+    init = Dict{Symbol,Any}()
+    if instance !== nothing
+        for (n, f) in fs
+            mf = something(findfield(meta, n), Some(findfirst(x -> x.name === n, meta.m2m)))
+            mf === nothing && continue                                           # not the model's
+            m2m = !(mf isa Field)
+            # (a declared ModelChoiceField or ModelMultipleChoiceField shows the objects by its to_field_name)
+            init[n] = f.kind === :modelmultichoice ? (instance.id === nothing ? Any[] : collect(Any, getproperty(instance, n))) :
+                      f.kind === :modelchoice ? getproperty(instance, n) :
+                      m2m ? (instance.id === nothing ? Any[] : [o.id for o in getproperty(instance, n)]) :
+                      mf.kind === :fk ? getproperty(instance, attname(mf)) :
+                      getproperty(instance, n)
+            init[n] === DB_DEFAULT && (init[n] = nothing)
+        end
+    end
+    merge!(init, Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(initial)))
+    Form(fs; data = data, initial = init, prefix = prefix, clean = clean, name = "$(nameof(T))Form",
+         model = T, instance = instance, files = files,
+         nonfield_error_messages = get(error_messages, :__all__, get(error_messages, "__all__", nothing)), kw...)
+end
+
+"""
+The editable fields of a model in the order they're declared (many-to-many ones among them, a
+multi-table parent's first): the fields a ModelForm takes when it isn't told which.
+"""
+Base.@nospecializeinfer function editable_field_names(@nospecialize(T::Type{<:Model}))
+    meta = modelmeta(T)
+    names = Symbol[f.name for f in all_fields(T) if f.editable]
+    m2ms = Symbol[f.name for f in meta.m2m if f.editable]
+    own = get(meta.extra, :field_order, Symbol[])
+    out = Symbol[n for n in names if !(n in own)]
+    for n in own
+        (n in names || n in m2ms) && !(n in out) && push!(out, n)
+    end
+    append!(out, [n for n in vcat(names, m2ms) if !(n in out)])
+end
+
+all_fields_option(x) = x === nothing || x == "__all__" || x === :__all__
+function check_field_list(T, what, x)
+    x isa AbstractString && x != "__all__" &&
+        throw(ArgumentError("$(nameof(T))Form $what cannot be a string. Did you mean to type: [:$x]?"))
+end
+
+"""
+    fields_for_model(Model; fields = nothing, exclude = [], widgets, labels, help_texts, error_messages,
+                     field_classes, formfield_callback, extra_fields) -> Vector{Pair{Symbol,Any}}
+
+The form fields a `ModelForm` of `Model` has, as `name => field` pairs (Django's `fields_for_model`):
+the model's editable fields (or those `fields` names, in its order; `"__all__"` for all), less
+`exclude`, with `extra_fields` (declared fields) replacing the model's or added. A name in `fields`
+that is neither the model's nor an extra field is an error, as Django's FieldError.
+
+`field_classes = Dict(:url => URLField)` makes the field with another form field constructor,
+keeping the model field's label, help text, `max_length` and whether it's required; a field
+given as a value is used as it is. `formfield_callback(field)` can change each field, or return
+`nothing` to leave it out.
+"""
+Base.@nospecializeinfer function fields_for_model(@nospecialize(T::Type{<:Model}); fields = nothing, exclude = Symbol[],
+                   labels = Dict{Symbol,String}(), help_texts = Dict{Symbol,String}(),
+                   widgets = Dict{Symbol,Any}(), field_classes = Dict{Symbol,Any}(),
+                   formfield_callback = nothing, extra_fields = Pair{Symbol,Any}[], error_messages = Dict{Symbol,Any}(),
+                   localized_fields = nothing)
+    check_field_list(T, "fields", fields)
+    check_field_list(T, "exclude", exclude)
+    check_field_list(T, "localized_fields", localized_fields)
     meta = modelmeta(T)
     extras = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in extra_fields)
-    chosen = fields === nothing ? vcat([f.name for f in all_fields(T) if f.editable], [f.name for f in meta.m2m if f.editable]) :
-             Symbol.(collect(fields))
+    exclude = Symbol[Symbol(x) for x in exclude]
+    chosen = all_fields_option(fields) ? editable_field_names(T) : Symbol[Symbol(x) for x in fields]
+    m2m_field(n) = (i = findfirst(x -> x.name === n, meta.m2m); i === nothing ? nothing : meta.m2m[i])
+    unknown = [n for n in chosen if !(n in exclude) && !haskey(extras, n) && findfield(meta, n) === nothing && m2m_field(n) === nothing]
+    isempty(unknown) || throw(LookupError("Unknown field(s) ($(join(unknown, ", "))) specified for $(nameof(T))"))
+    for n in chosen          # (a field that isn't editable can't be on the form, as Django's FieldError)
+        n in exclude || haskey(extras, n) || (mf = findfield(meta, n)) === nothing || mf.editable ||
+            throw(LookupError("'$n' cannot be specified for $(nameof(T)) model form as it is a non-editable field"))
+    end
     # fields that aren't on the model: where `fields` lists them, else at the end
     append!(chosen, [Symbol(k) for (k, _) in extra_fields if !(Symbol(k) in chosen)])
     fs = Pair{Symbol,Any}[]
@@ -232,8 +311,15 @@ Base.@nospecializeinfer function ModelForm(@nospecialize(T::Type{<:Model}); data
             push!(fs, n => deepcopy(extras[n]))
             continue
         end
-        i = findfirst(x -> x.name === n, meta.m2m)
-        f = deepcopy(i === nothing ? getfield_meta(T, n) : meta.m2m[i])
+        mf = something(m2m_field(n), Some(nothing))
+        f = deepcopy(mf === nothing ? getfield_meta(T, n) : mf)
+        # a default that's a function: its value is sent back in a hidden input, so has_changed compares
+        # with the value the form was shown with (Django's show_hidden_initial for callable defaults)
+        f.default isa Function && (f.form = something(f.form, Dict{Symbol,Any}()); f.form[:show_hidden_initial] = true)
+        if haskey(field_classes, n)                  # a different form field for it
+            fc = field_classes[n]
+            f = fc isa Field ? deepcopy(fc) : form_field_for(fc, f)
+        end
         haskey(labels, n) && (f.verbose_name = labels[n])
         haskey(help_texts, n) && (f.help_text = help_texts[n])
         if haskey(error_messages, n)                 # Meta.error_messages: per field, code => message, over the model field's
@@ -241,26 +327,125 @@ Base.@nospecializeinfer function ModelForm(@nospecialize(T::Type{<:Model}); data
             f.error_messages = merge(em, Dict{String,String}(string(k) => string(v) for (k, v) in error_messages[n]))
         end
         haskey(widgets, n) && (f.widget = widgets[n])
-        haskey(field_classes, n) && (f = deepcopy(field_classes[n]))            # a different form field for it
+        localized_fields !== nothing && (localized_fields == "__all__" || n in Symbol.(localized_fields)) && localize!(f)
         if formfield_callback !== nothing
             f = formfield_callback(f)                                          # nothing leaves the field out
             f === nothing && continue
         end
         push!(fs, n => f)
     end
-    init = Dict{Symbol,Any}()
-    if instance !== nothing
-        for (n, f) in fs
-            haskey(extras, n) && continue                                       # not the model's
-            init[n] = f.kind === :fk ? getproperty(instance, attname(f)) :
-                      f.kind === :m2m ? (instance.id === nothing ? Any[] : [o.id for o in getproperty(instance, n)]) :
-                      getproperty(instance, n)
-            init[n] === DB_DEFAULT && (init[n] = nothing)
+    fs
+end
+
+"Whether a form field shows and reads numbers and dates in the current language's format (`localize = true`)."
+is_localized(f::Field) = f.related isa NamedTuple && get(f.related, :localize, false)
+function localize!(f::Field)
+    f.related === nothing ? (f.related = (input_formats = nothing, localize = true)) :
+        f.related isa NamedTuple && haskey(f.related, :localize) && (f.related = merge(f.related, (localize = true,)))
+    f
+end
+
+# field_classes = Dict(:url => URLField): that form field, with the model field's label, help text, length and requiredness
+function form_field_for(ctor, mf::Field)
+    g = ctor()
+    g.name, g.model = mf.name, mf.model
+    g.verbose_name, g.help_text, g.blank, g.null = mf.verbose_name, mf.help_text, mf.blank, mf.null
+    mf.max_length === nothing || (g.max_length = mf.max_length)
+    mf.error_messages === nothing || (g.error_messages = mf.error_messages)
+    g
+end
+
+"""
+    modelform_factory(Model; fields, exclude, widgets, labels, ...) -> constructor
+
+Django's `modelform_factory`: a constructor `(data = nothing; kw...)` of `ModelForm(Model; ...)`
+with these options (and the keywords it's given). Unknown field names are an error here already.
+"""
+struct ModelFormFactory
+    model::Type
+    options::Dict{Symbol,Any}
+end
+Base.@nospecializeinfer function modelform_factory(@nospecialize(T::Type{<:Model}); kw...)
+    m = ModelFormFactory(T, Dict{Symbol,Any}(kw))
+    m()                                                    # (checks the options now, as Django's)
+    m
+end
+(m::ModelFormFactory)(data = nothing; kw...) = ModelForm(m.model; data, m.options..., kw...)
+
+is_empty_value(v) = v === nothing || (v isa AbstractString && isempty(v)) || ((v isa AbstractVector || v isa Tuple || v isa AbstractDict) && isempty(v))
+
+"""
+Whether the submitted data leaves out field `fld` (Django's `value_omitted_from_data`): a
+checkbox, or a list of checkboxes or a multiple select, never is, as a browser sends nothing for
+them when they're unticked.
+"""
+function value_omitted(f::Form, fld::Field)
+    f.data === nothing && return true
+    name = html_name(f, fld)
+    fld.kind in FILE_KINDS && return f.files === nothing || !haskey(f.files, name)
+    wk = widget_kind(fld.widget)
+    fld.kind === :bool && wk === nothing && return false
+    (fld.kind in MULTI_KINDS || wk in (:checkboxes, :selectmultiple)) && return false
+    fld.kind === :multi && return !any(i -> haskey(f.data, name * "_$(i - 1)"), eachindex(fld.related.fields))
+    fld.widget isa SelectDateWidget && return !any(s -> haskey(f.data, name * s), ("_year", "_month", "_day"))
+    !haskey(f.data, name)
+end
+
+"""
+    construct_instance(form, instance; fields = nothing, exclude = nothing) -> instance
+
+Set a model instance's fields from a valid ModelForm's `cleaned_data` (Django's
+`construct_instance`), not saving it; `save!(form)` uses it. A field the submitted data leaves
+out, that is empty and has a default, keeps the instance's value (the default), as Django's.
+Many-to-many fields are left to `save_m2m!`.
+"""
+Base.@nospecializeinfer function construct_instance(f::Form, @nospecialize(obj); fields = nothing, exclude = nothing)
+    meta = modelmeta(typeof(obj))
+    for (k, v) in f.cleaned_data
+        k === :__all__ && continue
+        mf = findfield(meta, k)
+        mf === nothing && continue
+        fields !== nothing && !(k in Symbol.(fields)) && continue
+        exclude !== nothing && k in Symbol.(exclude) && continue
+        i = findfirst(x -> x.name === k, f.fields)
+        if i !== nothing && (mf.default !== NO_DEFAULT || mf.db_default !== nothing) && is_empty_value(v) && value_omitted(f, f.fields[i])
+            continue
+        end
+        mf.kind in FILE_KINDS && v isa AbstractString && (v = file_from_db(mf, v))       # (a stored file's name)
+        setproperty!(obj, k, v)
+    end
+    obj
+end
+
+"""
+    model_to_dict(instance; fields = nothing, exclude = nothing) -> Dict{Symbol,Any}
+
+An instance's editable fields as a dict (Django's `model_to_dict`): its `id` (unless another field is
+the primary key), a foreign key as the related object's key, a many-to-many field as a vector of
+the related objects.
+"""
+Base.@nospecializeinfer function model_to_dict(@nospecialize(obj::Model); fields = nothing, exclude = nothing)
+    T = typeof(obj)
+    meta = modelmeta(T)
+    d = Dict{Symbol,Any}()
+    names = editable_field_names(T)
+    any(f -> f.primary_key, all_fields(T)) || pushfirst!(names, :id)
+    for n in names
+        if n === :id && findfield(meta, :id) === nothing
+            (fields === nothing || :id in Symbol.(fields)) && (exclude === nothing || !(:id in Symbol.(exclude))) && (d[:id] = obj.id)
+            continue
+        end
+        fields !== nothing && !(n in Symbol.(fields)) && continue
+        exclude !== nothing && n in Symbol.(exclude) && continue
+        i = findfirst(x -> x.name === n, meta.m2m)
+        if i !== nothing
+            d[n] = obj.id === nothing ? Any[] : collect(Any, getproperty(obj, n))
+        else
+            f = getfield_meta(T, n)
+            d[n] = f.kind === :fk ? getproperty(obj, attname(f)) : getproperty(obj, n)
         end
     end
-    merge!(init, Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(initial)))
-    Form(fs; data = data, initial = init, prefix = prefix, clean = clean, name = "$(nameof(T))Form",
-         model = T, instance = instance, files = files)
+    d
 end
 
 # (as Django's repr: whether it's valid is Unknown until it's validated; showing it doesn't validate)
@@ -286,6 +471,20 @@ end
 "` id=\"...\"`, or nothing when there's no id (`auto_id = false`)."
 id_attr(id) = isempty(id) ? "" : " id=\"" * escape_html(id) * "\""
 
+"""
+    flatatt(attrs) -> String
+
+HTML attributes from a dict, as Django's `flatatt`: ` name="value"` pairs, sorted, then the
+attributes set to `true` as bare names (sorted); `false` and `nothing` are left out.
+"""
+function flatatt(attrs)
+    kv = sort!([(string(k), v) for (k, v) in attrs if !(v isa Bool) && v !== nothing]; by = first)
+    bools = sort!([string(k) for (k, v) in attrs if v === true])
+    join((" " * escape_html(k) * "=\"" * escape_html(v) * "\"" for (k, v) in kv)) * join((" " * escape_html(k) for k in bools))
+end
+"`pretty_name(\"john_doe\")` is \"John doe\": a field name as a label, as Django's (\"\" for `nothing`)."
+pretty_name(name) = name === nothing ? "" : uppercasefirst(replace(string(name), '_' => ' '))
+
 function raw_value(f::Form, fld::Field)
     f.data === nothing && return nothing
     form_option(fld, :disabled) && return initial_for(f, fld)      # (a disabled field keeps its initial value, as Django)
@@ -298,8 +497,8 @@ function raw_value(f::Form, fld::Field)
     end
     fld.kind in MULTI_KINDS && return raw_list(f.data, html_name(f, fld))
     v = get(f.data, html_name(f, fld), nothing)
-    # a checkbox as Django's CheckboxInput reads it: "false" is unchecked, any other value sent is checked ("0" too, #16820)
-    fld.kind === :bool && widget_kind(fld.widget) === nothing && v isa AbstractString && return lowercase(v) != "false"
+    # a checkbox as Django's CheckboxInput reads it: "false" and "" are unchecked, any other value sent is checked ("0" too, #16820)
+    fld.kind === :bool && widget_kind(fld.widget) === nothing && v isa AbstractString && return !isempty(v) && lowercase(v) != "false"
     v
 end
 "All submitted values for a multi-valued field."
@@ -327,8 +526,10 @@ function parse_form_int(s)
     s = Base.Unicode.normalize(String(s), :NFKC)
     v = tryparse(Int, s)
     v === nothing || return v
+    # (beyond an Int's range: a BigInt, so the field's range check gives its message, as Django's)
+    occursin(r"^[+-]?\d+$", s) && return tryparse(BigInt, s)
     m = match(r"^([+-]?\d+)\.0*$", s)
-    m === nothing ? nothing : tryparse(Int, m[1])
+    m === nothing ? nothing : something(tryparse(Int, m[1]), tryparse(BigInt, m[1]), Some(nothing))
 end
 
 "Convert submitted text into a typed value. Returns `(value, error_or_nothing)`."
@@ -340,13 +541,13 @@ function to_julia(fld::Field, raw)
         if k === :multichoice
             keys_ = Set(string(c.first) for c in field_choices(fld))
             for v in vals
-                v in keys_ || return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v))
+                v in keys_ || return nothing, coded("invalid_choice", gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v))
             end
             out = Any[]
             for v in vals              # (a value coerce can't convert is an invalid choice, as Django's)
                 cv = try fld.related.coerce(v) catch e
                     e isa Union{ArgumentError,InexactError,MethodError} || rethrow()
-                    return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v))
+                    return nothing, coded("invalid_choice", gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v))
                 end
                 push!(out, cv)
             end
@@ -354,8 +555,14 @@ function to_julia(fld::Field, raw)
         end
         s = fld.related
         objs = Dict(choice_key(s, o) => o for o in choice_queryset(s))
+        model = queryset_model(choice_queryset(s))
         for v in vals
-            haskey(objs, v) || return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v))
+            occursin('\0', v) && return nothing, coded("null_characters_not_allowed", gettext("Null characters are not allowed."), Dict("value" => v))
+        end
+        for v in vals          # (a value that can't be a primary key: Django's invalid_pk_value)
+            s.to_field_name === nothing && parse_pk(model, v) === nothing &&
+                return nothing, coded("invalid_pk_value", gettext("“%(pk)s” is not a valid value."), Dict("pk" => v))
+            haskey(objs, v) || return nothing, coded("invalid_choice", gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => v))
         end
         return Any[objs[v] for v in unique(vals)], nothing
     end
@@ -365,10 +572,10 @@ function to_julia(fld::Field, raw)
             sr = strip(string(r))
             isempty(sr) && continue
             id = parse_pk(related_model(fld), sr)
-            id === nothing && return nothing, gettext("Enter a list of values.")
+            id === nothing && return nothing, coded("invalid_list", gettext("Enter a list of values."))
             push!(ids, id)
         end
-        objs = isempty(ids) ? Any[] : collect(filter(objects(related_model(fld)); id__in = unique(ids)))
+        objs = isempty(ids) ? Any[] : collect(filter(choices_queryset(fld); id__in = unique(ids)))
         length(objs) == length(unique(ids)) || return nothing, gettext("Select a valid choice. One of the selected values is not one of the available choices.")
         return objs, nothing
     end
@@ -380,7 +587,7 @@ function to_julia(fld::Field, raw)
     ev = form_option(fld, :empty_value)
     isempty(s) && ev !== NO_DEFAULT && return ev, nothing
     isempty(s) && return ((k in STRING_KINDS || k in (:filepath, :combo)) && !fld.null ? "" : nothing), nothing
-    k in STRING_KINDS && occursin('\0', s) && return nothing, gettext("Null characters are not allowed.")
+    k in STRING_KINDS && occursin('\0', s) && return nothing, coded("null_characters_not_allowed", gettext("Null characters are not allowed."), Dict("value" => s))
     opts = fld.related isa NamedTuple && haskey(fld.related, :localize) ? fld.related : nothing
     opts !== nothing && opts.localize && k in (INT_KINDS..., :float, :decimal) && (s = parse_localized_number(s))
     if k in STRING_KINDS
@@ -410,7 +617,7 @@ function to_julia(fld::Field, raw)
         return r isa Tuple ? (nothing, r[1]) : (r, nothing)
     elseif k === :filepath
         any(c -> c.first == s, filepath_choices(fld)) ||
-            return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
+            return nothing, coded("invalid_choice", gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
         return String(s), nothing
     elseif k === :time
         v = opts !== nothing && opts.input_formats !== nothing ? parse_input_datetime(s, :time; formats = opts.input_formats) : parse_time(s)
@@ -455,15 +662,15 @@ function to_julia(fld::Field, raw)
         sp = fld.related
         obj = sp.to_field_name === nothing ? (id = parse_pk(queryset_model(choice_queryset(sp)), s); id === nothing ? nothing : first(filter(choice_queryset(sp); pk = id))) :
               first(filter(choice_queryset(sp), Q(sp.to_field_name => s)))
-        return obj, obj === nothing ? gettext("Select a valid choice. That choice is not one of the available choices.") : nothing
+        return obj, obj === nothing ? coded("invalid_choice", gettext("Select a valid choice. That choice is not one of the available choices."), Dict("value" => s)) : nothing
     elseif k === :typedchoice
         # (NullBooleanField takes any value: one it doesn't know is unknown)
         haskey(fld.related, :any_value) || any(c -> string(c.first) == s, field_choices(fld)) ||
-            return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
+            return nothing, coded("invalid_choice", gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
         # a value coerce can't convert is an invalid choice, as Django's
         cv = try fld.related.coerce(String(s)) catch e
             e isa Union{ArgumentError,InexactError,MethodError} || rethrow()
-            return nothing, interpolate(gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
+            return nothing, coded("invalid_choice", gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
         end
         return cv, nothing
     elseif k === :combo
@@ -477,12 +684,12 @@ function to_julia(fld::Field, raw)
         end
         return v, nothing
     elseif k === :fk && fk_to_field(fld) !== nothing           # the to_field's value is submitted (#220)
-        obj = first(filter(objects(related_model(fld)), Q(fk_to_field(fld) => s)))
-        return obj, obj === nothing ? gettext("Select a valid choice. That choice is not one of the available choices.") : nothing
+        obj = first(filter(choices_queryset(fld), Q(fk_to_field(fld) => s)))
+        return obj, obj === nothing ? coded("invalid_choice", gettext("Select a valid choice. That choice is not one of the available choices."), Dict("value" => s)) : nothing
     elseif k === :fk
         id = parse_pk(related_model(fld), s)
-        obj = id === nothing ? nothing : first(filter(objects(related_model(fld)); id = id))
-        return obj, obj === nothing ? gettext("Select a valid choice. That choice is not one of the available choices.") : nothing
+        obj = id === nothing ? nothing : first(filter(choices_queryset(fld); id = id))
+        return obj, obj === nothing ? coded("invalid_choice", gettext("Select a valid choice. That choice is not one of the available choices."), Dict("value" => s)) : nothing
     end
     String(s), nothing
 end
@@ -507,7 +714,7 @@ function clean(fld::Field, value, initial = nothing)
         throw(ValidationError([field_message(fld, "invalid_list", gettext("Enter a list of values."))]))
     typed = typed_form_value(fld, value)
     v, err = typed === nothing ? to_julia(fld, value) : (typed, nothing)
-    err === nothing || throw(ValidationError(err isa AbstractVector ? err : [field_message(fld, "invalid", err)]))
+    err === nothing || throw(ValidationError(err isa AbstractVector ? err : [parse_message(fld, err, value)]))
     errs = fld.kind in MULTI_KINDS ? (isempty(v) && !fld.blank ? [field_message(fld, "required", gettext("This field is required."))] :
                                       validator_errors(fld, v)) :
            validate_field(fld, v isa Model ? v.id : v)
@@ -515,10 +722,18 @@ function clean(fld::Field, value, initial = nothing)
     v
 end
 
+"The message for a value `to_julia` couldn't convert: by its code (\"invalid\" unless `coded`), with the value as %(value)s."
+parse_message(fld::Field, err, raw) = field_message(fld, "invalid", err, Dict{String,Any}("value" => raw isa AbstractVector ? raw : string(something(raw, ""))))
+
 function clean_file_value(fld::Field, value, initial)
+    # false: clear the file (Django's ClearableFileInput); a required field can't be cleared, so it's as nothing
+    if value === false
+        fld.blank && return false
+        value = nothing
+    end
     nofile = gettext("No file was submitted. Check the encoding type on the form.")
     if (value isa UploadedFile && isempty(value.name)) || (value isa AbstractString && !isempty(value))
-        throw(ValidationError([field_message(fld, "missing", nofile)]))
+        throw(ValidationError([field_message(fld, "invalid", nofile)]))
     end
     form = Form([:f => fld]; data = Dict{String,Any}(), files = value isa Union{UploadedFile,AbstractVector} ? Dict{String,Any}("f" => value) : Dict{String,Any}(),
                 initial = initial === nothing || initial == "" ? Dict{Symbol,Any}() : Dict{Symbol,Any}(:f => initial))
@@ -561,21 +776,16 @@ function is_valid(f::Form)
         end
         v, err = to_julia(fld, raw_value(f, fld))
         if err !== nothing
-            err isa AbstractVector ? foreach(e -> add_error!(f, fld.name, e), err) : add_error!(f, fld.name, field_message(fld, "invalid", err))
+            err isa AbstractVector ? foreach(e -> add_error!(f, fld.name, e), err) : add_error!(f, fld.name, parse_message(fld, err, raw_value(f, fld)))
             continue
         end
         errs = fld.kind in MULTI_KINDS ? (isempty(v) && !fld.blank ? [field_message(fld, "required", gettext("This field is required."))] :
                                           validator_errors(fld, v)) :
                validate_field(fld, v isa Model ? v.id : v)
-        if isempty(errs) && f.model !== nothing && fld.unique && v !== nothing && v != ""
-            q = filter(objects(f.model), Q(attname(fld) => v))
-            (f.instance !== nothing && f.instance.id !== nothing) && (q = filter(q, !Q(id = f.instance.id)))
-            exists(q) && push!(errs, field_message(fld, "unique", gettext("%(model)s with this %(field)s already exists."),
-                                                   Dict("model" => uppercasefirst(string(modelmeta(f.model).verbose_name)), "field" => label(fld))))
-        end
         foreach(e -> add_error!(f, fld.name, e), errs)
         isempty(errs) && run_clean_field!(f, fld, v)
     end
+    f.model !== nothing && model_form_unique_errors!(f)
     f.model !== nothing && isempty(f.errors) && model_form_constraint_errors!(f)
     f.model !== nothing && model_form_clean!(f)
     f.clean === nothing || form_clean_hook(f)
@@ -602,8 +812,40 @@ function model_form_constraint_errors!(f::Form)
         findfield(modelmeta(T), Symbol(k)) === nothing || (values[Symbol(k)] = v)
     end
     id = inst === nothing ? nothing : inst.id
-    for e in vcat(unique_together_errors(T, values, id), constraint_errors(T, values, id))
+    for e in constraint_errors(T, values, id)
         add_error!(f, nothing, e)
+    end
+end
+
+"""
+A ModelForm's uniqueness checks, as Django's: the model's `validate_unique` on an instance with
+the cleaned data, leaving out the model fields that aren't on the form, that failed, or that
+are empty and allowed to be (so a `unique_together` only partly on the form isn't checked).
+Messages come from the form fields' `error_messages` and the form's non-field ones.
+"""
+function model_form_unique_errors!(f::Form)
+    T = f.model
+    meta = modelmeta(T)
+    inst = f.instance
+    obj = inst === nothing ? T() : T(copy(getfield(inst, :_data)), Dict{Symbol,Any}())
+    for (k, v) in f.cleaned_data
+        mf = k === :__all__ ? nothing : findfield(meta, k)
+        (mf === nothing || mf.kind === :m2m || mf.kind in FILE_KINDS) && continue
+        setproperty!(obj, k, v)
+    end
+    formfields = Dict{Symbol,Field}(x.name => x for x in f.fields)
+    exclude = Symbol[]
+    for mf in all_fields(T)
+        n = mf.name
+        ff = get(formfields, n, nothing)
+        if ff === nothing || haskey(f.errors, n) || !haskey(f.cleaned_data, n) || (!mf.blank && ff.blank && is_empty_value(f.cleaned_data[n]))
+            push!(exclude, n)
+        end
+    end
+    errs = validate_unique(obj; exclude, message_fields = formfields,
+                           unique_together_message = get(f.nonfield_error_messages, "unique_together", nothing))
+    for (k, msgs) in errs, m in msgs
+        add_error!(f, k === :__all__ ? nothing : k, m)
     end
 end
 
@@ -726,7 +968,7 @@ function clean_file_field(f::Form, fld::Field)
     up = file_upload(f, fld)
     if up === nothing && f.files !== nothing && (x = get(f.files, html_name(f, fld), nothing)) !== nothing &&
        !(x isa UploadedFile || x isa AbstractVector) && !(x isa AbstractString && isempty(x))
-        return nothing, [field_message(fld, "missing", gettext("No file was submitted. Check the encoding type on the form."))]
+        return nothing, [field_message(fld, "invalid", gettext("No file was submitted. Check the encoding type on the form."))]
     end
     current = initial_for(f, fld)
     v = up !== nothing ? up : file_cleared(f, fld) ? nothing : current
@@ -800,13 +1042,9 @@ For a `ModelForm`: copy cleaned data onto the instance and save it.
 """
 function save!(f::Form; commit = true)
     f.model === nothing && error("save! is only available for ModelForms")
-    is_valid(f) || error("cannot save a form with errors: $(f.errors)")
-    obj = f.instance === nothing ? f.model() : f.instance
-    for (k, v) in f.cleaned_data
-        k === :__all__ && continue
-        findfield(modelmeta(f.model), k) === nothing && continue
-        setproperty!(obj, k, v)
-    end
+    # (as Django's ValueError)
+    is_valid(f) || throw(ArgumentError("The $(nameof(f.model)) could not be $(f.instance === nothing || f.instance.id === nothing ? "created" : "changed") because the data didn't validate."))
+    obj = construct_instance(f, f.instance === nothing ? f.model() : f.instance)
     form_save_hook(f, Val(Symbol(f.name)), obj)
     f.instance = obj
     if commit
@@ -877,34 +1115,76 @@ function display_value(bf::BoundField)
 end
 
 "A list of errors as Django's `ErrorList.as_ul`: `class` adds a class (\"nonfield\"), `id` an id."
-errors_html(errs; class = nothing, id = nothing) = isempty(errs) ? "" :
+errors_html(errs; class = nothing, id = nothing, safe = nothing) = isempty(errs) ? "" :
     "<ul class=\"errorlist" * (class === nothing ? "" : " " * class) * "\"" * (id === nothing ? "" : id_attr(id)) * ">" *
-    join(["<li>" * escape_html(e) * "</li>" for e in errs]) * "</ul>"
+    join(["<li>" * (safe !== nothing && safe[i] ? string(e) : escape_html(e)) * "</li>" for (i, e) in enumerate(errs)]) * "</ul>"
 
 """
     ErrorList(messages; error_class=nothing, id=nothing)
 
 A list of error messages that renders itself, as Django's `ErrorList`: `{{ form.name.errors }}` and
 `{{ form.non_field_errors }}` in a template are a `<ul class="errorlist">` (`as_ul`), and
-`.as_text` gives `* message` lines. It is a vector of strings otherwise.
+`.as_text` gives `* message` lines. It is a vector of strings otherwise. Messages are escaped
+unless they're safe strings (`mark_safe`); `ErrorList(e::ValidationError)` takes its messages.
 """
 struct ErrorList <: AbstractVector{String}
     messages::Vector{String}
     error_class::Union{Nothing,String}
     id::Union{Nothing,String}
+    safe::Vector{Bool}
 end
 ErrorList(ms = String[]; error_class = nothing, id = nothing) =
-    ErrorList(collect(String, ms), error_class === nothing ? nothing : string(error_class), id === nothing ? nothing : string(id))
+    ErrorList(String[m isa SafeString ? m.s : m isa ValidationError ? join(m.messages, " ") : string(m) for m in ms],
+              error_class === nothing ? nothing : string(error_class), id === nothing ? nothing : string(id),
+              Bool[m isa SafeString for m in ms])
+ErrorList(e::ValidationError; kw...) = ErrorList(e.messages; kw...)
+Base.copy(e::ErrorList) = ErrorList(copy(e.messages), e.error_class, e.id, copy(e.safe))
 Base.size(e::ErrorList) = size(e.messages)
 Base.getindex(e::ErrorList, i::Int) = e.messages[i]
-as_ul(e::ErrorList) = SafeString(errors_html(e.messages; class = e.error_class, id = e.id))
+as_ul(e::ErrorList) = SafeString(errors_html(e.messages; class = e.error_class, id = e.id, safe = e.safe))
 "The errors as `* message` lines (Django's `ErrorList.as_text`)."
 errors_text(e::ErrorList) = join(("* " * m for m in e.messages), "\n")
 __html__(e::ErrorList) = as_ul(e).s
 tattr(e::ErrorList, ::Val{S}) where {S} = S === :as_ul ? as_ul(e) : S === :as_text ? errors_text(e) : NOTFOUND
 
+"""
+A form's errors in a template (`{{ form.errors }}`), as Django's `ErrorDict`: a `<ul>` of the fields
+with each one's own list (`as_ul`), or `* field` lines (`as_text`). A dict of field => `ErrorList` otherwise;
+`ErrorDict(Dict("name" => "message"))` makes one from messages or lists of them.
+"""
+struct ErrorDict <: AbstractDict{Symbol,ErrorList}
+    lists::Vector{Pair{Symbol,ErrorList}}
+end
+ErrorDict() = ErrorDict(Pair{Symbol,ErrorList}[])
+Base.copy(e::ErrorDict) = ErrorDict(copy(e.lists))
+ErrorDict(d::AbstractDict) = ErrorDict(Pair{Symbol,ErrorList}[Symbol(k) => error_list(v) for (k, v) in d])
+error_list(v) = v isa ErrorList ? v : ErrorList(v isa AbstractString || v isa SafeString || v isa ValidationError ? [v] : v)
+function Base.setindex!(e::ErrorDict, v, k)
+    i = findfirst(p -> p.first === Symbol(k), e.lists)
+    i === nothing ? push!(e.lists, Symbol(k) => error_list(v)) : (e.lists[i] = Symbol(k) => error_list(v))
+    e
+end
+function ErrorDict(f::Form)
+    ensure_validated(f)
+    names = [x.name for x in f.fields if haskey(f.errors, x.name)]
+    haskey(f.errors, :__all__) && push!(names, :__all__)
+    append!(names, sort!([k for k in keys(f.errors) if !(k in names)]))
+    ErrorDict([k => (k === :__all__ ? ErrorList(f.errors[k]; error_class = "nonfield") :
+                     (i = findfirst(x -> x.name === k, f.fields); id = i === nothing ? "" : html_id(f, f.fields[i]);
+                      ErrorList(f.errors[k]; id = isempty(id) ? nothing : id * "_error"))) for k in names])
+end
+Base.length(e::ErrorDict) = length(e.lists)
+Base.iterate(e::ErrorDict, i = 1) = i > length(e.lists) ? nothing : (e.lists[i], i + 1)
+Base.get(e::ErrorDict, k, default) = (i = findfirst(p -> p.first === Symbol(k), e.lists); i === nothing ? default : e.lists[i].second)
+as_ul(e::ErrorDict) = SafeString(isempty(e.lists) ? "" : "<ul class=\"errorlist\">" *
+    join("<li>" * escape_html(string(k)) * as_ul(v).s * "</li>" for (k, v) in e.lists) * "</ul>")
+errors_text(e::ErrorDict) = join(("* " * string(k) * "\n" * join(("  * " * m for m in v), "\n") for (k, v) in e.lists), "\n")
+__html__(e::ErrorDict) = as_ul(e).s
+tattr(e::ErrorDict, ::Val{S}) where {S} = S === :as_ul ? as_ul(e) : S === :as_text ? errors_text(e) :
+                                          (v = get(e, S, nothing); v === nothing ? NOTFOUND : v)
+
 input_type(fld::Field) = fld.widget isa Widget && haskey(fld.widget.attrs, "type") ? fld.widget.attrs["type"] :    # (TextInput(attrs = type => email))
-    widget_kind(fld.widget) === :password ? "password" : widget_kind(fld.widget) === :hidden ? "hidden" :
+    widget_kind(fld.widget) === :password ? "password" : widget_kind(fld.widget) === :hidden ? "hidden" : widget_kind(fld.widget) === :text ? "text" :
     fld.kind === :email ? "email" : fld.kind === :url ? "url" : fld.kind in INT_KINDS || fld.kind in (:float, :decimal) ? "number" :
     fld.kind === :datetime ? "datetime-local" : fld.kind === :date ? "date" : fld.kind === :time ? "time" : "text"
 
@@ -985,8 +1265,9 @@ function input_html(bf::BoundField)
     elseif fld.kind in FILE_KINDS
         cur = initial_for(f, fld)
         io = IOBuffer()
-        if cur isa FieldFile && !isempty(cur)
-            print(io, "Currently: <a href=\"", escape_html(cur.url), "\">", escape_html(cur.name), "</a>")
+        if (cur isa FieldFile && !isempty(cur)) || cur isa UploadedFile
+            # (a file not stored yet, on an instance from save!(form; commit = false), has no URL)
+            print(io, "Currently: ", cur isa FieldFile ? "<a href=\"" * escape_html(cur.url) * "\">" * escape_html(cur.name) * "</a>" : escape_html(cur.name))
             fld.blank && print(io, " <label><input type=\"checkbox\" name=\"$name-clear\" id=\"$id-clear\"> Clear</label>")
             print(io, "<br>Change: ")
         end
@@ -1002,8 +1283,8 @@ function input_html(bf::BoundField)
     elseif fld.kind === :m2m
         chosen = Set(string(x isa Model ? x.id : x) for x in (val isa AbstractVector ? val : Any[]))
         io = IOBuffer()
-        print(io, "<select$attrs multiple size=\"8\">")
-        for o in objects(related_model(fld))
+        print(io, "<select$attrs multiple>")
+        for o in choices_queryset(fld)
             sel = string(o.id) in chosen ? " selected" : ""
             print(io, "<option value=\"", o.id, "\"", sel, ">", escape_html(string(o)), "</option>")
         end
@@ -1011,7 +1292,7 @@ function input_html(bf::BoundField)
         return String(take!(io))
     elseif fld.kind in (:modelchoice, :modelmultichoice, :multichoice)
         multiple = fld.kind !== :modelchoice
-        chosen = Set(string(x) for x in (multiple ? (val isa AbstractVector ? val : Any[]) : (val === nothing ? Any[] : Any[val])))
+        chosen = chosen_values(bf)          # (objects by their to_field_name)
         io = IOBuffer()
         print(io, "<select$attrs", multiple ? " multiple" : "", ">")
         if fld.kind === :multichoice
@@ -1019,7 +1300,8 @@ function input_html(bf::BoundField)
         else
             sp = fld.related
             opts = Pair{Any,Any}[choice_key(sp, o) => instance_label(sp, o) for o in choice_queryset(sp)]
-            !multiple && sp.empty_label !== nothing && print(io, "<option value=\"\">", escape_html(sp.empty_label), "</option>")
+            !multiple && sp.empty_label !== nothing &&
+                print(io, "<option value=\"\"", val === nothing || val == "" ? " selected" : "", ">", escape_html(sp.empty_label), "</option>")
         end
         for (k, lbl) in opts
             print(io, "<option value=\"", escape_html(string(k)), "\"", string(k) in chosen ? " selected" : "",
@@ -1028,7 +1310,7 @@ function input_html(bf::BoundField)
         print(io, "</select>")
         return String(take!(io))
     elseif (fld.kind === :fk || fld.choices !== nothing || fld.kind === :filepath) && widget_kind(fld.widget) !== :hidden
-        groups = fld.kind === :fk ? [(nothing, Pair{Any,Any}[target_value(fld, o) => string(o) for o in objects(related_model(fld))])] :
+        groups = fld.kind === :fk ? [(nothing, Pair{Any,Any}[target_value(fld, o) => string(o) for o in choices_queryset(fld)])] :
                  fld.kind === :filepath ? [(nothing, filepath_choices(fld))] : choice_groups(fld)
         io = IOBuffer()
         # a required select without an empty first choice has no `required` (Django's Select.use_required_attribute):
@@ -1039,7 +1321,9 @@ function input_html(bf::BoundField)
         nb = fld.kind === :typedchoice && fld.related isa NamedTuple && haskey(fld.related, :any_value)
         nb && (val = val === true || val in ("True", "true", "2") ? "true" : val === false || val in ("False", "false", "3") ? "false" : "unknown")
         print(io, "<select$attrs>")
-        (fld.blank || fld.kind === :fk) && !nb && print(io, "<option value=\"\">---------</option>")
+        # (selected when there's no value, as Django's)
+        (fld.blank || fld.kind === :fk) && !nb &&
+            print(io, "<option value=\"\"", val === nothing || val == "" ? " selected" : "", ">---------</option>")
         for (glabel, opts) in groups
             glabel === nothing || print(io, "<optgroup label=\"", escape_html(string(glabel)), "\">")
             for (k, lbl) in opts
@@ -1053,7 +1337,9 @@ function input_html(bf::BoundField)
         return String(take!(io))
     elseif (fld.kind in (:text, :json, :hstore) && widget_kind(fld.widget) === nothing) || widget_kind(fld.widget) === :textarea
         wa = fld.widget isa Widget ? fld.widget.attrs : Dict{String,String}()      # (the widget's own rows and cols replace these)
-        return "<textarea$attrs" * (haskey(wa, "cols") ? "" : " cols=\"40\"") * (haskey(wa, "rows") ? "" : " rows=\"10\"") * ">" *
+        # (a text field's max_length is the textarea's maxlength, as Django's)
+        ml = fld.max_length !== nothing && !occursin(" maxlength=", attrs) ? " maxlength=\"$(fld.max_length)\"" : ""
+        return "<textarea$attrs$ml" * (haskey(wa, "cols") ? "" : " cols=\"40\"") * (haskey(wa, "rows") ? "" : " rows=\"10\"") * ">" *
                escape_html(display_string(val)) * "</textarea>"
     end
     t = input_type(fld)
@@ -1115,6 +1401,20 @@ end
 
 is_multiple_choice(fld::Field) = fld.kind in (:m2m, :modelmultichoice, :multichoice)
 
+"""
+The objects a foreign key or many-to-many field can choose from in a form: the related model's,
+narrowed by the field's `limit_choices_to` (a `Q`, a dict of lookups, or a function giving one,
+called each time), as Django's.
+"""
+function choices_queryset(fld::Field)
+    qs = objects(related_model(fld))
+    l = fld.form === nothing ? nothing : get(fld.form, :limit_choices_to, nothing)
+    l === nothing && return qs
+    l isa Function && (l = l())
+    qs = l isa Q ? filter(qs, l) : filter(qs; (Symbol(k) => v for (k, v) in pairs(l))...)
+    distinct(qs)                 # (a limit across a relation can repeat a row)
+end
+
 "`(value, label)` pairs of a choice field's options (groups flattened)."
 function choice_options(fld::Field)
     k = fld.kind
@@ -1123,8 +1423,8 @@ function choice_options(fld::Field)
         sp = fld.related
         return Pair{String,String}[string(choice_key(sp, o)) => instance_label(sp, o) for o in choice_queryset(sp)]
     end
-    k === :fk && return Pair{String,String}[string(target_value(fld, o)) => string(o) for o in objects(related_model(fld))]
-    k === :m2m && return Pair{String,String}[string(o.id) => string(o) for o in objects(related_model(fld))]
+    k === :fk && return Pair{String,String}[string(target_value(fld, o)) => string(o) for o in choices_queryset(fld)]
+    k === :m2m && return Pair{String,String}[string(o.id) => string(o) for o in choices_queryset(fld)]
     k === :filepath && return Pair{String,String}[string(c.first) => string(c.second) for c in filepath_choices(fld)]
     fld.choices === nothing && return Pair{String,String}[]
     Pair{String,String}[string(c.first) => string(c.second) for (_, opts) in choice_groups(fld) for c in opts]
@@ -1134,7 +1434,8 @@ end
 function chosen_values(bf::BoundField)
     val = display_value(bf)
     vals = val isa AbstractVector ? val : val === nothing ? Any[] : Any[val]
-    Set{String}(string(x isa Model ? x.id : x) for x in vals)
+    sp = bf.field.kind in (:modelchoice, :modelmultichoice) ? bf.field.related : nothing
+    Set{String}(string(x isa Model ? (sp === nothing ? x.id : choice_key(sp, x)) : x) for x in vals)
 end
 
 """
@@ -1497,7 +1798,7 @@ function tattr(f::Form, ::Val{S}) where {S}
     S === :as_div && return as_div(f)
     S === :as_ul && return as_ul(f)
     S === :as_table && return as_table(f)
-    S === :errors && return ensure_validated(f).errors
+    S === :errors && return ErrorDict(f)
     S === :non_field_errors && return ErrorList(non_field_errors(ensure_validated(f)); error_class = "nonfield")
     S === :is_bound && return f.data !== nothing
     S === :is_multipart && return is_multipart(f)

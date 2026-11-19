@@ -163,11 +163,20 @@ function MultiValueField(fields::AbstractVector; compress, decompress, widget = 
 end
 
 
-"A date and a time input making one `DateTime` (aware in the current time zone with `USE_TZ`)."
-SplitDateTimeField(; kw...) = MultiValueField([DateField(error_messages = Dict("incomplete" => gettext("Enter a valid date."))),
-                                                 Field(:char; max_length = 8, widget = Widget(:time),
-                                                       validators = Any[t -> parse_time(t) !== nothing || gettext("Enter a valid time.")],
-                                                       error_messages = Dict("incomplete" => gettext("Enter a valid time.")))];
+"""
+A date and a time input making one `DateTime` (aware in the current time zone with `USE_TZ`).
+`error_messages` can replace "invalid_date" and "invalid_time", as Django's.
+"""
+function SplitDateTimeField(; error_messages = nothing, kw...)
+    em = error_messages === nothing ? Dict{String,Any}() : Dict{String,Any}(string(k) => v for (k, v) in error_messages)
+    date_msgs = Dict{String,Any}("incomplete" => gettext("Enter a valid date."))
+    time_msgs = Dict{String,Any}("incomplete" => gettext("Enter a valid time."))
+    haskey(em, "invalid_date") && (date_msgs["invalid"] = em["invalid_date"])
+    haskey(em, "invalid_time") && (time_msgs["invalid"] = em["invalid_time"])
+    bad_time() = throw(ValidationError(gettext("Enter a valid time."); code = "invalid"))
+    MultiValueField([DateField(error_messages = date_msgs),
+                     Field(:char; max_length = 8, widget = Widget(:time),
+                           validators = Any[t -> parse_time(t) !== nothing || bad_time()], error_messages = time_msgs)];
     compress = vs -> begin
         d, t = vs
         tm = parse_time(t)
@@ -177,7 +186,8 @@ SplitDateTimeField(; kw...) = MultiValueField([DateField(error_messages = Dict("
     end,
     decompress = v -> v === nothing ? [nothing, nothing] :
         (dt = v isa TimeZones.ZonedDateTime ? make_naive(v) : DateTime(v); [Date(dt), Dates.format(dt, "HH:MM")]),
-    require_all_fields = false, kw...)
+    require_all_fields = false, (error_messages === nothing ? (;) : (; error_messages))..., kw...)
+end
 
 multi_raw(f::Form, fld::Field) = f.data === nothing ? nothing : multi_parts(f.data, html_name(f, fld), fld)
 # name_0, name_1, ...: a multiple choice part's list, a multi-value part's own name_1_0, name_1_1, ...

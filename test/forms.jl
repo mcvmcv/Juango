@@ -314,7 +314,7 @@ end
     blank = PickForm()
     many_html = Juango.widget_html(blank[:many])
     @test occursin("multiple", many_html) && occursin(">MC ANN<", many_html) && !occursin("Elsewhere", many_html)
-    @test occursin("<option value=\"\">---------</option>", Juango.widget_html(blank[:author]))
+    @test occursin("<option value=\"\" selected>---------</option>", Juango.widget_html(blank[:author]))
     @test occursin("value=\"MC Bob\"", Juango.widget_html(blank[:byname]))
     t(s, ctx) = render(Template(s), ctx)
     @test occursin("<div class=\"custom\">Code: <input", t("{{ form.code.as_field_group }}", Dict("form" => blank)))

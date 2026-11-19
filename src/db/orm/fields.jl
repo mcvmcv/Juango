@@ -271,7 +271,7 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
                input_formats = nothing, localize::Bool = false, db_collation = nothing, db_column = nothing, to_field = nothing,
                primary_key::Bool = false, through_fields = nothing, db_constraint::Bool = true,
                strip::Bool = true, empty_value = NO_DEFAULT, disabled::Bool = false, label_suffix = nothing, initial = NO_DEFAULT,
-               show_hidden_initial::Bool = false)
+               show_hidden_initial::Bool = false, limit_choices_to = nothing)
     initial === NO_DEFAULT || (default = initial)          # (a form field's initial value, Django's name for it)
     required === nothing || (blank = !required)
     # form fields: the date formats to accept, and numbers typed in the language's format ("1.234,5")
@@ -290,6 +290,8 @@ function Field(kind::Symbol; null = false, blank = false, default = NO_DEFAULT, 
     empty_value === NO_DEFAULT || (fopts[:empty_value] = empty_value)
     disabled && (fopts[:disabled] = true)
     show_hidden_initial && (fopts[:show_hidden_initial] = true)
+    # a foreign key's or many-to-many field's choices in forms: a Q, a dict of lookups, or a function giving either
+    limit_choices_to === nothing || (fopts[:limit_choices_to] = limit_choices_to)
     label isa SafeString && (fopts[:safe_label] = true)          # (a label marked safe is shown as HTML, as Django's mark_safe)
     label isa AbstractString && isempty(label) && (fopts[:no_label] = true)      # (label = "": none at all, as Django's)
     label_suffix === nothing || (fopts[:label_suffix] = string(label_suffix))
