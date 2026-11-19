@@ -1486,8 +1486,7 @@ end
 end
 
 # ---- Django's forms_tests/tests/test_formsets.py. Juango differences: cleaned_data(fs) is the counted forms' data
-# (Django's formset.cleaned_data is every form's: [f.cleaned_data for f in fs.forms]); a formset renders as_p by
-# default, as Juango's forms do (Django: div).
+# (Django's formset.cleaned_data is every form's: [f.cleaned_data for f in fs.forms]).
 
 @form DfsChoice begin
     choice = CharField(max_length = nothing)

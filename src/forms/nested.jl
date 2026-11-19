@@ -11,7 +11,7 @@
 #         save!(format)
 #     end
 #
-#     {{ tree.form.as_p }}                                   (or {{ tree.as_p }} for all of it)
+#     {{ tree.form.as_div }}                                 (or {{ tree }} for all of it)
 #     {{ tree.plates.management_form }}
 #     {% for plate in tree.plates %}
 #       {{ plate.form.as_p }}
@@ -224,25 +224,30 @@ function nested_row(spec::NestedSetSpec, prefix::AbstractString, index::Integer)
                Dict{String,Any}())
 end
 
-"All of a nested form as paragraphs: the form, then each child formset's management form and rows."
-function as_p(n::NestedForm)
+"All of a nested form, each form laid out by `layout` (`as_div`, `as_p`): the form, then each child formset's management form and rows."
+function render_nested(n::NestedForm, layout)
     io = IOBuffer()
-    print(io, as_p(n.form).s)
+    print(io, layout(n.form).s)
     for (name, s) in n.children
         print(io, "<fieldset class=\"nested-", escape_html(string(name)), "\">", management_form(s).s)
         foreach(e -> print(io, "<p class=\"errorlist nonform\">", escape_html(e), "</p>"), s.formset.non_form_errors)
-        foreach(r -> print(io, "<div class=\"nested-row\">", as_p(r).s, "</div>"), s.rows)
+        foreach(r -> print(io, "<div class=\"nested-row\">", layout(r).s, "</div>"), s.rows)
         print(io, "</fieldset>")
     end
     SafeString(String(take!(io)))
 end
-__html__(n::NestedForm) = as_p(n).s
+"All of a nested form with its forms as `<div>` rows (the default, as Django's forms)."
+as_div(n::NestedForm) = render_nested(n, as_div)
+"All of a nested form with its forms as `<p>` rows."
+as_p(n::NestedForm) = render_nested(n, as_p)
+__html__(n::NestedForm) = as_div(n).s
 
 function tattr(n::NestedForm, ::Val{S}) where {S}
     c = nested_child(n, S)
     c === nothing || return c
     S === :form && return n.form
     S === :as_p && return as_p(n)
+    S === :as_div && return as_div(n)
     S === :has_changed && return has_changed(n)
     tattr(n.form, Val(S))                                 # the form's fields and the rest
 end

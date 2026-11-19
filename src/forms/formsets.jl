@@ -280,7 +280,7 @@ as_p(fs::FormSet) = SafeString(management_form(fs).s * join([as_p(f).s for f in 
 as_table(fs::FormSet) = SafeString(management_form(fs).s * join([as_table(f).s for f in fs], "\n"))
 as_ul(fs::FormSet) = SafeString(management_form(fs).s * join([as_ul(f).s for f in fs], "\n"))
 as_div(fs::FormSet) = SafeString(management_form(fs).s * join([as_div(f).s for f in fs], "\n"))
-__html__(fs::FormSet) = as_p(fs).s
+__html__(fs::FormSet) = as_div(fs).s          # (as Django 5's default)
 
 "`fs.forms` builds the forms on first use, as Django's formset.forms does (the field holds them once built)."
 Base.getproperty(fs::FormSet, s::Symbol) = s === :forms ? build_forms!(fs) : getfield(fs, s)

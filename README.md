@@ -1382,7 +1382,7 @@ function contact(req)
         message!(req, :success, "Thanks!")
         return redirect("contact")
     end
-    render(req, "contact.html", Dict("form" => form))   # {{ form }} / {{ form.as_p }} / {{ form.email }}
+    render(req, "contact.html", Dict("form" => form))   # {{ form }} / {{ form.as_div }} / {{ form.email }}
 end
 
 form = ModelForm(Post; data=req.POST, instance=post, fields=[:title, :body])
@@ -1523,7 +1523,7 @@ fs = CommentFormSet(req.POST; instance = post)   # the foreign key to the post i
 ```
 <form method="post">{% csrf_token %}
   {{ formset.management_form }}
-  {% for form in formset %}{{ form.as_p }}{% endfor %}
+  {% for form in formset %}{{ form }}{% endfor %}
 </form>
 ```
 
@@ -1547,14 +1547,14 @@ end
 ```
 
 ```
-{{ tree.form.as_p }}{{ tree.plates.management_form }}
+{{ tree.form }}{{ tree.plates.management_form }}
 {% for plate in tree.plates %}
-  {{ plate.form.as_p }}{{ plate.blocks.management_form }}
-  {% for block in plate.blocks %}{{ block.form.as_p }}{% endfor %}
+  {{ plate.form }}{{ plate.blocks.management_form }}
+  {% for block in plate.blocks %}{{ block.form }}{% endfor %}
 {% endfor %}
 ```
 
-`{{ tree.as_p }}` renders all of it, and `empty_form(tree.plates)` gives a row with `__prefix__` for adding rows in the page, and `nested_row(spec.plates, "plates", n)` renders row `n` for an htmx view that adds one (the page then raises `plates-TOTAL_FORMS`). A row's form is made with `F(data; prefix, initial)`, so it can be worked out from the row's initial values. Over models, `nested_model_form(Order; fields = [...], nested = [:items => (fields = [:product, :qty], extra = 1, can_delete = true)])` edits an object and its children (an inline formset per relation, one level), and `save!(tree)` saves everything in one transaction.
+`{{ tree }}` renders all of it, and `empty_form(tree.plates)` gives a row with `__prefix__` for adding rows in the page, and `nested_row(spec.plates, "plates", n)` renders row `n` for an htmx view that adds one (the page then raises `plates-TOTAL_FORMS`). A row's form is made with `F(data; prefix, initial)`, so it can be worked out from the row's initial values. Over models, `nested_model_form(Order; fields = [...], nested = [:items => (fields = [:product, :qty], extra = 1, can_delete = true)])` edits an object and its children (an inline formset per relation, one level), and `save!(tree)` saves everything in one transaction.
 
 ### File uploads
 

@@ -283,7 +283,7 @@ end
     end
     out = string(render_form(f; template = "juango/forms/p.html"))
     @test occursin("<p><label for=\"id_name\">", out) && occursin("<ul class=\"errorlist\" id=\"id_name_error\">", out)
-    @test string(tr("{{ form }}", Dict("form" => f))) == string(as_p(f))      # the default stays as_p
+    @test string(tr("{{ form }}", Dict("form" => f))) == string(as_div(f))    # the default is as_div, as Django 5's (#248)
 end
 
 @testset "ModelChoiceField, typed, regex and combo fields, as_field_group, formfield_callback" begin

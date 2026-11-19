@@ -16,8 +16,8 @@
 
 """
 An HTML form: a list of fields, optionally bound to submitted `data`.
-Fields are rendered with `as_p(form)` (or `{{ form }}` / `{{ form.as_p }}` in
-templates), or individually as `{{ form.fieldname }}`.
+Fields are rendered with `as_div(form)` (`{{ form }}` in templates, as Django 5's default; `as_p`,
+`as_ul` and `as_table` too), or individually as `{{ form.fieldname }}`.
 """
 mutable struct Form
     name::String
@@ -1787,7 +1787,8 @@ as_table(f::Form) = render_rows(f, bf -> "<tr" * row_class(bf) * "><th>" * row_l
                                 "</td></tr>", h -> "<tr><td colspan=\"2\">" * h * "</td></tr>";
                                 wrap_errors = e -> "<tr><td colspan=\"2\">" * e * "</td></tr>")
 
-__html__(f::Form) = get(settings, :FORM_RENDERER, nothing) isa TemplateFormRenderer ? render_form(f).s : as_p(f).s
+# {{ form }}: as `<div>` rows (Django 5's default; as_p, as_ul and as_table are there too), or the FORM_RENDERER's template
+__html__(f::Form) = get(settings, :FORM_RENDERER, nothing) isa TemplateFormRenderer ? render_form(f).s : as_div(f).s
 __html__(bf::BoundField) = widget_html(bf)
 
 """
