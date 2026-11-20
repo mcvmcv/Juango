@@ -112,6 +112,9 @@ end
     # (salt entropy: a weak salt is re-hashed)
     h = PBKDF2Hasher()
     @test Juango.must_update(h, make_password("lètmein"; salt = "iodizedsalt")) && !Juango.must_update(h, make_password("lètmein"))
+    # (fewer iterations than the setting: re-hashed; more, as a newer Django's: kept, #261)
+    @test Juango.must_update(h, make_password("lètmein"; iterations = Juango.settings.PASSWORD_ITERATIONS - 1))
+    @test !Juango.must_update(h, make_password("lètmein"; iterations = Juango.settings.PASSWORD_ITERATIONS + 1))
     # test_low_level_pbkdf2_sha1
     s1 = Juango.encode_password(PBKDF2SHA1Hasher(), "lètmein", "seasalt2"; iterations = 1_800_000)
     @test s1 == "pbkdf2_sha1\$1800000\$seasalt2\$MEx5Z/KZ384PO7zdMHxMvXH2k3g="

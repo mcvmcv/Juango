@@ -1440,7 +1440,7 @@ end
     @test s.is_superuser && check_password(s, "Kw-pass-456")
     @test get_username(u) == "kwpass" && get_full_name(u) == "Kay Doe" && get_short_name(u) == "Kay"
     @test tr("{{ u.get_username }}|{{ u.get_full_name }}|{{ u.get_short_name }}|{{ a.get_username }}|{{ a.is_anonymous }}",
-             Dict("u" => u, "a" => Juango.AnonymousUser())) == "kwpass|Kay Doe|Kay||true"
+             Dict("u" => u, "a" => Juango.AnonymousUser())) == "kwpass|Kay Doe|Kay||True"
 
     # #120: list filters on a missing value; lists print as Django prints them
     @test tr("[{{ missing|slice:\":2\" }}][{{ missing|slice:\":2\"|upper }}][{{ missing|first }}][{{ missing|join:\", \" }}]", Dict()) == "[][][][]"
@@ -2305,9 +2305,9 @@ const FINDER151_FILE = Ref("")
     i = get_language_info("pt-BR")
     @test i.code == "pt-br" && i.name == "Brazilian Portuguese" && !i.bidi && get_language_info("de-at").name_local == "Deutsch"
     @test get_language_info("he").bidi && (try get_language_info("xx"); false catch e; e isa KeyError end)
-    @test tr("{% get_language_info for \"fr\" as l %}{{ l.name_local }}|{{ l.bidi }}") == "français|false"
+    @test tr("{% get_language_info for \"fr\" as l %}{{ l.name_local }}|{{ l.bidi }}") == "français|False"
     @test tr("{% get_language_info_list for langs as ls %}{% for l in ls %}{{ l.code }},{% endfor %}", Dict("langs" => [("de", "German"), "nl"])) == "de,nl,"
-    @test tr("{% load i18n %}{{ \"ar\"|language_name_local }}{{ \"ar\"|language_bidi }}") == "العربيّة" * "true"
+    @test tr("{% load i18n %}{{ \"ar\"|language_name_local }}{{ \"ar\"|language_bidi }}") == "العربيّة" * "True"
     # date archives: weeks and today
     @test Juango.week_start(2026, 1, "%V") == Date(2025, 12, 29) && Juango.week_start(2026, 1, "%W") == Date(2026, 1, 5)
     @test Juango.week_start(2026, 1, "%U") == Date(2026, 1, 4) && Juango.week_start(2026, 0, "%U") == Date(2025, 12, 28)

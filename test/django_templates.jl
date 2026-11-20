@@ -1193,11 +1193,11 @@ end
 
 @testset "django template_tests: test_builtins" begin
     # test_builtins01
-    @test_broken rt("{{ True }}", Dict{Any,Any}()) == "True"      # (a Juango difference)
+    @test rt("{{ True }}", Dict{Any,Any}()) == "True"
     # test_builtins02
-    @test_broken rt("{{ False }}", Dict{Any,Any}()) == "False"      # (a Juango difference)
+    @test rt("{{ False }}", Dict{Any,Any}()) == "False"
     # test_builtins03
-    @test_broken rt("{{ None }}", Dict{Any,Any}()) == "None"      # (a Juango difference)
+    @test rt("{{ None }}", Dict{Any,Any}()) == ""      # (a deliberate Juango difference: Django renders "None")
 end
 
 @testset "django template_tests: test_cache" begin
@@ -1850,7 +1850,7 @@ end
     # test_if_tag_badarg04
     @test rt("{% if x|default_if_none:y %}yes{% else %}no{% endif %}", Dict{Any,Any}()) == "no"
     # test_if_tag_single_eq
-    @test_broken (try; rt("{% if foo = bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => 1)); false; catch e; e isa Juango.TemplateSyntaxError; end)      # (a Juango difference)
+    @test rt("{% if foo = bar %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => 1)) == "no"      # (a deliberate Juango difference: Django refuses a single =)
     # test_if_is_match
     @test rt("{% if foo is True %}yes{% else %}no{% endif %}", Dict{Any,Any}("foo" => true)) == "yes"
     # test_if_is_no_match

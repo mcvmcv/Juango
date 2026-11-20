@@ -144,7 +144,7 @@ function default_settings()
         :MESSAGE_LEVEL => 20,                               # messages below this level (info) are dropped
         :MESSAGE_TAGS => Dict{Int,String}(),                # level => CSS tag, added to or replacing debug/info/success/warning/error
         :CSRF_TRUSTED_ORIGINS => String[],
-        :PASSWORD_ITERATIONS => 260_000,
+        :PASSWORD_ITERATIONS => 1_200_000,          # (Django 6.0's; #261)
         :SQL_DEBUG => false,
         :INTERNAL_IPS => String[],                     # addresses shown the debug toolbar (when DEBUG)
         :DEBUG_TOOLBAR_SHOW => nothing,                # nothing: DEBUG and an INTERNAL_IPS client; or a function req -> Bool

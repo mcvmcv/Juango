@@ -16,15 +16,80 @@ abstract type PasswordHasher end
 
 # --- PBKDF2-SHA256 ---------------------------------------------------------------------------------
 
+# PBKDF2's iterations are HMACs of a 32-byte value with one key: the key's inner and outer states are
+# computed once, and each HMAC is then two SHA-256 compressions on fixed buffers, with no allocation
+# (about 4x faster than calling hmac_sha256, which is what lets PASSWORD_ITERATIONS be Django's).
+const SHA256_K = UInt32[
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+const SHA256_H0 = UInt32[0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+rotr32(x::UInt32, n) = (x >> n) | (x << (32 - n))
+
+"One SHA-256 compression of the 16-word block in W[1:16] into the state h (W[17:64] is scratch)."
+@inline function sha256_compress!(h::Vector{UInt32}, W::Vector{UInt32})
+    @inbounds for t in 17:64
+        s0 = rotr32(W[t-15], 7) ⊻ rotr32(W[t-15], 18) ⊻ (W[t-15] >> 3)
+        s1 = rotr32(W[t-2], 17) ⊻ rotr32(W[t-2], 19) ⊻ (W[t-2] >> 10)
+        W[t] = W[t-16] + s0 + W[t-7] + s1
+    end
+    @inbounds begin
+        a, b, c, d, e, f, g, hh = h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]
+        for t in 1:64
+            t1 = hh + (rotr32(e, 6) ⊻ rotr32(e, 11) ⊻ rotr32(e, 25)) + ((e & f) ⊻ (~e & g)) + SHA256_K[t] + W[t]
+            t2 = (rotr32(a, 2) ⊻ rotr32(a, 13) ⊻ rotr32(a, 22)) + ((a & b) ⊻ (a & c) ⊻ (b & c))
+            hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2
+        end
+        h[1] += a; h[2] += b; h[3] += c; h[4] += d; h[5] += e; h[6] += f; h[7] += g; h[8] += hh
+    end
+    h
+end
+"The SHA-256 state after the 64-byte block key ⊻ pad (HMAC's inner or outer key)."
+function hmac_key_state(k::Vector{UInt8}, pad::UInt8)
+    h = copy(SHA256_H0); W = zeros(UInt32, 64)
+    @inbounds for i in 1:16
+        W[i] = UInt32(k[4i-3] ⊻ pad) << 24 | UInt32(k[4i-2] ⊻ pad) << 16 | UInt32(k[4i-1] ⊻ pad) << 8 | UInt32(k[4i] ⊻ pad)
+    end
+    sha256_compress!(h, W)
+end
+"An HMAC-SHA256 of the 32-byte value in `W[1:8]`, from the key states, into `h` (both clobbered)."
+@inline function hmac32!(h::Vector{UInt32}, W::Vector{UInt32}, ist::Vector{UInt32}, ost::Vector{UInt32})
+    for (st, last) in ((ist, false), (ost, true))
+        last && @inbounds(for i in 1:8; W[i] = h[i]; end)
+        copyto!(h, st)
+        @inbounds begin
+            W[9] = 0x80000000
+            for i in 10:15; W[i] = 0x00000000; end
+            W[16] = UInt32((64 + 32) * 8)          # (the key block and this 32-byte message, in bits)
+        end
+        sha256_compress!(h, W)
+    end
+    h
+end
+
 function pbkdf2_sha256(password::AbstractVector{UInt8}, salt::AbstractVector{UInt8}, iterations::Int)
     password = Vector{UInt8}(password)
-    u = hmac_sha256(password, vcat(salt, UInt8[0, 0, 0, 1]))
-    t = copy(u)
+    key = length(password) > 64 ? sha256(password) : password
+    k = vcat(key, zeros(UInt8, 64 - length(key)))
+    ist, ost = hmac_key_state(k, 0x36), hmac_key_state(k, 0x5c)
+    u1 = hmac_sha256(password, vcat(salt, UInt8[0, 0, 0, 1]))      # (the salt may be any length)
+    U = UInt32[UInt32(u1[4i-3]) << 24 | UInt32(u1[4i-2]) << 16 | UInt32(u1[4i-1]) << 8 | UInt32(u1[4i]) for i in 1:8]
+    T = copy(U); h = zeros(UInt32, 8); W = zeros(UInt32, 64)
     for _ in 2:iterations
-        u = hmac_sha256(password, u)
-        t .⊻= u
+        @inbounds for i in 1:8; W[i] = U[i]; end
+        hmac32!(h, W, ist, ost)
+        @inbounds for i in 1:8; U[i] = h[i]; T[i] ⊻= h[i]; end
     end
-    t
+    out = Vector{UInt8}(undef, 32)
+    @inbounds for i in 1:8
+        out[4i-3] = (T[i] >> 24) % UInt8; out[4i-2] = (T[i] >> 16) % UInt8; out[4i-1] = (T[i] >> 8) % UInt8; out[4i] = T[i] % UInt8
+    end
+    out
 end
 
 """
@@ -48,8 +113,10 @@ function verify_password(h::PBKDF2Hasher, raw::AbstractString, encoded::Abstract
     iters === nothing && return false
     consteq(encode_password(h, raw, parts[3]; iterations = iters), encoded)
 end
-# (other iterations, or a salt with too little entropy: Django's must_update)
-must_update(h::PBKDF2Hasher, encoded) = (p = split(encoded, '$'); length(p) < 3 || tryparse(Int, p[2]) != iterations_of(h) || weak_salt(p[3]))
+# (fewer iterations than the setting, or a salt with too little entropy; unlike Django's, a hash with
+# more iterations, a newer Django's, is kept rather than lowered)
+fewer_iterations(p, h) = (n = tryparse(Int, p[2]); n === nothing || n < iterations_of(h))
+must_update(h::PBKDF2Hasher, encoded) = (p = split(encoded, '$'); length(p) < 3 || fewer_iterations(p, h) || weak_salt(p[3]))
 
 """
 Whether a salt has less than 128 bits of entropy (as Django's `must_update`), counting it as
@@ -88,7 +155,7 @@ function verify_password(h::PBKDF2SHA1Hasher, raw::AbstractString, encoded::Abst
     iters === nothing && return false
     consteq(encode_password(h, raw, parts[3]; iterations = iters), encoded)
 end
-must_update(h::PBKDF2SHA1Hasher, encoded) = (p = split(encoded, '$'); length(p) < 3 || tryparse(Int, p[2]) != iterations_of(h) || weak_salt(p[3]))
+must_update(h::PBKDF2SHA1Hasher, encoded) = (p = split(encoded, '$'); length(p) < 3 || fewer_iterations(p, h) || weak_salt(p[3]))
 
 "PBKDF2-HMAC-SHA256 with any output length (scrypt uses one iteration and long outputs)."
 function pbkdf2_sha256(password::AbstractVector{UInt8}, salt::AbstractVector{UInt8}, iterations::Int, dklen::Int)

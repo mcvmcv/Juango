@@ -208,7 +208,7 @@ end
     @test sprint(io -> Juango.escape_html(io, "é<b>")) == "é&lt;b&gt;"
     @test tr("{{ s|escape }}", Dict("s" => mark_safe("<b>"))) == "<b>"                     # not escaped twice
     @test tr("{{ s|force_escape }}", Dict("s" => mark_safe("<b>"))) == "&lt;b&gt;"
-    @test tr("{{ n }} {{ f }} {{ b }}", Dict("n" => 3, "f" => 1.5, "b" => true)) == "3 1.5 true"
+    @test tr("{{ n }} {{ f }} {{ b }}", Dict("n" => 3, "f" => 1.5, "b" => true)) == "3 1.5 True"      # (Python's str, as Django's)
     @test tr("{% for x in xs %}{{ forloop.counter }}/{{ forloop.revcounter0 }}{% if forloop.last %}.{% endif %}{% endfor %}",
              Dict("xs" => [1, 2])) == "1/12/0."
     @test tr("{% for x in xs %}{% for y in xs %}{{ forloop.parentloop.counter }}{{ forloop.counter }} {% endfor %}{% endfor %}",

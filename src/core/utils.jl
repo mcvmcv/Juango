@@ -116,6 +116,7 @@ format_html_join(sep::AbstractString, fmt::AbstractString, rows) =
 
 "How values are turned into text in templates."
 display_string(::Nothing) = ""
+display_string(x::Bool) = x ? "True" : "False"        # (as Django's templates, Python's str)
 display_string(x::AbstractString) = String(x)
 display_string(x::SafeString) = x.s
 display_string(x::DateTime) = Dates.format(x, "yyyy-mm-dd HH:MM:SS")
