@@ -1020,3 +1020,155 @@ end
         configure!(MIGRATION_MODULES = old)
     end
 end
+
+# --- tests/schema: the schema editor, through the operations, with data in the tables ---------------
+
+@testset "django schema" begin
+    S = Juango.SchemaState()
+    q(t) = Juango.quote_name(Juango.backend(), t)
+    drop(ts...) = for t in ts
+        t in dm_tables() && Juango.execute("DROP TABLE $(q(t))")
+    end
+    rows(sql) = Juango.execute(sql)
+    # test_creation_deletion_reserved_names (a table and columns named with SQL keywords)
+    op = DM.CreateModel("select"; columns = [dmcol("when"), dmcol("order"; null = true)])
+    st = dm_run!(S, op)
+    dm_insert("select", :when => 1)
+    @test only(rows("SELECT $(q("when")) FROM $(q("select"))"))[:when] == 1
+    dm_run!(S, op; backwards = true)
+    @test !("select" in dm_tables())
+    # test_fk (the constraint is enforced)
+    st = dm_run!(S, DM.CreateModel("sc_author"; columns = [dmstr("name")]),
+                 DM.CreateModel("sc_book"; columns = [dmcol("author_id", :fk; references = "sc_author"), dmstr("title")]))
+    try
+        @test dm_fk("sc_book", "author_id", "sc_author")
+        if Juango.backend() isa Juango.SQLiteBackend      # (#260: SQLite's foreign keys aren't enforced)
+            @test_broken dm_fails(() -> dm_insert("sc_book", :author_id => 9999, :title => "x"))
+            Juango.execute("DELETE FROM sc_book")
+        else
+            @test dm_fails(() -> dm_insert("sc_book", :author_id => 9999, :title => "x"))
+        end
+        dm_insert("sc_author", :name => "Ann")
+        aid = only(rows("SELECT id FROM sc_author"))[:id]
+        dm_insert("sc_book", :author_id => aid, :title => "Book")
+        # test_add_field_temp_default (existing rows get the default)
+        st2 = dm_run!(st, DM.AddField("sc_author", Juango.Column("surname", :string; max_length = 15, default = "Godwin")))
+        @test only(rows("SELECT surname FROM sc_author"))[:surname] == "Godwin"
+        # test_add_field_temp_default_boolean
+        st2 = dm_run!(st2, DM.AddField("sc_author", dmcol("awesome", :bool; default = false)))
+        @test only(rows("SELECT awesome FROM sc_author"))[:awesome] in (false, 0)
+        # test_add_field_durationfield_with_default
+        st2 = dm_run!(st2, DM.AddField("sc_author", dmcol("duration", :duration; default = Dates.Minute(10), null = true)))
+        @test haskey(dm_cols("sc_author"), "duration")
+        # test_add_field_binary
+        st2 = dm_run!(st2, DM.AddField("sc_author", dmcol("bits", :binary; default = UInt8[0x01, 0x02], null = true)))
+        @test haskey(dm_cols("sc_author"), "bits")
+        # test_alter_char_field_decrease_length (the data fits)
+        st2 = dm_run!(st2, DM.AlterField("sc_author", Juango.Column("name", :string; max_length = 10)))
+        @test only(rows("SELECT name FROM sc_author"))[:name] == "Ann"
+        # test_alter_textual_field_keep_null_status, test_alter_charfield_to_null
+        st2 = dm_run!(st2, DM.AlterField("sc_author", Juango.Column("name", :string; max_length = 10, null = true)))
+        @test dm_cols("sc_author")["name"].null
+        dm_insert("sc_author", :name => nothing, :surname => "x", :awesome => false, :duration => nothing, :bits => nothing) |> _ -> nothing
+        # test_alter_null_to_not_null (with a default, existing NULLs take it)
+        Juango.execute("UPDATE sc_author SET name = NULL WHERE surname = 'x'")
+        st2 = dm_run!(st2, DM.AlterField("sc_author", Juango.Column("name", :string; max_length = 10, default = "Unknown")))
+        @test !dm_cols("sc_author")["name"].null
+        @test Set(r[:name] for r in rows("SELECT name FROM sc_author")) == Set(["Ann", "Unknown"])
+        Juango.execute("DELETE FROM sc_author WHERE surname = 'x'")
+        # test_alter_numeric_field_keep_null_status, test_alter_text_field
+        st2 = dm_run!(st2, DM.AddField("sc_book", dmcol("pages"; null = true)), DM.AlterField("sc_book", dmcol("pages", :bigint; null = true)))
+        @test dm_cols("sc_book")["pages"].null
+        # test_alter_text_field_to_date_field, _to_datetime_field, _to_time_field (empty columns)
+        st2 = dm_run!(st2, DM.AddField("sc_book", dmcol("info", :text; null = true)))
+        for k in (:date, :datetime, :time)
+            st2 = dm_run!(st2, DM.AlterField("sc_book", dmcol("info", k; null = true)))
+            st2 = dm_run!(st2, DM.AlterField("sc_book", dmcol("info", :text; null = true)))
+        end
+        @test haskey(dm_cols("sc_book"), "info")
+        # test_alter_fk_to_o2o, test_alter_o2o_to_fk (the unique constraint comes and goes, the fk stays)
+        st2 = dm_run!(st2, DM.AlterField("sc_book", dmcol("author_id", :fk; references = "sc_author", unique = true)))
+        @test dm_unique("sc_book", ["author_id"]) && dm_fk("sc_book", "author_id", "sc_author")
+        @test dm_fails(() -> dm_insert("sc_book", :author_id => aid, :title => "Second"))
+        st2 = dm_run!(st2, DM.AlterField("sc_book", dmcol("author_id", :fk; references = "sc_author")))
+        @test !dm_unique("sc_book", ["author_id"]) && dm_fk("sc_book", "author_id", "sc_author")
+        # test_alter_field_fk_keeps_index
+        st2 = dm_run!(st2, DM.AlterField("sc_book", dmcol("author_id", :fk; references = "sc_author", index = true)))
+        st2 = dm_run!(st2, DM.AlterField("sc_book", dmcol("author_id", :fk; references = "sc_author", index = true, null = true)))
+        @test dm_index("sc_book", ["author_id"]) && dm_fk("sc_book", "author_id", "sc_author")
+        # test_alter_to_fk, test_alter_fk (an integer column becomes a foreign key, and back)
+        st2 = dm_run!(st2, DM.AddField("sc_book", dmcol("editor_id", :bigint; null = true)))
+        st2 = dm_run!(st2, DM.AlterField("sc_book", dmcol("editor_id", :fk; references = "sc_author", null = true)))
+        @test dm_fk("sc_book", "editor_id", "sc_author")
+        st2 = dm_run!(st2, DM.AlterField("sc_book", dmcol("editor_id", :bigint; null = true)))
+        @test !dm_fk("sc_book", "editor_id", "sc_author")
+        # test_unique (a column made unique, and not)
+        st2 = dm_run!(st2, DM.AlterField("sc_book", Juango.Column("title", :string; max_length = 255, unique = true)))
+        @test dm_unique("sc_book", ["title"]) && dm_fails(() -> dm_insert("sc_book", :author_id => aid, :title => "Book"))
+        st2 = dm_run!(st2, DM.AlterField("sc_book", Juango.Column("title", :string; max_length = 255)))
+        @test !dm_unique("sc_book", ["title"])
+        # test_unique_together_with_fk
+        st2 = dm_run!(st2, DM.AlterUniqueTogether("sc_book", [["author_id", "title"]]))
+        @test dm_unique("sc_book", ["author_id", "title"])
+        st2 = dm_run!(st2, DM.AlterUniqueTogether("sc_book", []))
+        @test !dm_unique("sc_book", ["author_id", "title"]) && dm_fk("sc_book", "author_id", "sc_author")
+        # test_rename_keep_null_status, test_rename (data kept)
+        st2 = dm_run!(st2, DM.RenameField("sc_book", "pages", "page_count"))
+        @test dm_cols("sc_book")["page_count"].null && !haskey(dm_cols("sc_book"), "pages")
+        st2 = dm_run!(st2, DM.RenameField("sc_book", "title", "display"))
+        @test only(rows("SELECT display FROM sc_book"))[:display] == "Book"
+        # test_add_indexed_charfield, test_add_unique_charfield, test_text_field_with_db_index
+        st2 = dm_run!(st2, DM.AddField("sc_book", Juango.Column("isbn", :string; max_length = 20, null = true, index = true)),
+                      DM.AddField("sc_book", Juango.Column("code", :string; max_length = 20, null = true, unique = true)),
+                      DM.AddField("sc_book", dmcol("blurb", :text; null = true, index = true)))
+        @test dm_index("sc_book", ["isbn"]) && dm_unique("sc_book", ["code"])
+        @test dm_mysql() || dm_index("sc_book", ["blurb"])
+        # test_remove_indexed_field
+        st2 = dm_run!(st2, DM.RemoveField("sc_book", "isbn"))
+        @test !haskey(dm_cols("sc_book"), "isbn")
+        # test_check_constraints (enforced, and removable)
+        st2 = dm_run!(st2, DM.AddConstraint("sc_book", Juango.ConstraintSpec(:check, "sc_book_pages_positive"; condition = Q(page_count__gte = 0))))
+        @test dm_fails(() -> Juango.execute("UPDATE sc_book SET page_count = -1"))
+        st2 = dm_run!(st2, DM.RemoveConstraint("sc_book", "sc_book_pages_positive"))
+        Juango.execute("UPDATE sc_book SET page_count = -1")
+        @test only(rows("SELECT page_count FROM sc_book"))[:page_count] == -1
+        # test_alter_autofield_pk_to_bigautofield_pk, _to_smallautofield_pk (with a foreign key pointing at it)
+        st2 = dm_run!(st2, DM.AlterPrimaryKey("sc_author", :smallauto))
+        @test dm_fk("sc_book", "author_id", "sc_author")
+        st2 = dm_run!(st2, DM.AlterPrimaryKey("sc_author", :auto))
+        @test dm_fk("sc_book", "author_id", "sc_author") && dm_count("sc_book") == 1
+        # test_db_table (a renamed table keeps its rows and the foreign keys to it)
+        st2 = dm_run!(st2, DM.RenameModel("sc_author", "sc_writer"))
+        @test dm_count("sc_writer") == 1 && dm_fk("sc_book", "author_id", "sc_writer")
+        st2 = dm_run!(st2, DM.RenameModel("sc_writer", "sc_author"))
+        # test_db_comment_table, test_alter_db_comment (PostgreSQL and MySQL keep comments)
+        if Juango.backend() isa Union{Juango.PostgresBackend,Juango.MySQLBackend}
+            st2 = dm_run!(st2, DM.AlterModelTableComment("sc_book", "Books"), DM.AlterField("sc_book", Juango.Column("display", :string; max_length = 255, comment = "Shown")))
+            @test st2["sc_book"].comment == "Books"
+        end
+    finally
+        drop("sc_book", "sc_author", "sc_writer")
+    end
+    # test_foreign_key_index_long_names_regression, test_add_foreign_key_long_names (names past 63 bytes)
+    long1, long2 = "sc_" * "a"^55, "sc_" * "b"^55
+    st = dm_run!(S, DM.CreateModel(long1; columns = [dmstr("name")]),
+                 DM.CreateModel(long2; columns = [dmcol("author_with_an_extremely_long_column_name_for_testing_id", :fk; references = long1, index = true)]))
+    try
+        @test dm_fk(long2, "author_with_an_extremely_long_column_name_for_testing_id", long1)
+        @test all(k -> ncodeunits(k) <= 64, keys(dm_cons(long2)))
+    finally
+        drop(long2, long1)
+    end
+    # test_order_index (a descending index)
+    st = dm_run!(S, DM.CreateModel("sc_ordered"; columns = [dmstr("name")]))
+    try
+        st = dm_run!(st, DM.AddIndex("sc_ordered", Juango.Index("-name"; name = "sc_ordered_name_desc")))
+        @test dm_named("sc_ordered", "sc_ordered_name_desc")
+    finally
+        drop("sc_ordered")
+    end
+    # not translated: the m2m tests (join tables are tables, covered above); proxy, o2o-to-autofield,
+    # db_on_delete and ForeignObject tests; the array, JSON, collation and generated-field tests (in
+    # migrations.jl and db.jl); nulls_distinct, deferrable and covering constraints (#232); changing a
+    # primary key's type (#259); tests of the schema editor's Python API (context manager, deferred SQL)
+end

@@ -102,16 +102,17 @@ drop_index_stmt(b::MySQLBackend, table, name) = "DROP INDEX IF EXISTS $(quote_na
 function alter_column_sql(b::MySQLBackend, old::Table, new::Table, name, deferred::Vector{String})
     c0, c1 = getcolumn(old, name), getcolumn(new, name)
     t = quote_name(b, new.name)
-    stmts = ["ALTER TABLE $t DROP FOREIGN KEY $(quote_name(b, fk))" for fk in foreign_key_names(b, new.name, name)
-             if c0.references != c1.references || full_column_type(b, c0) != full_column_type(b, c1)]
     reindex = (c0.unique, c0.index) != (c1.unique, c1.index) || full_column_type(b, c0) != full_column_type(b, c1)
+    # (the key goes while its column's indexes are rebuilt: MySQL won't drop the index a key uses)
+    refk = c0.references != c1.references || reindex
+    stmts = ["ALTER TABLE $t DROP FOREIGN KEY $(quote_name(b, fk))" for fk in foreign_key_names(b, new.name, name) if refk]
     reindex && append!(stmts, drop_index_sql(b, old.name, c0))
     if c0.null && !c1.null && (bf = backfill_value(c1)) !== nothing
         push!(stmts, "UPDATE $t SET $(quote_name(b, name)) = $(lit(b, bf)) WHERE $(quote_name(b, name)) IS NULL")
     end
     push!(stmts, "ALTER TABLE $t MODIFY COLUMN " * column_sql(b, c1; inline_fk = false))
     reindex && append!(stmts, index_sql(b, new.name, c1; if_not_exists = false))
-    if c1.references !== nothing && (c0.references != c1.references || column_type_for(b, c0) != column_type_for(b, c1))
+    if c1.references !== nothing && refk
         append!(deferred, fk_sql(b, new.name, c1))
     end
     stmts
