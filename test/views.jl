@@ -996,7 +996,7 @@ Juango.backend_has_perm(::OwnArticlesBackend, u, perm, obj) =
         h = make_password("hunter2")
         @test startswith(h, "scrypt\$1024\$") && check_password("hunter2", h)
     finally
-        old_hashers === nothing ? configure!(PASSWORD_HASHERS = Any[Juango.PBKDF2Hasher()]) : configure!(PASSWORD_HASHERS = old_hashers)
+        old_hashers === nothing ? delete!(Juango.SETTINGS, :PASSWORD_HASHERS) : configure!(PASSWORD_HASHERS = old_hashers)
     end
 
     # LoginRequiredMiddleware

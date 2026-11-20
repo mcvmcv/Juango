@@ -40,7 +40,7 @@ mutable struct Field
     auto_now::Bool
     auto_now_add::Bool
     verbose_name::AbstractString      # may be gettext_lazy(...)
-    help_text::AbstractString
+    help_text::Union{AbstractString,SafeString}     # (SafeString: HTML, e.g. the password validators' rules)
     validators::Vector{Any}
     widget::Any                       # nothing, a Symbol (:textarea, :password, ...) or a widget value
     editable::Bool

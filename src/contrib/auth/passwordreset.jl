@@ -104,6 +104,7 @@ function UserCreationForm(data = nothing; fields = nothing, instance = nothing, 
         push!(f.fields, fld)
     end
     f.fields[end].help_text = "Enter the same password as before, for verification."
+    f.fields[end-1].help_text = password_validators_help_text_html()       # (the validators' rules, as Django's)
     f.name = "UserCreationForm"
     f
 end

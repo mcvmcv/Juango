@@ -48,7 +48,47 @@ function verify_password(h::PBKDF2Hasher, raw::AbstractString, encoded::Abstract
     iters === nothing && return false
     consteq(encode_password(h, raw, parts[3]; iterations = iters), encoded)
 end
-must_update(h::PBKDF2Hasher, encoded) = (p = split(encoded, '$'); length(p) < 2 || tryparse(Int, p[2]) != iterations_of(h))
+# (other iterations, or a salt with too little entropy: Django's must_update)
+must_update(h::PBKDF2Hasher, encoded) = (p = split(encoded, '$'); length(p) < 3 || tryparse(Int, p[2]) != iterations_of(h) || weak_salt(p[3]))
+
+"""
+Whether a salt has less than 128 bits of entropy (as Django's `must_update`), counting it as
+drawn from Juango's (and Django's) 62 letters and digits.
+"""
+weak_salt(salt) = length(salt) * log2(62) < 128
+
+"""
+    PBKDF2SHA1Hasher(; iterations = nothing)
+
+PBKDF2 with SHA-1 (Django's `PBKDF2SHA1PasswordHasher`), to verify hashes made with it:
+`pbkdf2_sha1\$<iterations>\$<salt>\$<hash>`.
+"""
+Base.@kwdef struct PBKDF2SHA1Hasher <: PasswordHasher
+    iterations::Union{Nothing,Int} = nothing
+end
+algorithm(::PBKDF2SHA1Hasher) = "pbkdf2_sha1"
+iterations_of(h::PBKDF2SHA1Hasher) = something(h.iterations, settings.PASSWORD_ITERATIONS)
+function pbkdf2_sha1(password::AbstractVector{UInt8}, salt::AbstractVector{UInt8}, iterations::Int)
+    password = Vector{UInt8}(password)
+    u = hmac_sha1(password, vcat(salt, UInt8[0, 0, 0, 1]))
+    t = copy(u)
+    for _ in 2:iterations
+        u = hmac_sha1(password, u)
+        t .⊻= u
+    end
+    t
+end
+function encode_password(h::PBKDF2SHA1Hasher, raw::AbstractString, salt::AbstractString; iterations = iterations_of(h))
+    "pbkdf2_sha1\$$iterations\$$salt\$$(base64encode(pbkdf2_sha1(codeunits(raw), codeunits(salt), iterations)))"
+end
+function verify_password(h::PBKDF2SHA1Hasher, raw::AbstractString, encoded::AbstractString)
+    parts = split(encoded, '$')
+    (length(parts) == 4 && parts[1] == "pbkdf2_sha1") || return false
+    iters = tryparse(Int, parts[2])
+    iters === nothing && return false
+    consteq(encode_password(h, raw, parts[3]; iterations = iters), encoded)
+end
+must_update(h::PBKDF2SHA1Hasher, encoded) = (p = split(encoded, '$'); length(p) < 3 || tryparse(Int, p[2]) != iterations_of(h) || weak_salt(p[3]))
 
 "PBKDF2-HMAC-SHA256 with any output length (scrypt uses one iteration and long outputs)."
 function pbkdf2_sha256(password::AbstractVector{UInt8}, salt::AbstractVector{UInt8}, iterations::Int, dklen::Int)
@@ -139,7 +179,7 @@ function scrypt(password::AbstractVector{UInt8}, salt::AbstractVector{UInt8}, N:
 end
 
 """
-    ScryptPasswordHasher(; work_factor = 2^14, block_size = 8, parallelism = 1)
+    ScryptPasswordHasher(; work_factor = 2^14, block_size = 8, parallelism = 5)
 
 scrypt, memory-hard like Argon2 (Django's `ScryptPasswordHasher`; about 16 MB per hash with
 the defaults). Stored as `scrypt\$<N>\$<salt>\$<r>\$<p>\$<hash>`.
@@ -147,7 +187,7 @@ the defaults). Stored as `scrypt\$<N>\$<salt>\$<r>\$<p>\$<hash>`.
 Base.@kwdef struct ScryptPasswordHasher <: PasswordHasher
     work_factor::Int = 2^14
     block_size::Int = 8
-    parallelism::Int = 1
+    parallelism::Int = 5        # (Django's)
 end
 algorithm(::ScryptPasswordHasher) = "scrypt"
 function encode_password(h::ScryptPasswordHasher, raw::AbstractString, salt::AbstractString;
@@ -564,7 +604,13 @@ salt_for(::PasswordHasher) = random_string(22)
 
 # --- choosing a hasher -------------------------------------------------------------------------------
 
-password_hashers() = collect(get(settings, :PASSWORD_HASHERS, Any[PBKDF2Hasher()]))
+"""
+The hashers Juango accepts (`PASSWORD_HASHERS`); the first hashes new passwords. By default
+Django's list, so hashes from a Django database verify: PBKDF2-SHA256, PBKDF2-SHA1, Argon2,
+bcrypt-SHA256 and scrypt.
+"""
+password_hashers() = collect(get(settings, :PASSWORD_HASHERS, DEFAULT_PASSWORD_HASHERS))
+const DEFAULT_PASSWORD_HASHERS = Any[PBKDF2Hasher(), PBKDF2SHA1Hasher(), Argon2Hasher(), BCryptSHA256Hasher(), ScryptPasswordHasher()]
 "The hasher that made an encoded password (among `PASSWORD_HASHERS`), or `nothing`."
 function identify_hasher(encoded::AbstractString)
     alg = first(split(encoded, '$'; limit = 2))
@@ -578,9 +624,19 @@ end
 Hash a password in Django's format (by default `pbkdf2_sha256\$iterations\$salt\$hash`).
 """
 function make_password(raw::AbstractString; hasher = nothing, iterations = nothing, salt = nothing)
+    if hasher isa AbstractString                     # by its algorithm's name, among PASSWORD_HASHERS (as Django's)
+        i = findfirst(h -> algorithm(h) == hasher, password_hashers())
+        i === nothing && throw(ArgumentError("Unknown password hashing algorithm '$hasher'. Did you specify it in the PASSWORD_HASHERS setting?"))
+        hasher = password_hashers()[i]
+    end
     h = something(hasher, iterations === nothing ? nothing : PBKDF2Hasher(iterations = iterations), first(password_hashers()))
     encode_password(h, raw, something(salt, salt_for(h)))
 end
+"`make_password(nothing)`: an unusable password (`!` and 40 random characters), as Django's."
+make_password(::Nothing; kw...) = UNUSABLE_PASSWORD_PREFIX * random_string(40)
+const UNUSABLE_PASSWORD_PREFIX = "!"
+"Whether an encoded password can match one (not an unusable `!...` one), Django's is_password_usable."
+is_password_usable(encoded) = encoded === nothing || !startswith(string(encoded), UNUSABLE_PASSWORD_PREFIX)
 
 """
     check_password(raw, encoded; setter = nothing) -> Bool
@@ -589,7 +645,11 @@ Whether `raw` matches. When it does but was hashed by an older hasher or with ot
 settings than the first of `PASSWORD_HASHERS`, `setter(raw)` is called so the caller can
 store a new hash.
 """
+check_password(::Nothing, encoded; kw...) = false
+check_password(raw, ::Nothing; kw...) = false
+check_password(::Nothing, ::Nothing; kw...) = false
 function check_password(raw::AbstractString, encoded::AbstractString; setter = nothing)
+    is_password_usable(encoded) || return false
     h = identify_hasher(encoded)
     h === nothing && return false
     ok = verify_password(h, raw, encoded)
@@ -650,10 +710,32 @@ password_error(v::CommonPasswordValidator, p, user) =
 Not too similar to the user's attributes (`username`, `first_name`, `last_name`, `email` and
 its parts): Ratcliff-Obershelp similarity at least `max_similarity` fails.
 """
-Base.@kwdef struct UserAttributeSimilarityValidator
-    user_attributes::Vector{Symbol} = [:username, :first_name, :last_name, :email]
-    max_similarity::Float64 = 0.7
+struct UserAttributeSimilarityValidator
+    user_attributes::Vector{Symbol}
+    max_similarity::Float64
+    function UserAttributeSimilarityValidator(; user_attributes = [:username, :first_name, :last_name, :email], max_similarity = 0.7)
+        max_similarity < 0.1 && throw(ArgumentError("max_similarity must be at least 0.1"))     # (as Django's)
+        new(Symbol.(collect(user_attributes)), Float64(max_similarity))
+    end
 end
+
+"An upper bound of `similarity` (Python's SequenceMatcher.quick_ratio): the characters in common, as Django compares."
+function quick_ratio(a::AbstractString, b::AbstractString)
+    total = length(a) + length(b)
+    total == 0 && return 1.0
+    counts = Dict{Char,Int}()
+    for c in b
+        counts[c] = get(counts, c, 0) + 1
+    end
+    m = 0
+    for c in a
+        n = get(counts, c, 0)
+        n > 0 && (m += 1; counts[c] = n - 1)
+    end
+    2m / total
+end
+"A value much shorter than the password can't be similar enough to matter (Django's exceeds_maximum_length_ratio)."
+exceeds_length_ratio(p, max_similarity, v) = (n = length(p); m = length(v); n >= 10m && m < max_similarity / 2 * n)
 
 "Ratcliff-Obershelp similarity of two strings, as Python's difflib.SequenceMatcher.ratio."
 function similarity(a::AbstractString, b::AbstractString)
@@ -688,9 +770,10 @@ function password_error(v::UserAttributeSimilarityValidator, p, user)
     for a in v.user_attributes
         val = try getproperty(user, a) catch; nothing end
         (val isa AbstractString && !isempty(val)) || continue
-        parts = vcat([lowercase(val)], split(lowercase(val), r"\W+"; keepempty = false))
+        parts = vcat(split(lowercase(val), r"\W+"), [lowercase(val)])
         for part in parts
-            if similarity(pl, part) >= v.max_similarity
+            exceeds_length_ratio(pl, v.max_similarity, part) && continue
+            if quick_ratio(pl, part) >= v.max_similarity
                 f = user isa Model ? findfield(modelmeta(typeof(user)), a) : nothing
                 return interpolate(gettext("The password is too similar to the %(verbose_name)s."),
                                    Dict("verbose_name" => f === nothing ? string(a) : lowercase(label(f))))
@@ -701,15 +784,47 @@ function password_error(v::UserAttributeSimilarityValidator, p, user)
 end
 
 default_password_validators() = Any[MinimumLengthValidator(), NumericPasswordValidator()]
+"The configured password validators (`AUTH_PASSWORD_VALIDATORS`)."
+password_validators() = collect(Any, get(settings, :AUTH_PASSWORD_VALIDATORS, default_password_validators()))
 
 """
-    validate_password(password; user = nothing) -> Vector{String}
-
-The messages of the `AUTH_PASSWORD_VALIDATORS` the password fails (empty when it passes).
+A validator's help text for a password field (Django's `get_help_text`); a validator of your own
+adds a method `password_help_text(v)`.
 """
-function validate_password(password::AbstractString; user = nothing)
+password_help_text(v) = nothing
+password_help_text(v::MinimumLengthValidator) =
+    (n = something(v.min_length, settings.PASSWORD_MIN_LENGTH);
+     interpolate(ngettext("Your password must contain at least %(min_length)d character.",
+                          "Your password must contain at least %(min_length)d characters.", n), Dict("min_length" => n)))
+password_help_text(::NumericPasswordValidator) = gettext("Your password can’t be entirely numeric.")
+password_help_text(::CommonPasswordValidator) = gettext("Your password can’t be a commonly used password.")
+password_help_text(::UserAttributeSimilarityValidator) = gettext("Your password can’t be too similar to your other personal information.")
+
+"The validators' help texts (Django's password_validators_help_texts)."
+password_validators_help_texts(validators = password_validators()) =
+    String[string(h) for h in (password_help_text(v) for v in validators) if h !== nothing]
+"""The help texts as an HTML list, escaped (`""` with none), Django's password_validators_help_text_html."""
+function password_validators_help_text_html(validators = password_validators())
+    ts = password_validators_help_texts(validators)
+    isempty(ts) ? SafeString("") : SafeString("<ul>" * join("<li>" * escape_html(t) * "</li>" for t in ts) * "</ul>")
+end
+
+"""
+Tell the validators a user's password changed (Django's `password_changed`): a validator that
+keeps a history adds a method `password_changed!(v, password, user)`.
+"""
+password_changed!(v, password, user) = nothing
+password_changed(password::AbstractString; user = nothing, validators = password_validators()) =
+    (foreach(v -> password_changed!(v, password, user), validators); nothing)
+
+"""
+    validate_password(password; user = nothing, validators = AUTH_PASSWORD_VALIDATORS) -> Vector{String}
+
+The messages of the validators the password fails (empty when it passes).
+"""
+function validate_password(password::AbstractString; user = nothing, validators = password_validators())
     msgs = String[]
-    for v in get(settings, :AUTH_PASSWORD_VALIDATORS, default_password_validators())
+    for v in validators
         e = password_error(v, password, user)
         e === nothing || push!(msgs, string(e))
     end

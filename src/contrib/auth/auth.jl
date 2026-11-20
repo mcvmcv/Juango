@@ -1,22 +1,37 @@
 # Authentication -------------------------------------------------------------------------------
 
+"""
+    UnicodeUsernameValidator(value)    ASCIIUsernameValidator(value)
+
+Django's username validators (for a field's `validators`): letters of any script (or only
+unaccented a-z and A-Z), digits and @/./+/-/_, and nothing after them, not even a newline.
+"""
+UnicodeUsernameValidator(v) = occursin(r"^[\w.@+-]+\z", v) ||
+    gettext("Enter a valid username. This value may contain only letters, numbers, and @/./+/-/_ characters.")
+ASCIIUsernameValidator(v) = occursin(r"^[\w.@+-]+\z"a, v) ||
+    gettext("Enter a valid username. This value may contain only unaccented lowercase a-z and uppercase A-Z letters, numbers, and @/./+/-/_ characters.")
+
 @abstract_model struct AbstractUser
-    username = CharField(max_length = 150, unique = true,
+    # (Django's verbose names and help texts)
+    username = CharField(max_length = 150, unique = true, verbose_name = "username",
                          help_text = "Required. 150 characters or fewer. Letters, digits and @/./+/-/_ only.",
-                         validators = [v -> occursin(r"^[\w.@+-]+$", v) || gettext("Enter a valid username.")])
-    password = CharField(max_length = 128)
-    email = EmailField(blank = true)
-    first_name = CharField(max_length = 150, blank = true)
-    last_name = CharField(max_length = 150, blank = true)
-    is_staff = BooleanField(default = false, help_text = "Designates whether the user can log into the admin site.")
-    is_superuser = BooleanField(default = false)
-    is_active = BooleanField(default = true)
-    date_joined = DateTimeField(auto_now_add = true)
-    last_login = DateTimeField(null = true, blank = true, editable = false)
-    groups = ManyToManyField(:Group; blank = true, related_name = :user_set,
-                             help_text = "The user gets every permission of these groups.")
+                         validators = [UnicodeUsernameValidator])
+    password = CharField(max_length = 128, verbose_name = "password")
+    email = EmailField(blank = true, verbose_name = "email address")
+    first_name = CharField(max_length = 150, blank = true, verbose_name = "first name")
+    last_name = CharField(max_length = 150, blank = true, verbose_name = "last name")
+    is_staff = BooleanField(default = false, verbose_name = "staff status",
+                            help_text = "Designates whether the user can log into this admin site.")
+    is_superuser = BooleanField(default = false, verbose_name = "superuser status",
+                                help_text = "Designates that this user has all permissions without explicitly assigning them.")
+    is_active = BooleanField(default = true, verbose_name = "active",
+                             help_text = "Designates whether this user should be treated as active. Unselect this instead of deleting accounts.")
+    date_joined = DateTimeField(auto_now_add = true, verbose_name = "date joined")
+    last_login = DateTimeField(null = true, blank = true, editable = false, verbose_name = "last login")
+    groups = ManyToManyField(:Group; blank = true, related_name = :user_set, verbose_name = "groups",
+                             help_text = "The groups this user belongs to. A user will get all permissions granted to each of their groups.")
     user_permissions = ManyToManyField(:Permission; blank = true, related_name = :user_set,
-                                       verbose_name = "User permissions")
+                                       verbose_name = "user permissions", help_text = "Specific permissions for this user.")
     Meta(ordering = ["username"])
 end
 
@@ -126,7 +141,8 @@ check_password(u::AbstractUser, raw::AbstractString) =
     check_password(raw, u.password; setter = r -> (u.id === nothing ? set_password!(u, r) : (set_password!(u, r); save!(u))))
 
 "Set (hash) a user's password. Call `save!(user)` afterwards."
-set_password!(u::AbstractUser, raw::AbstractString) = (u.password = make_password(raw); u)
+# (the validators hear of it, for a password history: password_changed, as Django's save does)
+set_password!(u::AbstractUser, raw::AbstractString) = (u.password = make_password(raw); password_changed(raw; user = u); u)
 "Mark the password as unusable."
 set_unusable_password!(u::AbstractUser) = (u.password = "!" * random_string(40); u)
 has_usable_password(u::AbstractUser) = !startswith(u.password, "!") && identify_hasher(u.password) !== nothing

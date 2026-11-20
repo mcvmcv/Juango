@@ -146,7 +146,7 @@ end
         @test [x["text"] for x in js["results"]] == ["Adm Ann"]
         r = get(c, "/admin/project/article/")
         y = year(now())
-        @test occursin(">$y</a>", text(r))
+        @test occursin(">$y</a>", text(r)) || occursin("created__month=$(month(now()))&amp;created__year=$y", text(r))   # (one year: months, as Django's)
         r = get(c, "/admin/project/article/?created__year=$y")
         @test occursin("‹ All dates", text(r)) && occursin(Dates.monthname(month(now())), text(r))
         @test !occursin("Inline two", text(get(c, "/admin/project/article/?created__year=1999")))
