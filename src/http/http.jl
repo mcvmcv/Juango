@@ -404,8 +404,8 @@ function set_cookie!(r::HttpResponse, name, value; max_age = nothing, expires = 
     push!(r.cookies, s)
     r
 end
-delete_cookie!(r::HttpResponse, name; path = "/", domain = nothing) =
-    set_cookie!(r, name, ""; max_age = 0, expires = DateTime(1970, 1, 1), path = path, domain = domain)
+delete_cookie!(r::HttpResponse, name; path = "/", domain = nothing, samesite = "Lax") =
+    set_cookie!(r, name, ""; max_age = 0, expires = DateTime(1970, 1, 1), path = path, domain = domain, samesite = samesite)
 
 signed_cookie_salt(name, salt) = string("juango.signed_cookies.", name, salt)
 

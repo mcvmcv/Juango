@@ -23,10 +23,14 @@ function SessionMiddleware(get_response)
         resp = get_response(req)
         s = req.session
         if s isa Session
+            st = settings
+            path, domain = get(st, :SESSION_COOKIE_PATH, "/"), get(st, :SESSION_COOKIE_DOMAIN, nothing)
             if s.flushed && haskey(req.COOKIES, name)
-                delete_cookie!(resp, name)
+                delete_cookie!(resp, name; path = path, domain = domain)
             end
-            if s.modified && !(resp.status >= 500)
+            # (SESSION_SAVE_EVERY_REQUEST: a session with data is saved, and its cookie renewed, every time)
+            save = s.modified || (get(st, :SESSION_SAVE_EVERY_REQUEST, false) && session_loaded(s) && !isempty(s.data))
+            if save && !(resp.status >= 500)
                 if isempty(s.data) && s.key === nothing
                     # nothing to store
                 else
@@ -34,8 +38,11 @@ function SessionMiddleware(get_response)
                     # browsers drop cookies over about 4 KB, which loses a signed-cookie session silently
                     ncodeunits(s.key) > 4000 && log!("juango.security.SessionCookieTooLarge", :warning,
                         "The session cookie is $(ncodeunits(s.key)) bytes: browsers may drop it. Store less in signed-cookie sessions."; request = req)
-                    set_cookie!(resp, name, s.key; max_age = settings.SESSION_COOKIE_AGE, httponly = true,
-                                secure = settings.SESSION_COOKIE_SECURE)
+                    browser = get_expire_at_browser_close(s)       # (no Max-Age: gone when the browser closes)
+                    age = browser ? nothing : get_expiry_age(s)
+                    set_cookie!(resp, name, s.key; max_age = age, expires = age === nothing ? nothing : now(Dates.UTC) + Second(age),
+                                httponly = get(st, :SESSION_COOKIE_HTTPONLY, true), secure = st.SESSION_COOKIE_SECURE,
+                                samesite = get(st, :SESSION_COOKIE_SAMESITE, "Lax"), path = path, domain = domain)
                 end
             end
             s.modified && patch_vary!(resp, "Cookie")

@@ -73,6 +73,60 @@ Base.empty!(s::Session) = (empty!(s.data); s.modified = true; s)
 
 session_expiry() = timezone_now() + Second(settings.SESSION_COOKIE_AGE)
 
+# --- per-session expiry (Django's set_expiry), kept in the data as "_session_expiry" -----------------
+
+"""
+    set_expiry!(session, value)
+
+When the session expires, as Django's `set_expiry`: a number of seconds (or a `Dates.Period`) of
+inactivity, a date and time, `0` for when the browser closes, `nothing` for the default
+(`SESSION_COOKIE_AGE`, or the browser closing with `SESSION_EXPIRE_AT_BROWSER_CLOSE`).
+"""
+function set_expiry!(s::Session, value)
+    if value === nothing
+        delete!(s, "_session_expiry")
+    elseif value isa Dates.Period
+        s["_session_expiry"] = round(Int, Dates.value(convert(Dates.Millisecond, value)) / 1000)
+    elseif value isa Integer
+        s["_session_expiry"] = Int(value)
+    else                                           # a DateTime or ZonedDateTime: kept as ISO text
+        s["_session_expiry"] = string(value isa Dates.DateTime && settings.USE_TZ ? make_aware(value) : value)
+    end
+    s
+end
+parse_expiry(v::Integer) = v
+parse_expiry(v::AbstractString) = (z = tryparse(TimeZones.ZonedDateTime, v); z === nothing ? something(tryparse(DateTime, v), nothing) : z)
+parse_expiry(v) = nothing
+
+"Seconds until the session expires (Django's get_expiry_age)."
+function get_expiry_age(s::Session; modification = timezone_now())
+    e = parse_expiry(get(s, "_session_expiry", nothing))
+    e === nothing && return settings.SESSION_COOKIE_AGE
+    e isa Integer && return e
+    m = e isa TimeZones.ZonedDateTime && !(modification isa TimeZones.ZonedDateTime) ? make_aware(modification) :
+        !(e isa TimeZones.ZonedDateTime) && modification isa TimeZones.ZonedDateTime ? DateTime(modification) : modification
+    round(Int, Dates.value(convert(Dates.Millisecond, e - m)) / 1000)
+end
+"When the session expires (Django's get_expiry_date)."
+function get_expiry_date(s::Session; modification = timezone_now())
+    e = parse_expiry(get(s, "_session_expiry", nothing))
+    e === nothing || e isa Integer || return e
+    modification + Second(e === nothing ? settings.SESSION_COOKIE_AGE : e)
+end
+"Whether the session's cookie lasts only until the browser closes (Django's get_expire_at_browser_close)."
+function get_expire_at_browser_close(s::Session)
+    e = get(s, "_session_expiry", nothing)
+    e === nothing ? get(settings, :SESSION_EXPIRE_AT_BROWSER_CLOSE, false) : e == 0
+end
+
+"Whether the session has no key and no data (Django's is_empty)."
+is_empty(s::Session) = s.key === nothing && isempty(s.data)
+
+"Django's test cookie: set it, then see on a later request whether the browser kept cookies."
+set_test_cookie!(s::Session) = (s["testcookie"] = "worked"; s)
+test_cookie_worked(s::Session) = get(s, "testcookie", nothing) == "worked"
+delete_test_cookie!(s::Session) = delete!(s, "testcookie")
+
 session_cache_key(k) = "juango.session:" * k
 cache_sessions() = settings.SESSION_ENGINE in (:cache, :cached_db)
 db_sessions() = settings.SESSION_ENGINE in (:db, :cached_db)
@@ -98,7 +152,7 @@ function save_file_session!(s::Session)
     mkpath(dir)
     f = session_file(s.key)
     tmp = f * ".tmp" * random_string(6)
-    write(tmp, JSON.json(Dict("expire" => time() + settings.SESSION_COOKIE_AGE, "data" => s.data)))
+    write(tmp, JSON.json(Dict("expire" => time() + get_expiry_age(s), "data" => s.data)))
     mv(tmp, f; force = true)                     # atomic: readers never see half a file
 end
 
@@ -107,6 +161,8 @@ Load a session from the store `SESSION_ENGINE` picks (see the top of sessions.jl
 """
 function load_session(key::Union{Nothing,AbstractString})
     key === nothing && return Session()
+    # (a key too short to be one Juango made is a new, empty session, as Django's)
+    !cookie_sessions() && length(key) < 8 && return Session()
     if cookie_sessions()
         data = try signing_loads(key; salt = SESSION_SALT, max_age = settings.SESSION_COOKIE_AGE) catch; nothing end
         return data isa AbstractDict ? Session(String(key), plainjson(data), false, false) : Session()
@@ -142,12 +198,12 @@ function save_session!(s::Session)
         s.modified = false
         return s
     end
-    cache_sessions() && cache_set(session_cache_key(s.key), s.data; timeout = settings.SESSION_COOKIE_AGE)
+    cache_sessions() && cache_set(session_cache_key(s.key), s.data; timeout = get_expiry_age(s))
     db_sessions() || (s.modified = false; return s)
     rec = first(filter(objects(SessionRecord); session_key = s.key))
     rec === nothing && (rec = SessionRecord(session_key = s.key))
     rec.session_data = JSON.json(s.data)
-    rec.expire_date = session_expiry()
+    rec.expire_date = get_expiry_date(s)
     save!(rec)
     s.modified = false
     s

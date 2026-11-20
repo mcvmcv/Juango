@@ -23,7 +23,8 @@ export Request, HttpResponse, JsonResponse, HttpResponseRedirect, HttpResponsePe
        HttpResponseNotFound, HttpResponseForbidden, HttpResponseBadRequest, HttpResponseNotAllowed,
        HttpResponseGone, HttpResponseNotModified, HttpResponseServerError, set_signed_cookie!, get_signed_cookie,
        StreamingHttpResponse, FileResponse, protected_media, content_disposition, TemplateResponse, Http404, PermissionDenied, BadRequest, QueryDict, getlist,
-       set_cookie!, delete_cookie!, getheader, setheader!, json_body
+       set_cookie!, delete_cookie!, getheader, setheader!, json_body,
+       set_expiry!, get_expiry_age, get_expiry_date, get_expire_at_browser_close, set_test_cookie!, test_cookie_worked, delete_test_cookie!
 export EventStreamResponse, sse_event, websocket, ws_send, ws_receive, ws_close, ws_isopen
 # urls
 export path, re_path, include_urls, reverse_url, resolve
