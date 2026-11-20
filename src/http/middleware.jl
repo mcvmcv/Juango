@@ -54,20 +54,46 @@ end
 patch_vary!(resp, h) = (v = getheader(resp, "Vary"); v === nothing ? setheader!(resp, "Vary", h) :
                         occursin(h, v) ? resp : setheader!(resp, "Vary", v * ", " * h))
 
-"Handles `APPEND_SLASH`: redirects `/foo` to `/foo/` when only the latter matches."
+"""
+A path as it goes in a Location header: quoted again (`#`, spaces), and a leading `//` written
+`/%2F`, so the redirect stays on this site (Django's escape_leading_slashes).
+"""
+function redirect_path(path::AbstractString)
+    q = join([path_quote(seg) for seg in split(path, '/')], '/')
+    startswith(q, "//") ? "/%2F" * q[3:end] : q
+end
+
+"""
+Django's CommonMiddleware: refuses user agents matching `DISALLOWED_USER_AGENTS` (403), adds
+`www.` to the host with `PREPEND_WWW`, redirects `/foo` to `/foo/` with `APPEND_SLASH` when only
+the latter matches, and gives a buffered response a Content-Length.
+"""
 function CommonMiddleware(get_response)
     function (req::Request)
-        if settings.APPEND_SLASH && req.resolver_match === nothing && !endswith(req.path, "/") &&
-           (m = resolve(req.path * "/"); m !== nothing && !haskey(NO_APPEND_SLASH, m.view))
-            if req.method in ("POST", "PUT", "PATCH") && settings.DEBUG
-                error("You called this URL via $(req.method), but the URL doesn't end in a slash and APPEND_SLASH is set. " *
-                      "Juango can't redirect to the slash URL while maintaining $(req.method) data. " *
-                      "Change your form to point to $(req.path)/ (note the trailing slash).")
-            end
-            q = isempty(req.query_string) ? "" : "?" * req.query_string
-            return HttpResponsePermanentRedirect(req.path * "/" * q)
+        ua = header(req, "user-agent")
+        if ua !== nothing && any(r -> occursin(r isa Regex ? r : Regex(string(r)), ua), get(settings, :DISALLOWED_USER_AGENTS, []))
+            return HttpResponseForbidden("<h1>Forbidden</h1>")
         end
-        get_response(req)
+        host = get_host(req)
+        www = get(settings, :PREPEND_WWW, false) && !isempty(host) && !startswith(host, "www.")
+        slash = settings.APPEND_SLASH && req.resolver_match === nothing && !endswith(req.path, "/") &&
+                (m = resolve(req.path * "/"); m !== nothing && !haskey(NO_APPEND_SLASH, m.view))
+        if slash && req.method in ("POST", "PUT", "PATCH") && settings.DEBUG
+            error("You called this URL via $(req.method), but the URL doesn't end in a slash and APPEND_SLASH is set. " *
+                  "Juango can't redirect to the slash URL while maintaining $(req.method) data. " *
+                  "Change your form to point to $(req.path)/ (note the trailing slash).")
+        end
+        if www || slash
+            q = isempty(req.query_string) ? "" : "?" * req.query_string
+            loc = redirect_path(req.path * (slash ? "/" : "")) * q
+            www && (loc = (is_secure(req) ? "https://" : "http://") * "www." * host * loc)
+            return HttpResponsePermanentRedirect(loc)
+        end
+        resp = get_response(req)
+        # (as Django's: a buffered response says how long it is)
+        resp isa HttpResponse && !is_streaming(resp) && !hasheader(resp, "Content-Length") &&
+            setheader!(resp, "Content-Length", string(length(resp.body)))
+        resp
     end
 end
 

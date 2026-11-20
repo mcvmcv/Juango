@@ -1954,7 +1954,7 @@ end
 configure!(MIDDLEWARE = [Juango.default_settings()[:MIDDLEWARE]..., Timing])
 ```
 
-The defaults are security headers, sessions, `APPEND_SLASH`, CSRF, authentication and htmx (`Vary: HX-Request` and out-of-band messages). Also available:
+The defaults are security headers, sessions, `APPEND_SLASH`, CSRF, authentication and htmx (`Vary: HX-Request` and out-of-band messages). The common middleware also does Django's `PREPEND_WWW` and `DISALLOWED_USER_AGENTS` (regexes refused with 403), and gives buffered responses a `Content-Length`. Also available:
 
 - `GZipMiddleware` compresses responses of 200 bytes or more for clients that accept gzip, with random padding in the gzip header against BREACH (as Django does). Put it first. Streaming responses are compressed chunk by chunk, each chunk flushed so it still goes out at once.
 - `BrokenLinkEmailsMiddleware` emails `MANAGERS` (via `mail_managers`) when a page linked from somewhere returns 404, unless `DEBUG` is on. Links from your own site are reported as broken internal links. Like Django it ignores requests without a referer, search engines, and paths matching `IGNORABLE_404_URLS` regexes.
