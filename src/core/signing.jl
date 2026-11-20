@@ -18,8 +18,13 @@ function b64url_decode(s::AbstractString)
     t *= repeat("=", mod(-length(t), 4))
     base64decode(t)
 end
-signature(value, salt) = b64url(hmac_sha256(Vector{UInt8}(codeunits(salt * "signer" * string(settings.SECRET_KEY))),
-                                            Vector{UInt8}(codeunits(value))))
+signature(value, salt; key = settings.SECRET_KEY) = b64url(hmac_sha256(Vector{UInt8}(codeunits(salt * "signer" * string(key))),
+                                                                        Vector{UInt8}(codeunits(value))))
+"""
+The keys a signature may have been made with: `SECRET_KEY`, then `SECRET_KEY_FALLBACKS` (Django's:
+list the old key there when rotating it, so what it signed stays valid until it's removed).
+"""
+verification_keys() = vcat([settings.SECRET_KEY], collect(get(settings, :SECRET_KEY_FALLBACKS, String[])))
 
 "Append a signature: `sign_value(\"hello\") == \"hello:<signature>\"` (keyed by SECRET_KEY and `salt`)."
 sign_value(value::AbstractString; salt = "juango.signing") = value * ":" * signature(value, salt)
@@ -28,7 +33,7 @@ function unsign_value(signed::AbstractString; salt = "juango.signing")
     i = findlast(':', signed)
     i === nothing && throw(BadSignature("no signature"))
     v, sig = signed[1:prevind(signed, i)], signed[nextind(signed, i):end]
-    consteq(sig, signature(v, salt)) || throw(BadSignature("signature does not match"))
+    any(k -> consteq(sig, signature(v, salt; key = k)), verification_keys()) || throw(BadSignature("signature does not match"))
     v
 end
 

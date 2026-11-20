@@ -1689,7 +1689,7 @@ mail_admins("Disk almost full", details)          # to settings.ADMINS = [("Name
 - **Tests.** The test `Client` switches `:smtp` to `:locmem`, so tests never send real mail and can inspect `outbox`.
 - **Errors.** With `DEBUG = false`, unhandled errors are mailed to `ADMINS`.
 - **Password reset.** `auth_urls()` now includes password reset: `password_reset/` emails a link that works once, expires after `PASSWORD_RESET_TIMEOUT` (3 days), and leads to a page for choosing a new password. The templates are in `registration/password_reset_*`, and you can override them in your own template directory.
-- **Signing.** `signing_dumps(value)` / `signing_loads(s; max_age)` make tamper-proof, URL-safe tokens keyed by `SECRET_KEY`, and `sign_value`/`unsign_value` do the same for plain strings.
+- **Signing.** `signing_dumps(value)` / `signing_loads(s; max_age)` make tamper-proof, URL-safe tokens keyed by `SECRET_KEY`, and `sign_value`/`unsign_value` do the same for plain strings. To rotate the key, put the old one in `SECRET_KEY_FALLBACKS` (as Django): what it signed (signed cookies, password reset links, logged-in sessions) keeps working, and new signatures use the new key.
 
 ### Permissions and groups
 

@@ -323,7 +323,7 @@ authenticate(username::AbstractString, password::AbstractString) = authenticate(
 authenticate(::Nothing, ::Any) = nothing
 authenticate(::Any, ::Nothing) = nothing
 
-session_auth_hash(u::AbstractUser) = bytes2hex(hmac_sha256(Vector{UInt8}(codeunits(settings.SECRET_KEY * "auth")), Vector{UInt8}(codeunits(u.password))))
+session_auth_hash(u::AbstractUser; key = settings.SECRET_KEY) = bytes2hex(hmac_sha256(Vector{UInt8}(codeunits(key * "auth")), Vector{UInt8}(codeunits(u.password))))
 
 """
     login!(req, user; backend = nothing)
@@ -370,7 +370,14 @@ function get_user(req::Request)
     i = bname === nothing ? 1 : findfirst(b -> backend_name(b) == bname, auth_backends())
     i === nothing && return AnonymousUser()            # that backend was removed from the settings
     u = backend_get_user(auth_backends()[i], id)
-    (u === nothing || !consteq(get(s, "_auth_user_hash", ""), session_auth_hash(u))) && return AnonymousUser()
+    # (a session from before a key rotation: valid with a SECRET_KEY_FALLBACKS key, and moved to the new one, as Django's)
+    u === nothing && return AnonymousUser()
+    h = get(s, "_auth_user_hash", "")
+    if !consteq(h, session_auth_hash(u))
+        any(k -> consteq(h, session_auth_hash(u; key = k)), collect(get(settings, :SECRET_KEY_FALLBACKS, String[]))) ||
+            return AnonymousUser()
+        s["_auth_user_hash"] = session_auth_hash(u)
+    end
     u
 end
 

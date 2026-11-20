@@ -150,3 +150,52 @@ end
         old_hashers === nothing ? delete!(Juango.SETTINGS, :PASSWORD_HASHERS) : configure!(PASSWORD_HASHERS = old_hashers)
     end
 end
+
+@testset "django auth: test_tokens" begin
+    port_block() do
+        u = create_user("tokentestuser", "testpw"; email = "test2@example.com")
+        # test_make_token, test_10265 (the same token for the user reloaded)
+        tk1 = make_reset_token(u)
+        @test check_reset_token(u, tk1)
+        ts = Juango.reset_now()
+        @test make_reset_token(u; ts = ts) == make_reset_token(get(User; id = u.id); ts = ts)
+        # test_token_with_different_email
+        u.email = "test4new@example.com"; save!(u)
+        @test !check_reset_token(u, tk1)
+        # test_timeout (valid PASSWORD_RESET_TIMEOUT seconds later, not one more)
+        tk = make_reset_token(u; ts = ts)
+        T = Juango.settings.PASSWORD_RESET_TIMEOUT
+        @test check_reset_token(u, tk; now = ts + T) && !check_reset_token(u, tk; now = ts + T + 1)
+        # test_check_token_with_nonexistent_token_and_user
+        @test !check_reset_token(nothing, tk) && !check_reset_token(u, nothing)
+        # test_token_with_different_secret
+        tk0 = make_reset_token(u; secret = "abcdefghijkl")
+        @test check_reset_token(u, tk0; secret = "abcdefghijkl") && !check_reset_token(u, make_reset_token(u); secret = "abcdefghijkl")
+        @test !check_reset_token(u, tk0)
+        # test_secret_lazy_validation
+        @test_throws "The SECRET_KEY setting must not be empty." make_reset_token(u; secret = "")
+        # test_check_token_secret_fallbacks, test_check_token_secret_key_fallbacks (a key rotated out still validates)
+        old = Juango.settings.SECRET_KEY
+        tk_old = make_reset_token(u)
+        configure!(SECRET_KEY = "new-secret-key-for-testing-rotation", SECRET_KEY_FALLBACKS = [old])
+        try
+            @test check_reset_token(u, tk_old) && check_reset_token(u, make_reset_token(u))
+            # (signed values and logged-in sessions follow the fallbacks too)
+            configure!(SECRET_KEY = old, SECRET_KEY_FALLBACKS = String[])
+            sv = sign_value("hello")
+            configure!(SECRET_KEY = "new-secret-key-for-testing-rotation", SECRET_KEY_FALLBACKS = [old])
+            @test unsign_value(sv) == "hello"
+            configure!(SECRET_KEY_FALLBACKS = String[])
+            @test_throws Juango.BadSignature unsign_value(sv)
+            # test_check_token_secret_key_fallbacks_override (no fallbacks: the old token fails)
+            @test !check_reset_token(u, tk_old)
+        finally
+            configure!(SECRET_KEY = old, SECRET_KEY_FALLBACKS = String[])
+        end
+        # (a password change ends the token, as Django's)
+        tk = make_reset_token(u)
+        set_password!(u, "another-pass-123"); save!(u)
+        @test !check_reset_token(u, tk)
+        # not translated: test_token_with_different_secret_subclass (no generator class)
+    end
+end

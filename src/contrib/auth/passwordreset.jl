@@ -7,24 +7,40 @@
 const RESET_EPOCH = DateTime(2001, 1, 1)
 reset_now() = round(Int, (now(Dates.UTC) - RESET_EPOCH) / Second(1))
 
-function reset_hash(u::AbstractUser, ts::Int)
+function reset_hash(u::AbstractUser, ts::Int, secret)
+    isempty(string(secret)) && throw(ImproperlyConfigured("The SECRET_KEY setting must not be empty."))
     login = u.last_login === nothing ? "" : Dates.format(u.last_login, "yyyy-mm-ddTHH:MM:SS")
-    value = string(u.id, u.password, login, ts, u.email)
-    h = bytes2hex(hmac_sha256(Vector{UInt8}(codeunits("juango.passwordreset" * string(settings.SECRET_KEY))), Vector{UInt8}(codeunits(value))))
+    value = string(u.id, u.password, login, ts, something(u.email, ""))
+    h = bytes2hex(hmac_sha256(Vector{UInt8}(codeunits("juango.passwordreset" * string(secret))), Vector{UInt8}(codeunits(value))))
     h[1:2:end]
 end
 
-"A one-time password reset token for a user."
-make_reset_token(u::AbstractUser; ts = reset_now()) = string(ts; base = 36) * "-" * reset_hash(u, ts)
+"""
+    make_reset_token(user; secret = SECRET_KEY) -> String
 
-"Whether a password reset token is valid (not tampered with, not used, not older than PASSWORD_RESET_TIMEOUT)."
-function check_reset_token(u::AbstractUser, token::AbstractString)
+A one-time password reset token for a user (Django's PasswordResetTokenGenerator). It stops
+working when the password changes, the user logs in, the email changes, or after
+PASSWORD_RESET_TIMEOUT seconds.
+"""
+make_reset_token(u::AbstractUser; ts = reset_now(), secret = settings.SECRET_KEY) = string(ts; base = 36) * "-" * reset_hash(u, ts, secret)
+
+"""
+    check_reset_token(user, token; secret = nothing) -> Bool
+
+Whether a password reset token is valid for the user. Made with `SECRET_KEY` or one of
+`SECRET_KEY_FALLBACKS` (or with `secret`, when given).
+"""
+check_reset_token(::Nothing, token; kw...) = false
+check_reset_token(u, ::Nothing; kw...) = false
+check_reset_token(::Nothing, ::Nothing; kw...) = false
+function check_reset_token(u::AbstractUser, token::AbstractString; secret = nothing, now = reset_now())
     parts = split(token, '-')
     length(parts) == 2 || return false
     ts = tryparse(Int, parts[1]; base = 36)
     ts === nothing && return false
-    consteq(string(parts[2]), reset_hash(u, ts)) || return false
-    reset_now() - ts <= settings.PASSWORD_RESET_TIMEOUT
+    secrets = secret === nothing ? verification_keys() : [secret]
+    any(k -> consteq(string(parts[2]), reset_hash(u, ts, k)), secrets) || return false
+    now - ts <= settings.PASSWORD_RESET_TIMEOUT
 end
 
 uid_encode(id) = b64url(string(id))
