@@ -998,7 +998,7 @@ contact = FormView(ContactForm; template = "contact.html", success_url = "/thank
 
 The hooks are `get_queryset`, `get_object`, `get_context_data(v, ctx)`, `get_template_names`, `get_success_url`, `get_initial`, `get_form`, `form_valid(v, form)` and `form_invalid(v, form)`. DeleteView deletes in its `form_valid` step, where the form is `nothing`. Templates get `view` too.
 
-Access control works on every generic view: `login_required = true`, `permission_required = "blog.change_post"` (403 when the user lacks it), and `test_func = user -> user.is_staff`. For other views, the wrappers `LoginRequiredMixin(view)`, `PermissionRequiredMixin(view, perms...)` and `UserPassesTestMixin(view, test)` do the same. `success_message` (the SuccessMessageMixin) takes `%(field)s` placeholders from the cleaned data.
+Access control works on every generic view: `login_required = true`, `permission_required = "blog.change_post"` (403 when the user lacks it), and `test_func = user -> user.is_staff` (a logged-in user who fails it gets 403, an anonymous one the login page, as Django's UserPassesTestMixin). For other views, the wrappers `LoginRequiredMixin(view)`, `PermissionRequiredMixin(view, perms...)` and `UserPassesTestMixin(view, test)` do the same, with Django's AccessMixin options: `login_url`, `redirect_field_name`, `raise_exception` and `permission_denied_message`. `success_message` (the SuccessMessageMixin) takes `%(field)s` placeholders from the cleaned data.
 
 Date-based archives take a `date_field`:
 

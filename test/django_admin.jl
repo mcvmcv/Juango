@@ -617,7 +617,7 @@ end
         @test r.status == 302 && getheader(r, "Location") == "/admin/"
         # test_login_successfully_redirects_to_original_URL
         r = get(Client(), base)
-        @test r.status == 302 && occursin("/admin/login/?next=" * Juango.urlquote(base), getheader(r, "Location"))
+        @test r.status == 302 && occursin("/admin/login/?next=" * base, getheader(r, "Location"))
         # per-permission access
         perm(code) = get(Permission; codename = code)
         function staff(name, codes...)

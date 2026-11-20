@@ -233,9 +233,27 @@ Put it after `AuthenticationMiddleware`. Unknown URLs still give 404.
 function LoginRequiredMiddleware(get_response)
     function (req::Request)
         rm = req.resolver_match
-        (rm === nothing || is_login_not_required(rm.view) || req.path == settings.LOGIN_URL || is_authenticated(req.user)) &&
-            return get_response(req)
-        redirect_to_login(req, settings.LOGIN_URL)
+        (rm === nothing || is_login_not_required(rm.view) || is_authenticated(req.user)) && return get_response(req)
+        # (a view's own login_required(login_url, redirect_field_name) wins, as Django's)
+        o = get(LOGIN_REQUIRED_OPTS, rm.view, nothing)
+        url = something(o === nothing ? nothing : o.login_url, settings.LOGIN_URL, Some(nothing))
+        url === nothing && throw(ImproperlyConfigured("No login URL to redirect to. Define settings.LOGIN_URL or provide a login_url via the login_required decorator."))
+        login = resolve_login_url(url)
+        req.path == login && return get_response(req)
+        redirect_to_login(req, login; redirect_field_name = o === nothing ? "next" : o.redirect_field_name)
+    end
+end
+
+"The login_url and redirect_field_name a view was given by `login_required`."
+const LOGIN_REQUIRED_OPTS = IdDict{Any,Any}()
+"A login URL that may be a URL name (`\"login\"`, `\"accounts:login\"`), as Django's resolve_url."
+function resolve_login_url(url)
+    s = string(url)
+    (startswith(s, "/") || occursin("://", s) || startswith(s, ".")) && return s
+    try
+        reverse_url(s)
+    catch
+        s
     end
 end
 
@@ -252,6 +270,7 @@ function propagate_flags!(wrapper, view)
     is_login_not_required(view) && (LOGIN_NOT_REQUIRED[wrapper] = true)
     haskey(NON_ATOMIC, view) && (NON_ATOMIC[wrapper] = NON_ATOMIC[view])
     haskey(NO_APPEND_SLASH, view) && (NO_APPEND_SLASH[wrapper] = true)
+    haskey(LOGIN_REQUIRED_OPTS, view) && !haskey(LOGIN_REQUIRED_OPTS, wrapper) && (LOGIN_REQUIRED_OPTS[wrapper] = LOGIN_REQUIRED_OPTS[view])
     VIEW_NAMES[wrapper] = view_label(view)
     wrapper
 end

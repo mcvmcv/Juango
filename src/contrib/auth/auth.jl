@@ -394,8 +394,10 @@ end
 
 "The login page, with where to come back to in `redirect_field_name` (\"next\"; `nothing` for no parameter)."
 function redirect_to_login(req::Request, login_url = settings.LOGIN_URL; redirect_field_name = "next")
+    login_url = resolve_login_url(login_url)            # (a URL name works too)
     redirect_field_name === nothing && return HttpResponseRedirect(login_url)
-    HttpResponseRedirect(login_url * (occursin('?', login_url) ? "&" : "?") * string(redirect_field_name) * "=" * urlquote(full_path(req)))
+    # (the page's / left as it is, as Django's: ?next=/secret/)
+    HttpResponseRedirect(login_url * (occursin('?', login_url) ? "&" : "?") * string(redirect_field_name) * "=" * replace(urlquote(full_path(req)), "%2F" => "/"))
 end
 
 """
@@ -411,6 +413,8 @@ function login_required(view; login_url = nothing, redirect_field_name = "next")
         view(req; kw...)
     end
     propagate_flags!(w, view)
+    LOGIN_REQUIRED_OPTS[w] = (login_url = login_url, redirect_field_name = redirect_field_name)   # (for LoginRequiredMiddleware)
+    w
 end
 
 "Like `login_required`, but also requires `is_staff`."

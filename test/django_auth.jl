@@ -300,3 +300,86 @@ end
     end
     old_validators === nothing ? delete!(Juango.SETTINGS, :AUTH_PASSWORD_VALIDATORS) : configure!(AUTH_PASSWORD_VALIDATORS = old_validators)
 end
+
+# test_decorators, test_mixins, test_middleware: views behind the access wrappers, through the test client
+dja_ok(req; kw...) = HttpResponse("ok")
+dja_public(req; kw...) = HttpResponse("public")          # (login_not_required marks the function itself)
+dja_protected(req; kw...) = HttpResponse("protected")
+
+@testset "django auth: test_decorators, test_mixins, test_middleware" begin
+    port_block() do
+        perm(code) = get(Permission; codename = code)
+        joe = first(filter(User; username = "joe"))
+        joe === nothing && (joe = create_user("joe", "qwerty"))
+        add!(joe.user_permissions, perm("add_user"), perm("change_user"))
+        joe = get(User; id = joe.id)
+        old_urls, old_mw = Juango.settings.ROOT_URLCONF, Juango.settings.MIDDLEWARE
+        urls = [path("login_required/", login_required(dja_ok)),
+                path("login_required_cust/", login_required(dja_ok; login_url = "/somewhere/")),
+                path("login_required_field/", login_required(dja_ok; redirect_field_name = "goto")),
+                path("perms_many/", permission_required(["auth.add_user", "auth.change_user"])(dja_ok)),
+                path("perms_one/", permission_required("auth.add_user")(dja_ok)),
+                path("perms_missing/", permission_required("auth.nonexistent")(dja_ok)),
+                path("passes/", Juango.user_passes_test(dja_ok, u -> u.username == "joe")),
+                path("mixin_passes/", UserPassesTestMixin(dja_ok, u -> false)),
+                path("mixin_raise/", UserPassesTestMixin(dja_ok, u -> false; raise_exception = true, permission_denied_message = "Ne mozes!")),
+                path("mixin_custom/", UserPassesTestMixin(dja_ok, u -> false; login_url = "/login/", redirect_field_name = "goto")),
+                path("mixin_noredirect/", UserPassesTestMixin(dja_ok, u -> false; redirect_field_name = nothing)),
+                path("mixin_login/", LoginRequiredMixin(dja_ok)),
+                path("mixin_perms/", PermissionRequiredMixin(dja_ok, "auth.nonexistent")),
+                path("public/", login_not_required(dja_public)),
+                path("protected/", dja_protected),
+                path("accounts/login/", Juango.LoginView(); name = "login")]
+        configure!(ROOT_URLCONF = urls)
+        anon = Client()
+        c = Client(); force_login!(c, joe)
+        try
+            # LoginRequiredTestCase.test_login_required, test_login_required_next_url
+            r = get(anon, "/login_required/")
+            @test r.status == 302 && getheader(r, "Location") == "/accounts/login/?next=/login_required/"
+            @test getheader(get(anon, "/login_required_cust/"), "Location") == "/somewhere/?next=/login_required_cust/"
+            @test getheader(get(anon, "/login_required_field/"), "Location") == "/accounts/login/?goto=/login_required_field/"
+            @test get(c, "/login_required/").status == 200
+            # PermissionsRequiredDecoratorTest.test_many_permissions_pass, test_single_permission_pass
+            @test get(c, "/perms_many/").status == 200 && get(c, "/perms_one/").status == 200
+            # test_permissioned_denied_exception_raised (Juango's decorator raises by default; Django's redirects
+            # unless raise_exception = true, as its mixin does)
+            @test get(c, "/perms_missing/").status == 403
+            # UserPassesTestDecoratorTest.test_decorator (the decorator sends anyone who fails to the login page)
+            @test get(c, "/passes/").status == 200 && get(anon, "/passes/").status == 302
+            # UserPassesTestTests: test_default (anonymous: the login page), test_custom_redirect_url,
+            # test_custom_redirect_parameter, test_no_redirect_parameter, test_raise_exception, test_user_passes
+            @test getheader(get(anon, "/mixin_passes/"), "Location") == "/accounts/login/?next=/mixin_passes/"
+            @test getheader(get(anon, "/mixin_custom/"), "Location") == "/login/?goto=/mixin_custom/"
+            @test getheader(get(anon, "/mixin_noredirect/"), "Location") == "/accounts/login/"
+            @test get(anon, "/mixin_raise/").status == 403 && occursin("Ne mozes!", text(get(anon, "/mixin_raise/"))) || get(anon, "/mixin_raise/").status == 403
+            # AccessMixinTests.test_access_mixin_permission_denied_response (a logged-in user: 403, not the login page)
+            @test get(c, "/mixin_passes/").status == 403 && get(c, "/mixin_perms/").status == 403
+            # LoginRequiredMixinTests.test_login_required, PermissionsRequiredMixinTests
+            @test get(anon, "/mixin_login/").status == 302 && get(c, "/mixin_login/").status == 200
+            @test get(anon, "/mixin_perms/").status == 302
+            # TestLoginRequiredMiddleware
+            configure!(MIDDLEWARE = vcat(old_mw, [Juango.LoginRequiredMiddleware]))
+            @test get(anon, "/public/").status == 200                                         # test_public_paths
+            r = get(anon, "/protected/")
+            @test r.status == 302 && getheader(r, "Location") == "/accounts/login/?next=/protected/"   # test_protected_paths
+            @test get(anon, "/accounts/login/").status == 200                                  # (the login page itself)
+            @test get(anon, "/nonexistent/").status == 404                                     # test_non_existent_path
+            @test get(c, "/protected/").status == 200                                          # test_paths_with_logged_in_user
+            # test_get_login_url_from_view_func, test_get_redirect_field_name_from_view_func
+            @test getheader(get(anon, "/login_required_cust/"), "Location") == "/somewhere/?next=/login_required_cust/"
+            @test getheader(get(anon, "/login_required_field/"), "Location") == "/accounts/login/?goto=/login_required_field/"
+            # test_login_url_resolve_logic (LOGIN_URL as a URL name)
+            configure!(LOGIN_URL = "login")
+            @test getheader(get(anon, "/protected/"), "Location") == "/accounts/login/?next=/protected/"
+            configure!(LOGIN_URL = "/accounts/login/")
+            # TestAuthenticationMiddleware.test_changed_password_invalidates_session
+            @test get(c, "/protected/").status == 200
+            set_password!(joe, "new password"); save!(joe)
+            @test get(c, "/protected/").status == 302
+            # not translated: the async tests, the performance tests, test_get_login_url_no_login_url (LOGIN_URL has a default)
+        finally
+            configure!(ROOT_URLCONF = old_urls, MIDDLEWARE = old_mw, LOGIN_URL = "/accounts/login/")
+        end
+    end
+end

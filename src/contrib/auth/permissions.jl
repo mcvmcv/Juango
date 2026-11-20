@@ -127,6 +127,8 @@ function permission_required(view, perms::AbstractString...; login_url = nothing
 end
 permission_required(perm::AbstractString, perms::AbstractString...; kw...) =
     view -> permission_required(view, perm, perms...; kw...)
+"`permission_required([\"app.a\", \"app.b\"])`: the permissions as a list, as Django takes them."
+permission_required(perms::AbstractVector; kw...) = view -> permission_required(view, String.(perms)...; kw...)
 
 # --- templates: {{ perms.app.codename }} -----------------------------------------------------------
 

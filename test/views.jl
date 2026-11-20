@@ -77,7 +77,7 @@ end
     c = Client()
     @test text(get(c, "/whoami/")) == "anon"
     r = get(c, "/secret/")
-    @test r.status == 302 && getheader(r, "Location") == "/accounts/login/?next=%2Fsecret%2F"
+    @test r.status == 302 && getheader(r, "Location") == "/accounts/login/?next=/secret/"
     r = post(c, "/accounts/login/?next=/secret/", Dict("username" => "alice", "password" => "bad"))
     @test r.status == 200 && occursin("correct username and password", text(r))
     r = post(c, "/accounts/login/?next=/secret/", Dict("username" => "alice", "password" => "wonderland"); follow = true)
@@ -203,7 +203,7 @@ end
         pleb = create_user("gvpleb", "pleb-password-1")
         pc = Client()
         force_login!(pc, pleb)
-        @test get(pc, "/gv-edit/$(party.id)/").status == 302             # test_func fails: to the login page
+        @test get(pc, "/gv-edit/$(party.id)/").status == 403             # test_func fails for a logged-in user: 403 (UserPassesTestMixin)
         @test get(pc, "/gv-perm/$(party.id)/").status == 403             # no permission
         @test get(c, "/gv-perm/$(party.id)/").status == 200              # superuser
         @test text(get(c, "/gv-del/$(party.id)/")) == "Delete Fete?"
@@ -824,7 +824,7 @@ end
     @test assert_template_used(r, "whoami.html") && assert_template_not_used(r, "base.html")
     @test_throws AssertionError assert_template_used(r, "other.html")
     r = get(c, "/secret/")
-    @test assert_redirects(r, settings.LOGIN_URL * "?next=%2Fsecret%2F") && assert_redirects(r, settings.LOGIN_URL * "?next=%2Fsecret%2F"; client = c)
+    @test assert_redirects(r, settings.LOGIN_URL * "?next=/secret/") && assert_redirects(r, settings.LOGIN_URL * "?next=/secret/"; client = c)
     @test_throws AssertionError assert_redirects(r, "/elsewhere/")
     @test assert_num_queries(() -> count(objects(Topic)), 1)
     @test_throws AssertionError assert_num_queries(() -> nothing, 1)
@@ -1005,7 +1005,7 @@ Juango.backend_has_perm(::OwnArticlesBackend, u, perm, obj) =
     try
         c = Client()
         r = get(c, "/whoami/")
-        @test r.status == 302 && getheader(r, "Location") == "/accounts/login/?next=%2Fwhoami%2F"
+        @test r.status == 302 && getheader(r, "Location") == "/accounts/login/?next=/whoami/"
         @test get(c, "/accounts/login/").status == 200 && get(c, "/accounts/password_reset/").status == 200
         r = get(c, "/admin/")
         @test r.status == 302 && startswith(getheader(r, "Location"), "/admin/login/")          # the admin's own login
@@ -2284,7 +2284,7 @@ const FINDER151_FILE = Ref("")
         configure!(ROOT_URLCONF = vcat(old_urls, [path("p151/", login_required(req -> HttpResponse("in"); redirect_field_name = "back")),
                                                    path("q151/", login_required(req -> HttpResponse("in"); redirect_field_name = nothing))]))
         r = get(Client(), "/p151/?x=1")
-        @test r.status == 302 && occursin("?back=%2Fp151%2F%3Fx%3D1", getheader(r, "Location"))
+        @test r.status == 302 && occursin("?back=/p151/%3Fx%3D1", getheader(r, "Location"))
         @test !occursin("?", getheader(get(Client(), "/q151/"), "Location"))
     finally
         configure!(ROOT_URLCONF = old_urls)

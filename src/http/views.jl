@@ -237,7 +237,9 @@ Base.@nospecializeinfer function generic_view(run, kind::Symbol, @nospecialize(m
     end
     view = (req::Request; kw...) -> run(ViewCall(kind, model, req, Dict{Symbol,Any}(kw), copy(o), nothing, nothing, nothing))
     test = get(o, :test_func, nothing)
-    test === nothing || (view = user_passes_test(view, test; login_url = get(o, :login_url, nothing)))
+    # (Django's UserPassesTestMixin: a logged-in user who fails it gets 403, an anonymous one the login page)
+    test === nothing || (view = UserPassesTestMixin(view, test; login_url = get(o, :login_url, nothing),
+                                                    raise_exception = get(o, :raise_exception, false)))
     perms = get(o, :permission_required, nothing)
     perms === nothing || (view = permission_required(view, (perms isa AbstractString ? [perms] : perms)...;
                                                      login_url = get(o, :login_url, nothing),
@@ -674,12 +676,40 @@ end
 
 # --- mixins as wrappers ---
 
-"`LoginRequiredMixin(view)`: the same as `login_required(view)` (or the `login_required = true` option)."
-LoginRequiredMixin(view; login_url = nothing, redirect_field_name = "next") = login_required(view; login_url = login_url, redirect_field_name = redirect_field_name)
-"`PermissionRequiredMixin(view, \"app.perm\"...)`: the same as `permission_required` (or the option)."
-PermissionRequiredMixin(view, perms::AbstractString...; kw...) = permission_required(view, perms...; kw...)
-"`UserPassesTestMixin(view, user -> Bool)`: the same as `user_passes_test` (or the `test_func` option)."
-UserPassesTestMixin(view, test; kw...) = user_passes_test(view, test; kw...)
+"""
+Django's AccessMixin: when a view refuses a request, an anonymous user goes to the login page
+(`login_url`, with the page in `redirect_field_name`; `nothing` leaves it out), and a logged-in
+user, or anyone with `raise_exception = true`, gets 403 with `permission_denied_message` (a string,
+or a function of the request).
+"""
+function access_mixin(view, allowed; login_url = nothing, redirect_field_name = "next", raise_exception = false,
+                      permission_denied_message = "")
+    w = function (req; kw...)
+        allowed(req) && return view(req; kw...)
+        if raise_exception || is_authenticated(req.user)
+            msg = permission_denied_message isa Function ? permission_denied_message(req) : permission_denied_message
+            throw(PermissionDenied(string(msg)))
+        end
+        redirect_to_login(req, something(login_url, settings.LOGIN_URL); redirect_field_name = redirect_field_name)
+    end
+    propagate_flags!(w, view)
+end
+
+"`LoginRequiredMixin(view; login_url, redirect_field_name, raise_exception, permission_denied_message)`: Django's (an AccessMixin)."
+LoginRequiredMixin(view; kw...) = access_mixin(view, req -> is_authenticated(req.user); kw...)
+"""
+`PermissionRequiredMixin(view, \"app.perm\"...; ...)`: Django's (an AccessMixin): a logged-in user
+without the permissions gets 403, an anonymous one the login page.
+"""
+PermissionRequiredMixin(view, perms::AbstractString...; kw...) =
+    access_mixin(view, req -> is_authenticated(req.user) && has_perms(req.user, collect(String, perms)); kw...)
+PermissionRequiredMixin(view, perms::AbstractVector; kw...) = PermissionRequiredMixin(view, perms...; kw...)
+"""
+`UserPassesTestMixin(view, user -> Bool; ...)`: Django's (an AccessMixin): a logged-in user who
+fails the test gets 403 (`user_passes_test` sends anyone who fails it to the login page, as
+Django's decorator).
+"""
+UserPassesTestMixin(view, test; kw...) = access_mixin(view, req -> test(req.user); kw...)
 
 # --- typed query parameters ------------------------------------------------------------------------------
 
