@@ -17,6 +17,10 @@
          ordering = ["content_type__app_label", "content_type__model", "codename"])
 end
 Base.show(io::IO, p::Permission) = print(io, p.content_type.app_label, " | ", p.content_type.model, " | ", p.name)
+# (natural keys, as Django's: a permission by codename, app label and model; a group by name)
+natural_key(p::Permission) = (p.codename, p.content_type.app_label, p.content_type.model)
+get_by_natural_key(::Type{Permission}, codename, app_label, model) =
+    get(Permission; codename = codename, content_type = get_by_natural_key(ContentType, app_label, model))
 # listing permissions shows their content types: load them in the same query
 default_queryset(::Type{Permission}) = select_related(base_objects(Permission), :content_type)
 
@@ -26,6 +30,8 @@ default_queryset(::Type{Permission}) = select_related(base_objects(Permission), 
     Meta(table = "auth_group", ordering = ["name"], app_label = "auth")
 end
 Base.show(io::IO, g::Group) = print(io, g.name)
+natural_key(g::Group) = (g.name,)
+get_by_natural_key(::Type{Group}, name) = get(Group; name = name)
 
 const DEFAULT_PERMISSIONS = ("add", "change", "delete", "view")
 
@@ -54,56 +60,108 @@ end
 perm_strings(qs) = Set{String}(string(r[:content_type__app_label], ".", r[:codename])
                                for r in values(qs, :content_type__app_label, :codename))
 
-"Permissions a user has directly, as `\"app.codename\"` strings."
-get_user_permissions(u::AbstractUser) = perm_strings(filter(base_objects(Permission); user_set = u))
-"Permissions a user has through groups."
-get_group_permissions(u::AbstractUser) = perm_strings(filter(base_objects(Permission); group_set__user_set = u))
-
-"The permissions of a user's groups and their own (cached on the user object); superusers get every one."
-function model_permissions(u::AbstractUser)
-    get!((getfield(u, :_cache)::Dict{Symbol,Any}), :_perm_cache) do
+# ModelBackend's permissions, each set cached on the user object, as Django's (reload the user after a change);
+# superusers get every one; inactive users and per-object checks none.
+function model_perm_set(u, which::Symbol)
+    (u isa AbstractUser && u.is_active) || return Set{String}()
+    get!((getfield(u, :_cache)::Dict{Symbol,Any}), which) do
         u.is_superuser ? perm_strings(base_objects(Permission)) :
-            perm_strings(filter(base_objects(Permission), Q(user_set = u) | Q(group_set__user_set = u)))
+        which === :_user_perm_cache ? perm_strings(filter(base_objects(Permission); user_set = u)) :
+        which === :_group_perm_cache ? perm_strings(filter(base_objects(Permission); group_set__user_set = u)) :
+            union(model_perm_set(u, :_user_perm_cache), model_perm_set(u, :_group_perm_cache))
     end
 end
+"The permissions of a user's groups and their own; superusers get every one."
+model_permissions(u::AbstractUser) = model_perm_set(u, :_perm_cache)
+
+# (each asks every backend, as Django's PermissionsMixin; a backend throwing PermissionDenied stops it: no)
+function perms_from_backends(f, u, obj)
+    out = Set{String}()
+    for b in auth_backends()
+        union!(out, Set{String}(f(b, u, obj)))
+    end
+    out
+end
+
+"Permissions a user has directly, as `\"app.codename\"` strings (from every backend)."
+get_user_permissions(u::Union{AbstractUser,AnonymousUser}; obj = nothing) = perms_from_backends(backend_get_user_permissions, u, obj)
+"Permissions a user has through groups (from every backend)."
+get_group_permissions(u::Union{AbstractUser,AnonymousUser}; obj = nothing) = perms_from_backends(backend_get_group_permissions, u, obj)
 
 """
     get_all_permissions(user; obj = nothing) -> Set{String}
 
-Everything the user may do, as far as `AUTHENTICATION_BACKENDS` say (cached on the user
-object; reload the user after changing permissions). Inactive users have none.
+Everything the user may do, as far as `AUTHENTICATION_BACKENDS` say (ModelBackend's are cached on
+the user object; reload the user after changing permissions). ModelBackend gives inactive and
+anonymous users none, and has no per-object permissions; a backend of your own may.
 """
-function get_all_permissions(u::AbstractUser; obj = nothing)
-    u.is_active || return Set{String}()
-    reduce(union, (Set{String}(backend_get_all_permissions(b, u, obj)) for b in auth_backends()); init = Set{String}())
-end
-get_all_permissions(::AnonymousUser; obj = nothing) = Set{String}()
+get_all_permissions(u::Union{AbstractUser,AnonymousUser}; obj = nothing) = perms_from_backends(backend_get_all_permissions, u, obj)
 
 """
     has_perm(user, "app.codename"; obj = nothing) -> Bool
 
-Active superusers have every permission; inactive users have none. Otherwise the user has
-it if a backend says so (`backend_has_perm`). The default `ModelBackend` has no per-object
-rules, so with `obj` only a backend of your own can grant it.
+Active superusers have every permission. Otherwise the user has it if a backend says so
+(`backend_has_perm`); a backend that throws `PermissionDenied` ends the search with no, as
+Django's. The default `ModelBackend` gives inactive users nothing and has no per-object rules,
+so with `obj` (or for an anonymous or inactive user) only a backend of your own can grant it.
 """
-function has_perm(u::AbstractUser, perm::AbstractString; obj = nothing)
-    u.is_active || return false
-    u.is_superuser && return true
-    any(b -> backend_has_perm(b, u, perm, obj) === true, auth_backends())
+function has_perm(u::Union{AbstractUser,AnonymousUser}, perm::AbstractString; obj = nothing)
+    u.is_active && u.is_superuser && return true
+    ask_backends(b -> backend_has_perm(b, u, perm, obj))
 end
-has_perm(::AnonymousUser, perm::AbstractString; obj = nothing) = false
 has_perm(::Nothing, perm::AbstractString; obj = nothing) = false
-
-"All of the permissions."
-has_perms(u, perms; obj = nothing) = all(p -> has_perm(u, p; obj = obj), perms)
-
-"Whether the user has any permission in an app (`has_module_perms(user, \"project\")`)."
-function has_module_perms(u::AbstractUser, app::AbstractString)
-    u.is_active || return false
-    u.is_superuser && return true
-    any(p -> startswith(p, app * "."), get_all_permissions(u))
+function ask_backends(f)
+    for b in auth_backends()
+        r = try
+            f(b)
+        catch e
+            e isa PermissionDenied || rethrow()
+            return false
+        end
+        r === true && return true
+    end
+    false
 end
-has_module_perms(::Union{AnonymousUser,Nothing}, app::AbstractString) = false
+
+"All of the permissions (a list: one name on its own is an error, as Django's)."
+function has_perms(u, perms; obj = nothing)
+    perms isa AbstractString && throw(ArgumentError("perm_list must be an iterable of permissions."))
+    all(p -> has_perm(u, p; obj = obj), perms)
+end
+
+"Whether the user has any permission in an app (`has_module_perms(user, \"project\")`): active superusers, or a backend says so."
+function has_module_perms(u::Union{AbstractUser,AnonymousUser}, app::AbstractString)
+    u.is_active && u.is_superuser && return true
+    ask_backends(b -> backend_has_module_perms(b, u, app))
+end
+has_module_perms(::Nothing, app::AbstractString) = false
+
+"""
+    with_perm(perm; is_active = true, include_superusers = true, backend = nothing, obj = nothing) -> QuerySet
+
+The users with a permission (`"app.codename"` or a `Permission`), as a backend sees it (Django's
+`UserManager.with_perm`): ModelBackend's are those granted it directly or through a group, and the
+superusers unless `include_superusers = false`; only active users, or only inactive ones with
+`is_active = false`, or both with `nothing`. With several `AUTHENTICATION_BACKENDS`, say which
+(a backend or its name); a backend without `backend_with_perm` finds no one.
+"""
+function with_perm(perm; is_active = true, include_superusers = true, backend = nothing, obj = nothing)
+    perm isa Union{AbstractString,Permission} || throw(ArgumentError("The `perm` argument must be a string or a permission instance."))
+    perm isa AbstractString && count('.', perm) != 1 &&
+        throw(ArgumentError("Permission name should be in the form app_label.permission_codename."))
+    bs = auth_backends()
+    b = if backend === nothing
+        length(bs) == 1 || throw(ArgumentError("You have multiple authentication backends configured and therefore must provide the `backend` argument."))
+        bs[1]
+    elseif backend isa AbstractString
+        i = findfirst(x -> backend_name(x) == backend, bs)
+        i === nothing ? throw(ArgumentError("No authentication backend named '$backend' in AUTHENTICATION_BACKENDS.")) : bs[i]
+    else
+        backend
+    end
+    r = backend_with_perm(b, perm; is_active = is_active, include_superusers = include_superusers, obj = obj)
+    r === nothing ? none(objects(get_user_model())) : r
+end
 
 """
     permission_required(perms...; login_url=nothing, raise_exception=true)(view)
@@ -143,5 +201,10 @@ end
 tattr(w::PermWrapper, ::Val{S}) where {S} = PermLookup(w.user, string(S))
 tattr(l::PermLookup, ::Val{S}) where {S} = has_perm(l.user, l.app * "." * string(S))
 truthy(l::PermLookup) = has_module_perms(l.user, l.app)
-Base.in(perm::AbstractString, w::PermWrapper) = has_perm(w.user, perm)
-value_in(perm, w::PermWrapper) = (perm isa SafeString && (perm = perm.s); perm isa AbstractString && has_perm(w.user, perm))
+# (as Django's: "auth" in perms is any permission in the app, "auth.add_user" in perms that one;
+# "add_user" in perms.auth is auth.add_user)
+Base.in(perm::AbstractString, w::PermWrapper) = occursin('.', perm) ? has_perm(w.user, perm) : has_module_perms(w.user, perm)
+Base.in(perm::AbstractString, l::PermLookup) = has_perm(l.user, l.app * "." * perm)
+value_in(perm, w::Union{PermWrapper,PermLookup}) = (perm isa SafeString && (perm = perm.s); perm isa AbstractString && perm in w)
+Base.show(io::IO, l::PermLookup) = print(io, "PermLookup(", repr(l.app), ")")
+Base.iterate(::PermWrapper) = throw(ArgumentError("PermWrapper is not iterable."))

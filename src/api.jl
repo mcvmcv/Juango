@@ -95,6 +95,7 @@ export User, AbstractUser, AnonymousUser, USER_MODEL, get_user_model, authentica
        staff_member_required, Permission, Group, has_perm, has_perms, permission_required, ModelBackend,
        validate_password, password_changed, get_user, is_password_usable, PBKDF2SHA1Hasher, UnicodeUsernameValidator, ASCIIUsernameValidator, password_validators_help_texts, password_validators_help_text_html, update_session_auth_hash!, UserCreationForm, UserChangeForm, AdminPasswordChangeForm, AllowAllUsersModelBackend, login_not_required,
        LoginRequiredMiddleware, RemoteUserMiddleware, PersistentRemoteUserMiddleware, RemoteUserBackend,
+       AllowAllUsersRemoteUserBackend, AbstractRemoteUserBackend, with_perm, email_user,
        PasswordChangeView, PasswordChangeDoneView, PasswordResetView, PasswordResetConfirmView
 export message!, get_messages, peek_messages, MessageMiddleware, url_has_allowed_host_and_scheme
 export HtmxDetails, is_htmx, hx_redirect, hx_refresh, hx_location, hx_stop_polling, hx_push_url, hx_replace_url,
@@ -153,7 +154,9 @@ public username_field, has_module_perms, get_all_permissions, perm_name, auth_ur
        PBKDF2Hasher, Argon2Hasher, BCryptSHA256Hasher, BCryptHasher, ScryptPasswordHasher, scrypt, MinimumLengthValidator,
        NumericPasswordValidator, CommonPasswordValidator, UserAttributeSimilarityValidator,
        password_summary, password_error, make_reset_token, check_reset_token,
-       backend_authenticate, backend_get_user, backend_has_perm
+       backend_authenticate, backend_get_user, backend_has_perm, backend_get_user_permissions, backend_get_group_permissions,
+       backend_get_all_permissions, backend_has_module_perms, backend_with_perm, get_user_permissions, get_group_permissions,
+       remote_clean_username, remote_configure_user, remote_user_can_authenticate, normalize_email, normalize_username
 # signing
 public signing_dumps, signing_loads, sign_value, unsign_value, BadSignature, SignatureExpired
 # signals, logging

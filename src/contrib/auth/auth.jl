@@ -130,6 +130,30 @@ tattr(u::AnonymousUser, ::Val{:get_short_name}) = ""
 is_authenticated(u) = u isa AbstractUser
 is_authenticated(req::Request) = req.user isa AbstractUser
 
+"The user's natural key, their `username_field` (Django's); `get_by_natural_key(User, name)` finds them."
+natural_key(u::AbstractUser) = (getproperty(u, username_field(typeof(u))),)
+get_by_natural_key(T::Type{<:AbstractUser}, name) = get(filter(objects(T), Q(username_field(T) => name)))
+
+"An email address with its domain in lower case (Django's `BaseUserManager.normalize_email`)."
+function normalize_email(email)
+    email === nothing && return ""
+    e = String(email)
+    i = findlast('@', e)
+    i === nothing ? e : e[1:prevind(e, i)] * "@" * lowercase(e[nextind(e, i):end])
+end
+
+"As Django's AbstractUser.clean: the username in NFKC form, the email's domain in lower case."
+function clean(u::AbstractUser)
+    uf = username_field(typeof(u))
+    v = getproperty(u, uf)
+    v isa AbstractString && setproperty!(u, uf, normalize_username(v))
+    u.email isa AbstractString && (u.email = normalize_email(u.email))
+    nothing
+end
+
+"Send the user an email (Django's `email_user`); `from_email = nothing` is `DEFAULT_FROM_EMAIL`."
+email_user(u::AbstractUser, subject, message, from_email = nothing; kw...) = send_mail(subject, message, from_email, [u.email]; kw...)
+
 # Password hashing and validation live in passwords.jl.
 
 """
@@ -162,6 +186,8 @@ function create_user(username::AbstractString, password = nothing; kw...)
         password = kw[:password]
         kw = Dict{Symbol,Any}(k => v for (k, v) in kw if k !== :password)
     end
+    isempty(username) && throw(ArgumentError("The given username must be set"))
+    haskey(kw, :email) && (kw = merge(Dict{Symbol,Any}(kw), Dict{Symbol,Any}(:email => normalize_email(kw[:email]))))
     T = get_user_model()
     uf = username_field(T)
     username = normalize_username(username)
@@ -172,8 +198,12 @@ function create_user(username::AbstractString, password = nothing; kw...)
     save!(u)
 end
 "Create and save a user with `is_staff` and `is_superuser` set."
-create_superuser(username::AbstractString, password = nothing; kw...) =
-    create_user(username, password; is_staff = true, is_superuser = true, kw...)
+function create_superuser(username::AbstractString, password = nothing; kw...)
+    kw = merge(Dict{Symbol,Any}(:is_staff => true, :is_superuser => true), Dict{Symbol,Any}(kw))
+    kw[:is_staff] === true || throw(ArgumentError("Superuser must have is_staff=True."))
+    kw[:is_superuser] === true || throw(ArgumentError("Superuser must have is_superuser=True."))
+    create_user(username, password; kw...)
+end
 
 # --- authentication backends -----------------------------------------------------------------
 #
@@ -183,12 +213,25 @@ create_superuser(username::AbstractString, password = nothing; kw...) =
 #     backend_authenticate(b, req; credentials...) -> user or nothing   (throw PermissionDenied to stop)
 #     backend_get_user(b, id) -> user or nothing                       (for the session's user id)
 #     backend_has_perm(b, user, perm, obj) -> true / false / nothing   (obj: object-level checks)
+#     backend_get_user_permissions(b, user, obj), backend_get_group_permissions(b, user, obj),
 #     backend_get_all_permissions(b, user, obj) -> Set{String}
+#     backend_has_module_perms(b, user, app_label) -> true / false / nothing
+#     backend_with_perm(b, perm; is_active, include_superusers, obj) -> users' QuerySet or nothing
+#
+# The user may be an AnonymousUser or an inactive user: a backend may grant them permissions too.
+# Throwing PermissionDenied from backend_has_perm or backend_has_module_perms means no, whatever
+# the backends after it say.
 
 backend_authenticate(b, req; kw...) = nothing
 backend_get_user(b, id) = nothing
 backend_has_perm(b, user, perm, obj) = nothing
-backend_get_all_permissions(b, user, obj) = Set{String}()
+backend_get_user_permissions(b, user, obj) = Set{String}()
+backend_get_group_permissions(b, user, obj) = Set{String}()
+# (by default, as Django's BaseBackend: the user's and the groups' permissions)
+backend_get_all_permissions(b, user, obj) = union(Set{String}(backend_get_user_permissions(b, user, obj)),
+                                                  Set{String}(backend_get_group_permissions(b, user, obj)))
+backend_has_module_perms(b, user, app) = nothing
+backend_with_perm(b, perm; kw...) = nothing
 
 """
     ModelBackend()
@@ -232,43 +275,91 @@ function backend_authenticate(::AllowAllUsersModelBackend, req; password = nothi
     check_password(u, password) ? u : nothing
 end
 backend_get_user(::AllowAllUsersModelBackend, id) = first(filter(objects(get_user_model()); id = id))
+# (its permissions are ModelBackend's: none for inactive users)
 backend_has_perm(::AllowAllUsersModelBackend, u, perm, obj) = backend_has_perm(ModelBackend(), u, perm, obj)
+backend_get_user_permissions(::AllowAllUsersModelBackend, u, obj) = backend_get_user_permissions(ModelBackend(), u, obj)
+backend_get_group_permissions(::AllowAllUsersModelBackend, u, obj) = backend_get_group_permissions(ModelBackend(), u, obj)
 backend_get_all_permissions(::AllowAllUsersModelBackend, u, obj) = backend_get_all_permissions(ModelBackend(), u, obj)
+backend_has_module_perms(::AllowAllUsersModelBackend, u, app) = backend_has_module_perms(ModelBackend(), u, app)
+backend_with_perm(::AllowAllUsersModelBackend, perm; kw...) = backend_with_perm(ModelBackend(), perm; kw...)
+
 function backend_has_perm(::ModelBackend, u, perm, obj)
     (u isa AbstractUser && u.is_active && obj === nothing) || return nothing
     perm in model_permissions(u) ? true : nothing
 end
-backend_get_all_permissions(::ModelBackend, u, obj) =
-    u isa AbstractUser && u.is_active && obj === nothing ? model_permissions(u) : Set{String}()
+model_backend_perms(u, obj, which) = obj === nothing ? model_perm_set(u, which) : Set{String}()
+backend_get_user_permissions(::ModelBackend, u, obj) = model_backend_perms(u, obj, :_user_perm_cache)
+backend_get_group_permissions(::ModelBackend, u, obj) = model_backend_perms(u, obj, :_group_perm_cache)
+backend_get_all_permissions(::ModelBackend, u, obj) = model_backend_perms(u, obj, :_perm_cache)
+backend_has_module_perms(::ModelBackend, u, app) =
+    u isa AbstractUser && u.is_active && any(p -> startswith(p, app * "."), model_permissions(u))
+function backend_with_perm(::ModelBackend, perm; is_active = true, include_superusers = true, obj = nothing)
+    T = get_user_model()
+    obj === nothing || return none(objects(T))
+    app, code = perm isa Permission ? (perm.content_type.app_label, perm.codename) : split(perm, '.'; limit = 2)
+    ps = filter(base_objects(Permission); codename = code, content_type__app_label = app)
+    # (ids from each route, so the joins don't repeat users)
+    ids = union(Set(values_list(filter(objects(T); user_permissions__in = ps), :id; flat = true)),
+                Set(values_list(filter(objects(T); groups__permissions__in = ps), :id; flat = true)))
+    q = Q(id__in = collect(ids))
+    include_superusers && (q = q | Q(is_superuser = true))
+    qs = filter(objects(T), q)
+    is_active === nothing ? qs : filter(qs; is_active = is_active)
+end
 
 """
     RemoteUserBackend(; create_unknown_user = true)
+    AllowAllUsersRemoteUserBackend(; create_unknown_user = true)
 
 Trust the user name a front-end server or proxy has authenticated (`RemoteUserMiddleware`
 passes it as `remote_user`): the user with that `username_field`, created with an unusable
-password if there is none and `create_unknown_user`. Permissions as `ModelBackend`.
+password if there is none and `create_unknown_user`. Inactive users are refused, except by
+`AllowAllUsersRemoteUserBackend`. Permissions as `ModelBackend`.
+
+A backend of your own that is a subtype of `AbstractRemoteUserBackend` (with a
+`create_unknown_user` field) can define, as Django's hooks:
+
+    remote_clean_username(b, name)                     # e.g. strip a realm: "alice@EXAMPLE" -> "alice"
+    remote_configure_user(b, req, user; created)       # set up the user (created: just made); return it
+    remote_user_can_authenticate(b, user)              # default: user.is_active
 """
-Base.@kwdef struct RemoteUserBackend
+abstract type AbstractRemoteUserBackend end
+Base.@kwdef struct RemoteUserBackend <: AbstractRemoteUserBackend
     create_unknown_user::Bool = true
 end
-function backend_authenticate(b::RemoteUserBackend, req; remote_user = nothing, kw...)
+Base.@kwdef struct AllowAllUsersRemoteUserBackend <: AbstractRemoteUserBackend
+    create_unknown_user::Bool = true
+end
+remote_clean_username(b, name) = name
+remote_configure_user(b, req, u; created = true) = u
+remote_user_can_authenticate(b, u) = u.is_active
+remote_user_can_authenticate(::AllowAllUsersRemoteUserBackend, u) = true
+function backend_authenticate(b::AbstractRemoteUserBackend, req; remote_user = nothing, kw...)
     remote_user === nothing && return nothing
-    name = strip(string(remote_user))
-    isempty(name) && return nothing
+    isempty(strip(string(remote_user))) && return nothing
+    name = String(remote_clean_username(b, strip(string(remote_user))))
     T = get_user_model()
     uf = username_field(T)
     u = first(filter(objects(T), Q(uf => name)))
+    created = false
     if u === nothing
         b.create_unknown_user || return nothing
-        u = T(; uf => String(name))
+        u = T(; uf => name, (uf === :username ? () : (:username => name,))...)
         set_unusable_password!(u)
         save!(u)
+        created = true
     end
-    u.is_active ? u : nothing
+    u = remote_configure_user(b, req, u; created = created)
+    remote_user_can_authenticate(b, u) ? u : nothing
 end
-backend_get_user(::RemoteUserBackend, id) = backend_get_user(ModelBackend(), id)
-backend_has_perm(::RemoteUserBackend, u, perm, obj) = backend_has_perm(ModelBackend(), u, perm, obj)
-backend_get_all_permissions(::RemoteUserBackend, u, obj) = backend_get_all_permissions(ModelBackend(), u, obj)
+backend_get_user(::AbstractRemoteUserBackend, id) = backend_get_user(ModelBackend(), id)
+backend_get_user(::AllowAllUsersRemoteUserBackend, id) = backend_get_user(AllowAllUsersModelBackend(), id)
+backend_has_perm(::AbstractRemoteUserBackend, u, perm, obj) = backend_has_perm(ModelBackend(), u, perm, obj)
+backend_get_user_permissions(::AbstractRemoteUserBackend, u, obj) = backend_get_user_permissions(ModelBackend(), u, obj)
+backend_get_group_permissions(::AbstractRemoteUserBackend, u, obj) = backend_get_group_permissions(ModelBackend(), u, obj)
+backend_get_all_permissions(::AbstractRemoteUserBackend, u, obj) = backend_get_all_permissions(ModelBackend(), u, obj)
+backend_has_module_perms(::AbstractRemoteUserBackend, u, app) = backend_has_module_perms(ModelBackend(), u, app)
+backend_with_perm(::AbstractRemoteUserBackend, perm; kw...) = backend_with_perm(ModelBackend(), perm; kw...)
 
 """
     RemoteUserMiddleware, PersistentRemoteUserMiddleware
@@ -281,18 +372,26 @@ login page). The proxy must remove the header from clients' requests, or anyone 
 """
 RemoteUserMiddleware(get_response) = remote_user_middleware(get_response; force_logout_if_no_header = true)
 PersistentRemoteUserMiddleware(get_response) = remote_user_middleware(get_response; force_logout_if_no_header = false)
+# (the backend that logged the session's user in, if it's a remote-user one: only those users are logged out)
+function session_remote_backend(req)
+    req.session isa Session || return nothing
+    bname = get(req.session, "_auth_user_backend", nothing)
+    i = bname === nothing ? nothing : findfirst(b -> backend_name(b) == bname, auth_backends())
+    i === nothing ? nothing : (b = auth_backends()[i]; b isa AbstractRemoteUserBackend ? b : nothing)
+end
 function remote_user_middleware(get_response; force_logout_if_no_header::Bool)
-    remote = backend_name(RemoteUserBackend())
-    by_remote(req) = req.session isa Session && get(req.session, "_auth_user_backend", nothing) == remote
     function (req::Request)
         name = header(req, settings.REMOTE_USER_HEADER)
         if name === nothing || isempty(strip(name))
-            force_logout_if_no_header && is_authenticated(req.user) && by_remote(req) && logout!(req)
+            force_logout_if_no_header && is_authenticated(req.user) && session_remote_backend(req) !== nothing && logout!(req)
             return get_response(req)
         end
         if is_authenticated(req.user)
-            string(getproperty(req.user, username_field(typeof(req.user)))) == strip(name) && return get_response(req)
-            by_remote(req) && logout!(req)          # another user than the header names
+            b = session_remote_backend(req)
+            # (the name as the backend cleans it, as Django's)
+            clean = b === nothing ? strip(name) : remote_clean_username(b, strip(name))
+            get_username(req.user) == clean && return get_response(req)
+            b === nothing || logout!(req)          # another user than the header names
         end
         u = authenticate(req; remote_user = name)
         u === nothing || login!(req, u)
@@ -300,7 +399,11 @@ function remote_user_middleware(get_response; force_logout_if_no_header::Bool)
     end
 end
 
-auth_backends() = get(settings, :AUTHENTICATION_BACKENDS, Any[ModelBackend()])
+function auth_backends()
+    bs = get(settings, :AUTHENTICATION_BACKENDS, Any[ModelBackend()])
+    isempty(bs) && throw(ImproperlyConfigured("No authentication backends have been defined. Does AUTHENTICATION_BACKENDS contain anything?"))
+    bs
+end
 backend_name(b) = string(parentmodule(typeof(b)), ".", nameof(typeof(b)))
 
 """
@@ -309,10 +412,14 @@ backend_name(b) = string(parentmodule(typeof(b)), ".", nameof(typeof(b)))
 
 Ask each of `AUTHENTICATION_BACKENDS` in turn; the first user one returns is the answer (and
 remembers which backend accepted it, for `login!`). A backend that throws `PermissionDenied`
-stops the search.
+stops the search; one whose `backend_authenticate` method doesn't take these keyword arguments
+is skipped (define it with `kw...` to take any).
 """
 function authenticate(req = nothing; kw...)
+    names = Tuple(keys(kw))
     for b in auth_backends()
+        # (a backend whose method doesn't take these credentials is skipped, as Django's)
+        hasmethod(backend_authenticate, Tuple{typeof(b),typeof(req)}, names) || continue
         u = try
             backend_authenticate(b, req; kw...)
         catch e
@@ -324,7 +431,9 @@ function authenticate(req = nothing; kw...)
             return u
         end
     end
-    creds = Dict{String,Any}(string(k) => v for (k, v) in kw if !occursin(r"pass|token|secret|key"i, string(k)))
+    # (sensitive values replaced by stars, as Django's _clean_credentials)
+    creds = Dict{String,Any}(string(k) => occursin(r"api|token|key|secret|pass|signature"i, string(k)) ? "********************" : v
+                             for (k, v) in kw)
     has_receivers(user_login_failed, :authenticate) && send(user_login_failed, :authenticate; credentials = creds, request = req)
     nothing
 end
@@ -338,13 +447,13 @@ session_auth_hash(u::AbstractUser; key = settings.SECRET_KEY) = bytes2hex(hmac_s
     login!(req, user; backend = nothing)
 
 Log the user in: rotate the session key and remember the user, and the backend that
-authenticated them, in the session.
+authenticated them, in the session. A user that `authenticate` didn't return needs `backend` (a
+backend or its name) when there are several `AUTHENTICATION_BACKENDS`, as Django's.
 """
 function login!(req::Request, u::AbstractUser; backend = nothing)
     s = req.session
     s isa Session || error("login! requires SessionMiddleware")
-    bname = backend !== nothing ? backend_name(backend) :
-            get((getfield(u, :_cache)::Dict{Symbol,Any}), :__auth_backend, backend_name(first(auth_backends())))
+    bname = login_backend_name(u, backend)
     # (as Django's: another user's session is emptied, not reused; otherwise a new key for the same data)
     if haskey(s, "_auth_user_id")
         (s["_auth_user_id"] != u.id || !consteq(string(get(s, "_auth_user_hash", "")), session_auth_hash(u))) && flush!(s)
@@ -363,10 +472,24 @@ function login!(req::Request, u::AbstractUser; backend = nothing)
     u
 end
 
-"Log the current user out and flush the session."
+function login_backend_name(u, backend)
+    backend isa AbstractString && return String(backend)
+    backend === nothing || return backend_name(backend)
+    c = getfield(u, :_cache)::Dict{Symbol,Any}
+    haskey(c, :__auth_backend) && return c[:__auth_backend]
+    bs = auth_backends()
+    length(bs) == 1 || throw(ArgumentError("You have multiple authentication backends configured and therefore must provide the `backend` argument or set the `backend` attribute on the user."))
+    backend_name(bs[1])
+end
+
+"Log the current user out and flush the session (`user_logged_out` is sent with `user = nothing` for an anonymous one, as Django's)."
 function logout!(req::Request)
     u = req.user
-    u isa AbstractUser && has_receivers(user_logged_out, typeof(u)) && send(user_logged_out, typeof(u); request = req, user = u)
+    if u isa AbstractUser
+        has_receivers(user_logged_out, typeof(u)) && send(user_logged_out, typeof(u); request = req, user = u)
+    else
+        has_receivers(user_logged_out, Nothing) && send(user_logged_out, Nothing; request = req, user = nothing)
+    end
     req.session isa Session && flush!(req.session)
     req.user = AnonymousUser()
     nothing

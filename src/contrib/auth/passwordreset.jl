@@ -121,7 +121,7 @@ Django's sign-up form for the `AUTH_USER_MODEL`: its username field (plus any `f
 `save!(form)` stores the password hashed. Other keywords go to `ModelForm`.
 
     form = UserCreationForm(req.POST)
-    is_valid(form) && (user = save!(form); login!(req, user))
+    is_valid(form) && (user = save!(form); login!(req, user; backend = first(auth_backends())))
 """
 function UserCreationForm(data = nothing; fields = nothing, instance = nothing, kw...)
     U = get_user_model()
