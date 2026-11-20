@@ -896,3 +896,72 @@ dm_default_back(v; kind = :string) = only(dm_roundtrip(DM.AddField("t", Juango.C
     # test_models_import_omitted / test_custom_operation: not applicable (no imports to manage: every
     # operation and value type is in scope in a migration file)
 end
+
+# --- test_commands: migrate, showmigrations, sqlmigrate on an app's migration files -----------------
+
+@testset "django migrations: test_commands" begin
+    dir = mktempdir()
+    old = Juango.settings.MIGRATION_MODULES
+    configure!(MIGRATION_MODULES = merge(old, Dict("dmcmd" => dir)))
+    quiet(f) = redirect_stdout(f, devnull)
+    wm(name, code) = write(joinpath(dir, name * ".jl"), "using Juango.Migrations\n" * code)
+    wm("0001_initial", """Migration(initial = true, operations = [CreateModel("dmcmd_author"; columns = [Column("name", :string; max_length = 255)])])""")
+    wm("0002_second", """Migration(dependencies = [("dmcmd", "0001_initial")], operations = [
+        AddField("dmcmd_author", Column("rating", :int; default = 0)),
+        CreateModel("dmcmd_book"; columns = [Column("author_id", :fk; references = "dmcmd_author")])])""")
+    try
+        # test_showmigrations_list
+        @test sprint(io -> DM.showmigrations("dmcmd"; io = io)) == "dmcmd\n [ ] 0001_initial\n [ ] 0002_second\n"
+        # test_showmigrations_plan
+        @test sprint(io -> DM.showmigrations("dmcmd"; plan = true, io = io)) == "[ ]  dmcmd.0001_initial\n[ ]  dmcmd.0002_second\n"
+        # test_showmigrations_unmigrated_app / an unknown app label
+        @test_throws "No installed app with label 'nonexistent_app'." DM.showmigrations("nonexistent_app"; io = devnull)
+        # test_migrate_check (unapplied migrations: false, the CLI's exit status 1)
+        @test migrate(; app = "dmcmd", target = "0002_second", check = true) == false
+        @test !("dmcmd_author" in dm_tables())
+        # test_migrate_plan
+        plan = quiet(() -> migrate(; app = "dmcmd", target = "0002_second", plan_only = true))
+        @test first.(plan) == [("dmcmd", "0001_initial"), ("dmcmd", "0002_second")] && !("dmcmd_author" in dm_tables())
+        # test_sqlmigrate_forwards, test_sqlmigrate_backwards
+        @test occursin("CREATE TABLE", sqlmigrate("dmcmd", "0001")) && occursin("dmcmd_author", sqlmigrate("dmcmd", "0001"))
+        @test occursin("DROP TABLE", sqlmigrate("dmcmd", "0001"; backwards = true))
+        # test_migrate
+        quiet(() -> migrate(; app = "dmcmd", target = "0002_second"))
+        @test issubset(["dmcmd_author", "dmcmd_book"], dm_tables()) && haskey(dm_cols("dmcmd_author"), "rating")
+        @test sprint(io -> DM.showmigrations("dmcmd"; io = io)) == "dmcmd\n [X] 0001_initial\n [X] 0002_second\n"
+        @test migrate(; app = "dmcmd", target = "0002_second", check = true) == true
+        # (migrating back to a migration unapplies the later ones)
+        quiet(() -> migrate(; app = "dmcmd", target = "0001_initial"))
+        @test "dmcmd_author" in dm_tables() && !("dmcmd_book" in dm_tables()) && !haskey(dm_cols("dmcmd_author"), "rating")
+        @test sprint(io -> DM.showmigrations("dmcmd"; plan = true, io = io)) == "[X]  dmcmd.0001_initial\n[ ]  dmcmd.0002_second\n"
+        # test_migrate_zero (unapply everything)
+        quiet(() -> migrate(; app = "dmcmd", target = "zero"))
+        @test !("dmcmd_author" in dm_tables())
+        # test_migrate_fake_initial / test_migrate_fake (recorded, not run)
+        quiet(() -> migrate(; app = "dmcmd", target = "0001_initial", fake = true))
+        @test ("dmcmd", "0001_initial") in DM.applied_migrations() && !("dmcmd_author" in dm_tables())
+        quiet(() -> migrate(; app = "dmcmd", target = "zero", fake = true))
+        @test !(("dmcmd", "0001_initial") in DM.applied_migrations())
+        # test_showmigrations_squashed: a squashed migration shows how many it replaces
+        wm("0001_squashed_0002", """Migration(initial = true, replaces = [("dmcmd", "0001_initial"), ("dmcmd", "0002_second")], operations = [
+            CreateModel("dmcmd_author"; columns = [Column("name", :string; max_length = 255), Column("rating", :int; default = 0)]),
+            CreateModel("dmcmd_book"; columns = [Column("author_id", :fk; references = "dmcmd_author")])])""")
+        @test sprint(io -> DM.showmigrations("dmcmd"; io = io)) == "dmcmd\n [ ] 0001_squashed_0002 (2 squashed migrations)\n"
+        quiet(() -> migrate(; app = "dmcmd", target = "0001_squashed_0002"))
+        @test sprint(io -> DM.showmigrations("dmcmd"; io = io)) == "dmcmd\n [X] 0001_squashed_0002 (2 squashed migrations)\n"
+        @test issubset(["dmcmd_author", "dmcmd_book"], dm_tables())
+        quiet(() -> migrate(; app = "dmcmd", target = "zero"))
+        @test !("dmcmd_author" in dm_tables())
+        # (makemigrations numbers after a squashed migration by the last one it replaces)
+        @test DM.next_number(DM.build_graph(), "dmcmd") == 3
+        # not translated: the makemigrations, squashmigrations and optimizemigration tests (in
+        # migrations.jl); verbosity and color options; test_sqlmigrate_* for non-atomic and
+        # transactional DDL details; test_migrate_syncdb_* (migrate --sync, in migrations.jl)
+    finally
+        for t in ["dmcmd_book", "dmcmd_author"]
+            t in dm_tables() && Juango.execute("DROP TABLE $(Juango.quote_name(Juango.backend(), t))")
+        end
+        Juango.execute("DELETE FROM juango_migrations WHERE app = 'dmcmd'")
+        configure!(MIGRATION_MODULES = old)
+    end
+end

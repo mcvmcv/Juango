@@ -742,17 +742,18 @@ Juango's own features are apps too: `juango.admin`, `juango.auth`, `juango.conte
 Migrations are versioned, reviewable files that move the database schema forwards and backwards:
 
 ```sh
-julia --project manage.jl makemigrations          # writes migrations/0002_add_post_status.jl
+julia --project manage.jl makemigrations          # writes migrations/0002_post_status.jl
 julia --project manage.jl sqlmigrate 0002         # the SQL it will run (--backwards for the reverse)
 julia --project manage.jl migrate                 # apply everything pending
 julia --project manage.jl migrate 0001            # go back to 0001, unapplying 0002 and later
 julia --project manage.jl migrate zero            # unapply all of the project's migrations
-julia --project manage.jl showmigrations          # [X] applied, [ ] pending
+julia --project manage.jl showmigrations          # [X] applied, [ ] pending (showmigrations blog --plan: one app, in order)
 julia --project manage.jl migrate --plan          # what migrate would do, without doing it
+julia --project manage.jl migrate --check         # exit status 1 if any migration is unapplied (for deploy scripts)
 julia --project manage.jl sqlflush                # the SQL flush would run; sqlsequencereset <app> moves id sequences (PostgreSQL)
 ```
 
-`makemigrations` compares your models with the state the existing migration files describe and writes the difference as operations. These are `CreateModel`, `DeleteModel`, `RenameModel`, `AddField`, `RemoveField`, `AlterField` and `RenameField`. When a column (or table) disappears and an identical one appears under a new name, it asks whether you renamed it. With `--noinput` the answer is no. A model whose table name changed (a new `Meta(table = ...)`, or the default name) is renamed without asking. A model's table is `<app label>_<model name>` (`blog_post`), as Django's, unless `Meta(table = ...)` names one; many-to-many join tables add the field's name (`blog_post_tags`). A generated file looks like this:
+`makemigrations` compares your models with the state the existing migration files describe and writes the difference as operations. These are `CreateModel`, `DeleteModel`, `RenameModel`, `AddField`, `RemoveField`, `AlterField` and `RenameField`. When a column (or table) disappears and an identical one appears under a new name, it asks whether you renamed it (a table counts as identical when its columns' definitions match, so a table renamed together with a column is asked about both). With `--noinput` the answer is no. A model whose table name changed (a new `Meta(table = ...)`, or the default name) is renamed without asking. A model's table is `<app label>_<model name>` (`blog_post`), as Django's, unless `Meta(table = ...)` names one; many-to-many join tables add the field's name (`blog_post_tags`). A generated file looks like this:
 
 ```julia
 using Juango.Migrations

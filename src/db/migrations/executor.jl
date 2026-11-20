@@ -173,7 +173,8 @@ end
 Apply migrations. With no arguments, applies every pending migration and then
 synchronises apps that have no migration files. `target` (with `app`, default
 `\"project\"`) migrates forwards or backwards to that migration; `\"zero\"` unapplies all.
-`fake=true` records migrations without running them. `sync=true` skips migration files and
+`fake=true` records migrations without running them. `check=true` only returns whether nothing
+is left to apply (Django's `migrate --check`). `sync=true` skips migration files and
 only synchronises tables for every model. `database` picks one of `DATABASES` (default
 "default"); the routers' `allow_migrate` decides which apps' migrations really run there
 (the others are only recorded).
@@ -181,7 +182,7 @@ only synchronises tables for every model. `database` picks one of `DATABASES` (d
 migrate(; database = nothing, kw...) = Juango.with_db(() -> migrate_here(; kw...), database)
 
 function migrate_here(; app = nothing, target = nothing, fake = false, fake_initial = true, sync = false, prune = false,
-                      verbose = true, plan_only::Bool = false)
+                      verbose = true, plan_only::Bool = false, check::Bool = false)
     log(msg) = verbose && println(msg)
     prune && return prune_migrations(app; log = log)
     db = Juango.current_alias()
@@ -201,6 +202,7 @@ function migrate_here(; app = nothing, target = nothing, fake = false, fake_init
         end
     end
     plan = migration_plan(g, applied; app = app, target = target)
+    check && return isempty(plan)                      # migrate --check: whether nothing is left to apply
     if plan_only                                       # migrate --plan: what would run, and nothing else
         println("Planned operations:")
         isempty(plan) && println("  No planned migration operations.")
@@ -274,21 +276,37 @@ function check_conflicts(g::Graph)
 end
 
 """
-    showmigrations(; io=stdout) -> Vector{Tuple{String,String,Bool}}
+    showmigrations(apps...; plan=false, io=stdout) -> Vector{Tuple{String,String,Bool}}
 
-List every migration with `[X]` when applied.
+List the migrations of each app (or only of `apps`), with `[X]` when applied (Django's
+showmigrations). `plan = true` lists them all in the order `migrate` would apply them, as
+`[X]  app.name`. An app that isn't known is an error.
 """
-function showmigrations(; io = stdout)
+function showmigrations(apps...; plan = false, io = stdout)
     g = build_graph()
     applied = applied_migrations()
+    known = known_apps()
+    for a in apps
+        string(a) in known || throw(MigrationError("No installed app with label '$a'."))
+    end
+    wanted = isempty(apps) ? known : String[string(a) for a in apps]
     rows = Tuple{String,String,Bool}[]
-    for a in known_apps()
+    if plan
+        for k in topo_order(g)
+            k[1] in wanted || continue
+            push!(rows, (k[1], k[2], k in applied))
+            println(io, "[", k in applied ? "X" : " ", "]  ", k[1], ".", k[2])
+        end
+        return rows
+    end
+    for a in wanted
         println(io, a)
         ks = [k for k in topo_order(g) if k[1] == a]
         isempty(ks) && println(io, " (no migrations)")
         for k in ks
             push!(rows, (k[1], k[2], k in applied))
-            println(io, " [", k in applied ? "X" : " ", "] ", k[2])
+            n = length(g.nodes[k].replaces)
+            println(io, " [", k in applied ? "X" : " ", "] ", k[2], n > 0 ? " ($n squashed migrations)" : "")
         end
     end
     rows

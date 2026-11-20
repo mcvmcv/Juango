@@ -245,7 +245,7 @@ function cmd_check(args)
     report_checks(msgs, length(run_checks(; tags = tags, deploy = deploy, include_silenced = true)) - length(msgs))
 end
 
-# migrate [app] [target] [--fake] [--sync]
+# migrate [app] [target] [--fake] [--sync] [--plan] [--check] [--prune] [--no-fake-initial] [--database NAME]
 function cmd_migrate(args)
     pos, flags = parse_flags(args)
     app, target = nothing, nothing
@@ -267,6 +267,10 @@ function cmd_migrate(args)
     end
     haskey(flags, "prune") && return migrate(; app = app, prune = true, database = get(flags, "database", nothing))
     haskey(flags, "plan") && return (migrate(; app = app, target = target, plan_only = true, database = get(flags, "database", nothing)); nothing)
+    if haskey(flags, "check")                          # (as Django's: exit 1 when migrations are unapplied)
+        migrate(; app = app, target = target, check = true, database = get(flags, "database", nothing)) || exit(1)
+        return nothing
+    end
     migrate(; app = app, target = target, fake = haskey(flags, "fake"), sync = haskey(flags, "sync"),
             fake_initial = !haskey(flags, "no-fake-initial"), database = get(flags, "database", nothing))
 end
@@ -471,13 +475,18 @@ end
 
 for (n, h, f) in (
     ("runserver", "Start the development server: runserver [host:]port [--cert cert.pem --key key.pem] [--noreload]", cmd_runserver),
-    ("migrate", "Apply migrations: migrate [app] [target|zero] [--plan] [--fake] [--no-fake-initial] [--sync] [--prune] [--database ALIAS]", cmd_migrate),
+    ("migrate", "Apply migrations: migrate [app] [target|zero] [--plan] [--check] [--fake] [--no-fake-initial] [--sync] [--prune] [--database ALIAS]", cmd_migrate),
     ("sqlflush", "Print the SQL that flush would run", _ -> foreach(s -> println(s, ";"), flush_sql())),
     ("sqlsequencereset", "Print the SQL that moves id sequences past the existing rows: sqlsequencereset <app> ...",
      args -> foreach(s -> println(s, ";"), sequence_reset_sql(isempty(args) ? nothing : String.(args)))),
     ("optimizemigration", "Rewrite a migration with fewer operations: optimizemigration <app> <migration> [--check]", cmd_optimizemigration),
     ("makemigrations", "Write migrations for model changes (--name, --empty, --merge, --update, --dry-run, --check, --noinput, --app)", cmd_makemigrations),
-    ("showmigrations", "List migrations and whether they are applied", _ -> showmigrations()),
+    ("showmigrations", "List migrations and whether they are applied: showmigrations [app...] [--plan]",
+     function (args)
+         pos, flags = parse_flags(args)
+         showmigrations(pos...; plan = haskey(flags, "plan"))
+         nothing
+     end),
     ("swap_user_model", "Move the users to a new user model before switching AUTH_USER_MODEL: swap_user_model <app.Model> [--dry-run]",
      function (args)
          pos, flags = parse_flags(args)
