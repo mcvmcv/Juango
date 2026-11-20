@@ -5,7 +5,7 @@
 using Test
 
 # Longest first, so the job slots finish at about the same time.
-const GROUPS = [["orm", "db", "migrations"], ["views", "admin", "django_templates", "django_migrations", "django_auth"], ["services", "django_forms", "django_admin", "django_csrf", "django_sessions"], ["templates", "forms", "django_orm"]]
+const GROUPS = [["orm", "db", "migrations"], ["views", "admin", "django_templates", "django_migrations", "django_auth"], ["services", "django_forms", "django_admin", "django_csrf", "django_sessions", "django_urls"], ["templates", "forms", "django_orm"]]
 const JOBS = parse(Int, get(ENV, "JUANGO_TEST_JOBS", "3"))
 # browser tests of live.js (they need chromium and node): JUANGO_BROWSER_TESTS=1
 get(ENV, "JUANGO_BROWSER_TESTS", "") == "1" && push!(GROUPS[2], "browser")

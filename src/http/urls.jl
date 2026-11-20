@@ -12,7 +12,7 @@ struct Converter
     to_url::Function
     full::Regex             # ^regex$, compiled once (checks values when reversing)
 end
-Converter(regex::AbstractString, to_julia, to_url) = Converter(String(regex), to_julia, to_url, Regex("^(?:" * regex * ")\$"))
+Converter(regex::AbstractString, to_julia, to_url) = Converter(String(regex), to_julia, to_url, Regex("^(?:" * regex * ")\\z"))
 
 const CONVERTERS = Dict{String,Converter}(
     "str" => Converter("[^/]+", identity, string),
@@ -22,11 +22,20 @@ const CONVERTERS = Dict{String,Converter}(
     "uuid" => Converter("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", identity, string),
 )
 
-"Register a custom path converter, e.g. `register_converter!(\"year\", \"[0-9]{4}\", s->parse(Int,s))`."
-register_converter!(name, regex, to_julia = identity, to_url = string) =
-    (CONVERTERS[string(name)] = Converter(regex, to_julia, to_url); nothing)
+"""
+Register a custom path converter, e.g. `register_converter!(\"year\", \"[0-9]{4}\", s->parse(Int,s))`.
+As Django's: a name already registered is an error. `to_julia` (or `to_url`) throwing an
+`ArgumentError` means the value doesn't match (another pattern may); other errors propagate.
+"""
+function register_converter!(name, regex, to_julia = identity, to_url = string)
+    haskey(CONVERTERS, string(name)) && throw(ArgumentError("Converter '$name' is already registered."))
+    CONVERTERS[string(name)] = Converter(regex, to_julia, to_url)
+    nothing
+end
+"A value a converter doesn't take: no match, not an error (Django's ValueError)."
+no_match_error(e) = e isa ArgumentError || e isa OverflowError || e isa InexactError
 
-const ROUTE_PARAM = r"<(?:(?<conv>[a-zA-Z_][a-zA-Z0-9_]*):)?(?<name>[a-zA-Z_][a-zA-Z0-9_]*)>"
+const ROUTE_PARAM = r"<(?:(?<conv>[^>:]+):)?(?<name>[^>]+)>"
 
 regex_escape(s::AbstractString) = replace(s, r"([\\.^$|?*+()\[\]{}])" => s"\\\1")
 
@@ -38,15 +47,19 @@ function compile_route(route::AbstractString; endpoint::Bool)
     last = 1
     for m in eachmatch(ROUTE_PARAM, route)
         print(io, regex_escape(route[last:prevind(route, m.offset)]))
+        # (as Django's: no whitespace in the brackets, a known converter, a name that's an identifier)
+        any(isspace, m.match) && throw(ImproperlyConfigured("URL route $(repr(String(route))) cannot contain whitespace in angle brackets <…>"))
         conv = m[:conv] === nothing ? "str" : String(m[:conv])
-        haskey(CONVERTERS, conv) || error("URL route '$route' uses unknown converter '$conv'")
+        haskey(CONVERTERS, conv) || throw(ImproperlyConfigured("URL route '$route' uses invalid converter '$conv'."))
         name = String(m[:name])
+        Base.isidentifier(name) ||
+            throw(ImproperlyConfigured("URL route '$route' uses parameter name '$name' which isn't a valid Python identifier."))
         print(io, "(?<", name, ">", CONVERTERS[conv].regex, ")")
         push!(params, (Symbol(name), conv))
         last = m.offset + ncodeunits(m.match)
     end
     print(io, regex_escape(route[last:end]))
-    endpoint && print(io, "\$")
+    endpoint && print(io, "\\z")          # (\z, not $: a trailing newline doesn't match, as Django's)
     Regex(String(take!(io))), params
 end
 
@@ -109,6 +122,7 @@ Captured values are passed to the view as keyword arguments, together with any
 extra `kwargs`.
 """
 function path(route::AbstractString, view; name = nothing, kwargs...)
+    view isa AbstractString && throw(ArgumentError("view must be a callable or a list/tuple in the case of include(), but got str."))
     startswith(route, "/") && @warn "URL route '$route' starts with '/'; routes should be relative (e.g. \"posts/\")."
     rx, params = compile_route(route; endpoint = true)
     URLPattern(String(route), rx, params, view, name === nothing ? nothing : string(name),
@@ -127,7 +141,9 @@ Pattern from a raw regular expression; named groups become keyword arguments
 (as strings). Reversing fills in its groups: named ones from keyword arguments, others from positional ones.
 """
 function re_path(rx::AbstractString, view; name = nothing, kwargs...)
-    r = startswith(rx, "^") ? Regex(rx) : Regex("^" * rx)
+    # (a closing $ is \z, so a trailing newline doesn't match, as Django's)
+    body = endswith(rx, "\$") && !endswith(rx, "\\\$") ? rx[1:prevind(rx, lastindex(rx))] * "\\z" : rx
+    r = startswith(body, "^") ? Regex(body) : Regex("^" * body)
     params = Tuple{Symbol,String}[(Symbol(n), "str") for n in Base.PCRE.capture_names(r.regex) |> values]
     URLPattern(String(rx), r, params, view, name === nothing ? nothing : string(name), Dict{Symbol,Any}(kwargs))
 end
@@ -174,7 +190,12 @@ function capture_kwargs(m::RegexMatch, params)
     for (name, conv) in params
         v = m[string(name)]
         v === nothing && continue
-        kw[name] = CONVERTERS[conv].to_julia(String(v))
+        kw[name] = try
+            CONVERTERS[conv].to_julia(String(v))
+        catch e
+            no_match_error(e) || rethrow()
+            return nothing                     # (the converter refuses it: no match)
+        end
     end
     kw
 end
@@ -186,13 +207,17 @@ function _resolve(patterns, p::AbstractString, kwargs, ns, prefix, app = nothing
         if pat isa URLPattern
             m = match(pat.regex, p)
             m === nothing && continue
-            kw = merge(kwargs, capture_kwargs(m, pat.params), pat.defaults)
+            ck = capture_kwargs(m, pat.params)
+            ck === nothing && continue
+            kw = merge(kwargs, ck, pat.defaults)
             return ResolverMatch(pat.view, kw, pat.name, ns, prefix * pat.route, nothing, app)
         elseif pat isa URLResolver
             m = match(pat.regex, p)
             m === nothing && continue
             rest = p[ncodeunits(m.match)+1:end]
-            r = _resolve(pat.patterns, rest, merge(kwargs, capture_kwargs(m, pat.params)),
+            ck = capture_kwargs(m, pat.params)
+            ck === nothing && continue
+            r = _resolve(pat.patterns, rest, merge(kwargs, ck),
                          joinns(ns, pat.namespace), prefix * pat.route, joinns(app, pat.app_name))
             r === nothing || return r
         elseif pat isa AbstractVector
@@ -419,7 +444,12 @@ function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLC
         ok = true
         for (i, (pn, conv)) in enumerate(e.params)
             c = CONVERTERS[conv]
-            s = string(c.to_url(isempty(args) ? kw[pn] : args[i]))
+            s = try
+                string(c.to_url(isempty(args) ? kw[pn] : args[i]))
+            catch e
+                no_match_error(e) || rethrow()
+                (ok = false; break)                # (the converter refuses the value: try the next pattern)
+            end
             occursin(c.full, s) || (ok = false; break)
             print(io, e.pieces[i], conv == "path" ? join(path_quote.(split(s, '/')), '/') : path_quote(s))
         end
