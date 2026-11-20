@@ -699,6 +699,107 @@ end
 
 # --- change list -------------------------------------------------------------------------------------
 
+# --- search (Django's ModelAdmin.get_search_results) ----------------------------------------------
+
+"""
+    search_results(T, qs, search_fields, term) -> (queryset, may_have_duplicates)
+
+The admin's search, as Django's: the term is split into words (a quoted phrase is one), and each
+word must match at least one of the search fields. A field is searched with `icontains`, or
+`"^name"` with `istartswith`, `"=name"` with `iexact`, `"@name"` with `search`, and a field that
+ends in a lookup (`"age__exact"`, `"author__name__startswith"`) with that lookup; an exact lookup
+on a field that isn't text skips words that aren't a value of it ("abc" for a number). The
+second value says whether the search crosses a many-to-many or reverse relation, which can
+repeat rows (the caller makes the queryset distinct).
+"""
+Base.@nospecializeinfer function search_results(@nospecialize(T::Type), qs, search_fields, term)
+    (isempty(search_fields) || isempty(term)) && return qs, false
+    lookups = [search_lookup(T, string(f)) for f in search_fields]
+    terms = Q[]
+    for bit in Juango.split_contents(term)
+        if length(bit) >= 2 && bit[1] in ('"', '\'') && bit[end] == bit[1]
+            bit = replace(bit[2:end-1], "\\" * bit[1] => string(bit[1]), "\\\\" => "\\")
+        end
+        qs_bit = Q[]
+        for (lk, vf) in lookups
+            v = vf === nothing ? bit : search_value(vf, bit)
+            v === nothing && continue                  # (not a value of that field)
+            push!(qs_bit, Q(Symbol(lk) => v))
+        end
+        push!(terms, isempty(qs_bit) ? Q(id__in = Any[]) : reduce(|, qs_bit))
+    end
+    qs = isempty(terms) ? qs : filter(qs, reduce(&, terms))
+    qs, any(((lk, _),) -> search_spawns_duplicates(T, lk), lookups)
+end
+
+is_lookup_name(s) = s in Juango.LOOKUPS || haskey(Juango.CUSTOM_LOOKUPS, s)
+
+"A search field as a lookup, and the field a word must be a value of (exact lookups on non-text fields)."
+Base.@nospecializeinfer function search_lookup(@nospecialize(T::Type), f::String)
+    startswith(f, "^") && return f[2:end] * "__istartswith", nothing
+    startswith(f, "=") && return f[2:end] * "__iexact", nothing
+    startswith(f, "@") && return f[2:end] * "__search", nothing
+    meta = modelmeta(T)
+    prev = nothing
+    for part in split(f, "__")
+        fld = part in ("pk", "id") ? nothing : findfield(meta, Symbol(part))
+        fld === nothing && (fld = findfirst_m2m(meta, Symbol(part)))
+        part in ("pk", "id") && (fld = (kind = :auto, null = false, name = :id))     # the automatic key
+        if fld === nothing
+            if prev !== nothing && is_lookup_name(part)
+                part == "exact" && !(prev.kind in (:string, :text, :citext, :email, :slug, :url)) && return f, prev
+                return f, nothing
+            end
+            break
+        end
+        prev = fld
+        fld.kind in (:fk, :o2o, :m2m) && (meta = modelmeta(related_model(fld)))
+    end
+    f * "__icontains", nothing
+end
+findfirst_m2m(meta, name) = (i = findfirst(x -> x.name === name, meta.m2m); i === nothing ? nothing : meta.m2m[i])
+
+"A search word as a value of a field, or nothing when it isn't one (strict booleans, as Django's)."
+function search_value(f, bit::AbstractString)
+    k = f.kind
+    k in (:int, :bigint, :smallint, :posint, :posbigint, :possmallint, :fk, :o2o, :auto) && return tryparse(Int, bit)
+    k === :float && return tryparse(Float64, bit)
+    k === :decimal && return (try Juango.Decimal(bit) catch; nothing end)
+    if k === :bool
+        bit in ("True", "true", "1") && return true
+        bit in ("False", "false", "0") && return false
+        f.null && bit in ("None", "null") && return nothing    # (as no value: skipped)
+        return nothing
+    end
+    k === :date && return tryparse(Date, bit)
+    k === :uuid && return tryparse(Juango.UUIDs.UUID, bit)
+    bit
+end
+
+"Whether a lookup path crosses a many-to-many or reverse relation (Django's lookup_spawns_duplicates)."
+Base.@nospecializeinfer function search_spawns_duplicates(@nospecialize(T::Type), lookup::AbstractString)
+    M = T
+    for part in split(lookup, "__")
+        part in ("pk", "id") && return false
+        f = findfield(modelmeta(M), Symbol(part))
+        if f === nothing
+            # a many-to-many relation (either side) or a reverse foreign key can repeat rows
+            any(r -> string(r[1]) == part || (!r[3] && string(something(r[2].related_query_name, r[2].related_name,
+                                                                         Juango.default_related_name(r[2].model),
+                                                                         Symbol(lowercase(modelmeta(r[2].model).name)))) == part),
+                Juango.m2m_relations(M)) && return true
+            rev = Juango.find_reverse(M, part)
+            rev === nothing && return false            # a lookup, or a custom filter's parameter
+            rev[3].one_to_one || return true
+            M = rev[2]
+            continue
+        end
+        f.kind in (:fk, :o2o) || return false
+        M = related_model(f)
+    end
+    false
+end
+
 function changelist(req::Request; app, model)
     ma = get_admin(app, model)
     T = ma.model
@@ -713,16 +814,16 @@ function changelist(req::Request; app, model)
     qs = admin_queryset(ma, req)
     q = strip(get(req.GET, "q", ""))
     sfields = search_fields(ma, req)
-    if !isempty(q) && !isempty(sfields)
-        qs = filter(qs, reduce(|, [Q(Symbol(f, "__icontains") => q) for f in sfields]))
-    end
+    qs, dups = search_results(T, qs, sfields, q)
     searched = qs
     filters = list_filters(req, ma)
     for (_, key, _, apply) in filters
         v = get(req.GET, key, nothing)
         (v === nothing || isempty(v)) && continue
         qs = apply(qs, v)
+        search_spawns_duplicates(T, key) && (dups = true)     # (a filter across a many-to-many relation)
     end
+    dups && (qs = distinct(qs))
     qs, drill = date_drilldown(req, ma, qs)
     # As Django's ChangeList: the admin's ordering, else the model's Meta.ordering given explicitly (a queryset with
     # an aggregate annotate leaves Meta.ordering out), then the primary key, so pages are in a total order
