@@ -2050,6 +2050,21 @@ Admin.register!(Person;
     urls = [path("<str:id>/promote/", promote; name = "person_promote")])                 # admin/hr/person/3/promote/
 ```
 
+The filters are Django's, with its URL parameters, so its links and bookmarks work: a boolean
+(`is_active__exact=1`, "Unknown" when nullable), choices (`status__exact=p`), a date (Today, Past 7
+days, This month, This year: `born__gte` / `born__lt`), a foreign key, many-to-many or reverse
+relation (`team__id__exact=3`, `team__isnull=True`, in the related admin's ordering; `:team =>
+:related_only` lists only those in use), a field through a relation (`:team__city`), or any other
+field (its values in use). Other parameters are lookups, as in Django: `?name__startswith=A` on the
+model's own fields, or through a relation a list filter names; others get a 400, and a value that
+doesn't fit (`?born__gte=soon`) sends back to the unfiltered list (`?e=1`).
+
+The search splits the term into words (a quoted phrase is one) and each must match one of
+`search_fields`: a field is searched with `icontains`, `"^name"` with `istartswith`, `"=name"` with
+`iexact`, `"@name"` with full-text `search`, and `"age__exact"` or `"team__name__startswith"` with
+that lookup (an exact lookup on a number skips words that aren't numbers). Searching or filtering
+across a many-to-many or reverse relation lists each row once.
+
 - **Big tables.** A foreign key to a table with more than `ADMIN_FK_SELECT_LIMIT` rows (1000) becomes a search box when the related model is in the admin with `search_fields`, else an id box, instead of a select of every row (`raw_id_fields` and `autocomplete_fields` choose explicitly; `ADMIN_FK_SELECT_LIMIT = nothing` turns this off).
 - **Filters.** `:field => :empty` filters on empty values and `:fk => :related_only` lists only the related objects in use.
 - **Permissions per object.** `has_*_permission(req, obj)` is asked for the model (with `obj = nothing`) and for each object, so a change page can be view-only for some objects. Custom views in `urls` run behind the admin's login and permission checks.

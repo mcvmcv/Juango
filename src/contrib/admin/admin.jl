@@ -523,51 +523,217 @@ function query_with(req::Request, changes::Pair...)
 end
 
 """
-The change list's filters, each as `(title, key, options, apply)`: `options` are `(label, value)`
-pairs for the URL parameter `key` (value `nothing` is "All"), and `apply(qs, value)` filters.
+The change list's filters, as Django's `FieldListFilter`s, each a NamedTuple `(title, params,
+choices, apply)`: the query parameters it reads, its choices (a label and the parameters it sets),
+and `apply(qs, values)` with the values of its parameters that the request has. For a field (or a
+path through relations, `"author__name"`) by its kind, with Django's parameter names:
+
+* a boolean: `f__exact` = 1/0 (and `f__isnull` = True for a nullable one: "Unknown")
+* choices: `f__exact`, one per choice (and `f__isnull` when a choice is `nothing`)
+* a date or datetime: `f__gte` / `f__lt` for Today, Past 7 days, This month, This year (and
+  `f__isnull` for No date / Has date when nullable)
+* a foreign key, many-to-many or reverse relation: `f__id__exact`, one per related object in its
+  admin's (or model's) order, and `f__isnull` = True for none; `:f => :related_only` lists only
+  the objects in use
+* any other field: `f`, one per value in use (and `f__isnull` = True for rows without one)
+* `:f => :empty`: `f__isempty` = 1/0
+* an `Admin.ListFilter`: its own parameter
 """
 function list_filters(req::Request, ma::ModelAdmin)
     out = Any[]
-    meta = modelmeta(ma.model)
     for entry in list_filter(ma, req)
         if entry isa ListFilter
-            opts_ = Tuple{String,Any}[(string(l), string(v)) for (v, l) in entry.lookups(req, ma)]
-            push!(out, (entry.title, entry.parameter, opts_, (qs, v) -> something(entry.queryset(req, qs, v), qs)))
+            ch = Tuple{String,Dict{String,String}}[(string(l), Dict(entry.parameter => string(v))) for (v, l) in entry.lookups(req, ma)]
+            push!(out, (title = entry.title, params = [entry.parameter], choices = ch,
+                        apply = (qs, vals) -> something(entry.queryset(req, qs, vals[entry.parameter]), qs)))
             continue
         end
-        name, mode = entry isa Pair ? (Symbol(entry.first), Symbol(entry.second)) : (entry, :field)
-        f = findfield(meta, name)
-        f === nothing && continue
-        if mode === :empty                     # Django's EmptyFieldListFilter
-            key = string(attname(f), "__isempty")
-            text = f.kind in Juango.STRING_KINDS
-            empty_q = text ? Q(Symbol(attname(f), "__isnull") => true) | Q(attname(f) => "") : Q(Symbol(attname(f), "__isnull") => true)
-            push!(out, (label(f), key, [("Empty", "1"), ("Not empty", "0")],
-                        (qs, v) -> v == "1" ? filter(qs, empty_q) : filter(qs, !empty_q)))
-            continue
-        end
-        key = string(attname(f))
-        opts_ = Tuple{String,Any}[]
-        if f.kind === :bool
-            append!(opts_, [("Yes", "1"), ("No", "0")])
-        elseif f.choices !== nothing
-            append!(opts_, [(string(c.second), string(c.first)) for c in Juango.field_choices(f)])
-        elseif f.kind === :fk && mode === :related_only          # RelatedOnlyFieldListFilter: only the ones in use
-            ids = unique(x for x in values_list(admin_queryset(ma, req), attname(f); flat = true) if x !== nothing)
-            append!(opts_, [(string(o), string(o.id)) for o in filter(objects(related_model(f)); id__in = ids)])
-        elseif f.kind === :fk
-            append!(opts_, [(string(o), string(o.id)) for o in objects(related_model(f))[1:100]])
-        else
-            vals = unique(values_list(order_by(admin_queryset(ma, req), string(name)), name; flat = true))
-            append!(opts_, [(string(v), string(v)) for v in first(vals, 50) if v !== nothing])
-        end
-        apply = f.kind === :bool ? ((qs, v) -> filter(qs, Q(f.name => v == "1"))) :
-                f.kind === :fk ? ((qs, v) -> filter(qs, Q(attname(f) => Juango.parse_pk(related_model(f), v)))) :
-                ((qs, v) -> filter(qs, Q(f.name => v)))
-        push!(out, (label(f), key, opts_, apply))
+        name, mode = entry isa Pair ? (string(entry.first), Symbol(entry.second)) : (string(entry), :field)
+        r = filter_field(ma.model, name)
+        r === nothing && continue
+        fl = field_list_filter(req, ma, name, r..., mode)
+        fl === nothing || push!(out, fl)
     end
     out
 end
+
+"""
+The field a list filter path ends at: `(field, kind, related, nullable, title)`, where `kind` is
+`:field` for a model field, `:m2m` for a many-to-many field and `:reverse` for a reverse relation
+(`related` is the model at the other end of a relation), or nothing for an unknown path.
+"""
+Base.@nospecializeinfer function filter_field(@nospecialize(T::Type), path::String)
+    M = T
+    parts = split(path, "__")
+    for (i, part) in enumerate(parts)
+        last = i == length(parts)
+        f = findfield(modelmeta(M), Symbol(part))
+        if f !== nothing
+            last && return (f, :field, f.kind in (:fk, :o2o) ? related_model(f) : nothing, f.null, label(f))
+            f.kind in (:fk, :o2o) || return nothing
+            M = related_model(f)
+            continue
+        end
+        m = findfirst_m2m(modelmeta(M), Symbol(part))
+        if m !== nothing
+            last && return (m, :m2m, related_model(m), true, label(m))
+            M = related_model(m)
+            continue
+        end
+        # the reverse side of a many-to-many field (books_contributed)
+        rm = findfirst(r -> !r[3] && string(something(r[2].related_query_name, r[2].related_name,
+                                                      Juango.default_related_name(r[2].model),
+                                                      Symbol(lowercase(modelmeta(r[2].model).name)))) == part, Juango.m2m_relations(M))
+        if rm !== nothing
+            r = Juango.m2m_relations(M)[rm]
+            last && return (r[2], :m2m, r[2].model, true, modelmeta(r[2].model).verbose_name_plural)
+            M = r[2].model
+            continue
+        end
+        rev = Juango.find_reverse(M, part)
+        rev === nothing && return nothing
+        last && return (rev[3], :reverse, rev[2], true, modelmeta(rev[2]).verbose_name)
+        M = rev[2]
+    end
+    nothing
+end
+
+"A filter parameter's value as a value of the field (nothing when it isn't one)."
+function filter_value(f, v::AbstractString)
+    k = f.kind
+    k in (:int, :bigint, :smallint, :posint, :posbigint, :possmallint, :fk, :o2o, :auto) && return tryparse(Int, v)
+    k === :float && return tryparse(Float64, v)
+    k === :decimal && return (try Juango.Decimal(v) catch; nothing end)
+    k === :bool && return v in ("1", "True", "true") ? true : v in ("0", "False", "false") ? false : nothing
+    k === :date && return tryparse(Date, v)
+    k === :datetime && return something(tryparse(DateTime, replace(v, ' ' => 'T')), (d = tryparse(Date, v); d === nothing ? nothing : DateTime(d)), Some(nothing))
+    k === :uuid && return tryparse(Juango.UUIDs.UUID, v)
+    String(v)
+end
+isnull_value(v) = v in ("True", "true", "1") ? true : v in ("False", "false", "0") ? false : nothing
+
+"A date filter's bound as a value of a date or datetime field (midnight in the current time zone)."
+function date_bound(f, d::Date)
+    f.kind === :date && return d
+    dt = DateTime(d)
+    settings.USE_TZ ? Juango.TimeZones.ZonedDateTime(dt, Juango.get_current_timezone()) : dt
+end
+
+struct BadFilterValue <: Exception
+    param::String
+end
+
+Base.@nospecializeinfer function field_list_filter(req, ma::ModelAdmin, path::String, @nospecialize(f), kind::Symbol, @nospecialize(rel), nullable::Bool, title, mode::Symbol)
+    empty_label = option(ma, :empty_value_display, "-")
+    P(x) = path * "__" * x
+    sym(k) = Symbol(k)
+    choice(l, ps...) = (string(l), Dict{String,String}(string(k) => string(v) for (k, v) in ps))
+    if mode === :empty                                  # Django's EmptyFieldListFilter
+        key = P("isempty")
+        text = kind === :field && (f.kind in Juango.STRING_KINDS || f.kind === :citext)
+        empty_q = text ? Q(sym(P("isnull")) => true) | Q(sym(path) => "") : Q(sym(P("isnull")) => true)
+        return (title = title, params = [key], choices = [choice(gettext("Empty"), key => "1"), choice(gettext("Not empty"), key => "0")],
+                apply = (qs, vals) -> vals[key] == "1" ? filter(qs, empty_q) : vals[key] == "0" ? filter(qs, !empty_q) : throw(BadFilterValue(key)))
+    end
+    isnull_apply(qs, vals) = haskey(vals, P("isnull")) ?
+        (b = isnull_value(vals[P("isnull")]); b === nothing ? throw(BadFilterValue(P("isnull"))) : filter(qs, Q(sym(P("isnull")) => b))) : qs
+    if rel !== nothing                                  # RelatedFieldListFilter / RelatedOnlyFieldListFilter
+        key = P("id__exact")
+        objs = if mode === :related_only
+            ids = unique(x for x in values_list(admin_queryset(ma, req), sym(P("id")); flat = true) if x !== nothing)
+            collect(filter(objects(rel); id__in = collect(Any, ids)))
+        else
+            collect(objects(rel))
+        end
+        relma = get(current_site().registry, admin_key(rel), nothing)
+        ords = relma !== nothing && !isempty(relma.ordering) ? relma.ordering : String[]
+        isempty(ords) || (objs = collect(order_by(filter(objects(rel); id__in = Any[o.id for o in objs]), ords...)))
+        ch = [choice(string(o), key => Juango.pk_string(o)) for o in objs]
+        nullable && push!(ch, choice(empty_label, P("isnull") => "True"))
+        return (title = title, params = [key, P("isnull")], choices = ch,
+                apply = (qs, vals) -> begin
+                    if haskey(vals, key)
+                        v = Juango.parse_pk(rel, vals[key])
+                        v === nothing && throw(BadFilterValue(key))
+                        qs = filter(qs, Q(sym(key) => v))
+                    end
+                    isnull_apply(qs, vals)
+                end)
+    end
+    if f.kind === :bool                                  # BooleanFieldListFilter
+        key = P("exact")
+        ch = f.choices !== nothing ? [choice(string(c.second), key => (c.first ? "1" : "0")) for c in Juango.field_choices(f) if c.first isa Bool] :
+             [choice(gettext("Yes"), key => "1"), choice(gettext("No"), key => "0")]
+        f.null && push!(ch, choice(gettext("Unknown"), P("isnull") => "True"))
+        return (title = title, params = [key, P("isnull")], choices = ch,
+                apply = (qs, vals) -> begin
+                    if haskey(vals, key)
+                        b = filter_value(f, vals[key])
+                        b === nothing && throw(BadFilterValue(key))
+                        qs = filter(qs, Q(sym(path) => b))
+                    end
+                    isnull_apply(qs, vals)
+                end)
+    end
+    if f.choices !== nothing                             # ChoicesFieldListFilter
+        key = P("exact")
+        ch = Tuple{String,Dict{String,String}}[]
+        none = nothing
+        for c in Juango.field_choices(f)
+            c.first === nothing ? (none = string(c.second)) : push!(ch, choice(c.second, key => c.first))
+        end
+        none === nothing || push!(ch, choice(none, P("isnull") => "True"))
+        return (title = title, params = [key, P("isnull")], choices = ch,
+                apply = (qs, vals) -> begin
+                    if haskey(vals, key)
+                        v = filter_value(f, vals[key])
+                        v === nothing && throw(BadFilterValue(key))
+                        qs = filter(qs, Q(sym(path) => v))
+                    end
+                    isnull_apply(qs, vals)
+                end)
+    end
+    if f.kind in (:date, :datetime)                      # DateFieldListFilter
+        gte, lt = P("gte"), P("lt")
+        today = Juango.localdate()
+        month1 = Date(year(today), month(today), 1)
+        bound(d) = f.kind === :date ? string(d) : string(d)     # (the date; midnight in the current time zone)
+        ch = [choice(gettext("Today"), gte => bound(today), lt => bound(today + Day(1))),
+              choice(gettext("Past 7 days"), gte => bound(today - Day(7)), lt => bound(today + Day(1))),
+              choice(gettext("This month"), gte => bound(month1), lt => bound(month1 + Month(1))),
+              choice(gettext("This year"), gte => bound(Date(year(today), 1, 1)), lt => bound(Date(year(today) + 1, 1, 1)))]
+        if f.null
+            push!(ch, choice(gettext("No date"), P("isnull") => "True"), choice(gettext("Has date"), P("isnull") => "False"))
+        end
+        return (title = title, params = [gte, lt, P("isnull")], choices = ch,
+                apply = (qs, vals) -> begin
+                    for k in (gte, lt)
+                        haskey(vals, k) || continue
+                        d = tryparse(Date, first(vals[k], 10))
+                        d === nothing && throw(BadFilterValue(k))
+                        qs = filter(qs, Q(sym(k) => date_bound(f, d)))
+                    end
+                    isnull_apply(qs, vals)
+                end)
+    end
+    # AllValuesFieldListFilter: the values in use
+    vals_ = collect(values_list(order_by(distinct(values_list(admin_queryset(ma, req), sym(path))), path), sym(path); flat = true))
+    has_null = any(isnothing, vals_)
+    ch = [choice(string(v), path => string(v)) for v in unique(vals_) if v !== nothing]
+    has_null && push!(ch, choice(empty_label, P("isnull") => "True"))
+    (title = title, params = [path, P("isnull")], choices = ch,
+     apply = (qs, vals) -> begin
+         if haskey(vals, path)
+             v = filter_value(f, vals[path])
+             v === nothing && throw(BadFilterValue(path))
+             qs = filter(qs, Q(sym(path) => v))
+         end
+         isnull_apply(qs, vals)
+     end)
+end
+
+"The values a request has for a filter's parameters."
+filter_values(req::Request, fl) = Dict{String,String}(p => req.GET[p] for p in fl.params if haskey(req.GET, p) && !isempty(req.GET[p]))
 
 """
 The filter sidebar. With `base` (the searched queryset) and facets on, each choice shows how many
@@ -575,24 +741,66 @@ rows it would leave, counting the search and the other filters (Django 5's facet
 """
 function filter_specs(req::Request, ma::ModelAdmin, filters = list_filters(req, ma); base = nothing, facets::Bool = false)
     specs = Any[]
-    for (title, key, opts_, apply) in filters
-        cur = get(req.GET, key, nothing)
+    for fl in filters
+        cur = filter_values(req, fl)
         others = nothing
         if facets && base !== nothing                 # the queryset with every other filter applied
             others = base
-            for (_, k2, _, ap2) in filters
-                k2 == key && continue
-                v2 = get(req.GET, k2, nothing)
-                (v2 === nothing || isempty(v2)) || (others = ap2(others, v2))
+            for f2 in filters
+                f2 === fl && continue
+                v2 = filter_values(req, f2)
+                isempty(v2) || (others = try f2.apply(others, v2) catch e; e isa BadFilterValue ? others : rethrow() end)
             end
         end
-        choices = [Dict{String,Any}("label" => others === nothing ? l : string(l, " (", count(v === nothing ? others : apply(others, v)), ")"),
-                                    "url" => query_with(req, key => v),
-                                    "selected" => (v === nothing ? cur === nothing : cur == v))
-                   for (l, v) in vcat(Tuple{String,Any}[("All", nothing)], opts_)]
-        push!(specs, Dict{String,Any}("title" => title, "choices" => choices))
+        clear = [p => nothing for p in fl.params]
+        choices = Any[Dict{String,Any}("label" => others === nothing ? gettext("All") : string(gettext("All"), " (", count(others), ")"),
+                                       "url" => query_with(req, clear...), "selected" => isempty(cur))]
+        for (l, ps) in fl.choices
+            n = others === nothing ? nothing : (try count(fl.apply(others, ps)) catch e; e isa BadFilterValue ? 0 : rethrow() end)
+            push!(choices, Dict{String,Any}("label" => n === nothing ? l : string(l, " (", n, ")"),
+                                            "url" => query_with(req, clear..., ps...), "selected" => !isempty(cur) && cur == ps))
+        end
+        push!(specs, Dict{String,Any}("title" => fl.title, "choices" => choices))
     end
     specs
+end
+
+# Query parameters of the change list itself (Django's IGNORED_PARAMS and the date hierarchy's)
+const CHANGELIST_PARAMS = Set(["q", "o", "page", "p", "all", "e", "_facets", "_popup", "_to_field", "_changelist_filters", "action",
+                               "_selected_action", "select_across", "index"])
+
+"""
+Query parameters no filter used, applied as lookups (Django's ChangeList, which bookmarks
+`?name__startswith=A`): a lookup on one of the model's own fields, or through a relation that a
+list filter starts with. Others are refused (400, Django's DisallowedModelAdminLookup); a value
+that doesn't fit its field is a `BadFilterValue` (the page drops the filters, `?e=1`).
+"""
+Base.@nospecializeinfer function lookup_params(req::Request, ma::ModelAdmin, @nospecialize(qs), used::Set{String})
+    T = ma.model
+    dh = ma.date_hierarchy === nothing ? Set{String}() : Set(string(ma.date_hierarchy, "__", x) for x in ("year", "month", "day"))
+    allowed_rel = Set(first(split(string(e isa Pair ? e.first : e isa ListFilter ? "" : e), "__")) for e in list_filter(ma, req))
+    dups = false
+    for k in collect(keys(req.GET.data))
+        (k in used || k in CHANGELIST_PARAMS || k in dh || startswith(k, "_")) && continue
+        v = req.GET[k]
+        parts = split(k, "__")
+        f = findfield(modelmeta(T), Symbol(parts[1]))
+        if f === nothing && !(parts[1] in ("id", "pk"))       # not a field nor a relation: a bad lookup (?e=1)
+            filter_field(T, String(parts[1])) === nothing && throw(BadFilterValue(k))
+        end
+        local_field = f !== nothing && !(f.kind in (:fk, :o2o)) || parts[1] in ("id", "pk")
+        (local_field || parts[1] in allowed_rel) ||
+            throw(Juango.BadRequest("Filtering by $k not allowed"))
+        lk = String(parts[end])
+        # (converted for the model's own field: f, or f__<lookup> for a lookup that compares values)
+        own = f !== nothing && (length(parts) == 1 || (length(parts) == 2 && is_lookup_name(lk) &&
+                                                       lk in ("exact", "gt", "gte", "lt", "lte", "ne")))
+        val = lk == "isnull" ? isnull_value(v) : lk == "in" ? split(v, ",") : own ? filter_value(f, v) : v
+        val === nothing && throw(BadFilterValue(k))
+        qs = filter(qs, Q(Symbol(k) => val))
+        dups |= search_spawns_duplicates(T, k)
+    end
+    qs, dups
 end
 
 # --- date hierarchy ---------------------------------------------------------------------------------
@@ -747,7 +955,7 @@ Base.@nospecializeinfer function search_lookup(@nospecialize(T::Type), f::String
         part in ("pk", "id") && (fld = (kind = :auto, null = false, name = :id))     # the automatic key
         if fld === nothing
             if prev !== nothing && is_lookup_name(part)
-                part == "exact" && !(prev.kind in (:string, :text, :citext, :email, :slug, :url)) && return f, prev
+                part == "exact" && !(prev.kind in Juango.STRING_KINDS || prev.kind === :citext) && return f, prev
                 return f, nothing
             end
             break
@@ -817,12 +1025,25 @@ function changelist(req::Request; app, model)
     qs, dups = search_results(T, qs, sfields, q)
     searched = qs
     filters = list_filters(req, ma)
-    for (_, key, _, apply) in filters
-        v = get(req.GET, key, nothing)
-        (v === nothing || isempty(v)) && continue
-        qs = apply(qs, v)
-        search_spawns_duplicates(T, key) && (dups = true)     # (a filter across a many-to-many relation)
+    used = Set{String}()
+    try
+        for fl in filters
+            vals = filter_values(req, fl)
+            union!(used, fl.params)
+            isempty(vals) && continue
+            qs = fl.apply(qs, vals)
+            any(p -> search_spawns_duplicates(T, p), keys(vals)) && (dups = true)   # (across a many-to-many relation)
+        end
+        # other parameters are lookups, as Django's: on the model's own fields, or through a relation
+        # a list filter names; anything else is refused
+        qs, extra_dups = lookup_params(req, ma, qs, used)
+        dups |= extra_dups
+    catch e
+        e isa BadFilterValue || rethrow()
+        haskey(req.GET, "e") || return Juango.HttpResponseRedirect(req.path * "?e=1")
+        qs = admin_queryset(ma, req)
     end
+    haskey(req.GET, "e") && message!(req, :error, gettext("The filters in the address weren't valid, so they were left out."))
     dups && (qs = distinct(qs))
     qs, drill = date_drilldown(req, ma, qs)
     # As Django's ChangeList: the admin's ordering, else the model's Meta.ordering given explicitly (a queryset with
