@@ -24,6 +24,24 @@ const FILE_RE = r"^(\d{4})_([A-Za-z0-9_]+)\.jl$"
 migration_files(dir) = (dir === nothing || !isdir(dir)) ? String[] :
     sort([f for f in readdir(dir) if occursin(FILE_RE, f)])
 
+"""
+The types a column default can be written with in a migration file (`Date("2014-03-31")`,
+`Second(3600)`, `UUID("...")`, `ZonedDateTime(..., tz"UTC")`), defined in the module it's loaded
+into: the project that loads it may not have Dates, UUIDs or TimeZones itself.
+"""
+function bind_value_types!(m::Module)
+    for n in names(Dates)
+        n === :Dates && continue
+        isdefined(m, n) || Core.eval(m, :(const $n = $(getfield(Dates, n))))
+    end
+    Core.eval(m, :(const Dates = $Dates))
+    Core.eval(m, :(const UUID = $(Juango.UUIDs.UUID)))
+    Core.eval(m, :(const TimeZones = $(Juango.TimeZones)))
+    Core.eval(m, :(const ZonedDateTime = $(Juango.TimeZones.ZonedDateTime)))
+    Core.eval(m, :(const $(Symbol("@tz_str")) = $(getfield(Juango.TimeZones, Symbol("@tz_str")))))
+    m
+end
+
 "Evaluate one migration file."
 function load_migration(path::AbstractString, app::AbstractString)
     # While Juango itself precompiles (its workload migrates the built-in apps), new modules
@@ -37,6 +55,7 @@ function load_migration(path::AbstractString, app::AbstractString)
             Core.eval(m, :(const $n = $(getfield(@__MODULE__, n))))
         end
         Core.eval(m, :(const Juango = $Juango))
+        bind_value_types!(m)
         Base.include(m, path)
     end
     mig isa Migration || throw(MigrationError("$path must evaluate to a Migration(...), got $(typeof(mig))"))

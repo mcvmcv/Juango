@@ -831,3 +831,68 @@ valid_plan(g, plan) = all(i -> all(d -> !(d in plan) || findfirst(==(d), plan) <
     # migrations.jl); test_remove_replaced_nodes, test_remove_replacement_node (squashing, in
     # migrations.jl); test_stringify, test_dummynode_* (Python internals)
 end
+
+# --- test_writer: operations and values written to a migration file and loaded back ---------------
+
+"Write a migration with these operations to a file and load it back (Django's serialize round trip)."
+function dm_roundtrip(ops...)
+    dir = mktempdir()
+    path = joinpath(dir, "0001_test.jl")
+    write(path, DM.migration_code(DM.Migration(; operations = collect(DM.Operation, ops))))
+    DM.load_migration(path, "testapp")
+end
+dm_default_back(v; kind = :string) = only(dm_roundtrip(DM.AddField("t", Juango.Column("c", kind; default = v))).operations).column.default
+
+@testset "django migrations: test_writer" begin
+    # test_serialize_numbers, test_serialize_constants, test_serialize_strings, test_serialize_multiline_strings
+    for v in Any[1, -1, 0, 1.5, -2.25, 1e300, typemax(Int64), true, false, "foobar", "", "Ω unicode ✓", "multi\nline\tstring",
+                 "a\"b'c\\d", "\$interpolation \$(x)", :symbol]
+        @test isequal(dm_default_back(v), v)
+    end
+    # test_serialize_infinity, test_serialize_nan
+    @test dm_default_back(Inf) == Inf && dm_default_back(-Inf) == -Inf && isnan(dm_default_back(NaN))
+    # test_serialize_builtin_types (lists and dicts)
+    @test dm_default_back(Any[1, "a", 2.5]) == Any[1, "a", 2.5]
+    @test dm_default_back(Dict("a" => 1, "b" => [2, 3])) == Dict("a" => 1, "b" => [2, 3])
+    # test_serialize_datetime, test_serialize_date, test_serialize_time, test_serialize_timedelta
+    @test dm_default_back(Date(2014, 3, 31); kind = :date) == Date(2014, 3, 31)
+    @test dm_default_back(DateTime(2014, 1, 1, 1, 1); kind = :datetime) == DateTime(2014, 1, 1, 1, 1)
+    @test dm_default_back(Dates.Time(10, 30); kind = :time) == Dates.Time(10, 30)
+    @test dm_default_back(Dates.Second(3600); kind = :duration) == Dates.Second(3600)
+    @test dm_default_back(Dates.CompoundPeriod(Dates.Day(1), Dates.Hour(2)); kind = :duration) == Dates.CompoundPeriod(Dates.Day(1), Dates.Hour(2))
+    # (an aware datetime)
+    zdt = Juango.TimeZones.ZonedDateTime(DateTime(2012, 1, 1, 1, 1), Juango.TimeZones.tz"UTC")
+    @test dm_default_back(zdt; kind = :datetime) == zdt
+    # test_serialize_decimal
+    @test dm_default_back(Juango.Decimal("1.3"); kind = :decimal) == Juango.Decimal("1.3")
+    # test_serialize_uuid
+    u = Juango.UUIDs.UUID("5c859437-d061-4847-b3f7-e6b78852f8c8")
+    @test dm_default_back(u; kind = :uuid) == u
+    # test_serialize_bytes (binary data)
+    @test dm_default_back(UInt8[0x00, 0xff, 0x41]; kind = :binary) == UInt8[0x00, 0xff, 0x41]
+    # every operation, written and read back, writes the same code (test_simple_migration and the operations)
+    ops = DM.Operation[DM.CreateModel("w_author"; model = "Author", columns = [Juango.Column("name", :string; max_length = 200, comment = "x"),
+                                                                             dmcol("score", :decimal; max_digits = 5, decimal_places = 2),
+                                                                             dmcol("tags", :array; of = :string, null = true)],
+                                      unique_together = [["name", "score"]], indexes = [Juango.Index("name"; name = "w_author_name")],
+                                      constraints = [Juango.ConstraintSpec(:check, "w_author_score"; condition = Q(score__gte = 0) | Q(name = "x"))],
+                                      comment = "Authors"),
+                       DM.CreateModel("w_book"; columns = [dmcol("author_id", :fk; references = "w_author", index = true)]),
+                       DM.AddField("w_book", Juango.Column("title", :string; max_length = 100, default = "Untitled")),
+                       DM.AlterField("w_book", Juango.Column("title", :string; max_length = 150, null = true)),
+                       DM.RenameField("w_book", "title", "name"), DM.RemoveField("w_book", "name"),
+                       DM.AlterUniqueTogether("w_author", []), DM.AlterModelTableComment("w_author", nothing),
+                       DM.AddIndex("w_book", Juango.Index(Lower(F(:author_id)); name = "w_book_lower")), DM.RemoveIndex("w_book", "w_book_lower"),
+                       DM.AddConstraint("w_book", Juango.ConstraintSpec(:unique, "w_book_u"; columns = ["author_id"], condition = Q(author_id__gt = 1))),
+                       DM.RemoveConstraint("w_book", "w_book_u"), DM.AlterPrimaryKey("w_book", :smallauto),
+                       DM.RenameModel("w_book", "w_volume"; model = "Volume"), DM.DeleteModel("w_volume"),
+                       DM.RunSQL(["SELECT 1", ("SELECT ?", Any[2])], "SELECT 3"), DM.CreateExtension("hstore"),
+                       DM.SeparateDatabaseAndState(; state_operations = [DM.DeleteModel("w_author")])]
+    m = dm_roundtrip(ops...)
+    @test DM.op_code.(m.operations) == DM.op_code.(ops)
+    # test_migration_file_header_comments / test_sorted_dependencies
+    code = DM.migration_code(DM.Migration(; dependencies = [("b", "0002_x"), ("a", "0001_initial")], operations = []))
+    @test startswith(code, "# Generated by Juango") && occursin("dependencies = [(\"b\", \"0002_x\"), (\"a\", \"0001_initial\")]", code)
+    # test_models_import_omitted / test_custom_operation: not applicable (no imports to manage: every
+    # operation and value type is in scope in a migration file)
+end

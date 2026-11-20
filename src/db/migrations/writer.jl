@@ -2,6 +2,7 @@
 
 jl(x) = repr(x)
 jl(x::AbstractString) = repr(String(x))
+jl(x::Dates.CompoundPeriod) = "Dates.CompoundPeriod(" * join(jl.(x.periods), ", ") * ")"
 
 function column_code(c::Column)
     kw = String[]
