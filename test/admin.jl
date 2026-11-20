@@ -129,7 +129,7 @@ end
         @test startswith(getheader(r, "Content-Type"), "text/csv") && startswith(text(r), "Name,Email\r\n")
         @test occursin("ADM BOB,bob@x.io", text(r)) && occursin("attachment", getheader(r, "Content-Disposition"))
         post(c, "/admin/project/author/", Dict("action" => "delete_selected", "_selected_action" => string(bob.id), "post" => "yes"))
-        @test !exists(filter(Author; id = bob.id)) && get(LogEntry; object_id = string(bob.id), action_flag = DELETION).object_repr == "ADM BOB"
+        @test !exists(filter(Author; id = bob.id)) && get(LogEntry; object_id = string(bob.id), action_flag = DELETION, content_type = Juango.get_for_model(Author)).object_repr == "ADM BOB"
         @test occursin("No action selected", text(post(c, "/admin/project/author/", Dict("action" => "nope", "_selected_action" => "1"); follow = true)))
 
         # Article: readonly, prepopulated, raw id, autocomplete, date hierarchy

@@ -385,7 +385,7 @@ end
 
 admin_url_for(e::LogEntry) = (e.content_type === nothing || e.object_id === nothing || e.action_flag == DELETION) ? nothing :
     (T = Juango.model_class(e.content_type); T === nothing || !is_registered(T; site = current_site()) ? nothing :
-     reverse_url("admin:change"; app = modelmeta(T).app, model = model_name(T), id = e.object_id))
+     reverse_url("admin:change"; app = modelmeta(T).app, model = model_name(T), id = admin_quote(e.object_id)))
 
 function index(req::Request; app = nothing)
     st = current_site()
@@ -418,8 +418,15 @@ end
 "An app's page in the admin (`/admin/<app_label>/`): its models."
 app_index(req::Request; app) = index(req; app = app)
 
-admin_login(req::Request) =
+function admin_login(req::Request)
+    # (already logged in with access: on to where the login would go, as Django's)
+    if req.method == "GET" && Juango.is_authenticated(req.user) && req.user.is_active && site_access(current_site(), req)
+        return Juango.HttpResponseRedirect(Juango.safe_next(req, reverse_url("admin:index")))
+    end
     LoginView(template = "admin/login.html", redirect_url = reverse_url("admin:index"), require_staff = true)(req)
+end
+"Whether the request's user may use this admin site."
+site_access(st, req) = st.has_permission === nothing ? req.user.is_staff : st.has_permission(req)
 
 function admin_logout(req::Request)
     req.method == "POST" || return Juango.HttpResponseNotAllowed(["POST"])
@@ -431,14 +438,49 @@ function header_label(ma::ModelAdmin, col)
     col isa Pair && return string(col.first)
     col isa Display && return something(col.description, "")
     col === :__str__ && return uppercasefirst(modelmeta(ma.model).verbose_name)
+    rf = related_column_field(ma.model, col)
+    rf === nothing || return label(rf)                          # ("parent__name": the field's label, as Django's)
     f = findfield(modelmeta(ma.model), Symbol(col))
     f === nothing ? uppercasefirst(replace(string(col), '_' => ' ')) : label(f)
+end
+
+"""
+The field at the end of a list_display column through relations (`:parent__name`, Django 5.1's
+related-field columns), or nothing for other columns.
+"""
+Base.@nospecializeinfer function related_column_field(@nospecialize(T::Type), col)
+    col isa Union{Symbol,AbstractString} || return nothing
+    parts = split(string(col), "__")
+    length(parts) > 1 || return nothing
+    M = T
+    for (i, part) in enumerate(parts)
+        f = findfield(modelmeta(M), Symbol(part))
+        f === nothing && return nothing
+        i == length(parts) && return f
+        f.kind in (:fk, :o2o) || return nothing
+        M = related_model(f)
+    end
+    nothing
+end
+"The value of a related-field column: through the relations, nothing where one is empty."
+Base.@nospecializeinfer function related_column_value(@nospecialize(obj), col)
+    v = obj
+    for part in split(string(col), "__")
+        v === nothing && return nothing
+        v = getproperty(v, Symbol(part))
+    end
+    v
 end
 
 Base.@nospecializeinfer function raw_cell(ma::ModelAdmin, @nospecialize(obj), col)
     col isa Pair && return col.second(obj)
     col isa Display && return col.f(obj)
     col === :__str__ && return string(obj)
+    rf = related_column_field(ma.model, col)
+    if rf !== nothing
+        v = related_column_value(obj, col)
+        return rf.choices !== nothing && v !== nothing ? Juango.choice_label(Juango.field_choices(rf), v) : v
+    end
     f = findfield(modelmeta(ma.model), Symbol(col))
     val = getproperty(obj, Symbol(col))
     f !== nothing && f.choices !== nothing && return Juango.choice_label(Juango.field_choices(f), val)
@@ -460,6 +502,7 @@ function column_ordering(ma::ModelAdmin, col)
     sb !== nothing && !(name in sb) && !(col isa Display && col.ordering !== nothing && Symbol(lstrip(col.ordering, '-')) in sb) && return nothing
     col isa Display && return col.ordering
     (name === nothing || name === :__str__) && return nothing
+    related_column_field(ma.model, name) === nothing || return string(name)      # (sorted by the lookup)
     f = findfield(modelmeta(ma.model), name)
     f === nothing || f.kind in (:m2m, :gfk, :grel) ? nothing : string(attname(f))
 end
@@ -1116,7 +1159,7 @@ function changelist(req::Request; app, model)
         hidden = fs === nothing ? "" : Juango.widget_html(forms[k][:id])
         pk = Juango.pk_string(o)
         # a NamedTuple, not a Dict: the template reads row.id, row.cells ..., and this is per row
-        push!(rows, (id = pk, cells = cells, hidden = SafeString(hidden), url = reverse_url("admin:change"; app = ma.app, model = ma.slug, id = pk) * back_q))
+        push!(rows, (id = pk, cells = cells, hidden = SafeString(hidden), url = reverse_url("admin:change"; app = ma.app, model = ma.slug, id = admin_quote(pk)) * back_q))
     end
     sf = option(ma, :show_facets, :allow)
     facets_on = sf === :always || (sf === :allow && haskey(req.GET, "_facets"))
@@ -1264,6 +1307,23 @@ function big_fk_widget(f)
     ra !== nothing && !isempty(ra.search_fields) ? :autocomplete : :raw_id
 end
 
+"The add form's initial values from the query string (Django's get_changeform_initial_data; many-to-many as 1,2,3)."
+function changeform_initial(ma::ModelAdmin, req::Request)
+    req.method == "GET" || return Dict{Symbol,Any}()
+    meta = modelmeta(ma.model)
+    out = Dict{Symbol,Any}()
+    for (k, vs) in req.GET.data
+        isempty(vs) && continue
+        m = findfirst_m2m(meta, Symbol(k))
+        if m !== nothing
+            out[Symbol(k)] = split(vs[end], ",")
+        elseif findfield(meta, Symbol(k)) !== nothing
+            out[Symbol(k)] = vs[end]
+        end
+    end
+    out
+end
+
 Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nospecialize(obj))
     T = ma.model
     meta = modelmeta(T)
@@ -1281,7 +1341,8 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
     form = configure_widgets!(ma, custom_add ? ma.add_form(data, req.FILES) :
                                   gf !== nothing ? gf(req, obj, data, req.FILES) :
                                   Juango.ModelForm(T; data = data, files = req.FILES, instance = obj,
-                                                   fields = filter(!in(locked), admin_fields(ma, req, obj))), req)
+                                                   fields = filter(!in(locked), admin_fields(ma, req, obj)),
+                                                   initial = adding ? changeform_initial(ma, req) : Dict{Symbol,Any}()), req)
     pfs = custom_add || (!adding && option(ma, :password_change_page, false)) ? Symbol[] : ma.password_fields
     inlines = save_as_new || custom_add ? Any[] : inline_formsets(ma, req, obj, data)
     if req.method == "POST" && is_valid(form) && all(x -> is_valid(x[2]), inlines)
@@ -1313,7 +1374,7 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         verb = adding ? "added" : "changed"
         if haskey(req.POST, "_continue") || save_as_new || custom_add
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may edit it again below.")
-            return Juango.HttpResponseRedirect(reverse_url("admin:change"; app = ma.app, model = ma.slug, id = Juango.pk_string(o)) * keep_filters(req))
+            return Juango.HttpResponseRedirect(reverse_url("admin:change"; app = ma.app, model = ma.slug, id = admin_pk(o)) * keep_filters(req))
         elseif haskey(req.POST, "_addanother")
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may add another $(meta.verbose_name) below.")
             return Juango.HttpResponseRedirect(reverse_url("admin:add"; app = ma.app, model = ma.slug))
@@ -1321,6 +1382,8 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         message!(req, :success, interpolate(adding ? gettext("The %(model)s “%(object)s” was added successfully.") :
                                                      gettext("The %(model)s “%(object)s” was changed successfully."),
                                             Dict("model" => meta.verbose_name, "object" => o)))
+        # (to the change list if the user may see it, else the index, as Django's)
+        can_view(req, ma) || can(req, ma, :change) || return Juango.HttpResponseRedirect(reverse_url("admin:index"))
         return Juango.HttpResponseRedirect(changelist_url(ma, req))
     end
     auto_readonly = adding ? Any[] :
@@ -1342,8 +1405,8 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         "password_fields" => [Dict("name" => string(pf), "label" => uppercasefirst(string(pf))) for pf in pfs],
         "view_on_site" => adding ? nothing : get_absolute_url(obj), "save_on_top" => option(ma, :save_on_top, false),
         "password_change" => adding || !option(ma, :password_change_page, false) ? nothing :
-            Dict("summary" => Juango.password_summary(obj), "url" => reverse_url("admin:password_change"; app = ma.app, model = ma.slug, id = Juango.pk_string(obj))),
-        "history_url" => adding ? nothing : reverse_url("admin:history"; app = ma.app, model = ma.slug, id = Juango.pk_string(obj))))
+            Dict("summary" => Juango.password_summary(obj), "url" => reverse_url("admin:password_change"; app = ma.app, model = ma.slug, id = admin_pk(obj))),
+        "history_url" => adding ? nothing : reverse_url("admin:history"; app = ma.app, model = ma.slug, id = admin_pk(obj))))
     render(req, "admin/change_form.html", ctx)
 end
 
@@ -1368,7 +1431,7 @@ function password_change_view(req::Request; app, model, id)
         log_action!(req.user, obj, CHANGE, "Changed password.")
         obj.id == req.user.id && Juango.update_session_auth_hash!(req, obj)       # changing your own: stay logged in
         message!(req, :success, gettext("Password changed successfully."))
-        return Juango.HttpResponseRedirect(reverse_url("admin:change"; app = ma.app, model = ma.slug, id = Juango.pk_string(obj)))
+        return Juango.HttpResponseRedirect(reverse_url("admin:change"; app = ma.app, model = ma.slug, id = admin_pk(obj)))
     end
     ctx = base_context(req, interpolate(gettext("Change password: %(username)s"), Dict("username" => string(obj))))
     merge!(ctx, Dict{String,Any}("opts" => opts(ma), "form" => form, "object" => obj))
@@ -1378,10 +1441,37 @@ end
 add_view(req::Request; app, model) = change_form(req, get_admin(app, model), nothing)
 "The object with this primary key (from the URL), or a 404."
 function admin_object(ma::ModelAdmin, req, id)
-    pk = Juango.parse_pk(ma.model, id)
-    pk === nothing && throw(Http404("No $(modelmeta(ma.model).verbose_name) with id '$id'"))
-    Juango.get_object_or_404(admin_queryset(ma, req); pk = pk)
+    key = admin_unquote(id)
+    pk = Juango.parse_pk(ma.model, key)
+    o = pk === nothing ? nothing : first(filter(admin_queryset(ma, req); pk = pk))
+    if o === nothing          # (back to the index with a message, as Django's; permission first)
+        can_view(req, ma) || can(req, ma, :change) || can(req, ma, :delete) || throw(PermissionDenied())
+        message!(req, :warning, interpolate(gettext("%(name)s with ID “%(key)s” doesn’t exist. Perhaps it was deleted?"),
+                                            Dict("name" => modelmeta(ma.model).verbose_name, "key" => key)))
+        throw(AdminRedirect(Juango.HttpResponseRedirect(reverse_url("admin:index"))))
+    end
+    o
 end
+
+"Thrown by a view to answer with a redirect (a missing object)."
+struct AdminRedirect <: Exception
+    response::Any
+end
+
+# Django's admin quote: a key in a URL with the characters that mean something there as _XX
+const QUOTE_CHARS = Set(collect("\":/_#?;@&=+\$,[]<>%\n\\"))
+hex2(c) = uppercase(string(UInt8(c); base = 16, pad = 2))
+"A primary key as the admin writes it in URLs (Django's `admin.utils.quote`): `\"a/b\"` is `\"a_2Fb\"`."
+admin_quote(s::AbstractString) = join(c in QUOTE_CHARS ? "_" * hex2(c) : string(c) for c in s)
+const UNQUOTE_RE = Regex("_(" * join(sort([hex2(c) for c in QUOTE_CHARS]), "|") * ")")
+"The primary key from an admin URL (Django's `unquote`)."
+admin_unquote(s::AbstractString) = replace(s, UNQUOTE_RE => m -> string(Char(parse(UInt8, m[2:end]; base = 16))))
+admin_pk(@nospecialize(o)) = admin_quote(Juango.pk_string(o))
+Juango.tattr(@nospecialize(m::Model), ::Val{:admin_pk}) = admin_pk(m)
+
+"The old object URL (`.../<id>/`) goes to its change page, as Django's."
+object_redirect(req::Request; app, model, id) =
+    Juango.HttpResponseRedirect(reverse_url("admin:change"; app = app, model = model, id = id))
 
 change_view(req::Request; app, model, id) = (ma = get_admin(app, model); change_form(req, ma, admin_object(ma, req, id)))
 
@@ -1390,7 +1480,8 @@ function delete_view(req::Request; app, model, id)
     meta = modelmeta(ma.model)
     obj = admin_object(ma, req, id)
     require_perm(req, ma, :delete; obj = obj)
-    if req.method == "POST"
+    if req.method == "POST" && isempty(get_deleted_objects(req, obj).protected)    # (protected: the page again, as Django's)
+        isempty(get_deleted_objects(req, obj).perms_needed) || throw(PermissionDenied())
         name = string(obj)
         try
             Juango.atomic() do
@@ -1409,21 +1500,72 @@ function delete_view(req::Request; app, model, id)
             return Juango.HttpResponseRedirect(reverse_url("admin:change"; app = ma.app, model = ma.slug, id = id))
         end
     end
-    related = Any[]
-    for (rn, M, f) in reverse_relations(ma.model)
-        startswith(string(rn), "+") && continue
-        n = count(filter(objects(M), Q(attname(f) => obj.id)))
-        n > 0 && push!(related, Dict{String,Any}("name" => modelmeta(M).verbose_name_plural, "count" => n,
-                                                 "action" => f.on_delete === :CASCADE ? "deleted" :
-                                                             f.on_delete === :SET_NULL ? "unlinked" :
-                                                             f.on_delete === :PROTECT ? "protected (blocks deletion)" :
-                                                             f.on_delete === :RESTRICT ? "restricted (blocks deletion unless deleted along with it)" :
-                                                             f.on_delete === :SET_DEFAULT || f.on_delete isa Juango.OnDeleteSet ? "reassigned" :
-                                                             "left untouched"))
-    end
-    ctx = base_context(req, gettext("Are you sure?"))
-    merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "related" => related))
+    d = get_deleted_objects(req, obj)
+    title = isempty(d.perms_needed) && isempty(d.protected) ? gettext("Are you sure?") :
+            interpolate(gettext("Cannot delete %(name)s"), Dict("name" => meta.verbose_name))
+    ctx = base_context(req, title)
+    merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "deleted_objects" => d.html,
+                                 "model_count" => d.model_count, "perms_lacking" => d.perms_needed, "protected" => d.protected))
     render(req, "admin/delete_confirmation.html", ctx)
+end
+
+"""
+What deleting `obj` would delete, as Django's `get_deleted_objects`: `html`, the nested list of
+the objects the cascade reaches ("Plot: <a>World Domination</a>" with what it takes along under
+it, linked to their change pages where the admin has them), `model_count` (verbose name plural =>
+count), `perms_needed` (the verbose names of registered models the user may not delete) and
+`protected` (the objects behind `:PROTECT` keys, or `:RESTRICT` keys the deletion doesn't reach,
+that block it).
+"""
+Base.@nospecializeinfer function get_deleted_objects(req, @nospecialize(obj))
+    seen = Set{Tuple{Any,Any}}()
+    counts = Dict{String,Int}()
+    perms = Set{String}()
+    protected = Any[]
+    restricted = Any[]
+    st = current_site()
+    item(o) = begin
+        T = typeof(o)
+        m = modelmeta(T)
+        ma = get(st.registry, admin_key(T), nothing)
+        name = uppercasefirst(m.verbose_name)
+        ma !== nothing && !can(req, ma, :delete, o) && push!(perms, m.verbose_name)
+        link = ma === nothing ? nothing : (try reverse_url("admin:change"; app = ma.app, model = ma.slug, id = admin_pk(o)) catch; nothing end)
+        link === nothing ? string(name, ": ", Juango.escape_html(string(o))) :
+                           string(name, ": <a href=\"", link, "\">", Juango.escape_html(string(o)), "</a>")
+    end
+    function walk(o)
+        T = Juango.concrete_model(typeof(o))
+        push!(seen, (T, o.pk))
+        m = modelmeta(T)
+        counts[m.verbose_name_plural] = get(counts, m.verbose_name_plural, 0) + 1
+        children = String[]
+        for (_, M, f) in Juango.deletion_referrers(T)
+            f.on_delete in (:CASCADE, :PROTECT, :RESTRICT) || continue
+            rel = collect(filter(Juango.base_objects(M), Juango.referrers_q(f, Any[o.pk])))
+            for r in rel
+                if f.on_delete === :PROTECT
+                    any(x -> x === r || (typeof(x) === typeof(r) && x.pk == r.pk), protected) || push!(protected, r)
+                elseif f.on_delete === :RESTRICT
+                    push!(restricted, r)
+                elseif !((Juango.concrete_model(typeof(r)), r.pk) in seen)
+                    push!(children, walk(r))
+                end
+            end
+        end
+        for C in Juango.child_models(T)        # (multi-table children extend the row)
+            for c in filter(Juango.base_objects(C); id__in = Any[o.pk])
+                (C, c.pk) in seen || push!(children, walk(c))
+            end
+        end
+        "<li>" * item(o) * (isempty(children) ? "" : "<ul>" * join(children) * "</ul>") * "</li>"
+    end
+    html = walk(obj)
+    for r in restricted                       # (a restricted row the deletion doesn't reach blocks it)
+        (Juango.concrete_model(typeof(r)), r.pk) in seen || any(x -> typeof(x) === typeof(r) && x.pk == r.pk, protected) || push!(protected, r)
+    end
+    (html = SafeString(html), model_count = sort(collect(counts); by = first), perms_needed = sort(collect(perms)),
+     protected = [SafeString(item(p)) for p in protected])
 end
 
 "The change history of one object."
@@ -1431,7 +1573,7 @@ function history_view(req::Request; app, model, id)
     ma = get_admin(app, model)
     obj = admin_object(ma, req, id)
     require_perm(req, ma, :view, :change; obj = obj)
-    entries = collect(select_related(order_by(filter(LogEntry; content_type = get_for_model(ma.model), object_id = Juango.pk_string(obj)),
+    entries = collect(select_related(order_by(filter(LogEntry; content_type = get_for_model(ma.model), object_id = admin_pk(obj)),
                                               "action_time", "id"), :user))
     ctx = base_context(req, interpolate(gettext("Change history: %(object)s"), Dict("object" => obj)))
     merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "entries" => entries))
@@ -1462,9 +1604,18 @@ function site_view(st::AdminSite, view; public = false)
             view(req; kw...)
         end
     # the admin checks logins itself, so LoginRequiredMiddleware leaves its views alone (as Django's)
+    # admin pages aren't cached (Django's admin_view is never_cache)
+    nc = Juango.never_cache(function (req; kw...)
+        try
+            checked(req; kw...)
+        catch e
+            e isa AdminRedirect || rethrow()
+            e.response
+        end
+    end)
     Juango.login_not_required(function (req; kw...)
         Base.ScopedValues.with(CURRENT_SITE => st, Juango.CURRENT_APP => ("admin" => st.name)) do
-            checked(req; kw...)
+            nc(req; kw...)
         end
     end)
 end
@@ -1593,6 +1744,7 @@ function urls(st::AdminSite = site)
         path("<slug:app>/<slug:model>/<str:id>/delete/", s(delete_view); name = "delete"),
         path("<slug:app>/<slug:model>/<str:id>/history/", s(history_view); name = "history"),
         path("<slug:app>/<slug:model>/<str:id>/password/", s(password_change_view); name = "password_change"),
+        path("<slug:app>/<slug:model>/<str:id>/", s(object_redirect)),
     ]); namespace = st.name)
 end
 

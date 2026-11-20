@@ -1,5 +1,5 @@
   <div class="submit-row">
-    {% if can_delete %}<a class="deletelink" href="{% url 'admin:delete' app=opts.app_label model=opts.slug id=object.pk_string %}">{% translate "Delete" %}</a>{% endif %}
+    {% if can_delete %}<a class="deletelink" href="{% url 'admin:delete' app=opts.app_label model=opts.slug id=object.admin_pk %}">{% translate "Delete" %}</a>{% endif %}
     {% if editable %}
     {% if save_as %}<input type="submit" name="_saveasnew" value="{% translate "Save as new" %}" class="button secondary">{% endif %}
     {% if can_add %}<input type="submit" name="_addanother" value="{% translate "Save and add another" %}" class="button secondary">{% endif %}

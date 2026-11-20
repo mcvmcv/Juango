@@ -119,7 +119,9 @@ Base.@nospecializeinfer function parse_pk(@nospecialize(T::Type), s)
     s isa UUID && return s
     s isa Tuple && return s
     k = pk_kind(T)
-    k === :composite && return parse_composite_pk(T, string(s))
+    # (a natural key is its one value, as obj.pk is: #221)
+    k === :composite && return natural_pk(T) ? (t = parse_composite_pk(T, string(s)); t === nothing ? nothing : t[1]) :
+                                                parse_composite_pk(T, string(s))
     k === :uuid ? tryparse(UUID, string(s)) : tryparse(Int, string(s))
 end
 Base.@nospecializeinfer function parse_composite_pk(@nospecialize(T::Type), s::AbstractString)
@@ -128,7 +130,7 @@ Base.@nospecializeinfer function parse_composite_pk(@nospecialize(T::Type), s::A
     length(bits) == length(fs) || return nothing
     vals = Any[]
     for (f, b) in zip(fs, bits)
-        b = unquote_pk(b)
+        length(fs) == 1 || (b = unquote_pk(b))           # (pk_string writes a natural key as it is)
         v = f.kind === :fk ? parse_pk(related_model(f), b) : f.kind in INT_KINDS ? tryparse(Int, b) :
             f.kind === :uuid ? tryparse(UUID, b) : f.kind === :date ? tryparse(Date, b) : String(b)
         v === nothing && return nothing

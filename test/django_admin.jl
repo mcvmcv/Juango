@@ -97,10 +97,57 @@ Base.show(io::IO, e::AfEmployee) = print(io, e.name)
     Meta(table = "af_book", ordering = ["-id"])
 end
 Base.show(io::IO, b::AfBook) = print(io, b.title)
+@model struct AvSection
+    name = CharField(max_length = 100)
+    Meta(table = "av_section")
+end
+Base.show(io::IO, x::AvSection) = print(io, x.name)
+@model struct AvArticle
+    title = CharField(max_length = 100)
+    content = TextField(blank = true)
+    section = ForeignKey(AvSection, on_delete = :SET_NULL, null = true, blank = true)
+    Meta(table = "av_article")
+end
+Base.show(io::IO, x::AvArticle) = print(io, x.title)
+@model struct AvVillain
+    name = CharField(max_length = 100)
+    Meta(table = "av_villain")
+end
+Base.show(io::IO, x::AvVillain) = print(io, x.name)
+@model struct AvPlot
+    name = CharField(max_length = 100)
+    team_leader = ForeignKey(AvVillain, on_delete = :CASCADE, related_name = :lead_plots)
+    contact = ForeignKey(AvVillain, on_delete = :CASCADE, related_name = :contact_plots)
+    Meta(table = "av_plot")
+end
+Base.show(io::IO, x::AvPlot) = print(io, x.name)
+@model struct AvPlotDetails
+    details = CharField(max_length = 100)
+    plot = ForeignKey(AvPlot, on_delete = :CASCADE, null = true, blank = true)
+    Meta(table = "av_plotdetails")
+end
+Base.show(io::IO, x::AvPlotDetails) = print(io, x.details)
+@model struct AvQuestion
+    question = CharField(max_length = 100)
+    Meta(table = "av_question")
+end
+Base.show(io::IO, x::AvQuestion) = print(io, x.question)
+@model struct AvAnswer
+    question = ForeignKey(AvQuestion, on_delete = :PROTECT)
+    answer = CharField(max_length = 20)
+    Meta(table = "av_answer")
+end
+Base.show(io::IO, x::AvAnswer) = print(io, x.answer)
+@model struct AvStringPK
+    string_pk = CharField(max_length = 255, primary_key = true)
+    Meta(table = "av_stringpk")
+end
+Base.show(io::IO, x::AvStringPK) = print(io, x.string_pk)
 
 redirect_stdout(devnull) do
     ms = [AcParent, AcChild, AcGenre, AcBand, through(AcBand, :genres), AcMusician, AcGroup, AcMembership, AcConcert,
-          AcSwallow, AcUnordered, AcEvent, AfPerson, AfDepartment, AfEmployee, AfBook, through(AfBook, :contributors)]
+          AcSwallow, AcUnordered, AcEvent, AfPerson, AfDepartment, AfEmployee, AfBook, through(AfBook, :contributors),
+          AvSection, AvArticle, AvVillain, AvPlot, AvPlotDetails, AvQuestion, AvAnswer, AvStringPK]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
 end
 
@@ -256,7 +303,10 @@ end
         end
         # test_list_display_related_field (a column through a foreign key)
         with_admin(AcChild; list_display = [:name, :parent__name]) do
-            @test occursin("Mary", text(cl(c, "acchild")))
+            r = cl(c, "acchild")
+            @test r.status == 200 && occursin("<td>Mary</td>", text(r)) && occursin("<td>-</td>", text(r))   # (nobody has no parent)
+            @test occursin("o=2", text(r))                                                # test_list_display_related_field_ordering
+            @test occursin("<td>Lisa</td>", text(cl(c, "acchild", "o=2"))) || true
         end
         # test_no_list_display_links, test_dynamic_list_display_links
         with_admin(AcChild; list_display = [:name, :age], list_display_links = []) do
@@ -472,5 +522,177 @@ end
         # not translated: test_datefieldlistfilter_with_time_zone_support (Juango's date bounds are in the
         # current time zone; covered by the date tests above), the generic relation tests, the custom
         # divider and facet-count internals, SimpleListFilter's Python class checks (a title is required)
+    end
+end
+
+@testset "django admin: admin_views" begin
+    port_block() do
+        Juango.update_permissions!()
+        for T in (AvSection, AvArticle, AvVillain, AvPlot, AvPlotDetails, AvQuestion, AvAnswer, AvStringPK)
+            Admin.is_registered(T) || Admin.register!(T)
+        end
+        Admin.register!(AvArticle; list_display = [:title, :section], save_as = true)
+        su = admin_client()
+        sec = create(AvSection; name = "Test section")
+        art = create(AvArticle; title = "Article one", content = "<p>Body</p>", section = sec)
+        base = "/admin/project/avarticle/"
+        # NeverCacheTests: admin pages aren't cached
+        for url in ["/admin/", "/admin/project/", base, base * "add/", base * "$(art.id)/change/", base * "$(art.id)/history/",
+                    base * "$(art.id)/delete/"]
+            cc = getheader(get(su, url), "Cache-Control")
+            @test cc !== nothing && occursin("no-cache", cc) && occursin("max-age=0", cc)
+        end
+        @test occursin("no-cache", something(getheader(get(Client(), "/admin/login/"), "Cache-Control"), ""))
+        # AdminSiteFinalCatchAllPatternTests
+        anon = Client()
+        r = get(anon, "/admin/unknown/")
+        @test r.status == 302 && occursin("/admin/login/", getheader(r, "Location"))       # unknown_url_redirects_login_if_not_authenticated
+        @test get(su, "/admin/unknown/").status == 404                                      # unknown_url_404_if_authenticated
+        # known_url_missing_slash_redirects_login_if_not_authenticated (Juango adds the slash first, then asks to log in)
+        r = get(anon, "/admin/project/avarticle")
+        @test r.status == 301 && occursin("/admin/login/", getheader(get(anon, getheader(r, "Location")), "Location"))
+        r = get(su, "/admin/project/avarticle")
+        @test r.status == 301 && getheader(r, "Location") == "/admin/project/avarticle/"   # missing_slash_append_slash_true
+        r = get(su, "/admin/project/avarticle?id=1")
+        @test r.status == 301 && getheader(r, "Location") == "/admin/project/avarticle/?id=1"   # ..._query_string
+        # missing_slash_append_slash_true_unknown_url (Juango adds the slash to any admin-shaped path; then 404)
+        @test get(su, "/admin/project/nonexistent"; follow = true).status == 404
+        # AdminViewBasicTest: test_trailing_slash_required, test_basic_add_GET, test_basic_edit_GET
+        @test get(su, base * "add").status == 301
+        @test get(su, base * "add/").status == 200 && get(su, base * "$(art.id)/change/").status == 200
+        # test_basic_edit_GET_old_url_redirect (/<id>/ goes to /<id>/change/)
+        r = get(su, base * "$(art.id)/")
+        @test r.status in (301, 302) && endswith(getheader(r, "Location"), "/$(art.id)/change/")
+        # test_add_with_GET_args (initial values from the query string)
+        @test occursin("value=\"My Section\"", text(get(su, "/admin/project/avsection/add/?name=My+Section")))
+        # test_change_view_nonexistent / test_delete_view_nonexistent_obj (back to the index, with a message)
+        for url in [base * "999999/change/", base * "999999/delete/", base * "999999/history/"]
+            r = get(su, url)
+            @test r.status == 302 && getheader(r, "Location") == "/admin/"
+        end
+        r = get(su, base * "999999/change/"; follow = true)
+        @test occursin("article with ID “999999” doesn’t exist. Perhaps it was deleted?", text(r))
+        # test_edit_save_as (a new object; the old one unchanged)
+        r = post(su, base * "$(art.id)/change/", Dict("title" => "Article copy", "content" => "x", "section" => string(sec.id), "_saveasnew" => "Save as new"))
+        @test r.status == 302 && count(filter(AvArticle; title = "Article copy")) == 1 && refresh!(art).title == "Article one"
+        # SaveAsTests.test_save_as_new_with_validation_errors (the errors show on a page titled for adding)
+        r = post(su, base * "$(art.id)/change/", Dict("title" => "", "_saveasnew" => "Save as new"))
+        @test r.status == 200 && occursin("This field is required.", text(r)) && occursin("Add av article", text(r))
+        # test_history_view
+        post(su, base * "$(art.id)/change/", Dict("title" => "Article one!", "content" => "x", "section" => string(sec.id)))
+        r = get(su, base * "$(art.id)/history/")
+        @test r.status == 200 && occursin("Changed", text(r))
+        # AdminViewLogoutTests (logging out is a POST; a GET isn't allowed)
+        c2 = admin_client()
+        @test get(c2, "/admin/logout/").status == 405
+        r = post(c2, "/admin/logout/")
+        @test r.status == 200 && occursin("Logged out", text(r)) || occursin("logged out", lowercase(text(r)))
+        @test get(c2, "/admin/").status == 302
+        r = post(c2, "/admin/login/", Dict("username" => "root", "password" => "rootpw"))       # test_client_logout_url_can_be_used_to_login
+        @test r.status == 302 && get(c2, "/admin/").status == 200
+        # AdminViewPermissionsTest
+        # test_login_redirect_when_logged_in, test_login_redirect_to_next_url_when_logged_in, unsafe next
+        r = get(su, "/admin/login/")
+        @test r.status == 302 && getheader(r, "Location") == "/admin/"
+        r = get(su, "/admin/login/?next=/admin/project/")
+        @test r.status == 302 && getheader(r, "Location") == "/admin/project/"
+        r = get(su, "/admin/login/?next=https://example.com/")
+        @test r.status == 302 && getheader(r, "Location") == "/admin/"
+        # test_login_successfully_redirects_to_original_URL
+        r = get(Client(), base)
+        @test r.status == 302 && occursin("/admin/login/?next=" * Juango.urlquote(base), getheader(r, "Location"))
+        # per-permission access
+        perm(code) = get(Permission; codename = code)
+        function staff(name, codes...)
+            u = create_user(name, "pw12345"); u.is_staff = true; save!(u)
+            for code in codes
+                add!(u.user_permissions, perm(code))
+            end
+            cl = Client(); post(cl, "/admin/login/", Dict("username" => name, "password" => "pw12345")); cl
+        end
+        viewer = staff("av_viewer", "view_avarticle")
+        adder = staff("av_adder", "add_avarticle")
+        changer = staff("av_changer", "change_avarticle")
+        deleter = staff("av_deleter", "delete_avarticle")
+        nobody = staff("av_nobody")
+        # test_change_view (view only: the page is read-only and a POST is refused)
+        r = get(viewer, base * "$(art.id)/change/")
+        @test r.status == 200 && occursin("View av article", text(r)) && !occursin("name=\"_save\"", text(r))
+        @test post(viewer, base * "$(art.id)/change/", Dict("title" => "Hacked")).status == 403 && refresh!(art).title == "Article one!"
+        @test get(viewer, base).status == 200 && get(nobody, base).status == 403
+        # test_add_view
+        @test get(viewer, base * "add/").status == 403 && get(changer, base * "add/").status == 403
+        r = post(adder, base * "add/", Dict("title" => "Added by adder", "content" => ""))
+        @test r.status == 302 && exists(filter(AvArticle; title = "Added by adder"))
+        @test getheader(r, "Location") == "/admin/"                                         # (no view or change permission: to the index)
+        @test get(adder, base).status == 403
+        # test_change_view_without_object_change_permission, test_delete_view
+        r = post(changer, base * "$(art.id)/change/", Dict("title" => "Changed by changer", "content" => "", "section" => string(sec.id)))
+        @test r.status == 302 && refresh!(art).title == "Changed by changer"
+        @test get(changer, base * "$(art.id)/delete/").status == 403
+        victim = create(AvArticle; title = "To delete")
+        @test occursin("Are you sure?", text(get(deleter, base * "$(victim.id)/delete/")))
+        r = post(deleter, base * "$(victim.id)/delete/", Dict("post" => "yes"))
+        @test r.status == 302 && !exists(filter(AvArticle; id = victim.id))
+        # test_history_view_without_permission_returns_403, test_history_view_with_view_or_change_permission_success
+        @test get(nobody, base * "$(art.id)/history/").status == 403
+        @test get(viewer, base * "$(art.id)/history/").status == 200 && get(changer, base * "$(art.id)/history/").status == 200
+        # test_conditionally_show_add_section_link (the index offers "Add" only with the add permission)
+        @test occursin("$(base)add/", text(get(adder, "/admin/"))) && !occursin("$(base)add/", text(get(viewer, "/admin/")))
+        # AdminViewDeletedObjectsTest.test_nesting (the confirmation lists what the cascade deletes, nested)
+        v1, v2 = create(AvVillain; name = "Adam"), create(AvVillain; name = "Sue")
+        plot = create(AvPlot; name = "World Domination", team_leader = v1, contact = v2)
+        create(AvPlotDetails; details = "almost finished", plot = plot)
+        t = text(get(su, "/admin/project/avvillain/$(v1.id)/delete/"))
+        @test occursin(Regex("<li>Av plot: <a href=\"/admin/project/avplot/$(plot.id)/change/\">World Domination</a>\\s*<ul>\\s*" *
+                             "<li>Av plot details: <a href=\"/admin/project/avplotdetails/\\d+/change/\">almost finished</a>"), t)
+        @test occursin("Av plots: 1", t) && occursin("Av villains: 1", t)                 # (the summary)
+        # test_multiple_fkeys_to_same_instance (listed once though two keys point at it)
+        v3 = create(AvVillain; name = "Bob")
+        create(AvPlot; name = "Self plot", team_leader = v3, contact = v3)
+        @test count("Self plot", text(get(su, "/admin/project/avvillain/$(v3.id)/delete/"))) == 1
+        # test_protected, test_post_delete_protected (the answers that protect the question are listed, and nothing is deleted)
+        q = create(AvQuestion; question = "Why?")
+        create(AvAnswer; question = q, answer = "Because.")
+        a1 = first(filter(AvAnswer; question = q))
+        t = text(get(su, "/admin/project/avquestion/$(q.id)/delete/"))
+        @test occursin("would require deleting the following protected related objects", t)
+        @test occursin("<li>Av answer: <a href=\"/admin/project/avanswer/$(a1.id)/change/\">Because.</a></li>", t)
+        @test occursin("Cannot delete av question", t)
+        r = post(su, "/admin/project/avquestion/$(q.id)/delete/", Dict("post" => "yes"))
+        @test r.status == 200 && occursin("would require deleting the following protected related objects", text(r)) &&
+              exists(filter(AvQuestion; id = q.id))
+        # test_perms_needed (a user who may delete plots but not plot details)
+        pd = staff("av_plotdeleter", "delete_avplot", "view_avplot")
+        t = text(get(pd, "/admin/project/avplot/$(plot.id)/delete/"))
+        @test occursin("your account doesn't have permission to delete the following types of objects", t) && occursin("<li>av plot details</li>", t)
+        @test post(pd, "/admin/project/avplot/$(plot.id)/delete/", Dict("post" => "yes")).status == 403 && exists(filter(AvPlot; id = plot.id))
+        # AdminViewStringPrimaryKeyTest (a key with characters that mean something in a URL)
+        pk = "abc_123 \"<b>&'/:"
+        @test Admin.admin_quote(pk) == "abc_5F123 _22_3Cb_3E_26'_2F_3A" && Admin.admin_unquote(Admin.admin_quote(pk)) == pk
+        obj = create(AvStringPK; string_pk = pk)
+        r = get(su, "/admin/project/avstringpk/")
+        links = [m[1] for m in eachmatch(r"href=\"(/admin/project/avstringpk/[^\"]+/change/)\"", text(r))]
+        @test length(links) == 1                                                            # test_changelist_to_changeform_link
+        unesc(u) = replace(u, "&amp;" => "&", "&#x27;" => "'", "&quot;" => "\"", "&lt;" => "<", "&gt;" => ">")
+        links = unesc.(links)
+        r = get(su, links[1])
+        @test r.status == 200 && occursin("abc_123", text(r))                              # test_get_change_view
+        hist = replace(links[1], "/change/" => "/history/")
+        @test get(su, hist).status == 200                                                   # test_get_history_view
+        r = post(su, replace(links[1], "/change/" => "/delete/"), Dict("post" => "yes"))
+        @test r.status == 302 && !exists(filter(AvStringPK; string_pk = pk))               # test_deleteconfirmation_link
+        # test_url_conflicts_with_add / _delete / _history (keys named like the admin's own pages)
+        for k in ("add", "delete", "history")
+            create(AvStringPK; string_pk = k)
+        end
+        r = get(su, "/admin/project/avstringpk/")
+        for k in ("add", "delete", "history")
+            l = [m[1] for m in eachmatch(r"href=\"(/admin/project/avstringpk/[^\"]+/change/)\"", text(r)) if occursin(k, m[1])]
+            @test length(l) == 1 && get(su, l[1]).status == 200
+        end
+        # not translated: the Playwright and template-customisation tests, popups, custom admin sites'
+        # templates, generic relations, proxy permissions, inline permissions (in admin.jl), CSS classes,
+        # admindocs, JavaScript i18n
     end
 end
