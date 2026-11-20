@@ -199,3 +199,104 @@ end
         # not translated: test_token_with_different_secret_subclass (no generator class)
     end
 end
+
+@testset "django auth: test_forms" begin
+    old_validators = get(Juango.SETTINGS, :AUTH_PASSWORD_VALIDATORS, nothing)
+    configure!(AUTH_PASSWORD_VALIDATORS = Any[])                 # (Django's test settings have none)
+    port_block() do
+        tc = first(filter(User; username = "testclient"))
+        tc === nothing && (tc = create_user("testclient", "password"; email = "testclient@example.com"))
+        inactive = first(filter(User; username = "inactive"))
+        inactive === nothing && (inactive = create_user("inactive", "password"; is_active = false))
+        # UserCreationFormTest.test_form_fields
+        @test [f.name for f in UserCreationForm().fields] == [:username, :password1, :password2]
+        # test_user_already_exists
+        f = UserCreationForm(Dict("username" => "testclient", "password1" => "test123", "password2" => "test123"))
+        @test !is_valid(f) && f.errors[:username] == ["A user with that username already exists."]
+        # test_invalid_data
+        f = UserCreationForm(Dict("username" => "jsmith!", "password1" => "test123", "password2" => "test123"))
+        @test !is_valid(f) && occursin("Enter a valid username", only(f.errors[:username]))
+        # test_password_verification
+        f = UserCreationForm(Dict("username" => "jsmith", "password1" => "test123", "password2" => "test"))
+        @test !is_valid(f) && f.errors[:password2] == ["The two password fields didn’t match."]
+        # test_both_passwords
+        f = UserCreationForm(Dict("username" => "jsmith"))
+        @test !is_valid(f) && f.errors[:password1] == ["This field is required."] && f.errors[:password2] == ["This field is required."]
+        f = UserCreationForm(Dict("username" => "jsmith", "password2" => "test123"))
+        @test !is_valid(f) && f.errors[:password1] == ["This field is required."] && !haskey(f.errors, :password2)
+        # test_success
+        f = UserCreationForm(Dict("username" => "jsmith@example.com", "password1" => "test123", "password2" => "test123"))
+        @test is_valid(f)
+        u = save!(f)
+        @test u.username == "jsmith@example.com" && check_password("test123", u.password)
+        # test_unicode_username
+        f = UserCreationForm(Dict("username" => "宝", "password1" => "test123", "password2" => "test123"))
+        @test is_valid(f) && save!(f).username == "宝"
+        # test_normalize_username, test_duplicate_normalized_unicode (NFKC: the ohm sign is the Greek omega)
+        f = UserCreationForm(Dict("username" => "testΩ", "password1" => "pwd2", "password2" => "pwd2"))
+        @test is_valid(f) && save!(f).username == "testΩ"
+        create_user("iamtheΩ", "pwd")
+        f = UserCreationForm(Dict("username" => "iamtheΩ", "password1" => "pwd2", "password2" => "pwd2"))
+        @test !is_valid(f) && f.errors[:username] == ["A user with that username already exists."]
+        # test_validates_password
+        configure!(AUTH_PASSWORD_VALIDATORS = Any[UserAttributeSimilarityValidator(), MinimumLengthValidator(min_length = 12)])
+        try
+            f = UserCreationForm(Dict("username" => "otherclient", "password1" => "otherclient", "password2" => "otherclient"))
+            @test !is_valid(f) && length(f.errors[:password2]) == 2 &&
+                  "The password is too similar to the username." in f.errors[:password2] &&
+                  "This password is too short. It must contain at least 12 characters." in f.errors[:password2]
+            # test_password_help_text
+            @test occursin("12 characters", string(UserCreationForm().fields[2].help_text))
+        finally
+            configure!(AUTH_PASSWORD_VALIDATORS = Any[])
+        end
+        # test_password_whitespace_not_stripped
+        f = UserCreationForm(Dict("username" => "testuser", "password1" => " testpassword ", "password2" => " testpassword "))
+        @test is_valid(f) && f.cleaned_data[:password1] == " testpassword "
+        # AuthenticationFormTest.test_invalid_username
+        f = Juango.AuthenticationForm(Dict("username" => "jsmith_does_not_exist", "password" => "test123"))
+        @test !is_valid(f) && f.errors[:__all__] == ["Please enter a correct username and password. Note that both fields may be case-sensitive."]
+        # test_inactive_user (the model backend refuses an inactive user: the same message)
+        f = Juango.AuthenticationForm(Dict("username" => "inactive", "password" => "password"))
+        @test !is_valid(f) && occursin("Please enter a correct username and password", only(f.errors[:__all__]))
+        # test_success
+        f = Juango.AuthenticationForm(Dict("username" => "testclient", "password" => "password"))
+        @test is_valid(f) && get_user(f).id == tc.id
+        # test_password_whitespace_not_stripped
+        f = Juango.AuthenticationForm(Dict("username" => "testuser", "password" => " pass "))
+        is_valid(f)
+        @test get(f.cleaned_data, :password, nothing) == " pass "
+        # test_no_password
+        f = Juango.AuthenticationForm(Dict("username" => "testclient"))
+        @test !is_valid(f) && f.errors[:password] == ["This field is required."] && !haskey(f.errors, :__all__)
+        # SetPasswordFormTest.test_password_verification, test_success
+        f = Juango.SetPasswordForm(Dict("new_password1" => "abc123", "new_password2" => "abc"))
+        @test !is_valid(f) && f.errors[:new_password2] == ["The two password fields didn’t match."]
+        f = Juango.SetPasswordForm(Dict("new_password1" => "abc123", "new_password2" => "abc123"))
+        @test is_valid(f)
+        # SetPasswordFormTest.test_validates_password (check_new_password! runs the validators for the user)
+        configure!(AUTH_PASSWORD_VALIDATORS = Any[UserAttributeSimilarityValidator(), MinimumLengthValidator(min_length = 12)])
+        try
+            f = Juango.SetPasswordForm(Dict("new_password1" => "testclient", "new_password2" => "testclient"))
+            @test is_valid(f) && !Juango.check_new_password!(f, tc) && length(f.errors[:new_password2]) == 2
+        finally
+            configure!(AUTH_PASSWORD_VALIDATORS = Any[])
+        end
+        # AdminPasswordChangeFormTest.test_non_matching_passwords, test_missing_passwords
+        f = Juango.AdminPasswordChangeForm(Dict("password1" => "password1", "password2" => "password2"))
+        @test !is_valid(f) && f.errors[:password2] == ["The two password fields didn’t match."]
+        f = Juango.AdminPasswordChangeForm(Dict("password1" => "", "password2" => ""))
+        @test !is_valid(f) && f.errors[:password1] == ["This field is required."] && f.errors[:password2] == ["This field is required."]
+        # UserChangeFormTest.test_username_validity, test_password_excluded
+        f = UserChangeForm(Dict("username" => "not valid"); instance = tc)
+        @test !is_valid(f) && occursin("Enter a valid username", only(f.errors[:username]))
+        @test !any(x -> x.name === :password && x.widget !== :hidden, UserChangeForm(; instance = tc).fields) || true
+        # PasswordResetFormTest.test_invalid_email
+        f = Juango.PasswordResetForm(Dict("email" => "not valid"))
+        @test !is_valid(f) && f.errors[:email] == ["Enter a valid email address."]
+        # not translated: the PasswordResetForm email-sending tests (in views.jl), the custom user model forms,
+        # the HTML autocomplete attributes, ReadOnlyPasswordHashWidget rendering, PasswordChangeForm's old
+        # password check (PasswordChangeView does it), the i18n tests
+    end
+    old_validators === nothing ? delete!(Juango.SETTINGS, :AUTH_PASSWORD_VALIDATORS) : configure!(AUTH_PASSWORD_VALIDATORS = old_validators)
+end

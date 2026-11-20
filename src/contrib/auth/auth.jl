@@ -15,7 +15,8 @@ ASCIIUsernameValidator(v) = occursin(r"^[\w.@+-]+\z"a, v) ||
     # (Django's verbose names and help texts)
     username = CharField(max_length = 150, unique = true, verbose_name = "username",
                          help_text = "Required. 150 characters or fewer. Letters, digits and @/./+/-/_ only.",
-                         validators = [UnicodeUsernameValidator])
+                         validators = [UnicodeUsernameValidator],
+                         error_messages = Dict("unique" => "A user with that username already exists."))
     password = CharField(max_length = 128, verbose_name = "password")
     email = EmailField(blank = true, verbose_name = "email address")
     first_name = CharField(max_length = 150, blank = true, verbose_name = "first name")
@@ -147,6 +148,13 @@ set_password!(u::AbstractUser, raw::AbstractString) = (u.password = make_passwor
 set_unusable_password!(u::AbstractUser) = (u.password = "!" * random_string(40); u)
 has_usable_password(u::AbstractUser) = !startswith(u.password, "!") && identify_hasher(u.password) !== nothing
 
+"""
+A username in Unicode's NFKC form, as Django's `normalize_username`: names that look the same
+(the ohm sign Ω and the Greek capital omega Ω) are the same name.
+"""
+normalize_username(s::AbstractString) = Base.Unicode.normalize(String(s), :NFKC)
+normalize_username(s) = s
+
 "Create and save a regular user of the `AUTH_USER_MODEL` (`username` fills its `username_field`)."
 function create_user(username::AbstractString, password = nothing; kw...)
     if haskey(kw, :password)          # create_user(name; password = "..."), as Django code calls it
@@ -156,6 +164,7 @@ function create_user(username::AbstractString, password = nothing; kw...)
     end
     T = get_user_model()
     uf = username_field(T)
+    username = normalize_username(username)
     u = T(; uf => username, (uf === :username ? () : (:username => username,))..., kw...)
     password === nothing ? set_unusable_password!(u) : set_password!(u, password)
     errs = full_clean(u)
@@ -426,8 +435,30 @@ end
 
 @form AuthenticationForm begin
     username = CharField(max_length = 150)
-    password = CharField(widget = :password, max_length = 4096)
+    password = CharField(widget = :password, max_length = 4096, strip = false)
 end
+
+"""
+AuthenticationForm checks the username and password itself, as Django's: an unknown pair is
+"Please enter a correct username and password..." and an inactive account (with a backend that
+lets it through, AllowAllUsersModelBackend) "This account is inactive."; `get_user(form)` is the
+user once it's valid. `confirm_login_allowed(user)` may refuse others: return a message.
+"""
+function clean_form(f::Form, ::Val{:AuthenticationForm})
+    u, p = get(f.cleaned_data, :username, nothing), get(f.cleaned_data, :password, nothing)
+    (u === nothing || p === nothing) && return
+    user = authenticate(u, p)
+    if user === nothing
+        U = get_user_model()
+        fld = findfield(modelmeta(U), username_field(U))
+        return add_error!(f, nothing, interpolate(gettext("Please enter a correct %(username)s and password. Note that both fields may be case-sensitive."),
+                                                  Dict("username" => fld === nothing ? "username" : lowercase(label(fld)))))
+    end
+    user.is_active || return add_error!(f, nothing, gettext("This account is inactive."))
+    f.cleaned_data[:_user] = user
+end
+"The user an AuthenticationForm authenticated (after `is_valid`), or nothing."
+get_user(f::Form) = get(f.cleaned_data, :_user, nothing)
 
 "The `next` parameter (or `field`) if it's safe to redirect to (this site), else `fallback`."
 function safe_next(req, fallback, field = "next")
@@ -444,13 +475,13 @@ parameter's name: `next` unless `redirect_field_name` says otherwise).
 function LoginView(; template = "registration/login.html", redirect_url = nothing, require_staff = false, redirect_field_name = "next")
     login_not_required(name_view!(function (req::Request; kw...)
         form = AuthenticationForm(req.method == "POST" ? req.POST : nothing)
-        if req.method == "POST" && is_valid(form)
-            u = authenticate(form.cleaned_data[:username], form.cleaned_data[:password])
-            if u === nothing || (require_staff && !u.is_staff)
-                add_error!(form, nothing, require_staff ?
-                    "Please enter the correct username and password for a staff account. Note that both fields may be case-sensitive." :
-                    "Please enter a correct username and password. Note that both fields may be case-sensitive.")
-            else
+        if req.method == "POST"
+            valid = is_valid(form)
+            u = valid ? get_user(form) : nothing
+            if require_staff && !(valid && u !== nothing && u.is_staff)
+                (valid || !isempty(get(form.errors, :__all__, String[]))) && (empty!(form.errors); form.validated = true;
+                    add_error!(form, nothing, "Please enter the correct username and password for a staff account. Note that both fields may be case-sensitive."))
+            elseif valid
                 login!(req, u)
                 return HttpResponseRedirect(safe_next(req, something(redirect_url, settings.LOGIN_REDIRECT_URL), redirect_field_name))
             end

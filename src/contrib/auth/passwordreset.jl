@@ -100,6 +100,19 @@ end
 end
 clean_form(f::Form, ::Val{:PasswordChangeForm}) = clean_form(f, Val(:SetPasswordForm))
 
+"The form data with its username in NFKC form (Django's UsernameField), the rest as it is."
+function normalized_username_data(data, U)
+    data === nothing && return data
+    k = string(username_field(U))
+    v = get(data, k, nothing)
+    v isa AbstractString || return data
+    n = normalize_username(v)
+    n == v && return data
+    d = data isa QueryDict ? copy(data) : Dict{String,Any}(string(a) => b for (a, b) in data)
+    d isa QueryDict ? (d.data[k] = [n]) : (d[k] = n)
+    d
+end
+
 """
     UserCreationForm(data = nothing; fields = [username_field], instance = nothing, kw...)
 
@@ -112,6 +125,7 @@ Django's sign-up form for the `AUTH_USER_MODEL`: its username field (plus any `f
 """
 function UserCreationForm(data = nothing; fields = nothing, instance = nothing, kw...)
     U = get_user_model()
+    data = normalized_username_data(data, U)
     f = ModelForm(U; data = data, instance = instance, kw...,
                   fields = fields === nothing ? [username_field(U)] : fields)
     for (n, l) in ((:password1, "Password"), (:password2, "Password confirmation"))

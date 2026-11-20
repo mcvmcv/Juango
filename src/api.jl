@@ -92,7 +92,7 @@ export recording, recorded, undo_recorded!, undo_problem, UndoProblem, not_recor
 export User, AbstractUser, AnonymousUser, USER_MODEL, get_user_model, authenticate, login!, logout!,
        create_user, create_superuser, get_username, get_full_name, get_short_name, set_password!, check_password, make_password, is_authenticated, login_required,
        staff_member_required, Permission, Group, has_perm, has_perms, permission_required, ModelBackend,
-       validate_password, password_changed, is_password_usable, PBKDF2SHA1Hasher, UnicodeUsernameValidator, ASCIIUsernameValidator, password_validators_help_texts, password_validators_help_text_html, update_session_auth_hash!, UserCreationForm, UserChangeForm, AdminPasswordChangeForm, AllowAllUsersModelBackend, login_not_required,
+       validate_password, password_changed, get_user, is_password_usable, PBKDF2SHA1Hasher, UnicodeUsernameValidator, ASCIIUsernameValidator, password_validators_help_texts, password_validators_help_text_html, update_session_auth_hash!, UserCreationForm, UserChangeForm, AdminPasswordChangeForm, AllowAllUsersModelBackend, login_not_required,
        LoginRequiredMiddleware, RemoteUserMiddleware, PersistentRemoteUserMiddleware, RemoteUserBackend,
        PasswordChangeView, PasswordChangeDoneView, PasswordResetView, PasswordResetConfirmView
 export message!, get_messages, peek_messages, MessageMiddleware, url_has_allowed_host_and_scheme
