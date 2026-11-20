@@ -143,11 +143,28 @@ Base.show(io::IO, x::AvAnswer) = print(io, x.answer)
     Meta(table = "av_stringpk")
 end
 Base.show(io::IO, x::AvStringPK) = print(io, x.string_pk)
+@model struct AvPost
+    title = CharField(max_length = 100)
+    content = TextField(blank = true)
+    posted = DateField(default = () -> Juango.localdate())
+    Meta(table = "av_post")
+end
+@model struct AvPodcast
+    name = CharField(max_length = 100, default = "pod")
+    release_date = DateField()
+    Meta(table = "av_podcast", ordering = ["release_date"])
+end
+@model struct AvCity
+    name = CharField(max_length = 100)
+    Meta(table = "av_city")
+end
+Base.show(io::IO, x::AvCity) = print(io, x.name)
+Juango.get_absolute_url(c::AvCity) = "/dummy/$(c.id)/"
 
 redirect_stdout(devnull) do
     ms = [AcParent, AcChild, AcGenre, AcBand, through(AcBand, :genres), AcMusician, AcGroup, AcMembership, AcConcert,
           AcSwallow, AcUnordered, AcEvent, AfPerson, AfDepartment, AfEmployee, AfBook, through(AfBook, :contributors),
-          AvSection, AvArticle, AvVillain, AvPlot, AvPlotDetails, AvQuestion, AvAnswer, AvStringPK]
+          AvSection, AvArticle, AvVillain, AvPlot, AvPlotDetails, AvQuestion, AvAnswer, AvStringPK, AvPost, AvPodcast, AvCity]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
 end
 
@@ -694,5 +711,74 @@ end
         # not translated: the Playwright and template-customisation tests, popups, custom admin sites'
         # templates, generic relations, proxy permissions, inline permissions (in admin.jl), CSS classes,
         # admindocs, JavaScript i18n
+    end
+end
+
+@testset "django admin: admin_views (2)" begin
+    port_block() do
+        su = admin_client()
+        # ReadonlyTest.test_readonly_get, test_readonly_post (a read-only field isn't an input, and a POST can't set it)
+        with_admin(AvPost; readonly_fields = [:posted]) do
+            t = text(get(su, "/admin/project/avpost/add/"))
+            @test !occursin("name=\"posted\"", t)
+            r = post(su, "/admin/project/avpost/add/", Dict("title" => "Django Got Readonly Fields", "content" => "x"))
+            @test r.status == 302 && only(collect(objects(AvPost))).posted == Juango.localdate()
+            r = post(su, "/admin/project/avpost/add/", Dict("title" => "Second", "content" => "x", "posted" => "1990-08-10"))
+            @test r.status == 302 && get(AvPost; title = "Second").posted == Juango.localdate()
+            p = get(AvPost; title = "Second")
+            t = text(get(su, "/admin/project/avpost/$(p.id)/change/"))
+            @test !occursin("name=\"posted\"", t) && occursin(string(Dates.year(Juango.localdate())), t)
+        end
+        # DateHierarchyTests
+        url = "/admin/project/avpodcast/"
+        with_admin(AvPodcast; date_hierarchy = :release_date) do
+            t = text(get(su, url))                                                        # test_empty
+            @test !occursin("release_date__year=", t)
+            create(AvPodcast; release_date = Date(2000, 6, 30))                         # test_single (a day link)
+            @test occursin("?release_date__day=30&amp;release_date__month=6&amp;release_date__year=2000\"", text(get(su, url)))
+            @test !occursin("2,000", text(get(su, url)))                                 # (assert_non_localized_year)
+            create(AvPodcast; release_date = Date(2000, 6, 15)); create(AvPodcast; release_date = Date(2000, 6, 3))   # test_within_month
+            t = text(get(su, url))
+            @test all(d -> occursin("?release_date__day=$d&amp;release_date__month=6&amp;release_date__year=2000\"", t), (30, 15, 3))
+            create(AvPodcast; release_date = Date(2000, 1, 30)); create(AvPodcast; release_date = Date(2000, 3, 15))  # test_within_year
+            t = text(get(su, url))
+            @test !occursin("release_date__day=", t)
+            @test all(m -> occursin("?release_date__month=$m&amp;release_date__year=2000\"", t), (1, 3, 6))
+            create(AvPodcast; release_date = Date(2003, 3, 15)); create(AvPodcast; release_date = Date(2005, 5, 3))   # test_multiple_years
+            t = text(get(su, url))
+            @test !occursin("release_date__month=", t) && all(y -> occursin("?release_date__year=$y\"", t), (2000, 2003, 2005))
+            t = text(get(su, url * "?release_date__year=2003"))
+            @test occursin("?release_date__month=3&amp;release_date__year=2003\"", t) && length(listed(get(su, url * "?release_date__year=2003"))) == 1
+        end
+        # AdminViewOnSiteTests: test_true, test_false, test_callable, and the redirect behind the link
+        c1 = create(AvCity; name = "Chicago")
+        ct = Juango.get_for_model(AvCity).id
+        with_admin(AvCity) do
+            t = text(get(su, "/admin/project/avcity/$(c1.id)/change/"))
+            @test occursin("/admin/r/$ct/$(c1.id)/", t)
+            r = get(su, "/admin/r/$ct/$(c1.id)/")
+            @test r.status == 302 && getheader(r, "Location") == "/dummy/$(c1.id)/"
+            @test get(su, "/admin/r/$ct/999999/").status == 404
+        end
+        with_admin(AvCity; view_on_site = false) do
+            @test !occursin("/admin/r/$ct/", text(get(su, "/admin/project/avcity/$(c1.id)/change/")))
+        end
+        with_admin(AvCity; view_on_site = o -> "/city/$(o.name)/") do
+            @test occursin("\"/city/Chicago/\"", text(get(su, "/admin/project/avcity/$(c1.id)/change/")))
+        end
+        with_admin(AvPodcast) do                                                          # test_missing_get_absolute_url
+            pod = first(objects(AvPodcast))
+            @test !occursin("View on site", text(get(su, "/admin/project/avpodcast/$(pod.id)/change/")))
+        end
+        # AdminKeepChangeListFiltersTests (the change list's filters ride along to the change page and back)
+        with_admin(AvPodcast; list_filter = [:name]) do
+            pod = first(objects(AvPodcast))
+            r = get(su, url * "?name=pod")
+            @test occursin("/admin/project/avpodcast/$(pod.id)/change/?_changelist_filters=name%3Dpod", text(r))
+            r = post(su, "/admin/project/avpodcast/$(pod.id)/change/?_changelist_filters=name%3Dpod",
+                     Dict("name" => "pod", "release_date" => "2000-06-30"))
+            @test r.status == 302 && getheader(r, "Location") == url * "?name=pod"
+        end
+        # not translated: the remaining admin_views classes test templates, JavaScript, popups and widgets
     end
 end

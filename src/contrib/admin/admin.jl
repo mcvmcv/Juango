@@ -227,6 +227,8 @@ Change list options:
 * `list_display_links`: the columns that link to the change page (default the first; `[]` for
   none). Columns of model fields, and `Admin.display(...; ordering = ...)` ones, sort when their
   header is clicked (`?o=2.-1`); `sortable_by = [...]` limits which.
+* `view_on_site = false` hides the change form's "View on site" link (shown for an object with
+  `get_absolute_url`, through `admin/r/<content type>/<id>/`); a function `obj -> url` sets it.
 * `empty_value_display = "-"`, `search_help_text`, `save_on_top = true` (save buttons above the
   form too).
 * `list_max_show_all = 200`: a "Show all" link when the whole list is no longer than that.
@@ -258,7 +260,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    sortable_by = nothing, empty_value_display = "-", search_help_text = nothing, save_on_top = false,
                    get_fieldsets = nothing, get_inlines = nothing, get_exclude = nothing, get_prepopulated_fields = nothing,
                    list_max_show_all = 200, preserve_filters = true, password_change_page = false, show_facets = :allow,
-                   filter_horizontal = Symbol[], filter_vertical = Symbol[], import_export = nothing)
+                   filter_horizontal = Symbol[], filter_vertical = Symbol[], import_export = nothing, view_on_site = true)
     modelmeta(T)  # validates T is a model
     slug = model_name(T)
     key = admin_key(T)
@@ -298,6 +300,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                                                  :show_facets => Symbol(show_facets),
                                                  :filter_horizontal => Symbol.(collect(filter_horizontal)),
                                                  :filter_vertical => Symbol.(collect(filter_vertical)),
+                                                 :view_on_site => view_on_site,
                                                  :import_export => import_export === true ? Juango.ModelResource(T) : import_export), modelmeta(T).app)
     filter!(!=(key), site.order)
     push!(site.order, key)
@@ -859,20 +862,44 @@ Base.@nospecializeinfer function date_drilldown(req, ma::ModelAdmin, @nospeciali
     y === nothing || (qs = filter(qs, Q(Symbol(f, "__year") => y)))
     m === nothing || (qs = filter(qs, Q(Symbol(f, "__month") => m)))
     d === nothing || (qs = filter(qs, Q(Symbol(f, "__day") => d)))
-    dates = [x for x in values_list(qs, f; flat = true) if x !== nothing]
+    dates = [Date(x isa Juango.TimeZones.ZonedDateTime ? Juango.localtime(x) : x) for x in values_list(qs, f; flat = true) if x !== nothing]
     key(k) = "$(f)__$k"
+    # (with nothing chosen, it starts at the months of a single year or the days of a single month, as Django's)
+    ly, lm = y, m
+    if y === nothing && m === nothing && d === nothing && !isempty(dates)
+        lo, hi = extrema(dates)
+        if year(lo) == year(hi)
+            ly = year(lo)
+            month(lo) == month(hi) && (lm = month(lo))
+        end
+    end
     links, back = Any[], nothing
-    if y === nothing
-        links = [Dict("label" => string(v), "url" => query_with(req, key("year") => v)) for v in sort(unique(year.(dates)))]
-    elseif m === nothing
-        back = Dict("label" => "‹ All dates", "url" => query_with(req, key("year") => nothing))
-        links = [Dict("label" => "$(MONTHS[v]) $y", "url" => query_with(req, key("month") => v)) for v in sort(unique(month.(dates)))]
+    if ly === nothing
+        links = [Dict("label" => string(v), "url" => date_query(req, key("year") => v)) for v in sort(unique(year.(dates)))]
+    elseif lm === nothing
+        y === nothing || (back = Dict("label" => "‹ " * gettext("All dates"), "url" => date_query(req, key("year") => nothing)))
+        links = [Dict("label" => "$(MONTHS[v]) $ly", "url" => date_query(req, key("year") => ly, key("month") => v))
+                 for v in sort(unique(month.(dates)))]
     else
-        back = Dict("label" => "‹ $y", "url" => query_with(req, key("month") => nothing, key("day") => nothing))
-        d === nothing && (links = [Dict("label" => "$(MONTHS[m]) $v", "url" => query_with(req, key("day") => v))
+        m === nothing || (back = Dict("label" => "‹ $ly", "url" => date_query(req, key("month") => nothing, key("day") => nothing)))
+        d === nothing && (links = [Dict("label" => "$(MONTHS[lm]) $v", "url" => date_query(req, key("year") => ly, key("month") => lm, key("day") => v))
                                    for v in sort(unique(day.(dates)))])
     end
     qs, Dict{String,Any}("links" => links, "back" => back)
+end
+
+"A query string for a date hierarchy link: the request's parameters with these changed, sorted (as Django's get_query_string)."
+function date_query(req::Request, changes::Pair...)
+    q = copy(req.GET)
+    delete!(q.data, "page")
+    for (k, v) in changes
+        v === nothing ? delete!(q.data, string(k)) : (q.data[string(k)] = [string(v)])
+    end
+    parts = String[]
+    for k in sort(collect(keys(q.data))), v in q.data[k]
+        push!(parts, Juango.urlquote(k) * "=" * Juango.urlquote(v))
+    end
+    "?" * join(parts, "&")
 end
 
 # --- actions -------------------------------------------------------------------------------------
@@ -1403,7 +1430,7 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         "inlines" => editable ? [inline_context(ia, fs) for (ia, fs) in inlines] : Any[],
         "prepopulated" => Juango.JSON.json(prepop), "save_as" => ma.save_as && !adding && can(req, ma, :add),
         "password_fields" => [Dict("name" => string(pf), "label" => uppercasefirst(string(pf))) for pf in pfs],
-        "view_on_site" => adding ? nothing : get_absolute_url(obj), "save_on_top" => option(ma, :save_on_top, false),
+        "view_on_site" => adding ? nothing : view_on_site_url(ma, obj), "save_on_top" => option(ma, :save_on_top, false),
         "password_change" => adding || !option(ma, :password_change_page, false) ? nothing :
             Dict("summary" => Juango.password_summary(obj), "url" => reverse_url("admin:password_change"; app = ma.app, model = ma.slug, id = admin_pk(obj))),
         "history_url" => adding ? nothing : reverse_url("admin:history"; app = ma.app, model = ma.slug, id = admin_pk(obj))))
@@ -1468,6 +1495,32 @@ const UNQUOTE_RE = Regex("_(" * join(sort([hex2(c) for c in QUOTE_CHARS]), "|") 
 admin_unquote(s::AbstractString) = replace(s, UNQUOTE_RE => m -> string(Char(parse(UInt8, m[2:end]; base = 16))))
 admin_pk(@nospecialize(o)) = admin_quote(Juango.pk_string(o))
 Juango.tattr(@nospecialize(m::Model), ::Val{:admin_pk}) = admin_pk(m)
+
+"""
+The change form's "View on site" link (Django's view_on_site): with `view_on_site = true` (the
+default) the site's redirect to the object's `get_absolute_url` when it has one, with a function
+what it returns for the object, with `false` none.
+"""
+Base.@nospecializeinfer function view_on_site_url(ma::ModelAdmin, @nospecialize(obj))
+    v = option(ma, :view_on_site, true)
+    v === false && return nothing
+    v isa Function && return v(obj)
+    get_absolute_url(obj) === nothing && return nothing
+    reverse_url("admin:view_on_site"; content_type_id = Juango.get_for_model(typeof(obj)).id, object_id = admin_pk(obj))
+end
+"`admin/r/<content type>/<id>/`: to the object's `get_absolute_url` (Django's contenttypes shortcut)."
+function view_on_site_view(req::Request; content_type_id, object_id)
+    ct = first(filter(Juango.ContentType; id = content_type_id))
+    ct === nothing && throw(Http404("Content type $content_type_id object has no associated model"))
+    T = Juango.model_class(ct)
+    T === nothing && throw(Http404("Content type $content_type_id object has no associated model"))
+    pk = Juango.parse_pk(T, admin_unquote(object_id))
+    o = pk === nothing ? nothing : first(filter(objects(T); pk = pk))
+    o === nothing && throw(Http404("Content type $content_type_id object $object_id doesn’t exist"))
+    url = get_absolute_url(o)
+    url === nothing && throw(Http404("$(modelmeta(T).verbose_name) objects don’t have a get_absolute_url() method"))
+    Juango.HttpResponseRedirect(url)
+end
 
 "The old object URL (`.../<id>/`) goes to its change page, as Django's."
 object_redirect(req::Request; app, model, id) =
@@ -1732,7 +1785,8 @@ function urls(st::AdminSite = site)
     include_urls(vcat(Any[
         path("", s(index); name = "index"),
         path("login/", site_view(st, admin_login; public = true); name = "login"),
-        path("logout/", site_view(st, admin_logout; public = true); name = "logout")],
+        path("logout/", site_view(st, admin_logout; public = true); name = "logout"),
+        path("r/<int:content_type_id>/<str:object_id>/", s(view_on_site_view); name = "view_on_site")],
         Any[wrap(p) for p in st.extra_urls], custom, Any[
         path("<slug:app>/", s(app_index); name = "app_list"),
         path("<slug:app>/<slug:model>/", s(changelist); name = "changelist"),
