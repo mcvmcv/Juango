@@ -267,10 +267,13 @@ struct RunJulia <: Operation
 end
 
 """
-    Migration(; dependencies=[], operations=[], initial=false)
+    Migration(; dependencies=[], operations=[], initial=false, replaces=[], run_before=[])
 
-The value a migration file evaluates to. `dependencies` are `(app, name)` pairs. The app
-and name come from the file's directory and filename.
+The value a migration file evaluates to. `dependencies` are `(app, name)` pairs; a name may be
+`"__first__"` (the app's first migration, or nothing when the app has none) or `"__latest__"`
+(its latest). `run_before` names migrations that must run after this one, as if they depended
+on it (Django's `run_before`, for migrations of apps you don't control). The app and name come
+from the file's directory and filename.
 """
 mutable struct Migration
     app::String
@@ -280,10 +283,12 @@ mutable struct Migration
     initial::Bool
     path::String
     replaces::Vector{Tuple{String,String}}   # a squashed migration: the migrations it stands for
+    run_before::Vector{Tuple{String,String}} # migrations that must run after this one (they depend on it)
 end
-Migration(; dependencies = [], operations = [], initial = false, replaces = []) =
+Migration(; dependencies = [], operations = [], initial = false, replaces = [], run_before = []) =
     Migration("", "", Tuple{String,String}[(string(a), string(n)) for (a, n) in dependencies],
-              collect(Operation, operations), initial, "", Tuple{String,String}[(string(a), string(n)) for (a, n) in replaces])
+              collect(Operation, operations), initial, "", Tuple{String,String}[(string(a), string(n)) for (a, n) in replaces],
+              Tuple{String,String}[(string(a), string(n)) for (a, n) in run_before])
 
 key(m::Migration) = (m.app, m.name)
 Base.show(io::IO, m::Migration) = print(io, m.app, ".", m.name)

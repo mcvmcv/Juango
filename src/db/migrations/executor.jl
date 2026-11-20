@@ -201,6 +201,7 @@ function migrate_here(; app = nothing, target = nothing, fake = false, fake_init
             record_applied!(key(m)); push!(applied, key(m))
         end
     end
+    check_consistent_history(g, applied, db)
     plan = migration_plan(g, applied; app = app, target = target)
     check && return isempty(plan)                      # migrate --check: whether nothing is left to apply
     if plan_only                                       # migrate --plan: what would run, and nothing else
@@ -266,6 +267,21 @@ function builtin_post_migrate(label; database, kw...)
     nothing
 end
 Juango.connect!(Juango.post_migrate, builtin_post_migrate; dispatch_uid = :juango_builtin_post_migrate)
+
+"""
+An applied migration whose dependency isn't applied (a migration added to the history after
+later ones ran, or a dependency recorded as unapplied by hand) is an error, as Django's
+`InconsistentMigrationHistory`: migrating on would run things in the wrong order.
+"""
+function check_consistent_history(g::Graph, applied, db = "default")
+    for k in sort(collect(applied))
+        haskey(g.nodes, k) || continue
+        for d in g.nodes[k].dependencies
+            (haskey(g.nodes, d) && !(d in applied)) &&
+                throw(MigrationError("Migration $(k[1]).$(k[2]) is applied before its dependency $(d[1]).$(d[2]) on database '$db'."))
+        end
+    end
+end
 
 function check_conflicts(g::Graph)
     for a in unique(first.(collect(keys(g.nodes))))

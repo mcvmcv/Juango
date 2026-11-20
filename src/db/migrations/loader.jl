@@ -82,6 +82,7 @@ function build_graph(apps = migrated_apps(); applied = nothing)
         nodes[key(m)] = m
     end
     resolve_swappable!(nodes)
+    resolve_special_dependencies!(nodes)
     resolve_replacements!(nodes, applied)
     for m in values(nodes), d in m.dependencies
         haskey(nodes, d) || throw(MigrationError("$m depends on $(d[1]).$(d[2]), which does not exist"))
@@ -158,6 +159,37 @@ function resolve_swappable!(nodes)
         any(d -> d[1] == "__user_model__", m.dependencies) || continue
         m.dependencies = unique([d for d in (d[1] == "__user_model__" ? target : d for d in m.dependencies)
                                  if d !== nothing && d != key(m)])
+    end
+    nodes
+end
+
+"""
+`(app, "__first__")` and `(app, "__latest__")` dependencies become that app's first or latest
+migration (a `__first__` of an app without migrations goes away), and `run_before` becomes a
+dependency of the migrations it names (as Django's loader).
+"""
+function resolve_special_dependencies!(nodes)
+    byapp = Dict{String,Vector{Tuple{String,String}}}()
+    for k in keys(nodes)
+        push!(get!(byapp, k[1], Tuple{String,String}[]), k)
+    end
+    function special(d)
+        d[2] in ("__first__", "__latest__") || return d
+        ks = get(byapp, d[1], nothing)
+        if ks === nothing || isempty(ks)
+            d[2] == "__first__" && return nothing
+            throw(MigrationError("dependency on app with no migrations: $(d[1])"))
+        end
+        g = Graph(Dict(k => nodes[k] for k in ks))
+        d[2] == "__first__" ? first(topo_order(g)) : only(leaf_nodes(g, d[1]))
+    end
+    for m in values(nodes)
+        any(d -> d[2] in ("__first__", "__latest__"), m.dependencies) || continue
+        m.dependencies = unique([x for x in (special(d) for d in m.dependencies) if x !== nothing && x != key(m)])
+    end
+    for m in values(nodes), r in m.run_before
+        haskey(nodes, r) || throw(MigrationError("$m should run before $(r[1]).$(r[2]), which does not exist"))
+        key(m) in nodes[r].dependencies || push!(nodes[r].dependencies, key(m))
     end
     nodes
 end

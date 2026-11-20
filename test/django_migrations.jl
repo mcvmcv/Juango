@@ -965,3 +965,58 @@ end
         configure!(MIGRATION_MODULES = old)
     end
 end
+
+# --- test_loader / test_executor ---------------------------------------------------------------------
+
+@testset "django migrations: test_loader" begin
+    dirs = Dict(a => mktempdir() for a in ("dml1", "dml2", "dml3"))
+    old = Juango.settings.MIGRATION_MODULES
+    configure!(MIGRATION_MODULES = merge(old, dirs))
+    quiet(f) = redirect_stdout(f, devnull)
+    wm(app, name, code) = write(joinpath(dirs[app], name * ".jl"), "using Juango.Migrations\n" * code)
+    try
+        wm("dml1", "0001_initial", """Migration(initial = true, operations = [CreateModel("dml1_a")])""")
+        wm("dml1", "0002_second", """Migration(dependencies = [("dml1", "0001_initial")], operations = [AddField("dml1_a", Column("x", :int; null = true))])""")
+        # test_first: a dependency on another app's __first__ / __latest__ migration
+        wm("dml2", "0001_initial", """Migration(dependencies = [("dml1", "__first__")], operations = [CreateModel("dml2_b")])""")
+        wm("dml2", "0002_second", """Migration(dependencies = [("dml2", "0001_initial"), ("dml1", "__latest__")], operations = [])""")
+        # test_run_before: dml3.0001 must run before dml1.0002
+        wm("dml3", "0001_initial", """Migration(run_before = [("dml1", "0002_second")], operations = [CreateModel("dml3_c")])""")
+        g = DM.build_graph(["dml1", "dml2", "dml3"]; applied = Set{Tuple{String,String}}())
+        @test g.nodes[("dml2", "0001_initial")].dependencies == [("dml1", "0001_initial")]
+        @test ("dml1", "0002_second") in g.nodes[("dml2", "0002_second")].dependencies
+        @test ("dml3", "0001_initial") in g.nodes[("dml1", "0002_second")].dependencies
+        order = DM.topo_order(g)
+        @test findfirst(==(("dml3", "0001_initial")), order) < findfirst(==(("dml1", "0002_second")), order)
+        # test_load_unmigrated_dependency (a __first__ of an app with no migrations goes away)
+        wm("dml3", "0002_second", """Migration(dependencies = [("dml3", "0001_initial"), ("nomigrations", "__first__")], operations = [])""")
+        g = DM.build_graph(["dml1", "dml2", "dml3"]; applied = Set{Tuple{String,String}}())
+        @test g.nodes[("dml3", "0002_second")].dependencies == [("dml3", "0001_initial")]
+        rm(joinpath(dirs["dml3"], "0002_second.jl"))
+        # test_name_match (a migration by a prefix of its name), and an ambiguous or unknown one
+        @test DM.resolve_name(g, "dml1", "0002") == ("dml1", "0002_second")
+        @test_throws DM.MigrationError DM.resolve_name(g, "dml1", "00")
+        @test_throws DM.MigrationError DM.resolve_name(g, "dml1", "nonexistent")
+        # test_ignore_files (only NNNN_name.jl files are migrations)
+        write(joinpath(dirs["dml1"], "notes.jl"), "error(\"not a migration\")")
+        write(joinpath(dirs["dml1"], "_0003_private.jl"), "error(\"not a migration\")")
+        @test sort(last.(filter(k -> k[1] == "dml1", collect(keys(DM.build_graph(["dml1"]; applied = Set{Tuple{String,String}}()).nodes))))) ==
+              ["0001_initial", "0002_second"]
+        # test_load_import_error / test_invalid (a file that doesn't evaluate to a Migration)
+        write(joinpath(dirs["dml1"], "0009_broken.jl"), "using Juango.Migrations\n42")
+        @test_throws DM.MigrationError DM.build_graph(["dml1"]; applied = Set{Tuple{String,String}}())
+        rm(joinpath(dirs["dml1"], "0009_broken.jl"))
+        # test_check_consistent_history: an applied migration whose dependency isn't
+        quiet(() -> migrate(; app = "dml1", target = "0002_second", fake = true))
+        DM.record_unapplied!(("dml1", "0001_initial"))
+        @test_throws "Migration dml1.0002_second is applied before its dependency dml1.0001_initial on database 'default'." quiet(() -> migrate(; app = "dml1", target = "0002_second"))
+        DM.record_unapplied!(("dml1", "0002_second"))
+        # test_marked_as_migrated / unmigrated: apps with and without migration files
+        @test "dml1" in DM.migrated_apps() && !("nomigrations" in DM.migrated_apps())
+        # not translated: test_load_module_file, test_loading_namespace_package, test_explicit_missing_module
+        # (Python packaging); the squashed-loading tests (in migrations.jl and test_commands above)
+    finally
+        Juango.execute("DELETE FROM juango_migrations WHERE app IN ('dml1', 'dml2', 'dml3')")
+        configure!(MIGRATION_MODULES = old)
+    end
+end
