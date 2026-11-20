@@ -383,3 +383,106 @@ dja_protected(req; kw...) = HttpResponse("protected")
         end
     end
 end
+
+@testset "django auth: test_views" begin
+    port_block() do
+        old_urls = Juango.settings.ROOT_URLCONF
+        tc = first(filter(User; username = "testclient"))
+        tc === nothing && (tc = create_user("testclient", "password"; email = "testclient@example.com"))
+        set_password!(tc, "password"); save!(tc)
+        urls = Any[path("accounts/", Juango.auth_urls()),
+                   path("login/redirect_authenticated_user/", Juango.LoginView(; redirect_authenticated_user = true)),
+                   path("login/next_page/", Juango.LoginView(; next_page = "/somewhere/")),
+                   path("login/allowed_hosts/", Juango.LoginView(; success_url_allowed_hosts = ["otherserver"])),
+                   path("logout/next_page/", Juango.LogoutView(; next_page = "/somewhere/")),
+                   path("logout/custom_query/", Juango.LogoutView(; redirect_field_name = "follow")),
+                   path("reset/post_login/<str:uidb64>/<str:token>/", Juango.PasswordResetConfirmView(; post_reset_login = true, success_url = "/after/")),
+                   path("password_reset/custom_redirect/", Juango.PasswordResetView(; success_url = "/custom/")),
+                   path("somewhere/", req -> HttpResponse("somewhere")), path("after/", req -> HttpResponse("after"))]
+        configure!(ROOT_URLCONF = urls)
+        try
+            login(c, user = "testclient", pw = "password") = post(c, "/accounts/login/", Dict("username" => user, "password" => pw))
+            # LoginTest.test_security_check (an unsafe next is replaced with LOGIN_REDIRECT_URL)
+            for bad in ["http://example.com", "https://example.com", "ftp://example.com", "///example.com", "//example.com", "javascript:alert(\"XSS\")"]
+                c = Client()
+                r = post(c, "/accounts/login/?next=" * Juango.urlquote(bad), Dict("username" => "testclient", "password" => "password"))
+                @test r.status == 302 && getheader(r, "Location") == "/"
+            end
+            for good in ["/view/?param=http://example.com", "/view/?param=https://example.com", "/view?param=ftp://example.com",
+                         "https://testserver/", "HTTPS://testserver/", "//testserver/", "/url%20with%20spaces/"]
+                c = Client()
+                r = post(c, "/accounts/login/?next=" * Juango.urlquote(good), Dict("username" => "testclient", "password" => "password"))
+                @test r.status == 302 && getheader(r, "Location") == good
+            end
+            # test_session_key_flushed_on_login (another user's session is emptied, not reused)
+            other = first(filter(User; username = "staff")); other === nothing && (other = create_user("staff", "password"))
+            c = Client()
+            login(c)
+            k1 = c.cookies["sessionid"]
+            login(c, "staff", "password")
+            @test c.cookies["sessionid"] != k1
+            # test_login_csrf_rotate is in views.jl; test_login_next_page, test_login_redirect_url_overrides_next_page
+            r = login(Client(), "testclient", "password")
+            @test getheader(r, "Location") == "/"
+            r = post(Client(), "/login/next_page/", Dict("username" => "testclient", "password" => "password"))
+            @test getheader(r, "Location") == "/somewhere/"
+            # LoginSuccessURLAllowedHostsTest
+            r = post(Client(), "/login/allowed_hosts/?next=" * Juango.urlquote("https://otherserver/home"), Dict("username" => "testclient", "password" => "password"))
+            @test getheader(r, "Location") == "https://otherserver/home"
+            r = post(Client(), "/login/allowed_hosts/?next=" * Juango.urlquote("https://evil/home"), Dict("username" => "testclient", "password" => "password"))
+            @test getheader(r, "Location") == "/"
+            # LoginRedirectAuthenticatedUser (default: the form; with the option: on to the next page)
+            c = Client(); login(c)
+            @test get(c, "/accounts/login/").status == 200
+            r = get(c, "/login/redirect_authenticated_user/")
+            @test r.status == 302 && getheader(r, "Location") == "/"
+            @test getheader(get(c, "/login/redirect_authenticated_user/?next=/somewhere/"), "Location") == "/somewhere/"
+            @test get(Client(), "/login/redirect_authenticated_user/").status == 200      # test_guest
+            # LogoutTest: test_logout_with_post, test_logout_with_next_page_specified, test_logout_with_redirect_argument,
+            # test_logout_with_custom_redirect_argument, test_security_check (an unsafe next is ignored)
+            c = Client(); login(c)
+            @test get(c, "/accounts/logout/").status == 405
+            r = post(c, "/accounts/logout/")
+            @test r.status == 302 && getheader(r, "Location") == "/"
+            c = Client(); login(c)
+            @test getheader(post(c, "/logout/next_page/"), "Location") == "/somewhere/"
+            c = Client(); login(c)
+            @test getheader(post(c, "/accounts/logout/?next=/login/"), "Location") == "/login/"
+            c = Client(); login(c)
+            @test getheader(post(c, "/logout/custom_query/?follow=/somewhere/"), "Location") == "/somewhere/"
+            c = Client(); login(c)
+            @test getheader(post(c, "/accounts/logout/?next=" * Juango.urlquote("http://example.com")), "Location") == "/"
+            # PasswordResetTest: the confirm link moves its token into the session
+            empty!(Juango.outbox)
+            tc.email = "testclient@example.com"; save!(tc)
+            r = post(Client(), "/accounts/password_reset/", Dict("email" => "testclient@example.com"))
+            @test r.status == 302 && length(Juango.outbox) == 1                    # test_email_found
+            link = match(r"http://testserver(/accounts/reset/\S+/)", only(Juango.outbox).body)[1]
+            c = Client()
+            r = get(c, link)                                                              # test_confirm_valid
+            @test r.status == 302 && endswith(getheader(r, "Location"), "/set-password/")
+            @test occursin("new_password1", text(get(c, getheader(r, "Location"))))
+            @test !occursin("new_password1", text(get(c, link[1:end-6] * "00000/")))          # test_confirm_invalid
+            @test !occursin("new_password1", text(get(c, "/accounts/reset/123456/1-1/")))   # test_confirm_invalid_user
+            @test !occursin("new_password1", text(get(c, "/accounts/reset/zzzzzzzzzzzzz/1-1/")))   # test_confirm_overflow_user
+            empty!(Juango.outbox)
+            r = post(Client(), "/accounts/password_reset/", Dict("email" => "not_a_real_email@email.com"))
+            @test r.status == 302 && isempty(Juango.outbox)                         # test_email_not_found
+            r = post(Client(), "/password_reset/custom_redirect/", Dict("email" => "not_a_real_email@email.com"))
+            @test getheader(r, "Location") == "/custom/"                                   # test_reset_custom_redirect
+            # test_confirm_login_post_reset (logged in after the reset) and a custom success_url
+            uid, tok = match(r"/accounts/reset/([^/]+)/([^/]+)/", link).captures
+            tok = Juango.make_reset_token(get(User; id = tc.id))
+            c = Client()
+            r = get(c, "/reset/post_login/$uid/$tok/")
+            r = post(c, getheader(r, "Location"), Dict("new_password1" => "anewpassword", "new_password2" => "anewpassword"))
+            @test r.status == 302 && getheader(r, "Location") == "/after/"
+            @test haskey(c.cookies, "sessionid") && get(c, "/accounts/password_change/").status == 200    # (logged in)
+            # not translated: the mail template options (extra_email_context is in PasswordResetView), poisoned
+            # hosts (ALLOWED_HOSTS, in views.jl), the custom and UUID user models, the admin user change pages
+            # (admin.jl), LOGIN_URL forms (LoginURLSettings: redirect_to_login with URL names is tested above)
+        finally
+            configure!(ROOT_URLCONF = old_urls)
+        end
+    end
+end

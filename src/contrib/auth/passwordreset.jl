@@ -243,7 +243,8 @@ Always continues to the "done" page, so it doesn't reveal which addresses exist.
 """
 function PasswordResetView(; template = "registration/password_reset_form.html",
                            email_template = "registration/password_reset_email.txt",
-                           subject_template = "registration/password_reset_subject.txt", from_email = nothing)
+                           subject_template = "registration/password_reset_subject.txt", from_email = nothing,
+                           success_url = nothing, extra_email_context = Dict{String,Any}())
     name_view!(function (req::Request; kw...)
         form = PasswordResetForm(req.method == "POST" ? req.POST : nothing)
         if req.method == "POST" && is_valid(form)
@@ -253,12 +254,13 @@ function PasswordResetView(; template = "registration/password_reset_form.html",
                 ctx = Dict{String,Any}("user" => u, "uid" => uid_encode(u.id), "token" => make_reset_token(u),
                                        "protocol" => is_secure(req) ? "https" : "http", "domain" => site_domain(req), "site_name" => (is_installed("sites") ? get_current_site(req).name : get_host(req)),
                                        "site_name" => settings.SITE_NAME, "email" => u.email)
+                merge!(ctx, Dict{String,Any}(string(k) => v for (k, v) in extra_email_context))
                 ctx["reset_url"] = ctx["protocol"] * "://" * ctx["domain"] *
                                    reverse_url("password_reset_confirm"; uidb64 = ctx["uid"], token = ctx["token"])
                 subject = replace(strip(render_to_string(subject_template, ctx)), r"\s+" => " ")
                 send_mail(subject, render_to_string(email_template, ctx), from_email, [u.email])
             end
-            return HttpResponseRedirect(reverse_url("password_reset_done"))
+            return HttpResponseRedirect(something(success_url === nothing ? nothing : resolve_login_url(success_url), reverse_url("password_reset_done")))
         end
         render(req, template, Dict("form" => form))
     end, "PasswordResetView")
@@ -270,19 +272,35 @@ end
 The page behind the emailed link: checks the token and lets the user choose a new
 password. `validlink` is false in the template when the link is invalid or used.
 """
-function PasswordResetConfirmView(; template = "registration/password_reset_confirm.html")
+function PasswordResetConfirmView(; template = "registration/password_reset_confirm.html", success_url = nothing,
+                                  post_reset_login = false, post_reset_login_backend = nothing, reset_url_token = "set-password")
     name_view!(function (req::Request; uidb64, token, kw...)
         id = uid_decode(uidb64)
         pk = id === nothing ? nothing : parse_pk(get_user_model(), id)
         u = pk === nothing ? nothing : first(filter(get_user_model(); id = pk))
-        if u === nothing || !check_reset_token(u, token)
-            return render(req, template, Dict("validlink" => false, "form" => nothing))
+        invalid() = render(req, template, Dict("validlink" => false, "form" => nothing))
+        u === nothing && return invalid()
+        # As Django's: the emailed link's token goes into the session and the browser to
+        # .../<reset_url_token>/, so the token isn't in the address the page's resources see (Referer)
+        s = req.session isa Session ? req.session : nothing
+        if token == reset_url_token
+            s === nothing && return invalid()
+            t = get(s, "_password_reset_token", nothing)
+            (t === nothing || !check_reset_token(u, t)) && return invalid()
+        else
+            check_reset_token(u, token) || return invalid()
+            if s !== nothing
+                s["_password_reset_token"] = token
+                return HttpResponseRedirect(replace(req.path, token => reset_url_token))
+            end
         end
         form = SetPasswordForm(req.method == "POST" ? req.POST : nothing)
         if req.method == "POST" && is_valid(form) && check_new_password!(form, u)
             set_password!(u, form.cleaned_data[:new_password1])
             save!(u)
-            return HttpResponseRedirect(reverse_url("password_reset_complete"))
+            s === nothing || delete!(s, "_password_reset_token")
+            post_reset_login && login!(req, u; backend = post_reset_login_backend)
+            return HttpResponseRedirect(something(success_url === nothing ? nothing : resolve_login_url(success_url), reverse_url("password_reset_complete")))
         end
         render(req, template, Dict("validlink" => true, "form" => form))
     end, "PasswordResetConfirmView")

@@ -204,12 +204,17 @@
     @test occursin("resetme", only(outbox).body)
     @test post(c, "/accounts/password_reset/", Dict("email" => "nobody@x.io")).status == 302 && length(outbox) == 1
     @test occursin("Password reset sent", text(get(c, "/accounts/password_reset/done/")))
-    @test occursin("Enter new password", text(get(c, link)))
-    r = post(c, link, Dict("new_password1" => "newpassword9", "new_password2" => "different9"))
+    # (the link's token goes into the session and the page moves to .../set-password/, as Django's)
+    r = get(c, link)
+    @test r.status == 302 && endswith(getheader(r, "Location"), "/set-password/")
+    setlink = getheader(r, "Location")
+    @test occursin("Enter new password", text(get(c, setlink)))
+    @test occursin("unsuccessful", text(get(Client(), setlink)))     # (another browser: no token in its session)
+    r = post(c, setlink, Dict("new_password1" => "newpassword9", "new_password2" => "different9"))
     @test occursin("didn’t match", text(r))
-    r = post(c, link, Dict("new_password1" => "123", "new_password2" => "123"))
+    r = post(c, setlink, Dict("new_password1" => "123", "new_password2" => "123"))
     @test occursin("too short", text(r)) && occursin("entirely numeric", text(r))
-    r = post(c, link, Dict("new_password1" => "newpassword9", "new_password2" => "newpassword9"))
+    r = post(c, setlink, Dict("new_password1" => "newpassword9", "new_password2" => "newpassword9"))
     @test r.status == 302 && getheader(r, "Location") == "/accounts/reset/done/"
     @test authenticate("resetme", "newpassword9") !== nothing && authenticate("resetme", "oldpassword1") === nothing
     @test occursin("unsuccessful", text(get(c, link)))                # used: the password hash changed

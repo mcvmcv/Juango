@@ -345,7 +345,10 @@ function login!(req::Request, u::AbstractUser; backend = nothing)
     s isa Session || error("login! requires SessionMiddleware")
     bname = backend !== nothing ? backend_name(backend) :
             get((getfield(u, :_cache)::Dict{Symbol,Any}), :__auth_backend, backend_name(first(auth_backends())))
-    if get(s, "_auth_user_id", nothing) != u.id
+    # (as Django's: another user's session is emptied, not reused; otherwise a new key for the same data)
+    if haskey(s, "_auth_user_id")
+        (s["_auth_user_id"] != u.id || !consteq(string(get(s, "_auth_user_hash", "")), session_auth_hash(u))) && flush!(s)
+    else
         s.key === nothing || cycle_key!(s)
     end
     s["_auth_user_id"] = u.id
@@ -465,9 +468,10 @@ end
 get_user(f::Form) = get(f.cleaned_data, :_user, nothing)
 
 "The `next` parameter (or `field`) if it's safe to redirect to (this site), else `fallback`."
-function safe_next(req, fallback, field = "next")
+function safe_next(req, fallback, field = "next"; extra_hosts = String[])
+    field === nothing && return fallback
     n = get(req.GET, field, get(req.POST, field, ""))
-    url_has_allowed_host_and_scheme(n, [get_host(req)]; require_https = is_secure(req)) ? n : fallback
+    url_has_allowed_host_and_scheme(n, vcat([get_host(req)], collect(String, extra_hosts)); require_https = is_secure(req)) ? n : fallback
 end
 
 """
@@ -476,8 +480,17 @@ end
 A login page view. The template gets `form` and `next` (and `redirect_field_name`, the
 parameter's name: `next` unless `redirect_field_name` says otherwise).
 """
-function LoginView(; template = "registration/login.html", redirect_url = nothing, require_staff = false, redirect_field_name = "next")
+function LoginView(; template = "registration/login.html", redirect_url = nothing, require_staff = false, redirect_field_name = "next",
+                   next_page = nothing, redirect_authenticated_user = false, success_url_allowed_hosts = String[])
+    target(req) = safe_next(req, something(next_page === nothing ? nothing : resolve_login_url(next_page), redirect_url, settings.LOGIN_REDIRECT_URL),
+                            redirect_field_name; extra_hosts = success_url_allowed_hosts)
     login_not_required(name_view!(function (req::Request; kw...)
+        # (redirect_authenticated_user: a logged-in user goes on, unless that's this page: a loop, as Django's)
+        if redirect_authenticated_user && is_authenticated(req.user)
+            t = target(req)
+            t == req.path && throw(ArgumentError("Redirection loop for authenticated user detected. Check that your LOGIN_REDIRECT_URL doesn't point to a login page."))
+            return HttpResponseRedirect(t)
+        end
         form = AuthenticationForm(req.method == "POST" ? req.POST : nothing)
         if req.method == "POST"
             valid = is_valid(form)
@@ -487,7 +500,7 @@ function LoginView(; template = "registration/login.html", redirect_url = nothin
                     add_error!(form, nothing, "Please enter the correct username and password for a staff account. Note that both fields may be case-sensitive."))
             elseif valid
                 login!(req, u)
-                return HttpResponseRedirect(safe_next(req, something(redirect_url, settings.LOGIN_REDIRECT_URL), redirect_field_name))
+                return HttpResponseRedirect(target(req))
             end
         end
         render(req, template, Dict("form" => form, "next" => safe_next(req, "", redirect_field_name),
@@ -496,12 +509,21 @@ function LoginView(; template = "registration/login.html", redirect_url = nothin
 end
 
 "Log out (POST) and redirect to `settings.LOGOUT_REDIRECT_URL`."
-function LogoutView(; redirect_url = nothing, template = nothing)
+function LogoutView(; redirect_url = nothing, template = nothing, next_page = nothing, redirect_field_name = "next",
+                    success_url_allowed_hosts = String[])
     v = function (req::Request; kw...)
         req.method == "POST" || return HttpResponseNotAllowed(["POST"])
         logout!(req)
-        template === nothing ? HttpResponseRedirect(safe_next(req, something(redirect_url, settings.LOGOUT_REDIRECT_URL))) :
-                               render(req, template)
+        # (as Django's: ?next=, then next_page, then LOGOUT_REDIRECT_URL; with none, the logged-out page)
+        fallback = something(next_page === nothing ? nothing : resolve_login_url(next_page), redirect_url,
+                             # (with a template it's rendered unless something names a page: LOGOUT_REDIRECT_URL defaults to "/")
+                             template !== nothing || get(settings, :LOGOUT_REDIRECT_URL, nothing) === nothing ? nothing :
+                                 resolve_login_url(settings.LOGOUT_REDIRECT_URL),
+                             Some(nothing))
+        nxt = safe_next(req, nothing, redirect_field_name; extra_hosts = success_url_allowed_hosts)
+        url = something(nxt, fallback, Some(nothing))
+        url !== nothing && return HttpResponseRedirect(url)
+        template === nothing ? HttpResponseRedirect("/") : render(req, template)
     end
     name_view!(v, "LogoutView")
 end
