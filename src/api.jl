@@ -162,7 +162,7 @@ public set_language, number_format, localize, language_name, makemessages, compi
        is_aware, convert_naive_datetimes, JavaScriptCatalog, JSONCatalog
 # caching, HTTP caching, security
 public cache, incr, decr, incr_version, create_cache_table, CacheSerializationError, patch_cache_control!,
-       BrokenLinkEmailsMiddleware, is_secure, csp_override, csp_report_only_override, deploy_issues
+       BrokenLinkEmailsMiddleware, is_secure, get_host, get_port, csp_override, csp_report_only_override, deploy_issues
 # admin log, contrib apps, tasks
 public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, sitemap_view,
        sitemap_index_view, flatpage, flatpage_urls, FlatpageFallbackMiddleware, RequestSite,

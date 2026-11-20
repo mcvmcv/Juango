@@ -248,7 +248,29 @@ header(req::Request, name::AbstractString, default = nothing) = get(req.headers,
 "Parse the request body as JSON."
 json_body(req::Request) = JSON.parse(String(copy(req.body)))
 
-get_host(req::Request) = get(req.headers, "host", "testserver")
+"""
+The request's host (and port): its Host header, or with `USE_X_FORWARDED_HOST` (behind a proxy
+that sets it) X-Forwarded-Host, as Django's get_host. ALLOWED_HOSTS is checked on it.
+"""
+function get_host(req::Request)
+    if get(settings, :USE_X_FORWARDED_HOST, false)
+        f = get(req.headers, "x-forwarded-host", nothing)
+        f === nothing || return strip(String(first(split(f, ','))))
+    end
+    get(req.headers, "host", "testserver")
+end
+"""
+The port the request came to (Django's get_port): with `USE_X_FORWARDED_PORT`, X-Forwarded-Port;
+otherwise the Host's, or 443 / 80.
+"""
+function get_port(req::Request)
+    if get(settings, :USE_X_FORWARDED_PORT, false)
+        f = get(req.headers, "x-forwarded-port", nothing)
+        f === nothing || return strip(String(f))
+    end
+    m = match(r":(\d+)$", get_host(req))
+    m === nothing ? (is_secure(req) ? "443" : "80") : String(m[1])
+end
 
 """
     url_has_allowed_host_and_scheme(url, allowed_hosts; require_https = false) -> Bool

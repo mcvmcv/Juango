@@ -1607,7 +1607,7 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 - CSRF protection on every method except GET, HEAD, OPTIONS and TRACE: `{% csrf_token %}` or an `X-CSRFToken` header. Mark exceptions with `csrf_exempt(view)`. The token (and its cookie) is only created when a page uses it.
   - Settings as Django's: `CSRF_HEADER_NAME`, `CSRF_COOKIE_NAME`/`_AGE`/`_DOMAIN`/`_PATH`/`_SECURE`/`_HTTPONLY`/`_SAMESITE`, `CSRF_USE_SESSIONS` (the secret in the session, no cookie) and `CSRF_FAILURE_VIEW` (a view `(req; reason)` for the 403).
   - Pages get a masked form of the token, different on every render, so response compression can't leak it (BREACH). The cookie's plain value is accepted too, for JavaScript that reads it.
-  - As in Django, a browser's `Origin` must match the request's scheme and host, or be in `CSRF_TRUSTED_ORIGINS`.
+  - As in Django, a browser's `Origin` must match the request's scheme and host, or be in `CSRF_TRUSTED_ORIGINS`, where `https://*.example.com` trusts every subdomain. Over HTTPS without an `Origin`, the `Referer` must be this host, a trusted origin's, or one under `CSRF_COOKIE_DOMAIN`.
   - Over HTTPS without an `Origin`, the `Referer` must be an https URL of this site.
 - `url_has_allowed_host_and_scheme(url, hosts)` says whether a redirect target (a `next` parameter, say) stays on the site. The login and logout views and `set_language` use it, and it refuses what browsers would read as another site (`//evil`, `/\evil`, `https:evil`).
 - Forms: `AuthenticationForm`, `UserCreationForm` (username, two passwords checked against `AUTH_PASSWORD_VALIDATORS`; `save!` hashes the password), `UserChangeForm` (every field but the password; `Juango.password_summary(user)` describes the stored hash safely), `PasswordChangeForm`, `SetPasswordForm`. The admin's "add user" page uses `UserCreationForm`, then opens the user's change page.
@@ -1970,7 +1970,7 @@ configure!(SECURE_SSL_REDIRECT = true,                         # http:// -> http
            SECURE_PROXY_SSL_HEADER = ("X-Forwarded-Proto", "https"))   # behind a proxy that sets this header
 ```
 
-It also sends `X-Content-Type-Options: nosniff`, `X-Frame-Options` (`X_FRAME_OPTIONS`, default `DENY`), `Referrer-Policy` (`SECURE_REFERRER_POLICY`) and `Cross-Origin-Opener-Policy` (`SECURE_CROSS_ORIGIN_OPENER_POLICY`). `is_secure(req)` is true for requests served over TLS, or when `SECURE_PROXY_SSL_HEADER` names a header the proxy sets. Set that only if the proxy always sets or strips the header.
+It also sends `X-Content-Type-Options: nosniff`, `X-Frame-Options` (`X_FRAME_OPTIONS`, default `DENY`), `Referrer-Policy` (`SECURE_REFERRER_POLICY`) and `Cross-Origin-Opener-Policy` (`SECURE_CROSS_ORIGIN_OPENER_POLICY`). `is_secure(req)` is true for requests served over TLS, or when `SECURE_PROXY_SSL_HEADER` names a header the proxy sets. Set that only if the proxy always sets or strips the header. Likewise `USE_X_FORWARDED_HOST = true` makes `get_host(req)` (and ALLOWED_HOSTS) use the proxy's `X-Forwarded-Host`, and `USE_X_FORWARDED_PORT = true` makes `get_port(req)` use `X-Forwarded-Port`.
 
 For a Content-Security-Policy, add `ContentSecurityPolicyMiddleware`:
 

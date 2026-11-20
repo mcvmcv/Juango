@@ -357,14 +357,40 @@ function store_csrf_secret!(req::Request, resp::HttpResponse)
     nothing
 end
 
+"""
+Whether `host` is `pattern` or, for a pattern starting with a dot, one of its subdomains
+(Django's is_same_domain): `.example.com` matches `example.com` and `www.example.com`.
+"""
+function is_same_domain(host::AbstractString, pattern::AbstractString)
+    isempty(pattern) && return false
+    pattern = lowercase(pattern); host = lowercase(host)
+    pattern[1] == '.' ? (endswith(host, pattern) || host == pattern[2:end]) : host == pattern
+end
+split_origin(o) = (m = match(r"^([a-zA-Z][a-zA-Z0-9+.-]*)://([^/?#]*)", o); m === nothing ? nothing : (lowercase(m[1]), m[2]))
+"""
+Whether an Origin is trusted, as Django's: this site's own, one of CSRF_TRUSTED_ORIGINS, or a
+subdomain of a wildcard one (`https://*.example.com`) with the same scheme.
+"""
+function origin_trusted(req::Request, origin::AbstractString)
+    origin == request_origin(req) && return true
+    trusted = collect(String, settings.CSRF_TRUSTED_ORIGINS)
+    any(t -> !occursin('*', t) && t == origin, trusted) && return true
+    p = split_origin(origin)
+    p === nothing && return false
+    any(trusted) do t
+        occursin('*', t) || return false
+        tp = split_origin(t)
+        tp !== nothing && tp[1] == p[1] && is_same_domain(p[2], lstrip(tp[2], '*'))
+    end
+end
+
 function check_csrf(req::Request)
     cookie = client_csrf_secret(req)
     cookie === nothing && throw(CsrfFailure(settings.CSRF_USE_SESSIONS ? "CSRF token not in the session." : "CSRF cookie not set."))
     origin = header(req, "origin")
     if origin !== nothing
         # the same scheme as the request: an http:// page can't post to the https:// site
-        (origin == request_origin(req) || origin in settings.CSRF_TRUSTED_ORIGINS) ||
-            throw(CsrfFailure("Origin checking failed - $origin does not match any trusted origins."))
+        origin_trusted(req, origin) || throw(CsrfFailure("Origin checking failed - $origin does not match any trusted origins."))
     elseif is_secure(req)
         # as Django: over HTTPS without an Origin, the Referer must be this site (or trusted), so a
         # man-in-the-middle on plain HTTP can't set the cookie and post a matching token
@@ -373,9 +399,18 @@ function check_csrf(req::Request)
         m = match(r"^([a-zA-Z][a-zA-Z0-9+.-]*)://([^/?#]+)", ref)
         m === nothing && throw(CsrfFailure("Referer checking failed - Referer is malformed."))
         lowercase(m[1]) == "https" || throw(CsrfFailure("Referer checking failed - Referer is insecure while host is secure."))
-        ref_origin = "https://" * m[2]
-        (ref_origin == request_origin(req) || ref_origin in settings.CSRF_TRUSTED_ORIGINS) ||
-            throw(CsrfFailure("Referer checking failed - $(m[2]) does not match any trusted origins."))
+        # this host (or the cookie's domain, with the port when it isn't 80 or 443), or a trusted
+        # origin's host (a wildcard one's subdomains), as Django's
+        dom = settings.CSRF_USE_SESSIONS ? get(settings, :SESSION_COOKIE_DOMAIN, nothing) : settings.CSRF_COOKIE_DOMAIN
+        good = if dom === nothing
+            get_host(req)
+        else
+            port = get_port(req)
+            port in ("443", "80") ? string(dom) : string(dom, ":", port)
+        end
+        hosts = vcat([lstrip(something(split_origin(t), ("", ""))[2], '*') for t in settings.CSRF_TRUSTED_ORIGINS], [good])
+        any(h -> is_same_domain(m[2], h), hosts) ||
+            throw(CsrfFailure("Referer checking failed - $ref does not match any trusted origins."))
     end
     tok = get(req.POST, "csrfmiddlewaretoken", nothing)
     tok === nothing && (tok = header(req, csrf_header_name()))

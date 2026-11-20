@@ -16,7 +16,9 @@ function default_settings()
     Dict{Symbol,Any}(
         :DEBUG => true,
         :SECRET_KEY => "juango-insecure-change-me-in-production",
-        :SECRET_KEY_FALLBACKS => String[],         # old keys still accepted when checking signatures (key rotation)
+        :SECRET_KEY_FALLBACKS => String[],
+        :USE_X_FORWARDED_HOST => false,            # behind a proxy that sets X-Forwarded-Host (get_host)
+        :USE_X_FORWARDED_PORT => false,            # and X-Forwarded-Port (get_port)         # old keys still accepted when checking signatures (key rotation)
         :DATABASE => "db.sqlite3",
         :ROOT_URLCONF => Any[],
         :INSTALLED_APPS => default_installed_apps(),
