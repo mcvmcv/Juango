@@ -346,7 +346,7 @@ function column_sql(b::DatabaseBackend, c::Column; adding = false, inline_fk = i
     (d === nothing && adding && !c.null) && (d = backfill_value(c))
     d === nothing || (s *= " DEFAULT " * lit(b, d))
     is_positive_kind(c.kind) && positive_check(b) && (s *= " CHECK (" * quote_name(b, c.name) * " >= 0)")
-    (c.references !== nothing && inline_fk) && (s *= " REFERENCES $(quote_name(b, ref_table(c.references))) ($(quote_name(b, something(c.ref_column, "id"))))")
+    (c.references !== nothing && inline_fk) && (s *= " REFERENCES $(quote_name(b, ref_table(c.references))) ($(quote_name(b, something(c.ref_column, "id")))) DEFERRABLE INITIALLY DEFERRED")
     (c.comment !== nothing && b isa MySQLBackend) && (s *= " COMMENT " * lit(b, c.comment))
     s
 end
@@ -434,7 +434,7 @@ end
 function pk_column_sql(b::DatabaseBackend, t::Table)
     t.parent === nothing && is_auto_pk(t.pk) && return autoincrement_pk(b, auto_pk_int(t.pk))
     s = quote_name(b, "id") * " " * column_type(b, t.pk === :uuid ? :uuid : auto_pk_int(t.pk), nothing) * " NOT NULL PRIMARY KEY"
-    (t.parent !== nothing && inline_foreign_keys(b)) && (s *= " REFERENCES $(quote_name(b, t.parent)) ($(quote_name(b, "id")))")
+    (t.parent !== nothing && inline_foreign_keys(b)) && (s *= " REFERENCES $(quote_name(b, t.parent)) ($(quote_name(b, "id"))) DEFERRABLE INITIALLY DEFERRED")
     s
 end
 

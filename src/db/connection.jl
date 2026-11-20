@@ -310,6 +310,18 @@ rollback_sql(::DatabaseBackend) = "ROLLBACK"
 savepoint_sql(b::DatabaseBackend, name) = "SAVEPOINT " * quote_name(b, name)
 release_savepoint_sql(b::DatabaseBackend, name) = "RELEASE SAVEPOINT " * quote_name(b, name)
 rollback_savepoint_sql(b::DatabaseBackend, name) = "ROLLBACK TO SAVEPOINT " * quote_name(b, name)
+"""
+    schema_atomic(f)
+
+Run schema changes in a transaction. On SQLite, which alters a table by rebuilding it (dropping
+the old one, which its foreign keys object to), the keys are off for it and checked before it
+commits, as Django's schema editor does: an `IntegrityError` names a row left pointing at nothing.
+"""
+schema_atomic(f) = schema_atomic(f, backend())
+schema_atomic(f, ::DatabaseBackend) = atomic(f)
+
+"Run after a transaction begins, on its connection and not counted as a query (SQLite: defer its foreign key checks to the commit)."
+after_begin!(::DatabaseBackend) = nothing
 
 # introspection (used by `migrate`)
 "Whether a table exists."
@@ -920,6 +932,7 @@ Base.@nospecializeinfer function transaction(@nospecialize(f), b, h::Union{Datab
     depth = h.depth
     sp = "juango_sp_$(depth)"
     execute(depth == 0 ? begin_sql(b) : savepoint_sql(b, sp))
+    depth == 0 && after_begin!(b)
     h.depth = depth + 1
     try
         r = f()

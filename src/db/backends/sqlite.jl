@@ -17,7 +17,9 @@ function open_connection(b::SQLiteBackend)
     if b.path != ":memory:"
         SQLite.execute(db, "PRAGMA journal_mode=WAL")
     end
-    SQLite.execute(db, "PRAGMA foreign_keys=OFF")   # cascades are done by the ORM (on_delete)
+    # foreign keys are enforced, as Django's (#260); the ORM does the on_delete cascades itself, and the
+    # keys are checked when a transaction commits (DEFERRABLE INITIALLY DEFERRED, defer_foreign_keys)
+    SQLite.execute(db, "PRAGMA foreign_keys=ON")
     register_sqlite_functions!(db)                  # juango_datepart, juango_trunc (datefunctions.jl)
     register_sqlite_extras!(db)                     # LPAD, MD5, math, REGEXP, STDDEV ... (functions.jl)
 end
@@ -82,6 +84,25 @@ autoincrement_pk(b::SQLiteBackend, int = :bigint) = quote_name(b, "id") * " INTE
 
 sql_literal(::SQLiteBackend, p::Bool) = p ? "1" : "0"
 inline_foreign_keys(::SQLiteBackend) = true   # SQLite can't add constraints to an existing table
+# (keys of tables created before #260 aren't DEFERRABLE: deferred in each transaction instead)
+function schema_atomic(f, ::SQLiteBackend)
+    outside = commit_holder().depth == 0        # (PRAGMA foreign_keys can't change inside a transaction)
+    outside && execute("PRAGMA foreign_keys = OFF")
+    try
+        atomic(() -> (r = f(); check_foreign_keys(); r))
+    finally
+        outside && execute("PRAGMA foreign_keys = ON")
+    end
+end
+"Raise `IntegrityError` for rows whose foreign key points at nothing (SQLite's `PRAGMA foreign_key_check`)."
+function check_foreign_keys()
+    bad = execute("PRAGMA foreign_key_check")
+    isempty(bad) && return
+    r = bad[1]
+    throw(IntegrityError("The row in table '$(r[:table])' with primary key '$(r[:rowid])' has an invalid foreign key: it refers to " *
+                         "table '$(r[:parent])', which has no such row ($(length(bad)) row$(length(bad) == 1 ? "" : "s") in all)."))
+end
+after_begin!(::SQLiteBackend) = (SQLite.execute(connection(), "PRAGMA defer_foreign_keys = ON"); nothing)
 can_alter_table(::SQLiteBackend) = false      # no ALTER COLUMN; migrations rebuild the table
 
 function limit_offset_sql(::SQLiteBackend, limit, offset)

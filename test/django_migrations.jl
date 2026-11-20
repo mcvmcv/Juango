@@ -207,7 +207,7 @@ function dm_run!(st, ops...; backwards = false, app = "testapp")
     end
     append!(actions, deferred)
     b isa Juango.PostgresBackend && (actions = DM.settle_deferred_triggers(actions))
-    Juango.atomic(() -> foreach(DM.run_action, actions))
+    Juango.schema_atomic(() -> foreach(DM.run_action, actions))
     backwards ? st : states[end]
 end
 dm_tables() = Set(Juango.introspect_tables())
@@ -1042,12 +1042,7 @@ end
                  DM.CreateModel("sc_book"; columns = [dmcol("author_id", :fk; references = "sc_author"), dmstr("title")]))
     try
         @test dm_fk("sc_book", "author_id", "sc_author")
-        if Juango.backend() isa Juango.SQLiteBackend      # (#260: SQLite's foreign keys aren't enforced)
-            @test_broken dm_fails(() -> dm_insert("sc_book", :author_id => 9999, :title => "x"))
-            Juango.execute("DELETE FROM sc_book")
-        else
-            @test dm_fails(() -> dm_insert("sc_book", :author_id => 9999, :title => "x"))
-        end
+        @test dm_fails(() -> dm_insert("sc_book", :author_id => 9999, :title => "x"))     # (SQLite too since #260)
         dm_insert("sc_author", :name => "Ann")
         aid = only(rows("SELECT id FROM sc_author"))[:id]
         dm_insert("sc_book", :author_id => aid, :title => "Book")

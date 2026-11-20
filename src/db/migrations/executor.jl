@@ -107,7 +107,11 @@ function apply!(g::Graph, k; backwards = false, fake = false, fake_initial = tru
         backwards ? record_unapplied_all!(m) : record_applied_all!(m)
     end
     # CREATE INDEX CONCURRENTLY & co. can't run in a transaction (Django's Migration.atomic = False)
-    any(op -> needs_no_transaction(op, Juango.backend()), m.operations) ? run() : atomic(run)
+    if any(op -> needs_no_transaction(op, Juango.backend()), m.operations)
+        run()
+    else
+        Juango.schema_atomic(run)
+    end
     log(label * (fake ? " FAKED" : " OK"))
 end
 

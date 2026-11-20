@@ -408,7 +408,7 @@ end
     force_login!(c, root_user())
     Admin.register!(Essay; list_display = [:title])
     @test !occursin("Hidden", text(get(c, "/admin/project/essay/")))
-    @test get(c, "/admin/project/essay/$(hidden.id)/change/").status == 404
+    @test get(c, "/admin/project/essay/$(hidden.id)/change/").status == 302      # (not in its queryset: missing, back to the index)
     Admin.register!(Essay; list_display = [:title], queryset = req -> filter(base_objects(Essay); title__startswith = "H"))
     r = get(c, "/admin/project/essay/")
     @test occursin("Hidden", text(r)) && !occursin("Databases", text(r))
@@ -825,7 +825,7 @@ end
     force_login!(c, root_user())
     Admin.register!(Ticket)
     @test get(c, "/admin/project/ticket/$(t.id)/change/").status == 200
-    @test get(c, "/admin/project/ticket/not-a-uuid/change/").status == 404
+    @test get(c, "/admin/project/ticket/not-a-uuid/change/").status == 302      # (no such object: back to the index, as Django's)
     @test occursin("t1", text(get(c, "/admin/project/ticket/")))
     Admin.unregister!(Ticket)
     delete!(t)

@@ -74,7 +74,7 @@ function swap_user_model(new; dry_run::Bool = false, log = println)
     log("Moving $(count(base_objects(Old))) user(s) from $otab to $ntab:")
     foreach(s -> log("  ", s), stmts)
     dry_run && return stmts
-    atomic() do
+    schema_atomic() do                         # (SQLite rebuilds the tables: their keys are checked at the end)
         foreach(s -> execute(s, Any[]), stmts)
         sync_sequence(b, ntab)
     end

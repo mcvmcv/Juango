@@ -272,7 +272,8 @@ backup = ForeignKey(Venue, on_delete = SET(fallback), null = true)   # an object
 - **The options.** `:CASCADE` deletes the referencing rows too, `:SET_NULL` clears the key (it needs `null = true`), `:PROTECT` refuses with `ProtectedError`, and `:DO_NOTHING` leaves the rows alone. `:SET_DEFAULT` points the key at its `default`, and `SET(x)` points it at `x` or at what `x()` returns.
 - **`:RESTRICT`** works like `:PROTECT`, with one exception, as in Django. Deleting is allowed when the rows pointing through the key are deleted by the same operation. For example, deleting a band deletes its records and its tracks together, even though a track's `record` key is restricted. Deleting just the record raises `RestrictedError`.
 - **Telling users.** The errors carry the rows that block the delete (`e.protected_objects`, `e.restricted_objects`, as Django's), and `protected_message(e)` makes a sentence of them, with plurals that agree: `Can't delete this author: 2 articles still refer to it (“A”, “B”).` The admin shows it.
-- **The admin's delete page** says which related rows each option affects.
+- **The admin's delete page** lists everything the delete takes along, nested under what it hangs from, as Django's; protected rows, and kinds the user may not delete, make it a "Cannot delete" page.
+- **The database checks the keys too**, on every backend: a row can't point at a row that isn't there. On SQLite (since #260, as Django) the keys are checked when the transaction commits, so rows that refer to each other can be written in any order within one; a key with `:DO_NOTHING` that's left pointing at a deleted row fails the commit. SQLite databases from before #260 should be checked for such orphans first: `PRAGMA foreign_key_check` lists them.
 
 #### Integer sizes and primary keys
 
