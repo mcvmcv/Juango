@@ -57,6 +57,72 @@ function update_permissions!()
     end
 end
 
+# --- the auth app's system checks (Django's auth.E002-E012, auth.W004) ------------------------------
+
+"""
+The auth app's checks, as Django's: the user model's `username_field` must be unique (auth.E003, or
+the warning auth.W004 with authentication backends other than ModelBackend alone) and not one of its
+`required_fields` (auth.E002); permission names and codenames must fit their columns (auth.E007,
+E008, E011, E012) and not repeat a built-in or another custom one (auth.E005, E006).
+Returns `(level, message, id, hint)` tuples.
+"""
+function auth_check_issues(models = MODEL_LIST)
+    out = Tuple{Symbol,String,String,Union{Nothing,String}}[]
+    U = try get_user_model() catch; nothing end
+    if U !== nothing && any(T -> T === U, models)
+        uf = username_field(U)
+        label = "$(nameof(U)).$uf"
+        if uf in required_fields(U)
+            push!(out, (:error, "The field named as the 'USERNAME_FIELD' for a custom user model must not be included in 'REQUIRED_FIELDS'.",
+                        "auth.E002", "The 'USERNAME_FIELD' is currently set to '$uf', you should remove '$uf' from the 'REQUIRED_FIELDS'."))
+        end
+        f = findfield(modelmeta(U), uf)
+        alone = c -> c isa UniqueConstraint && c.fields == [uf] && c.condition === nothing && isempty(c.expressions)
+        unique = f !== nothing && (f.unique || f.primary_key || any(alone, model_constraints(U)) ||
+                                   any(u -> u == [uf], modelmeta(U).unique_together))
+        if !unique
+            bs = get(settings, :AUTHENTICATION_BACKENDS, Any[ModelBackend()])
+            if length(bs) == 1 && only(bs) isa ModelBackend
+                push!(out, (:error, "'$label' must be unique because it is named as the 'USERNAME_FIELD'.", "auth.E003", nothing))
+            else
+                push!(out, (:warning, "'$label' is named as the 'USERNAME_FIELD', but it is not unique.", "auth.W004",
+                            "Ensure that your authentication backend(s) can handle non-unique usernames."))
+            end
+        end
+    end
+    name_max, code_max = 255, 100
+    for T in models
+        (T <: AutoThrough || !model_in_use(T)) && continue
+        m = modelmeta(T)
+        label = "$(m.app).$(nameof(T))"
+        actions = String.(collect(get(m.extra, :default_permissions, DEFAULT_PERMISSIONS)))
+        builtin = Set(a * "_" * lowercase(m.name) for a in actions)
+        if !isempty(actions)
+            vmax = name_max - maximum(length("Can $a ") for a in actions)
+            length(m.verbose_name) > vmax &&
+                push!(out, (:error, "The verbose_name of model '$label' must be at most $vmax characters for its builtin permission names to be at most $name_max characters.", "auth.E007", nothing))
+            cmax = code_max - maximum(length("$(a)_") for a in actions)
+            length(lowercase(m.name)) > cmax &&
+                push!(out, (:error, "The name of model '$label' must be at most $cmax characters for its builtin permission codenames to be at most $code_max characters.", "auth.E011", nothing))
+        end
+        seen = Set{String}()
+        for (code, name) in get(m.extra, :permissions, [])
+            code, name = string(code), string(name)
+            length(name) > name_max &&
+                push!(out, (:error, "The permission named '$name' of model '$label' is longer than $name_max characters.", "auth.E008", nothing))
+            length(code) > code_max &&
+                push!(out, (:error, "The permission codenamed '$code' of model '$label' is longer than $code_max characters.", "auth.E012", nothing))
+            if code in builtin
+                push!(out, (:error, "The permission codenamed '$code' clashes with a builtin permission for model '$label'.", "auth.E005", nothing))
+            elseif code in seen
+                push!(out, (:error, "The permission codenamed '$code' is duplicated for model '$label'.", "auth.E006", nothing))
+            end
+            push!(seen, code)
+        end
+    end
+    out
+end
+
 perm_strings(qs) = Set{String}(string(r[:content_type__app_label], ".", r[:codename])
                                for r in values(qs, :content_type__app_label, :codename))
 

@@ -1647,7 +1647,7 @@ end
 2. `manage.jl swap_user_model accounts.Member` (`--dry-run` prints the plan) copies the users with their ids, their groups and permissions, moves every foreign key that points at the old user table (the admin's log and your models) to the new one, and moves the id sequence on, in one transaction where the database allows.
 3. Set `AUTH_USER_MODEL = "accounts.Member"`. Sessions stay valid, since the ids are the same. The old table is left alone; drop it with a migration when you're sure.
 
-If `AUTH_USER_MODEL` is switched without moving the users, the `auth.W020` check says so.
+If `AUTH_USER_MODEL` is switched without moving the users, the `auth.W020` check says so. As in Django, `manage.jl check` also reports a user model whose `username_field` isn't unique (auth.E003, or the warning auth.W004 when there are other backends) or is one of its `required_fields` (auth.E002). It reports permission names and codenames that are too long for their columns (auth.E007, E008, E011, E012), and custom permissions that repeat a built-in or another custom one (auth.E005, E006).
 
 #### Authentication backends
 

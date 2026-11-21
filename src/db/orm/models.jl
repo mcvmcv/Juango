@@ -47,10 +47,15 @@ built-in models, the label of the `App` whose module defines it, or `\"project\"
 """
 default_app_label(T) = parentmodule(T) === (@__MODULE__) ? "juango" : something(module_app_label(parentmodule(T)), "project")
 
-"Remove a model from the registry (mostly for tests that redefine models)."
+"Remove a model from the registry (mostly for tests that redefine models), with its many-to-many fields' automatic through models."
 Base.@nospecializeinfer function unregister_model!(@nospecialize(T::Type))
     delete!(MODEL_REGISTRY, T)
     filter!(x -> x !== T, MODEL_LIST)
+    # (an automatic through model with a foreign key to it would otherwise outlive it)
+    for Th in [X for X in MODEL_LIST if X <: AutoThrough && any(f -> f.kind === :fk && f.related === T, modelmeta(X).fields)]
+        delete!(MODEL_REGISTRY, Th)
+        filter!(x -> x !== Th, MODEL_LIST)
+    end
     invalidate_relations!()
     nothing
 end

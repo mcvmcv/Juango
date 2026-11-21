@@ -567,3 +567,71 @@ end
         dab_cleanup()
     end
 end
+
+@testset "django auth: test_checks" begin
+    m = Module(:DabChecks)
+    Core.eval(m, :(using Juango))
+    long_model = "Dab" * "x"^91                                   # (94 characters: its codenames would be too long)
+    Base.include_string(m, """
+        @model struct DabChecked
+            Meta(app_label = "dabchecks", permissions = [("change_dabchecked", "Can edit permission (duplicate)")])
+        end
+        @model struct DabDuplicated
+            Meta(app_label = "dabchecks", permissions = [("my_custom_permission", "Some permission"), ("other_one", "Some other permission"),
+                                                         ("my_custom_permission", "Some permission with duplicate permission code")])
+        end
+        @model struct DabLongVerbose
+            Meta(app_label = "dabchecks", verbose_name = "$("some ridiculously long verbose name that is out of control" ^ 5)")
+        end
+        @model struct DabLongVerboseNoPerms
+            Meta(app_label = "dabchecks", verbose_name = "$("some ridiculously long verbose name that is out of control" ^ 5)", default_permissions = ())
+        end
+        @model struct DabLongPermName
+            Meta(app_label = "dabchecks", permissions = [("dab_perm", "$("X" ^ 256)")])
+        end
+        @model struct DabLongCodename
+            Meta(app_label = "dabchecks", permissions = [("$("x" ^ 101)", "Custom permission")])
+        end
+        @model struct $long_model
+            Meta(app_label = "dabchecks")
+        end
+        @model struct DabEmailUser <: AbstractUser
+            Meta(app_label = "dabchecks", table = "dab_email_user")
+        end
+        Juango.username_field(::Type{DabEmailUser}) = :email
+        @model struct DabGoodEmailUser <: AbstractUser
+            login_email = EmailField(unique = true)
+            Meta(app_label = "dabchecks", table = "dab_good_email_user")
+        end
+        Juango.username_field(::Type{DabGoodEmailUser}) = :login_email
+        """)
+    T(n) = getfield(m, Symbol(n))
+    issues(models...) = [(l, msg, id) for (l, msg, id, _) in Juango.auth_check_issues(collect(Any, models))]
+    try
+        @test issues(T(:DabChecked)) == [(:error, "The permission codenamed 'change_dabchecked' clashes with a builtin permission for model 'dabchecks.DabChecked'.", "auth.E005")]   # test_clashing_default_permissions
+        @test issues(T(:DabDuplicated)) == [(:error, "The permission codenamed 'my_custom_permission' is duplicated for model 'dabchecks.DabDuplicated'.", "auth.E006")]   # test_non_clashing_custom_permissions
+        @test issues(T(:DabLongVerbose)) == [(:error, "The verbose_name of model 'dabchecks.DabLongVerbose' must be at most 244 characters for its builtin permission names to be at most 255 characters.", "auth.E007")]   # test_verbose_name_max_length
+        @test isempty(issues(T(:DabLongVerboseNoPerms)))                                                   # test_empty_default_permissions
+        @test issues(T(:DabLongPermName)) == [(:error, "The permission named '$("X" ^ 256)' of model 'dabchecks.DabLongPermName' is longer than 255 characters.", "auth.E008")]   # test_custom_permission_name_max_length
+        @test issues(T(:DabLongCodename)) == [(:error, "The permission codenamed '$("x" ^ 101)' of model 'dabchecks.DabLongCodename' is longer than 100 characters.", "auth.E012")]   # test_custom_permission_codename_max_length
+        @test issues(T(long_model)) == [(:error, "The name of model 'dabchecks.$long_model' must be at most 93 characters for its builtin permission codenames to be at most 100 characters.", "auth.E011")]   # test_model_name_max_length
+        @test isempty(Juango.auth_check_issues(filter(X -> parentmodule(X) !== m, Juango.all_models())))   # (Juango's own models and the tests' pass)
+        # UserModelChecksTests
+        override_settings(AUTH_USER_MODEL = T(:DabEmailUser)) do
+            @test issues(T(:DabEmailUser)) == [(:error, "'DabEmailUser.email' must be unique because it is named as the 'USERNAME_FIELD'.", "auth.E003")]   # test_username_non_unique
+            override_settings(AUTHENTICATION_BACKENDS = Any[ModelBackend(), DabRowlevelBackend()]) do
+                @test issues(T(:DabEmailUser)) == [(:warning, "'DabEmailUser.email' is named as the 'USERNAME_FIELD', but it is not unique.", "auth.W004")]
+            end
+            Core.eval(m, :(Juango.required_fields(::Type{DabEmailUser}) = (:email, :first_name)))
+            @test (:error, "The field named as the 'USERNAME_FIELD' for a custom user model must not be included in 'REQUIRED_FIELDS'.", "auth.E002") in
+                  Base.invokelatest(issues, T(:DabEmailUser))   # test_username_not_in_required_fields
+        end
+        override_settings(AUTH_USER_MODEL = T(:DabGoodEmailUser)) do
+            @test isempty(issues(T(:DabGoodEmailUser)))                                                     # test_required_fields_is_list (and a unique USERNAME_FIELD)
+        end
+        # not translated: is_anonymous and is_authenticated as methods (auth.C009, C010: Python), and the
+        # UniqueConstraint variants of test_username_partially_unique (a conditional constraint isn't unique: auth.jl)
+    finally
+        foreach(Juango.unregister_model!, filter(X -> parentmodule(X) === m, Juango.all_models()))
+    end
+end

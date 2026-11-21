@@ -105,7 +105,7 @@ function prompt(msg, default = "")
 end
 
 "The fields `createsuperuser` asks for besides the username and password (Django's REQUIRED_FIELDS); define a method for your user model."
-required_fields(::Type) = (:email,)
+required_fields(T::Type) = username_field(T) === :email ? () : (:email,)
 
 # (as Django's createsuperuser: a username error as a message, or nothing)
 function superuser_username_error(U, name)
@@ -325,6 +325,7 @@ register_check!(tags = [:migrations]) do
     [CheckMessage(mode === :error ? :error : :warning, "$(w.migration), operation $(w.op): $(w.msg)"; id = w.id, hint = w.hint) for w in ws]
 end
 register_check!(() -> [CheckMessage(:warning, m; id = "auth.W020") for m in user_model_swap_issues()]; tags = [:models])
+register_check!(() -> [CheckMessage(l, m; id = id, hint = h) for (l, m, id, h) in auth_check_issues()]; tags = [:models])
 register_check!(deploy_checks; tags = [:security], deploy = true)
 
 "Print check messages as `manage.jl check` does (with how many were silenced); returns them."
