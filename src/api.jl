@@ -130,7 +130,8 @@ export App, get_model, lookup_value, concrete_fields, many_to_many, attname, col
        value_from_object, value_to_json, value_from_json, Admin, Sitemap, sitemap_urls, Feed, FlatPage, Site, get_current_site,
        @background, enqueue, get_result, TaskResult
 # server and commands
-export runserver, execute_from_command_line
+export runserver, execute_from_command_line, call_command, CommandError
+public command_io, required_fields
 
 # --- public, not exported ----------------------------------------------------------------------------
 

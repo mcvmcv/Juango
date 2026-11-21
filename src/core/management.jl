@@ -9,6 +9,53 @@ const COMMANDS = Dict{String,Tuple{String,Function}}()
 "Register a custom management command: `register_command!(\"hello\", \"Say hi\", args -> println(\"hi\"))`."
 register_command!(name, help, f) = (COMMANDS[string(name)] = (string(help), f); nothing)
 
+"""
+    CommandError(msg)
+
+A command's failure, as Django's: `execute_from_command_line` prints `CommandError: msg` to stderr
+and exits with status 1 (a script; in the REPL it only prints). `call_command` lets it through.
+"""
+struct CommandError <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::CommandError) = print(io, "CommandError: ", e.msg)
+
+# A command's input and output: the terminal, or what call_command gives (Django's stdin/stdout/stderr
+# options and its mocked getpass/input). getpass(prompt) reads a password; system_user is getpass.getuser().
+Base.@kwdef struct CommandIO
+    stdin::IO = Base.stdin
+    stdout::IO = Base.stdout
+    stderr::IO = Base.stderr
+    getpass::Any = p -> read(Base.getpass(p), String)
+    isatty::Bool = Base.stdin isa Base.TTY
+    system_user::String = something(get(ENV, "USER", nothing), get(ENV, "USERNAME", nothing), "")
+end
+const COMMAND_IO = Base.ScopedValues.ScopedValue{Union{Nothing,CommandIO}}(nothing)
+command_io() = something(COMMAND_IO[], CommandIO())
+cmd_stdout() = command_io().stdout
+cmd_stderr() = command_io().stderr
+
+"""
+    call_command(name, args...; stdin = "", stdout = IOBuffer(), stderr = IOBuffer(), getpass = nothing,
+                 isatty = true, system_user = "") -> the command's return value
+
+Run a management command from code or a test, as Django's `call_command`: `args` are its
+command-line words (`call_command("createsuperuser", "--username=joe", "--noinput")`). Its prompts read
+lines from `stdin` (a string or an IO); `getpass` answers password prompts (a function of the prompt, or
+a vector of answers in turn; by default lines of `stdin` too). Output goes to `stdout` and `stderr`.
+A `CommandError` is thrown, not printed.
+"""
+function call_command(name::AbstractString, args...; stdin = "", stdout = IOBuffer(), stderr = IOBuffer(), getpass = nothing,
+                      isatty::Bool = true, system_user::AbstractString = "")
+    entry = get(all_commands(), String(name), nothing)
+    entry === nothing && throw(CommandError("Unknown command: '$name'"))
+    inp = stdin isa AbstractString ? IOBuffer(stdin) : stdin
+    gp = getpass === nothing ? (p -> readline(inp)) :
+         getpass isa AbstractVector ? (answers = Iterators.Stateful(getpass); p -> String(popfirst!(answers))) : getpass
+    io = CommandIO(; stdin = inp, stdout = stdout, stderr = stderr, getpass = gp, isatty = isatty, system_user = String(system_user))
+    Base.ScopedValues.with(() -> entry[2](String[string(a) for a in args]), COMMAND_IO => io)
+end
+
 function parse_flags(args)
     flags = Dict{String,String}()
     positional = String[]
@@ -51,47 +98,162 @@ function cmd_runserver(args)
 end
 
 function prompt(msg, default = "")
-    print(msg)
-    s = readline()
+    io = command_io()
+    print(io.stdout, msg)
+    s = readline(io.stdin)
     isempty(s) ? default : s
 end
 
+"The fields `createsuperuser` asks for besides the username and password (Django's REQUIRED_FIELDS); define a method for your user model."
+required_fields(::Type) = (:email,)
+
+# (as Django's createsuperuser: a username error as a message, or nothing)
+function superuser_username_error(U, name)
+    uf = username_field(U)
+    vname = string(getfield_meta(U, uf).verbose_name)
+    exists(filter(objects(U), Q(uf => name))) && return "Error: That $vname is already taken."
+    isempty(name) && return uppercasefirst(vname) * " cannot be blank."
+    errs = validate_field(getfield_meta(U, uf), name)
+    isempty(errs) ? nothing : join(errs, "; ")
+end
+# one field's value, cleaned as the model field does; the error messages or nothing
+function superuser_field_errors(U, f::Symbol, v)
+    fl = getfield_meta(U, f)
+    isempty(v) && !fl.blank && return ["This field cannot be blank."]
+    isempty(v) && return nothing
+    errs = validate_field(fl, v)
+    isempty(errs) ? nothing : errs
+end
+"The system user's name as a username suggestion, if it's a valid one and not taken (Django's get_default_username)."
+function default_superuser_username(U, system_user)
+    name = lowercase(Base.Unicode.normalize(system_user; stripmark = true))
+    name = filter(isascii, name)
+    (isempty(name) || superuser_username_error(U, name) !== nothing) ? "" : name
+end
+
+"""
+createsuperuser [--username U] [--email E] [--noinput] [--verbosity 0]: as Django's. Interactive, it
+asks for what's missing (suggesting the system user's name) and the password twice, repeats a question
+whose answer isn't valid, and offers to bypass the password validators. With `--noinput` the username,
+email and password come from the flags or JUANGO_SUPERUSER_USERNAME / _EMAIL / _PASSWORD; without a
+password the user gets an unusable one.
+"""
 function cmd_createsuperuser(args)
     _, flags = parse_flags(args)
+    io = command_io()
+    out, err = io.stdout, io.stderr
     noinput = haskey(flags, "noinput") || haskey(flags, "no-input")
-    username = get(flags, "username", nothing)
-    email = get(flags, "email", "")
-    password = get(flags, "password", get(ENV, "JUANGO_SUPERUSER_PASSWORD", nothing))
-    if username === nothing
-        noinput && error("--username is required with --noinput")
-        username = prompt("Username: ")
-    end
-    if !haskey(flags, "email") && !noinput
-        email = prompt("Email address: ")
-    end
-    if password === nothing && !noinput
-        while true
-            p1 = read(Base.getpass("Password"), String)
-            p2 = read(Base.getpass("Password (again)"), String)
-            if p1 != p2
-                println("Error: Your passwords didn't match.")
-            elseif isempty(p1)
-                println("Error: Blank passwords aren't allowed.")
-            else
-                errs = validate_password(p1; user = (; username = username, email = email))
-                if !isempty(errs)
-                    foreach(e -> println(e), errs)
-                    lowercase(strip(prompt("Bypass password validation and create user anyway? [y/N]: "))) in ("y", "yes") || continue
+    verbosity = parse(Int, get(flags, "verbosity", "1"))
+    U = get_user_model()
+    uf = username_field(U)
+    vname = string(getfield_meta(U, uf).verbose_name)
+    others = [f for f in required_fields(U) if f !== uf]
+    data = Dict{Symbol,Any}()
+    password = get(flags, "password", nothing)
+    username = get(flags, string(uf), get(flags, "username", nothing))
+    try
+        if noinput
+            password = something(password, get(ENV, "JUANGO_SUPERUSER_PASSWORD", nothing), Some(nothing))
+            username = something(username, get(ENV, "JUANGO_SUPERUSER_" * uppercase(string(uf)), nothing), Some(nothing))
+            username === nothing && throw(CommandError("You must use --$uf with --noinput."))
+            e = superuser_username_error(U, username)
+            e === nothing || throw(CommandError(e))
+            for f in others
+                v = something(get(flags, string(f), nothing), get(ENV, "JUANGO_SUPERUSER_" * uppercase(string(f)), nothing), Some(nothing))
+                v === nothing && throw(CommandError("You must use --$f with --noinput."))
+                errs = superuser_field_errors(U, f, v)
+                errs === nothing || throw(CommandError(join(errs, "; ")))
+                data[f] = v
+            end
+        else
+            io.isatty || (println(out, "Superuser creation skipped due to not running in a TTY. You can run `manage.py createsuperuser` in your project to create one manually."); return nothing)
+            if username !== nothing
+                e = superuser_username_error(U, username)
+                e === nothing || (println(err, e); username = nothing)
+            end
+            default = default_superuser_username(U, io.system_user)
+            while username === nothing
+                msg = uppercasefirst(vname) * (isempty(default) ? "" : " (leave blank to use '$default')") * ": "
+                v = prompt(msg, default)
+                e = isempty(v) ? "Error: This field cannot be blank." : superuser_username_error(U, v)
+                e === nothing ? (username = v) : println(err, startswith(e, "Error: ") ? e : "Error: " * e)
+            end
+            for f in others
+                if haskey(flags, string(f))
+                    errs = superuser_field_errors(U, f, flags[string(f)])
+                    errs === nothing && (data[f] = flags[string(f)]; continue)
+                    println(err, "Error: ", join(errs, "; "))
                 end
-                password = p1
-                break
+                while !haskey(data, f)
+                    v = prompt(uppercasefirst(string(getfield_meta(U, f).verbose_name)) * ": ")
+                    errs = superuser_field_errors(U, f, v)
+                    errs === nothing ? (data[f] = v) : println(err, "Error: ", join(errs, "; "))
+                end
+            end
+            while password === nothing
+                p1 = io.getpass("Password: ")
+                p2 = io.getpass("Password (again): ")
+                if p1 != p2
+                    println(err, "Error: Your passwords didn't match.")
+                elseif isempty(strip(p1))
+                    println(err, "Error: Blank passwords aren't allowed.")
+                else
+                    errs = validate_password(p1; user = (; uf => username, (k => v for (k, v) in data)...))
+                    if !isempty(errs)
+                        println(err, join(errs, "\n"))
+                        lowercase(strip(prompt("Bypass password validation and create user anyway? [y/N]: "))) in ("y", "yes") || continue
+                    end
+                    password = p1
+                end
             end
         end
+    catch e
+        e isa InterruptException || rethrow()
+        println(err, "\nOperation cancelled.")
+        throw(CommandError("Operation cancelled."))
     end
+    create_superuser(username, password; data...)
+    verbosity >= 1 && println(out, "Superuser created successfully.")
+    nothing
+end
+
+"""
+changepassword [username] [--password P]: as Django's. The username defaults to the system user's; the
+password is asked for twice, up to three times if they differ or the validators refuse it.
+"""
+function cmd_changepassword(args)
+    pos, flags = parse_flags(args)
+    io = command_io()
     U = get_user_model()
-    exists(filter(objects(U), Q(username_field(U) => username))) && error("Error: That username is already taken.")
-    create_superuser(username, password; email = email)
-    println("Superuser created successfully.")
+    name = isempty(pos) ? io.system_user : pos[1]
+    u = first(filter(objects(U), Q(username_field(U) => name)))
+    u === nothing && throw(CommandError("user '$name' does not exist"))
+    pw = get(flags, "password", nothing)
+    if pw === nothing
+        println(io.stdout, "Changing password for user '$(get_username(u))'")
+        tries, ok = 0, false
+        while !ok && tries < 3
+            p1 = io.getpass("Password: ")
+            p2 = io.getpass("Password (again): ")
+            if p1 != p2
+                println(io.stdout, "Passwords do not match. Please try again.")
+                tries += 1
+                continue
+            end
+            errs = validate_password(p2; user = u)
+            if isempty(errs)
+                ok, pw = true, p1
+            else
+                println(io.stderr, join(errs, "\n"))
+                tries += 1
+            end
+        end
+        ok || throw(CommandError("Aborting password change for user '$(get_username(u))' after $tries attempts"))
+    end
+    set_password!(u, pw)
+    save!(u)
+    println(io.stdout, "Password changed successfully for user '$(get_username(u))'")
+    "Password changed successfully for user '$(get_username(u))'"
 end
 
 function cmd_showurls(args)
@@ -571,16 +733,7 @@ for (n, h, f) in (
                                   confirm = haskey(f, "noinput") || haskey(f, "no-input") ? (_ -> true) : nothing)
     end),
     ("clearsessions", "Delete expired sessions", _ -> println("Deleted ", clear_expired_sessions!(), " expired sessions.")),
-    ("changepassword", "Change a user's password: changepassword <username>", function (args)
-        pos, flags = parse_flags(args)
-        U = get_user_model()
-        u = get(objects(U), Q(username_field(U) => isempty(pos) ? prompt("Username: ") : pos[1]))
-        pw = get(flags, "password", nothing)
-        pw === nothing && (pw = read(Base.getpass("New password"), String))
-        set_password!(u, pw)
-        save!(u)
-        println("Password changed successfully for user '$(u.username)'")
-    end),
+    ("changepassword", "Change a user's password: changepassword [username] (default: the system user)", cmd_changepassword),
     ("shell", "How to start an interactive session with the project loaded", cmd_shell),
     ("help", "Show this message", cmd_help))
     COMMANDS[n] = (h, f)
@@ -607,7 +760,14 @@ function execute_from_command_line(args = ARGS)
         println(stderr, "Unknown command: '$cmd'. Type 'julia --project manage.jl help' for usage.")
         return nothing
     end
-    entry[2](args[2:end])
+    try
+        entry[2](args[2:end])
+    catch e
+        e isa CommandError || rethrow()
+        println(stderr, "CommandError: ", e.msg)          # (as Django's: the message and exit status 1)
+        isinteractive() || exit(1)
+        nothing
+    end
 end
 
 # --- startproject ---------------------------------------------------------------------------------

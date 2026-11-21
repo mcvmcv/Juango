@@ -450,3 +450,120 @@ end
         dab_cleanup()
     end
 end
+
+@testset "django auth: test_management (createsuperuser, changepassword)" begin
+    dab_cleanup()
+    out() = IOBuffer()
+    try
+        joe = create_user("dab_joe", "qwerty"; email = "joe@example.com")
+        # ChangepasswordManagementCommandTestCase
+        o = out()
+        r = call_command("changepassword", "dab_joe"; getpass = ["not qwerty", "not qwerty"], stdout = o)
+        @test String(take!(o)) == "Changing password for user 'dab_joe'\nPassword changed successfully for user 'dab_joe'\n"   # test_get_pass
+        @test r == "Password changed successfully for user 'dab_joe'" && check_password(dab_reload(joe), "not qwerty")
+        call_command("changepassword"; getpass = ["joes new pw", "joes new pw"], system_user = "dab_joe")      # test_system_username
+        @test check_password(dab_reload(joe), "joes new pw")
+        e = try call_command("changepassword", "dab_joe2"; getpass = ["x", "x"]); nothing catch e; e end        # test_nonexistent_username
+        @test e isa CommandError && e.msg == "user 'dab_joe2' does not exist"
+        o = out()
+        e = try call_command("changepassword", "dab_joe"; getpass = repeat(["a1b2c3d4e5", "zzzzzzzzzz"], 3), stdout = o); nothing catch e; e end
+        @test e isa CommandError && e.msg == "Aborting password change for user 'dab_joe' after 3 attempts"   # test_that_max_tries_exits_1
+        @test count("Passwords do not match. Please try again.", String(take!(o))) == 3
+        override_settings(AUTH_PASSWORD_VALIDATORS = Any[Juango.NumericPasswordValidator()]) do         # test_password_validation
+            er = out()
+            e = try call_command("changepassword", "dab_joe"; getpass = fill("1234567890", 6), stderr = er); nothing catch e; e end
+            @test e isa CommandError && occursin("This password is entirely numeric.", String(take!(er)))
+            call_command("changepassword", "dab_joe"; getpass = ["1234567890", "1234567890", "abcdef1234", "abcdef1234"])   # (then a good one)
+            @test check_password(dab_reload(joe), "abcdef1234")
+        end
+        create_user("dab_Júlia", "pw")
+        o = out()
+        call_command("changepassword", "dab_Júlia"; getpass = ["n3w p4ss", "n3w p4ss"], stdout = o)           # ..._works_with_nonascii_output
+        @test occursin("for user 'dab_Júlia'", String(take!(o)))
+
+        # CreatesuperuserManagementCommandTestCase, --noinput
+        o = out()
+        call_command("createsuperuser", "--noinput", "--username=dab_su", "--email=su@somewhere.org"; stdout = o)   # test_basic_usage
+        su = get(User; username = "dab_su")
+        @test String(take!(o)) == "Superuser created successfully.\n"
+        @test su.email == "su@somewhere.org" && su.is_superuser && su.is_staff && !Juango.has_usable_password(su)
+        e = try call_command("createsuperuser", "--noinput", "--username=dab_noemail"); nothing catch e; e end      # test_no_email_argument
+        @test e isa CommandError && e.msg == "You must use --email with --noinput."
+        e = try call_command("createsuperuser", "--noinput", "--email=x@y.org"); nothing catch e; e end
+        @test e isa CommandError && e.msg == "You must use --username with --noinput."
+        e = try call_command("createsuperuser", "--noinput", "--username=\U1f920", "--email=x@y.org"); nothing catch e; e end   # test_validate_username
+        @test e isa CommandError && e.msg == "Enter a valid username. This value may contain only letters, numbers, and @/./+/-/_ characters."
+        e = try call_command("createsuperuser", "--noinput", "--username=dab_su", "--email=x@y.org"); nothing catch e; e end   # test_existing_username_non_interactive
+        @test e isa CommandError && e.msg == "Error: That username is already taken."
+        e = try call_command("createsuperuser", "--noinput", "--username=dab_bad", "--email=notanemail"); nothing catch e; e end
+        @test e isa CommandError && e.msg == "Enter a valid email address."
+        o = out()
+        call_command("createsuperuser", "--noinput", "--username=dab_quiet", "--email=q@y.org", "--verbosity=0"; stdout = o)   # test_verbosity_zero
+        @test isempty(String(take!(o)))
+        call_command("createsuperuser", "--noinput", "--username=dab_joe+admin@somewhere.org", "--email=joe@somewhere.org")   # test_email_in_username
+        @test exists(filter(User; username = "dab_joe+admin@somewhere.org"))
+        withenv("JUANGO_SUPERUSER_PASSWORD" => "test_password", "JUANGO_SUPERUSER_USERNAME" => "dab_test_superuser",
+                "JUANGO_SUPERUSER_EMAIL" => "joe@somewhere.org") do                                                 # test_environment_variable_non_interactive
+            call_command("createsuperuser", "--noinput")
+        end
+        u = get(User; username = "dab_test_superuser")
+        @test u.email == "joe@somewhere.org" && check_password(u, "test_password")
+
+        # interactive
+        o = out()
+        call_command("createsuperuser"; isatty = false, stdout = o)                                                # test_skip_if_not_in_TTY
+        @test occursin("Superuser creation skipped due to not running in a TTY.", String(take!(o)))
+        o, er = out(), out()
+        call_command("createsuperuser"; stdin = "dab_alice2\nalice@example.com\n", getpass = ["password", "password"],
+                     stdout = o, stderr = er)                                                                       # test_basic_usage (interactive)
+        @test exists(filter(User; username = "dab_alice2", email = "alice@example.com")) && endswith(String(take!(o)), "Superuser created successfully.\n")
+        o = out()
+        call_command("createsuperuser"; stdin = "\n\n", getpass = ["password", "password"], system_user = "dab_alice", stdout = o)   # test_default_username
+        @test startswith(String(take!(o)), "Username (leave blank to use 'dab_alice'): ") && exists(filter(User; username = "dab_alice", email = ""))
+        o = out()
+        call_command("createsuperuser"; stdin = "dab_bob\n\n", getpass = ["password", "password"], system_user = "dab_alice", stdout = o)   # GetDefaultUsername: test_existing
+        @test startswith(String(take!(o)), "Username: ")
+        call_command("createsuperuser"; stdin = "\n\n", getpass = ["password", "password"], system_user = "Dáb_Zöe")   # test_i18n
+        @test exists(filter(User; username = "dab_zoe"))
+        er = out()
+        call_command("createsuperuser"; stdin = "\U1f920\ndab_valid\n\n", getpass = ["password", "password"], stderr = er)   # test_invalid_username
+        @test String(take!(er)) == "Error: Enter a valid username. This value may contain only letters, numbers, and @/./+/-/_ characters.\n"
+        er = out()
+        call_command("createsuperuser"; stdin = "dab_su\ndab_janet2\n\n", getpass = ["password", "password"], stderr = er)   # test_existing_username
+        @test String(take!(er)) == "Error: That username is already taken.\n" && exists(filter(User; username = "dab_janet2"))
+        er = out()
+        call_command("createsuperuser", "--username=dab_su"; stdin = "dab_janet3\n\n", getpass = ["password", "password"], stderr = er)   # ..._provided_via_option_and_interactive
+        @test String(take!(er)) == "Error: That username is already taken.\n" && exists(filter(User; username = "dab_janet3"))
+        er = out()
+        call_command("createsuperuser"; stdin = "\ndab_blank\n\n", getpass = ["password", "password"], stderr = er)          # test_blank_username
+        @test String(take!(er)) == "Error: This field cannot be blank.\n"
+        er = out()
+        call_command("createsuperuser"; stdin = "dab_em\nbad-email\ngood@example.com\n", getpass = ["password", "password"], stderr = er)   # (REQUIRED_FIELDS validated)
+        @test String(take!(er)) == "Error: Enter a valid email address.\n" && get(User; username = "dab_em").email == "good@example.com"
+        er = out()
+        call_command("createsuperuser"; stdin = "dab_mm\n\n", getpass = ["password", "not password", "password", "password"], stderr = er)   # test_validation_mismatched_passwords
+        @test String(take!(er)) == "Error: Your passwords didn't match.\n"
+        er = out()
+        call_command("createsuperuser"; stdin = "dab_bl\n\n", getpass = ["", "", "password", "password"], stderr = er)       # test_validation_blank_password_entered
+        @test String(take!(er)) == "Error: Blank passwords aren't allowed.\n"
+        override_settings(AUTH_PASSWORD_VALIDATORS = Any[Juango.NumericPasswordValidator()]) do
+            er = out()
+            call_command("createsuperuser"; stdin = "dab_pv\n\nn\n", getpass = ["1234567890", "1234567890", "password", "password"], stderr = er)   # test_password_validation
+            @test String(take!(er)) == "This password is entirely numeric.\n" && check_password(get(User; username = "dab_pv"), "password")
+            call_command("createsuperuser"; stdin = "dab_pvb\n\ny\n", getpass = ["1234567890", "1234567890"])               # test_password_validation_bypass
+            @test check_password(get(User; username = "dab_pvb"), "1234567890")
+        end
+        withenv("JUANGO_SUPERUSER_PASSWORD" => "env_password") do                                                 # test_ignore_environment_variable_interactive
+            call_command("createsuperuser"; stdin = "dab_ienv\n\n", getpass = ["cmd_password", "cmd_password"])
+        end
+        @test check_password(get(User; username = "dab_ienv"), "cmd_password")
+        er = out()
+        e = try call_command("createsuperuser"; stdin = "dab_ki\n\n", getpass = p -> throw(InterruptException()), stderr = er); nothing catch e; e end
+        @test e isa CommandError && String(take!(er)) == "\nOperation cancelled.\n" && !exists(filter(User; username = "dab_ki"))   # test_keyboard_interrupt
+        # not translated: the custom and swapped user models (REQUIRED_FIELDS with foreign keys and many-to-many,
+        # USERNAME_FIELD email, IntegerUsernameUser; `required_fields` is the hook), --database, and the
+        # non-Unicode terminals
+    finally
+        dab_cleanup()
+    end
+end
