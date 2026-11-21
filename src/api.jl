@@ -84,7 +84,7 @@ export recording, recorded, undo_recorded!, undo_problem, UndoProblem, not_recor
        read_table, parse_csv, read_xlsx, excel_date, has_errors, ImportResult, API, route!, add_router!, api_urls, ModelSchema, openapi_schema,
        paginate_api, api_key_auth, bearer_auth, session_auth, get_object_or_404, get_list_or_404, TemplateView, RedirectView, ListView,
        DetailView, CreateView, UpdateView, DeleteView, FormView, ArchiveIndexView, YearArchiveView,
-       MonthArchiveView, DayArchiveView, DateDetailView, WeekArchiveView, TodayArchiveView, ViewCall, default_hook, Paginator, page, get_page,
+       MonthArchiveView, DayArchiveView, DateDetailView, WeekArchiveView, TodayArchiveView, ViewCall, default_hook, Paginator, page, get_page, validate_number, get_elided_page_range, InvalidPage, PageNotAnInteger, EmptyPage,
        require_http_methods, require_GET, require_POST, require_safe, csrf_exempt, non_atomic_requests, get_csrf_token,
        ensure_csrf_cookie, csrf_protect, requires_csrf_token, xframe_options_exempt, xframe_options_deny,
        xframe_options_sameorigin, gzip_page, no_append_slash, sensitive_post_parameters,

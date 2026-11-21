@@ -217,6 +217,7 @@ end
 function response_for_exception(req::Request, e, bt)
     e isa NPlusOneError && get(req.meta, :test_client, false) === true && throw(e)     # (NPLUSONE = :raise fails the test itself)
     # (as Django's SuspiciousOperations: logged to the security logger and answered with 400)
+    e isa InvalidPage && (e = Http404("Invalid page: $(e.msg)"))     # (a page out of range a view didn't catch)
     if e isa DisallowedRedirect
         log!("juango.security.DisallowedRedirect", :error, e.msg; request = req)
         e = BadRequest(e.msg)

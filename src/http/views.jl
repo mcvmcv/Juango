@@ -155,21 +155,86 @@ struct Paginator
     num_pages::Int
     orphans::Int
     allow_empty_first_page::Bool
-    Paginator(@nospecialize(items), per_page::Int, count::Int, num_pages::Int, orphans::Int = 0, allow_empty_first_page::Bool = true) =
-        new(items, per_page, count, num_pages, orphans, allow_empty_first_page)
+    error_messages::Dict{Symbol,String}
+    Paginator(@nospecialize(items), per_page::Int, count::Int, num_pages::Int, orphans::Int = 0, allow_empty_first_page::Bool = true,
+              error_messages::Dict{Symbol,String} = Dict{Symbol,String}()) =
+        new(items, per_page, count, num_pages, orphans, allow_empty_first_page, error_messages)
 end
 """
-    Paginator(items, per_page; orphans = 0, allow_empty_first_page = true)
+    Paginator(items, per_page; orphans = 0, allow_empty_first_page = true, error_messages = Dict())
 
 As Django's: the last page takes up to `orphans` more items rather than leaving them on a page of
-their own; with `allow_empty_first_page = false` an empty list has no pages.
+their own; with `allow_empty_first_page = false` an empty list has no pages. `error_messages`
+replaces the messages of `:invalid_page`, `:min_page` and `:no_results` (Django 5.0).
+`p.page_range` is `1:p.num_pages`.
 """
-Base.@nospecializeinfer function Paginator(@nospecialize(items), per_page::Integer; orphans::Integer = 0, allow_empty_first_page::Bool = true)
+Base.@nospecializeinfer function Paginator(@nospecialize(items), per_page::Integer; orphans::Integer = 0, allow_empty_first_page::Bool = true,
+                                           error_messages = Dict{Symbol,String}())
     items isa QuerySet && warn_unordered(items, "Paginating")          # (Django's UnorderedObjectListWarning)
     n = items isa QuerySet ? count(items) : length(items)
     pages = n == 0 && !allow_empty_first_page ? 0 : cld(max(1, n - orphans), per_page)
-    Paginator(items, Int(per_page), n, pages, Int(orphans), allow_empty_first_page)
+    Paginator(items, Int(per_page), n, pages, Int(orphans), allow_empty_first_page,
+              Dict{Symbol,String}(Symbol(k) => string(v) for (k, v) in pairs_of(error_messages)))
 end
+Base.getproperty(p::Paginator, s::Symbol) = s === :page_range ? (1:getfield(p, :num_pages)) : getfield(p, s)
+tattr(p::Paginator, ::Val{:page_range}) = collect(1:p.num_pages)
+
+"""
+A page number a paginator can't give (Django's InvalidPage): `PageNotAnInteger` for one that isn't
+a number, `EmptyPage` for one out of range. A view that lets one through answers 404.
+"""
+abstract type InvalidPage <: Exception end
+struct PageNotAnInteger <: InvalidPage
+    msg::String
+end
+struct EmptyPage <: InvalidPage
+    msg::String
+end
+Base.showerror(io::IO, e::InvalidPage) = print(io, nameof(typeof(e)), ": ", e.msg)
+page_message(p::Paginator, k::Symbol, default) = gettext(get(p.error_messages, k, default))
+
+"""
+    validate_number(paginator, n) -> Int
+
+The page number `n` (an integer, a whole float, its text, or `"last"`), as Django's: `PageNotAnInteger`
+if it isn't one, `EmptyPage` if it's below 1 or past the last page (page 1 of an empty list is fine
+unless `allow_empty_first_page = false`).
+"""
+function validate_number(p::Paginator, n)
+    num = n isa Integer ? Int(n) : n isa AbstractFloat ? (isinteger(n) ? Int(n) : nothing) :
+          n == "last" ? p.num_pages : n isa AbstractString ? tryparse(Int, strip(n)) : nothing
+    num === nothing && throw(PageNotAnInteger(page_message(p, :invalid_page, "That page number is not an integer")))
+    num < 1 && throw(EmptyPage(page_message(p, :min_page, "That page number is less than 1")))
+    if num > p.num_pages
+        (num == 1 && p.allow_empty_first_page) || throw(EmptyPage(page_message(p, :no_results, "That page contains no results")))
+    end
+    num
+end
+
+"""
+    get_elided_page_range(paginator, number = 1; on_each_side = 3, on_ends = 2)
+
+The page numbers to show around page `number`, with `Paginator.ELLIPSIS` ("…") for the gaps, as
+Django's: `[1, 2, "…", 7, 8, 9, 10, 11, 12, 13, "…", 49, 50]`.
+"""
+function get_elided_page_range(p::Paginator, number = 1; on_each_side::Integer = 3, on_ends::Integer = 2)
+    number = validate_number(p, number)
+    n = p.num_pages
+    n <= (on_each_side + on_ends) * 2 && return Any[i for i in 1:n]
+    out = Any[]
+    if number > 1 + on_each_side + on_ends + 1
+        append!(out, 1:on_ends); push!(out, PAGINATOR_ELLIPSIS); append!(out, (number - on_each_side):number)
+    else
+        append!(out, 1:number)
+    end
+    if number < n - on_each_side - on_ends - 1
+        append!(out, (number + 1):(number + on_each_side)); push!(out, PAGINATOR_ELLIPSIS); append!(out, (n - on_ends + 1):n)
+    else
+        append!(out, (number + 1):n)
+    end
+    out
+end
+const PAGINATOR_ELLIPSIS = "\u2026"
 
 struct Page
     object_list::Vector{Any}
@@ -188,18 +253,25 @@ end
 """
     get_page(paginator, n) -> Page
 
-Like `page`, but never raises (Django's `get_page`): a number that isn't one gives the first page,
-and one past the end the last page. For `?page=` values from URLs that go stale.
+Like `page`, but lenient (Django's `get_page`): a number that isn't one gives the first page, and
+one out of range (0, negative, past the end) the last page. For `?page=` values from URLs that go
+stale. (Only an empty list with `allow_empty_first_page = false` has no page to give.)
 """
 function get_page(p::Paginator, n)
-    num = n isa Integer ? Int(n) : n == "last" ? p.num_pages : tryparse(Int, strip(string(n)))
-    page(p, num === nothing ? 1 : clamp(num, 1, p.num_pages))
+    num = try
+        validate_number(p, n)
+    catch e
+        e isa PageNotAnInteger ? 1 : e isa EmptyPage ? p.num_pages : rethrow()
+    end
+    page(p, num)
 end
 
-"Page `n` (1-based); accepts a string such as `req.GET[\"page\"]`. Raises `Http404` if out of range."
+"""
+Page `n` (1-based); accepts a string such as `req.GET[\"page\"]` and `"last"`. Throws
+`PageNotAnInteger` or `EmptyPage` (a 404 if a view lets it through), as Django's.
+"""
 function page(p::Paginator, n)
-    num = n isa Integer ? Int(n) : n == "last" ? p.num_pages : something(tryparse(Int, string(n)), 0)
-    (1 <= num <= p.num_pages) || throw(Http404("Invalid page ($n)"))
+    num = validate_number(p, n)
     lo = (num - 1) * p.per_page + 1
     hi = num * p.per_page + p.orphans >= p.count ? p.count : num * p.per_page      # (the last page takes the orphans)
     objs = p.items isa QuerySet ? any_vector(fetch(p.items[lo:max(hi, lo - 1)])) : collect(Any, p.items[lo:hi])
@@ -209,6 +281,9 @@ function page(p::Paginator, n)
 end
 Base.iterate(pg::Page, st...) = iterate(pg.object_list, st...)
 Base.length(pg::Page) = length(pg.object_list)
+Base.getindex(pg::Page, i) = pg.object_list[i]
+Base.lastindex(pg::Page) = lastindex(pg.object_list)
+Base.show(io::IO, pg::Page) = print(io, "<Page ", pg.number, " of ", pg.paginator.num_pages, ">")
 truthy(pg::Page) = !isempty(pg.object_list)
 
 # --- generic views ---------------------------------------------------------------------------
@@ -439,7 +514,13 @@ Base.@nospecializeinfer function list_context!(ctx, v::ViewCall, @nospecialize(o
         p = Paginator(objs, n; orphans = opt(v, :paginate_orphans, 0), allow_empty_first_page = opt(v, :allow_empty, true))
         pk = string(opt(v, :page_kwarg, "page"))
         # (the page from the URL's kwargs, else the query string, as Django's)
-        pg = page(p, something(get(v.kwargs, Symbol(pk), nothing), get(v.request.GET, pk, nothing), "1"))
+        raw = something(get(v.kwargs, Symbol(pk), nothing), get(v.request.GET, pk, nothing), "1")
+        pg = try
+            page(p, raw)
+        catch e
+            e isa InvalidPage || rethrow()
+            throw(Http404("Invalid page ($raw): $(e.msg)"))     # (Django's message)
+        end
         merge!(ctx, Dict{String,Any}("paginator" => p, "page_obj" => pg, "is_paginated" => p.num_pages > 1,
                                      "object_list" => pg.object_list, cname => pg.object_list))
     else

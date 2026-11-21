@@ -1721,8 +1721,8 @@ end
     # #131: get_page clamps
     p = Paginator(collect(1:25), 10)
     @test get_page(p, "2").number == 2 && get_page(p, "99").number == 3 && get_page(p, "x").number == 1
-    @test get_page(p, 0).number == 1 && get_page(p, "last").number == 3 && get_page(Paginator(Int[], 10), 5).number == 1
-    @test_throws Juango.Http404 page(p, 99)
+    @test get_page(p, 0).number == 3 && get_page(p, "last").number == 3 && get_page(Paginator(Int[], 10), 5).number == 1
+    @test_throws EmptyPage page(p, 99)
 end
 
 @testset "FileResponse from a stored file or an IO; content_disposition (#133)" begin
