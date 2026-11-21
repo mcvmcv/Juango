@@ -115,7 +115,7 @@ function FileResponse(path::AbstractString; as_attachment::Bool = false, filenam
     end
     r = StreamingHttpResponse(writer; status = status, content_type = ct, headers = headers)
     setheader!(r, "Content-Length", string(filesize(path)))
-    setheader!(r, "Content-Disposition", content_disposition(filename; attachment = as_attachment))
+    (cd = content_disposition(filename; attachment = as_attachment)) === nothing || setheader!(r, "Content-Disposition", cd)
     r
 end
 
@@ -154,27 +154,30 @@ function FileResponse(io::IO; filename = "", as_attachment::Bool = false, conten
     end
     r = StreamingHttpResponse(writer; status = status, content_type = ct, headers = headers)
     n === nothing || setheader!(r, "Content-Length", string(n))
-    setheader!(r, "Content-Disposition", content_disposition(filename; attachment = as_attachment))
+    (cd = content_disposition(filename; attachment = as_attachment)) === nothing || setheader!(r, "Content-Disposition", cd)
     r
 end
 
 """
-    content_disposition(filename; attachment = false) -> String
+    content_disposition(filename; attachment = false) -> String or nothing
 
 The value of a Content-Disposition header (`attachment; filename="report.xlsx"`, with RFC 6266
 encoding for names that aren't plain ASCII): `resp["Content-Disposition"] = content_disposition(name; attachment = true)`.
+As Django's: without a filename it's `"attachment"`, or `nothing` (no header) when inline.
 """
 function content_disposition(filename; attachment = false)
     kind = attachment ? "attachment" : "inline"
-    name = string(filename)
-    isempty(name) && return kind
-    if all(c -> isascii(c) && isprint(c), name)
+    name = filename === nothing ? "" : string(filename)
+    # (as Django's content_disposition_header: no filename is "attachment", or no header at all when inline)
+    isempty(name) && return attachment ? "attachment" : nothing
+    if all(c -> c == '\t' || ' ' <= c <= '~', name)
         return "$kind; filename=\"$(replace(name, "\\" => "\\\\", "\"" => "\\\""))\""
     end
+    # (Python's quote: letters, digits, _.-~ and / as they are)
     encoded = join(c in UInt8('0'):UInt8('9') || c in UInt8('A'):UInt8('Z') || c in UInt8('a'):UInt8('z') ||
-                   c in codeunits("!#\$&+-.^_`|~") ? string(Char(c)) : "%" * uppercase(string(c, base = 16, pad = 2))
+                   c in codeunits("_.-~/") ? string(Char(c)) : "%" * uppercase(string(c, base = 16, pad = 2))
                    for c in codeunits(name))
-    "$kind; filename*=UTF-8''$encoded"
+    "$kind; filename*=utf-8''$encoded"
 end
 
 # --- server-sent events -------------------------------------------------------------------------------------

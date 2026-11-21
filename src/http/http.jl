@@ -1,26 +1,50 @@
 # Requests & responses ---------------------------------------------------------------
 
+# The lists of a QueryDict, keeping the order keys were first given in (as Django's, so a query
+# string re-encodes as it came). A Dict{String,Vector{String}} otherwise.
+struct OrderedLists <: AbstractDict{String,Vector{String}}
+    order::Vector{String}
+    d::Dict{String,Vector{String}}
+end
+OrderedLists() = OrderedLists(String[], Dict{String,Vector{String}}())
+Base.getindex(l::OrderedLists, k) = l.d[k]
+Base.setindex!(l::OrderedLists, v, k) = (k = String(k); haskey(l.d, k) || push!(l.order, k); l.d[k] = v; l)
+Base.delete!(l::OrderedLists, k) = (haskey(l.d, k) && (delete!(l.d, k); filter!(!=(k), l.order)); l)
+Base.haskey(l::OrderedLists, k) = haskey(l.d, k)
+Base.get(l::OrderedLists, k, default) = get(l.d, k, default)
+Base.get!(l::OrderedLists, k, default) = haskey(l.d, k) ? l.d[k] : (l[k] = default; default)
+Base.length(l::OrderedLists) = length(l.order)
+Base.keys(l::OrderedLists) = copy(l.order)
+Base.values(l::OrderedLists) = [l.d[k] for k in l.order]
+Base.empty!(l::OrderedLists) = (empty!(l.order); empty!(l.d); l)
+Base.iterate(l::OrderedLists, i = 1) = i > length(l.order) ? nothing : (l.order[i] => l.d[l.order[i]], i + 1)
+Base.copy(l::OrderedLists) = OrderedLists(copy(l.order), Dict(k => copy(v) for (k, v) in l.d))
+
 """
     QueryDict
 
 A multi-valued dict of form / query-string data. `qd["k"]` returns the last value,
-`getlist(qd, "k")` returns all values.
+`getlist(qd, "k")` returns all values; keys keep their order. As Django's: `setlist!`,
+`appendlist!`, `setlistdefault!`, `lists`, `update!` (which appends) and `urlencode(qd; safe)`.
 """
 struct QueryDict <: AbstractDict{String,String}
-    data::Dict{String,Vector{String}}
+    data::OrderedLists
 end
-QueryDict() = QueryDict(Dict{String,Vector{String}}())
+QueryDict() = QueryDict(OrderedLists())
+
+# (text that isn't UTF-8, from %ff and the like, has U+FFFD in its place, as Django's decoding with errors="replace")
+valid_text(s::AbstractString) = isvalid(s) ? String(s) : String(map(c -> isvalid(c) ? c : '\ufffd', s))
 
 function QueryDict(qs::AbstractString)
-    d = Dict{String,Vector{String}}()
+    q = QueryDict()
     for part in split(qs, '&'; keepempty = false)
         k, v = occursin('=', part) ? split(part, '='; limit = 2) : (part, "")
-        push!(get!(d, urlunquote(k), String[]), urlunquote(v))
+        push!(get!(q.data, valid_text(urlunquote(k)), String[]), valid_text(urlunquote(v)))
     end
-    QueryDict(d)
+    q
 end
 
-function QueryDict(d::AbstractDict)
+function QueryDict(d::Union{AbstractDict,AbstractVector{<:Pair}})
     q = QueryDict()
     for (k, v) in d
         q.data[string(k)] = v isa AbstractVector ? String[string(x) for x in v] : [string(v)]
@@ -42,8 +66,33 @@ function Base.iterate(q::QueryDict, st...)
     (r[1].first => last(r[1].second)), r[2]
 end
 Base.setindex!(q::QueryDict, v, k::AbstractString) = (q.data[k] = [string(v)]; q)
+Base.setindex!(q::QueryDict, v, k::Symbol) = (q[string(k)] = v)
+Base.delete!(q::QueryDict, k) = (delete!(q.data, string(k)); q)
+Base.empty!(q::QueryDict) = (empty!(q.data); q)
+"The key's last value, removed with its list (`default` if missing)."
+Base.pop!(q::QueryDict, k) = (v = q[string(k)]; delete!(q, k); v)
+Base.pop!(q::QueryDict, k, default) = haskey(q, string(k)) ? pop!(q, k) : default
+"The key's last value, setting it to `default` first if it's missing (Django's setdefault)."
+Base.get!(q::QueryDict, k, default) = (haskey(q, string(k)) || (q[string(k)] = default); q[string(k)])
 "All values submitted for key `k`."
 getlist(q::QueryDict, k) = get(q.data, string(k), String[])
+"Replace the key's values (Django's setlist)."
+setlist!(q::QueryDict, k, vs) = (q.data[string(k)] = String[string(v) for v in vs]; q)
+"Add a value to the key's list (Django's appendlist)."
+appendlist!(q::QueryDict, k, v) = (push!(get!(q.data, string(k), String[]), string(v)); q)
+"The key's list, set to `default` first if it's missing (Django's setlistdefault)."
+setlistdefault!(q::QueryDict, k, default = String[]) = get!(q.data, string(k), String[string(v) for v in default])
+"Each key with all its values, in order (Django's lists())."
+lists(q::QueryDict) = [k => copy(v) for (k, v) in q.data]
+"Add another dict's values to the lists, as Django's QueryDict.update (it appends, not replaces)."
+function update!(q::QueryDict, other)
+    for (k, v) in (other isa QueryDict ? lists(other) : pairs_of(other))
+        for x in (v isa AbstractVector ? v : [v])
+            appendlist!(q, k, x)
+        end
+    end
+    q
+end
 
 """
     get(q::QueryDict, key, T) -> T or nothing
@@ -67,9 +116,17 @@ function parse_param(::Type{T}, raw::AbstractString) where {T}
     T === DateTime && return parse_input_datetime(s, :datetime)
     nothing
 end
-Base.copy(q::QueryDict) = QueryDict(Dict(k => copy(v) for (k, v) in q.data))
-"Re-encode as a query string."
-urlencode(q::QueryDict) = urlencode(Dict(k => v for (k, v) in q.data))
+Base.copy(q::QueryDict) = QueryDict(copy(q.data))
+"""
+    urlencode(q::QueryDict; safe = "")
+
+Re-encode as a query string, keys in their order, as Django's: characters in `safe` (e.g. "/")
+are left as they are.
+"""
+function urlencode(q::QueryDict; safe::AbstractString = "")
+    enc(s) = (e = urlquote(s); isempty(safe) ? e : foldl((t, c) -> replace(t, urlquote(string(c)) => string(c)), safe; init = e))
+    join([enc(k) * "=" * enc(v) for (k, vs) in q.data for v in vs], "&")
+end
 
 """
     Request
@@ -113,14 +170,46 @@ function Request(method::AbstractString, target::AbstractString;
     req
 end
 
+"""
+    parse_cookies(header) -> Dict{String,String}
+
+A Cookie header's cookies, as Django's `parse_cookie` (and the browsers) read it: `;`-separated
+`name=value` pairs, a chunk without `=` being a value with an empty name, later names winning,
+and quoted values unquoted (`"a\\073b"` is `a;b`).
+"""
 function parse_cookies(s::AbstractString)
     d = Dict{String,String}()
-    for part in split(s, ';'; keepempty = false)
-        occursin('=', part) || continue
-        k, v = split(part, '='; limit = 2)
-        d[strip(k)] = strip(strip(v), '"')
+    for chunk in split(s, ';')
+        k, v = occursin('=', chunk) ? split(chunk, '='; limit = 2) : ("", chunk)
+        k, v = strip(k), strip(v)
+        (isempty(k) && isempty(v)) || (d[String(k)] = cookie_unquote(v))
     end
     d
+end
+"Python's http.cookies._unquote: a quoted value without its quotes, \\ooo (octal) and \\x escapes read."
+function cookie_unquote(v::AbstractString)
+    (length(v) >= 2 && startswith(v, '"') && endswith(v, '"')) || return String(v)
+    s = v[nextind(v, 1):prevind(v, lastindex(v))]
+    replace(s, r"\\[0-3][0-7][0-7]" => m -> string(Char(parse(Int, m[2:end]; base = 8))), r"\\(.)" => s"\1")
+end
+# Python's http.cookies._LegalChars: other characters make the value quoted, with octal escapes
+const COOKIE_LEGAL = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#\$%&'*+-.^_`|~:")
+"A cookie value as Python's SimpleCookie writes it: as it is, or quoted with `;`, `,`, spaces and the like as \\ooo."
+function cookie_quote(v::AbstractString)
+    all(in(COOKIE_LEGAL), v) && return String(v)
+    io = IOBuffer()
+    print(io, '"')
+    for c in v
+        if c == '"' || c == '\\'
+            print(io, '\\', c)
+        elseif c in COOKIE_LEGAL || UInt32(c) > 0xff
+            print(io, c)
+        else
+            print(io, '\\', string(UInt32(c); base = 8, pad = 3))
+        end
+    end
+    print(io, '"')
+    String(take!(io))
 end
 
 """
@@ -330,12 +419,50 @@ mutable struct DeferredTemplate
     context_data::Dict{String,Any}
 end
 
-function HttpResponse(content = ""; status::Integer = 200,
+"""
+A response body's bytes, as Django's make_bytes: text or bytes as they are, anything else iterable
+(a vector of chunks, a generator) its chunks joined, any other value its text (`12345`).
+"""
+content_bytes(c::AbstractVector{UInt8}) = Vector{UInt8}(c)
+content_bytes(c::AbstractString) = Vector{UInt8}(codeunits(c))
+content_bytes(c::Union{AbstractVector,Base.Generator,Tuple}) = reduce(vcat, (content_bytes(x) for x in c); init = UInt8[])
+content_bytes(c) = Vector{UInt8}(codeunits(string(c)))
+
+"Django's check: a status code is an integer from 100 to 599."
+function check_status(status)
+    s = status isa Integer ? Int(status) : status isa AbstractString ? tryparse(Int, status) : nothing
+    s === nothing && throw(ArgumentError("HTTP status code must be an integer."))
+    100 <= s <= 599 || throw(ArgumentError("HTTP status code must be an integer from 100 to 599."))
+    s
+end
+
+function HttpResponse(content = ""; status = 200,
                       content_type = "text/html; charset=utf-8", headers = Pair{String,String}[])
-    body = content isa AbstractVector{UInt8} ? Vector{UInt8}(content) : Vector{UInt8}(codeunits(string(content)))
-    hs = Pair{String,String}[string(k) => string(v) for (k, v) in headers]
+    body = content_bytes(content)
+    hs = Pair{String,String}[header_pair(k, v) for (k, v) in headers]
     any(h -> header_eq(h.first, "content-type"), hs) || pushfirst!(hs, "Content-Type" => content_type)
-    HttpResponse(Int(status), hs, body, String[], nothing, String[], nothing, nothing)
+    HttpResponse(check_status(status), hs, body, String[], nothing, String[], nothing, nothing)
+end
+
+"""
+Thrown for a header name or value with a newline in it (Django's BadHeaderError): a value from the
+request put into a header could otherwise add headers of its own.
+"""
+struct BadHeaderError <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::BadHeaderError) = print(io, "BadHeaderError: ", e.msg)
+"""
+A header as it can be sent, as Django's: a newline in the name or value is a `BadHeaderError`, a
+name must be ASCII, and a value that isn't Latin-1 is MIME-encoded (RFC 2047: `=?utf-8?b?...?=`).
+"""
+function header_pair(name, value)
+    k, v = string(name), string(value)
+    (occursin('\n', k) || occursin('\r', k)) && throw(BadHeaderError("Header names can't contain newlines (got $(repr(k)))"))
+    (occursin('\n', v) || occursin('\r', v)) && throw(BadHeaderError("Header values can't contain newlines (got $(repr(v)))"))
+    isascii(k) || throw(ArgumentError("Header names must be ASCII (got $(repr(k)))"))
+    all(c -> UInt32(c) <= 0xff, v) || (v = "=?utf-8?b?" * base64encode(v) * "?=")
+    k => v
 end
 
 function Base.getproperty(r::HttpResponse, s::Symbol)
@@ -378,10 +505,17 @@ function getheader(r::HttpResponse, name::AbstractString, default = nothing)
     default
 end
 function setheader!(r::HttpResponse, name::AbstractString, value)
+    h = header_pair(name, value)
     filter!(h -> !header_eq(h.first, name), r.headers)
-    push!(r.headers, string(name) => string(value))
+    push!(r.headers, h)
     r
 end
+"Remove a header (Django's `del response[name]`)."
+delheader!(r::HttpResponse, name::AbstractString) = (filter!(h -> !header_eq(h.first, name), r.headers); r)
+"Add to the body, as Django's HttpResponse.write; returns the number of bytes."
+Base.write(r::HttpResponse, x::Union{AbstractString,AbstractVector{UInt8}}) = (b = content_bytes(x); append!(r.body, b); length(b))
+"Add each chunk to the body (Django's writelines)."
+writelines(r::HttpResponse, xs) = (foreach(x -> write(r, x), xs); nothing)
 hasheader(r::HttpResponse, name) = getheader(r, name) !== nothing
 
 """
@@ -389,12 +523,25 @@ hasheader(r::HttpResponse, name) = getheader(r, name) !== nothing
 """
 function set_cookie!(r::HttpResponse, name, value; max_age = nothing, expires = nothing, path = "/",
                      domain = nothing, secure = false, httponly = false, samesite = "Lax")
-    s = string(name, "=", value, "; Path=", path)
-    max_age !== nothing && (s *= "; Max-Age=$(Int(max_age))")
+    # (as Django's: an expiry date becomes a Max-Age (so not with max_age as well); a max_age may be a
+    # Period or a fraction; SameSite is Lax, Strict or None; the value is quoted when it holds ; , spaces and the like)
+    expires isa Union{DateTime,TimeZones.ZonedDateTime} && max_age !== nothing &&
+        throw(ArgumentError("'expires' and 'max_age' can't be used together."))
+    max_age isa Dates.Period && (max_age = Dates.value(convert(Dates.Millisecond, max_age)) ÷ 1000)
+    max_age === nothing || (max_age = trunc(Int, max_age))
+    if expires isa Union{DateTime,TimeZones.ZonedDateTime}
+        e = expires isa TimeZones.ZonedDateTime ? DateTime(TimeZones.astimezone(expires, TimeZones.tz"UTC")) : expires
+        max_age = max(0, Dates.value(convert(Dates.Millisecond, e - now(UTC))) ÷ 1000 + 1)
+        expires = nothing
+    end
+    samesite === nothing || lowercase(string(samesite)) in ("lax", "none", "strict") ||
+        throw(ArgumentError("samesite must be \"lax\", \"none\", or \"strict\"."))
+    s = string(name, "=", cookie_quote(string(value)), "; Path=", path)
+    max_age !== nothing && (s *= "; Max-Age=$(max_age)")
     if expires !== nothing
-        s *= "; Expires=" * http_date(expires)
+        s *= "; Expires=" * (expires isa AbstractString ? expires : http_date(expires))
     elseif max_age !== nothing
-        s *= "; Expires=" * http_date(now(UTC) + Second(Int(max_age)))
+        s *= "; Expires=" * http_date(now(UTC) + Second(max_age))
     end
     domain !== nothing && (s *= "; Domain=$domain")
     secure && (s *= "; Secure")
@@ -404,8 +551,13 @@ function set_cookie!(r::HttpResponse, name, value; max_age = nothing, expires = 
     push!(r.cookies, s)
     r
 end
-delete_cookie!(r::HttpResponse, name; path = "/", domain = nothing, samesite = "Lax") =
-    set_cookie!(r, name, ""; max_age = 0, expires = DateTime(1970, 1, 1), path = path, domain = domain, samesite = samesite)
+"Delete a cookie: Secure for a `__Secure-` or `__Host-` name or with SameSite=None, as browsers require (Django's)."
+function delete_cookie!(r::HttpResponse, name; path = "/", domain = nothing, samesite = "Lax")
+    secure = startswith(string(name), "__Secure-") || startswith(string(name), "__Host-") ||
+             (samesite !== nothing && lowercase(string(samesite)) == "none")
+    set_cookie!(r, name, ""; max_age = 0, expires = "Thu, 01 Jan 1970 00:00:00 GMT", path = path, domain = domain,
+                samesite = samesite, secure = secure)
+end
 
 signed_cookie_salt(name, salt) = string("juango.signed_cookies.", name, salt)
 
@@ -453,11 +605,36 @@ const NO_COOKIE_DEFAULT = NoCookieDefault()
 JsonResponse(data; status = 200, kw...) =
     HttpResponse(JSON.json(data); status = status, content_type = "application/json", kw...)
 
-function HttpResponseRedirect(url; status = 302)
+"""
+A redirect to a URL Django's redirects refuse (`DisallowedRedirect`, answered with 400): a scheme
+other than `allowed_schemes` (`javascript:`, `data:`, `file:`...), or a URL longer than 2048 characters.
+"""
+struct DisallowedRedirect <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::DisallowedRedirect) = print(io, "DisallowedRedirect: ", e.msg)
+const MAX_REDIRECT_URL_LENGTH = 2048
+function check_redirect_url(url::AbstractString, allowed_schemes)
+    length(url) > MAX_REDIRECT_URL_LENGTH && throw(DisallowedRedirect("Unsafe redirect exceeding $MAX_REDIRECT_URL_LENGTH characters"))
+    # (as Python's urlsplit: leading spaces and control characters, and tabs and newlines anywhere, are ignored)
+    u = filter(c -> !(c in ('\t', '\r', '\n')), lstrip(c -> c <= ' ', url))
+    m = match(r"^([A-Za-z][A-Za-z0-9+.\-]*):", u)
+    m === nothing || lowercase(m[1]) in allowed_schemes ||
+        throw(DisallowedRedirect("Unsafe redirect to URL with protocol '$(lowercase(m[1]))'"))
+    nothing
+end
+"""
+    HttpResponseRedirect(url; status = 302, allowed_schemes = ("http", "https", "ftp"))
+
+A redirect. As Django's, a URL with another scheme (`javascript:`...) or over 2048 characters is
+refused with `DisallowedRedirect`.
+"""
+function HttpResponseRedirect(url; status = 302, allowed_schemes = ("http", "https", "ftp"))
+    check_redirect_url(string(url), allowed_schemes)
     r = HttpResponse(""; status = status)
     setheader!(r, "Location", url)
 end
-HttpResponsePermanentRedirect(url) = HttpResponseRedirect(url; status = 301)
+HttpResponsePermanentRedirect(url; kw...) = HttpResponseRedirect(url; status = 301, kw...)
 HttpResponseNotFound(content = "<h1>Not Found</h1>") = HttpResponse(content; status = 404)
 HttpResponseForbidden(content = "<h1>403 Forbidden</h1>") = HttpResponse(content; status = 403)
 HttpResponseBadRequest(content = "<h1>Bad Request (400)</h1>") = HttpResponse(content; status = 400)

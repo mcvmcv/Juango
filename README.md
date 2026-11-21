@@ -952,6 +952,14 @@ error emails). `set_signed_cookie!(resp, name, value)` and `get_signed_cookie(re
 keep a cookie the client can read but not change. `HttpResponseGone`, `HttpResponseNotModified`
 and `HttpResponseServerError` complete the response shortcuts.
 
+Requests and responses follow Django's rules:
+
+- **QueryDict.** `req.GET` and `req.POST` keep their keys in order, and a `+` decodes as a space. Besides `getlist`, there are Django's `setlist!`, `appendlist!`, `setlistdefault!`, `lists` and `update!` (which appends, as Django's does), and `urlencode(q; safe = "/")`. Bytes that aren't UTF-8 decode as U+FFFD.
+- **Headers.** A header name or value with a newline in it throws `BadHeaderError`, so a request value copied into a header can't add headers of its own. A value that isn't Latin-1 is MIME-encoded. `delheader!` removes a header.
+- **Redirects.** `HttpResponseRedirect` and `redirect` refuse a URL whose scheme isn't http, https or ftp (`javascript:`, `data:`, `file:`...), or one longer than 2048 characters. They throw `DisallowedRedirect`, which is answered with 400 and logged to `juango.security.DisallowedRedirect`. `allowed_schemes` changes the list.
+- **Cookies.** A cookie value containing `;`, `,`, spaces and the like is quoted, and the request's cookies are parsed as Django's `parse_cookie` reads them. `max_age` takes a number or a `Period`. An `expires` date sets Max-Age as well, so the two can't both be given. `samesite` must be Lax, Strict or None. Deleting a `__Secure-` or `__Host-` cookie, or one with SameSite=None, marks it Secure.
+- **Responses.** The status must be from 100 to 599. Content can be text, bytes, a list of chunks or a generator, and `write(resp, s)` and `writelines(resp, chunks)` add to the body. `content_disposition` writes Django's Content-Disposition header.
+
 #### Transactions, error pages and TemplateResponse
 
 ```julia

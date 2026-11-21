@@ -388,7 +388,7 @@ end
         @test !Juango.is_streaming(r) && String(copy(r.body)) == read(fpath, String)     # read at once: its length is known (#134)
         @test text(r) == read(fpath, String) && getheader(r, "Content-Length") == string(filesize(fpath))
         @test getheader(r, "Content-Type") == "text/csv; charset=utf-8"
-        @test getheader(r, "Content-Disposition") == "attachment; filename*=UTF-8''report%20%C3%BC.csv"
+        @test getheader(r, "Content-Disposition") == "attachment; filename*=utf-8''report%20%C3%BC.csv"
         @test Juango.content_disposition("a\"b.txt") == "inline; filename=\"a\\\"b.txt\""
         @test get(c, "/missing/").status == 404
         @test isempty(text(request(c, "HEAD", "/gen/")))
@@ -1739,7 +1739,7 @@ end
     @test body(r2) == "on disk" && getheader(r2, "Content-Disposition") == "inline; filename=\"d.txt\""
     io = IOBuffer("streamed"); r3 = FileResponse(io; filename = "s.bin", as_attachment = true)
     @test body(r3) == "streamed" && getheader(r3, "Content-Length") == "8" && !isopen(io)
-    @test content_disposition("Résumé.pdf"; attachment = true) == "attachment; filename*=UTF-8''R%C3%A9sum%C3%A9.pdf"
+    @test content_disposition("Résumé.pdf"; attachment = true) == "attachment; filename*=utf-8''R%C3%A9sum%C3%A9.pdf"
 end
 
 @testset "FilterSet (#137)" begin

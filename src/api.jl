@@ -22,7 +22,7 @@ export settings, configure!, declare_settings!
 export Request, HttpResponse, JsonResponse, HttpResponseRedirect, HttpResponsePermanentRedirect,
        HttpResponseNotFound, HttpResponseForbidden, HttpResponseBadRequest, HttpResponseNotAllowed,
        HttpResponseGone, HttpResponseNotModified, HttpResponseServerError, set_signed_cookie!, get_signed_cookie,
-       StreamingHttpResponse, FileResponse, protected_media, content_disposition, TemplateResponse, Http404, PermissionDenied, BadRequest, QueryDict, getlist,
+       StreamingHttpResponse, FileResponse, protected_media, content_disposition, TemplateResponse, Http404, PermissionDenied, BadRequest, QueryDict, getlist, setlist!, appendlist!, setlistdefault!, lists, update!, delheader!, writelines, BadHeaderError, DisallowedRedirect,
        set_cookie!, delete_cookie!, getheader, setheader!, json_body,
        set_expiry!, get_expiry_age, get_expiry_date, get_expire_at_browser_close, set_test_cookie!, test_cookie_worked, delete_test_cookie!
 export EventStreamResponse, sse_event, websocket, ws_send, ws_receive, ws_close, ws_isopen
@@ -131,7 +131,7 @@ export App, get_model, lookup_value, concrete_fields, many_to_many, attname, col
        @background, enqueue, get_result, TaskResult
 # server and commands
 export runserver, execute_from_command_line, call_command, CommandError
-public command_io, required_fields
+public command_io, required_fields, parse_cookies, urlencode, hasheader
 
 # --- public, not exported ----------------------------------------------------------------------------
 

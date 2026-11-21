@@ -40,7 +40,7 @@ function SessionMiddleware(get_response)
                         "The session cookie is $(ncodeunits(s.key)) bytes: browsers may drop it. Store less in signed-cookie sessions."; request = req)
                     browser = get_expire_at_browser_close(s)       # (no Max-Age: gone when the browser closes)
                     age = browser ? nothing : get_expiry_age(s)
-                    set_cookie!(resp, name, s.key; max_age = age, expires = age === nothing ? nothing : now(Dates.UTC) + Second(age),
+                    set_cookie!(resp, name, s.key; max_age = age,   # (Expires follows from Max-Age)
                                 httponly = get(st, :SESSION_COOKIE_HTTPONLY, true), secure = st.SESSION_COOKIE_SECURE,
                                 samesite = get(st, :SESSION_COOKIE_SAMESITE, "Lax"), path = path, domain = domain)
                 end

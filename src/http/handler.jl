@@ -214,6 +214,11 @@ end
 
 function response_for_exception(req::Request, e, bt)
     e isa NPlusOneError && get(req.meta, :test_client, false) === true && throw(e)     # (NPLUSONE = :raise fails the test itself)
+    # (as Django's SuspiciousOperations: logged to the security logger and answered with 400)
+    if e isa DisallowedRedirect
+        log!("juango.security.DisallowedRedirect", :error, e.msg; request = req)
+        e = BadRequest(e.msg)
+    end
     if e isa Http404
         log!("juango.request", :warning, "Not Found: $(req.path)"; request = req, status_code = 404)
         settings.DEBUG && return technical_404(req, e)
