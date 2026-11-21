@@ -559,14 +559,36 @@ function LocaleMiddleware(get_response)
 end
 
 """
-`set_language` view: POST `language` (and `next`) to choose a language; it is remembered in
-a cookie and the user goes back to `next`, with its language prefix swapped.
+`set_language` view, as Django's: POST `language` (and `next`) to choose a language. It's
+remembered in the `LANGUAGE_COOKIE_NAME` cookie (with the `LANGUAGE_COOKIE_AGE`, `_PATH`,
+`_DOMAIN`, `_SECURE`, `_HTTPONLY` and `_SAMESITE` settings), and the user goes back to `next`
+(or the Referer, or `/`, when `next` isn't safe), its language prefix swapped. A GET changes
+nothing. A request that doesn't accept HTML (fetch, ajax) and gives no `next` gets 204.
 """
 function set_language(req)
-    nxt = safe_next(req, "/")
-    lang = supported_language(get(req.POST, "language", get(req.GET, "language", "")))
-    resp = HttpResponseRedirect(lang === nothing ? nxt : swap_language_prefix(nxt, lang))
-    lang === nothing || set_cookie!(resp, settings.LANGUAGE_COOKIE_NAME, lang; max_age = 365 * 24 * 3600)
+    host = [get_host(req)]
+    ok(u) = u !== nothing && !isempty(u) && url_has_allowed_host_and_scheme(u, host; require_https = is_secure(req))
+    nxt = get(req.POST, "next", get(req.GET, "next", nothing))
+    if (nxt !== nothing || accepts(req, "text/html")) && !ok(nxt)
+        ref = header(req, "referer")
+        nxt = ref === nothing ? nothing : urlunquote(ref)       # (the Referer may be encoded)
+        ok(nxt) || (nxt = "/")
+    end
+    resp = nxt === nothing ? HttpResponse(""; status = 204) : HttpResponseRedirect(nxt)
+    if req.method == "POST"
+        lang = supported_language(get(req.POST, "language", ""))
+        if lang !== nothing
+            if nxt !== nothing
+                t = swap_language_prefix(nxt, lang)
+                t == nxt || (resp = HttpResponseRedirect(t))
+            end
+            st = settings
+            set_cookie!(resp, st.LANGUAGE_COOKIE_NAME, lang; max_age = get(st, :LANGUAGE_COOKIE_AGE, nothing),
+                        path = get(st, :LANGUAGE_COOKIE_PATH, "/"), domain = get(st, :LANGUAGE_COOKIE_DOMAIN, nothing),
+                        secure = get(st, :LANGUAGE_COOKIE_SECURE, false), httponly = get(st, :LANGUAGE_COOKIE_HTTPONLY, false),
+                        samesite = get(st, :LANGUAGE_COOKIE_SAMESITE, nothing))
+        end
+    end
     resp
 end
 function swap_language_prefix(path, lang)

@@ -387,6 +387,27 @@ function url_has_allowed_host_and_scheme(url, allowed_hosts; require_https::Bool
     hosts = Set(something(host_name(string(h)), "") for h in (allowed_hosts isa AbstractString ? [allowed_hosts] : allowed_hosts))
     host in hosts
 end
+"""
+    accepts(req, media_type) -> Bool
+
+Whether the request's Accept header takes `media_type` (Django's `HttpRequest.accepts`):
+`text/html` is accepted by `text/html`, `text/*` and `*/*`, and by a request without an Accept header.
+"""
+function accepts(req::Request, media_type::AbstractString)
+    a = header(req, "accept")
+    (a === nothing || isempty(strip(a))) && return true
+    main, sub = split(lowercase(media_type), '/'; limit = 2)
+    for part in split(a, ',')
+        t = lowercase(strip(split(part, ';')[1]))
+        q = match(r";\s*q=([0-9.]+)", part)
+        q !== nothing && something(tryparse(Float64, q[1]), 1.0) == 0 && continue
+        t == "*/*" && return true
+        m, s = occursin('/', t) ? split(t, '/'; limit = 2) : (t, "")
+        m == main && (s == "*" || s == sub) && return true
+    end
+    false
+end
+
 full_path(req::Request) = isempty(req.query_string) ? req.path : req.path * "?" * req.query_string
 build_absolute_uri(req::Request, loc = full_path(req)) =
     (is_secure(req) ? "https://" : "http://") * get_host(req) * loc
@@ -632,7 +653,7 @@ refused with `DisallowedRedirect`.
 function HttpResponseRedirect(url; status = 302, allowed_schemes = ("http", "https", "ftp"))
     check_redirect_url(string(url), allowed_schemes)
     r = HttpResponse(""; status = status)
-    setheader!(r, "Location", url)
+    setheader!(r, "Location", iri_to_uri(url))        # (as Django's: a URL with é in it goes as %C3%A9)
 end
 HttpResponsePermanentRedirect(url; kw...) = HttpResponseRedirect(url; status = 301, kw...)
 HttpResponseNotFound(content = "<h1>Not Found</h1>") = HttpResponse(content; status = 404)

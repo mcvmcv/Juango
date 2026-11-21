@@ -172,9 +172,11 @@ function handle_request_inner(req::Request)
     end
 end
 
-function try_render(names, ctx, status)
+# (as Django's defaults: the 404 and 403 pages get the request, for csrf_token and the context processors;
+# the 400 and 500 pages don't, so a broken context processor can't break them too)
+function try_render(names, ctx, status; request = nothing)
     try
-        return HttpResponse(render_to_string(names, ctx); status = status)
+        return HttpResponse(render_to_string(names, ctx; request = request); status = status)
     catch e
         e isa TemplateDoesNotExist || @error "Error rendering error page" exception = e
         return nothing
@@ -224,13 +226,13 @@ function response_for_exception(req::Request, e, bt)
         settings.DEBUG && return technical_404(req, e)
         c = custom_error_response(req, 404, e)
         c === nothing || return c
-        r = try_render("404.html", Dict("request_path" => req.path, "exception" => e.msg), 404)
+        r = try_render("404.html", Dict("request_path" => iri_to_uri(req.path), "exception" => e.msg), 404; request = req)
         return something(r, HttpResponseNotFound("<h1>Not Found</h1><p>The requested resource was not found on this server.</p>"))
     elseif e isa PermissionDenied
         log!("juango.request", :warning, "Forbidden (Permission denied): $(req.path)"; request = req, status_code = 403)
         c = custom_error_response(req, 403, e)
         c === nothing || return c
-        r = try_render("403.html", Dict("exception" => e.msg), 403)
+        r = try_render("403.html", Dict("exception" => e.msg), 403; request = req)
         return something(r, HttpResponseForbidden())
     elseif e isa BadRequest
         log!("juango.request", :warning, "Bad Request: $(req.path): $(e.msg)"; request = req, status_code = 400)

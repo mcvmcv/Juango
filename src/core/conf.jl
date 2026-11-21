@@ -86,6 +86,12 @@ function default_settings()
                        ("zh-hans", "简体中文"), ("ru", "Русский"), ("ar", "العربية")],
         :LOCALE_PATHS => String[],
         :LANGUAGE_COOKIE_NAME => "juango_language",
+        :LANGUAGE_COOKIE_AGE => 365 * 24 * 3600,     # (Django's is None: a session cookie; Juango's keeps it a year)
+        :LANGUAGE_COOKIE_PATH => "/",
+        :LANGUAGE_COOKIE_DOMAIN => nothing,
+        :LANGUAGE_COOKIE_SECURE => false,
+        :LANGUAGE_COOKIE_HTTPONLY => false,
+        :LANGUAGE_COOKIE_SAMESITE => nothing,
         :USE_THOUSAND_SEPARATOR => false,
         :USE_BLANK_CHOICE_DASH => false,     # true: "---------" as the empty choice (Django 6.1's transitional setting), else "- Select an option -"
         :DATE_INPUT_FORMATS => nothing,                # strftime formats forms accept, for languages without their own (nothing: Django's English ones)
@@ -141,6 +147,7 @@ function default_settings()
         :CSRF_COOKIE_AGE => 60 * 60 * 24 * 365,
         :CSRF_HEADER_NAME => "X-CSRFToken",                # also Django's spelling, HTTP_X_CSRFTOKEN
         :CSRF_USE_SESSIONS => false,                        # the secret in the session instead of a cookie
+        :CSRF_FAILURE_TEMPLATE_NAME => "403_csrf.html",       # the CSRF failure page's template, if the project has one
         :CSRF_FAILURE_VIEW => nothing,                      # a view (req; reason) -> response for CSRF failures (403)
         :MESSAGE_STORAGE => :session,                       # :session, :cookie or :fallback (the cookie ones need MessageMiddleware)
         :MESSAGE_LEVEL => 20,                               # messages below this level (info) are dropped

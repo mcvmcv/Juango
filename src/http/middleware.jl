@@ -487,16 +487,47 @@ function csrf_process(req::Request, call; enforce::Union{Nothing,Bool} = nothing
     resp
 end
 
+const CSRF_REASON_NO_REFERER = "Referer checking failed - no Referer."
+const CSRF_REASON_NO_COOKIE = "CSRF cookie not set."
+"The context of the CSRF failure page, as Django's csrf_failure gives `403_csrf.html`."
+function csrf_failure_context(reason)
+    Dict{String,Any}("title" => "Forbidden", "main" => "CSRF verification failed. Request aborted.", "reason" => reason,
+        "no_referer" => reason == CSRF_REASON_NO_REFERER,
+        "no_referer1" => "You are seeing this message because this HTTPS site requires a \u201cReferer header\u201d to be sent by your web browser, but none was sent. This header is required for security reasons, to ensure that your browser is not being hijacked by third parties.",
+        "no_referer2" => "If you have configured your browser to disable \u201cReferer\u201d headers, please re-enable them, at least for this site, or for HTTPS connections, or for \u201csame-origin\u201d requests.",
+        "no_referer3" => "If you are using the <meta name=\"referrer\" content=\"no-referrer\"> tag or including the \u201cReferrer-Policy: no-referrer\u201d header, please remove them. The CSRF protection requires the \u201cReferer\u201d header to do strict referer checking. If you\u2019re concerned about privacy, use alternatives like <a rel=\"noreferrer\" \u2026> for links to third-party sites.",
+        "no_cookie" => reason == CSRF_REASON_NO_COOKIE,
+        "no_cookie1" => "You are seeing this message because this site requires a CSRF cookie when submitting forms. This cookie is required for security reasons, to ensure that your browser is not being hijacked by third parties.",
+        "no_cookie2" => "If you have configured your browser to disable cookies, please re-enable them, at least for this site, or for \u201csame-origin\u201d requests.",
+        "DEBUG" => settings.DEBUG, "more" => "More information is available with DEBUG=True.")
+end
+"""
+The response to a CSRF failure, as Django's: `CSRF_FAILURE_VIEW` if set, else the
+`CSRF_FAILURE_TEMPLATE_NAME` template (`403_csrf.html`) if the project has one, else the built-in
+page. Both explain a missing Referer or cookie; with DEBUG the page also gives the reason and help.
+"""
 function csrf_failure_response(req, reason)
     log!("juango.security.csrf", :warning, "Forbidden (CSRF): $reason: $(req.path)"; request = req, status_code = 403)
     v = settings.CSRF_FAILURE_VIEW
     v === nothing || return to_response(v(req; reason = reason))
-    body = """<!doctype html><html><head><title>403 Forbidden</title></head><body>
-    <h1>Forbidden <span style="color:#666">(403)</span></h1><p>CSRF verification failed. Request aborted.</p>""" *
-           (settings.DEBUG ? "<p>Reason given for failure: <code>$(escape_html(reason))</code></p>" *
-                             "<p>Make sure your form includes <code>{% csrf_token %}</code>.</p>" : "") *
-           "</body></html>"
-    HttpResponseForbidden(body)
+    ctx = csrf_failure_context(reason)
+    r = try_render(get(settings, :CSRF_FAILURE_TEMPLATE_NAME, "403_csrf.html"), ctx, 403)
+    r === nothing || return r
+    e(k) = escape_html(string(ctx[k]))
+    info = (ctx["no_referer"] ? "<p>$(e("no_referer1"))</p><p>$(e("no_referer2"))</p><p>$(e("no_referer3"))</p>" : "") *
+           (ctx["no_cookie"] ? "<p>$(e("no_cookie1"))</p><p>$(e("no_cookie2"))</p>" : "")
+    help = settings.DEBUG ?
+        """<div id="info"><h2>Help</h2><p>Reason given for failure:</p><pre>$(e("reason"))</pre>
+        <p>In general, this can occur when there is a genuine Cross Site Request Forgery, or when Juango\u2019s CSRF mechanism has not been used correctly. For POST forms, you need to ensure:</p>
+        <ul><li>Your browser is accepting cookies.</li>
+        <li>The view function passes a request to the template\u2019s <code>render</code> method.</li>
+        <li>In the template, there is a <code>{% csrf_token %}</code> template tag inside each POST form that targets an internal URL.</li>
+        <li>The form has a valid CSRF token. After logging in in another browser tab or hitting the back button after a login, you may need to reload the page with the form, because the token is rotated after a login.</li></ul>
+        <p>You\u2019re seeing the help section of this page because you have <code>DEBUG = true</code> in your settings. Change that to <code>false</code>, and only the initial error message will be displayed.</p></div>""" :
+        """<div id="explanation"><p><small>$(e("more"))</small></p></div>"""
+    HttpResponseForbidden("""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="robots" content="NONE,NOARCHIVE"><title>403 Forbidden</title></head><body>
+    <div id="summary"><h1>Forbidden <span style="color:#666">(403)</span></h1><p>$(e("main"))</p>$info</div>
+    $help</body></html>""")
 end
 
 # --- context processors --------------------------------------------------------------------------

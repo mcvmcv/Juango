@@ -944,6 +944,8 @@ as Django's `app_name`: `include_urls(blog_patterns; app_name = "blog", namespac
 `reverse_url("blog:post", 3)` and `{% url 'blog:post' 3 %}` give the instance the current request
 is in, or `current_app = "news"`, or the instance named like the app.
 
+`redirect(to)` and `resolve_url(to)` take a URL, a URL name (reversed with the arguments), or a model instance with `get_absolute_url`. As in Django, a name that doesn't reverse is a `NoReverseMatch`, unless it looks like a URL (it has a `/` or a `.`). `redirect(to; preserve_request = true)` keeps the method and body with a 307, or a 308 when permanent. Redirect URLs are percent-encoded to ASCII (`iri_to_uri`). `get_object_or_404` and `get_list_or_404` take a model, a queryset or a related manager, and say so if they're given anything else.
+
 View decorators besides `require_GET`/`require_POST`/`require_safe` and `login_required`:
 `csrf_exempt`, `csrf_protect` (for projects without the middleware), `ensure_csrf_cookie`,
 `xframe_options_exempt`/`_deny`/`_sameorigin`, `gzip_page`, `never_cache`, `cache_page`,
@@ -1622,7 +1624,7 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 - `authenticate`, `login!`, `logout!`, `create_user`, `create_superuser`, `login_required`, `staff_member_required`. `login_required`, `user_passes_test`, `permission_required`, `LoginView` and `LoginRequiredMixin` take `redirect_field_name` (`"next"`; `nothing` for none). `AllowAllUsersModelBackend()` lets inactive users log in (still without permissions), and `AdminPasswordChangeForm` sets someone else's password.
 - Sessions (`req.session["k"] = v`) are stored where `SESSION_ENGINE` says: `:db` (default), `:cache`, `:cached_db`, `:file` (in `SESSION_FILE_PATH`) or `:signed_cookies` (the signed data itself in the cookie, so nothing on the server, but a session can't be revoked early). The session key rotates on login, and changing a password invalidates existing sessions. Sessions and `req.user` load lazily, as in Django: the store is read when a view first uses the session, and the user is looked up when `req.user` is first read (templates that don't use `user` or `perms` don't load it), so requests that don't need them cost no queries. `clearsessions` removes expired database rows and files.
 - CSRF protection on every method except GET, HEAD, OPTIONS and TRACE: `{% csrf_token %}` or an `X-CSRFToken` header. Mark exceptions with `csrf_exempt(view)`. The token (and its cookie) is only created when a page uses it.
-  - Settings as Django's: `CSRF_HEADER_NAME`, `CSRF_COOKIE_NAME`/`_AGE`/`_DOMAIN`/`_PATH`/`_SECURE`/`_HTTPONLY`/`_SAMESITE`, `CSRF_USE_SESSIONS` (the secret in the session, no cookie) and `CSRF_FAILURE_VIEW` (a view `(req; reason)` for the 403).
+  - Settings as Django's: `CSRF_HEADER_NAME`, `CSRF_COOKIE_NAME`/`_AGE`/`_DOMAIN`/`_PATH`/`_SECURE`/`_HTTPONLY`/`_SAMESITE`, `CSRF_USE_SESSIONS` (the secret in the session, no cookie) and `CSRF_FAILURE_VIEW` (a view `(req; reason)` for the 403). Without a failure view, the project's `403_csrf.html` is used if it exists (`CSRF_FAILURE_TEMPLATE_NAME`), with Django's context. Otherwise the built-in page is shown. Both explain a missing Referer or cookie, and with DEBUG they give the reason and help.
   - Pages get a masked form of the token, different on every render, so response compression can't leak it (BREACH). The cookie's plain value is accepted too, for JavaScript that reads it.
   - As in Django, a browser's `Origin` must match the request's scheme and host, or be in `CSRF_TRUSTED_ORIGINS`, where `https://*.example.com` trusts every subdomain. Over HTTPS without an `Origin`, the `Referer` must be this host, a trusted origin's, or one under `CSRF_COOKIE_DOMAIN`.
   - Over HTTPS without an `Origin`, the `Referer` must be an https URL of this site.
@@ -1768,6 +1770,8 @@ urlpatterns = [i18n_patterns(path("about/", about; name = "about")),   # /en/abo
 ```
 
 `get_language_info("pt-br")` gives the same in Julia.
+
+`set_language` (at `i18n/setlang/`) works as Django's. A POST with `language` sets the language cookie and redirects to `next`, with its language prefix swapped. If `next` isn't safe, it goes to the Referer, then `/`. A GET changes nothing. A fetch or ajax request that doesn't accept HTML and gives no `next` gets 204. The cookie follows the `LANGUAGE_COOKIE_NAME`, `_AGE`, `_PATH`, `_DOMAIN`, `_SECURE`, `_HTTPONLY` and `_SAMESITE` settings. Juango's default age is a year; Django's cookie lasts until the browser closes.
 
 - **Catalogues** are standard gettext files at `locale/<lang>/LC_MESSAGES/juango.po`, editable in Poedit, Weblate and similar tools.
   - `manage.jl makemessages -l de` collects strings from `.jl` files and templates and keeps existing translations.

@@ -56,31 +56,52 @@ function render_response!(r::HttpResponse)
 end
 
 """
-    redirect(to, args...; permanent=false, kwargs...)
+    resolve_url(to, args...; kwargs...) -> String
 
-`to` can be a URL (`"/posts/"`, `"https://…"`), a URL pattern name (reversed with
-`args`/`kwargs`), or a model instance with `get_absolute_url` defined.
+Where `to` points, as Django's: a model instance's `get_absolute_url`, a relative URL
+(`"./"`, `"../"`) as it is, a URL pattern name reversed with `args`/`kwargs`, and otherwise text
+that looks like a URL (it has a `/` or a `.`). A name that doesn't reverse and doesn't look like a
+URL is a `NoReverseMatch`, not a redirect to the misspelled name.
 """
-function redirect(to, args...; permanent = false, kwargs...)
-    url = if to isa Model
+function resolve_url(to, args...; kwargs...)
+    if to isa Model
         u = get_absolute_url(to)
-        u === nothing && error("$(typeof(to)) does not define get_absolute_url")
-        u
-    elseif to isa AbstractString && (occursin('/', to) || startswith(to, ".") || occursin(r"^\w+:", to) && occursin("//", to))
-        to
-    else
-        try
-            reverse_url(string(to), args...; kwargs...)
-        catch e
-            e isa NoReverseMatch || rethrow()
-            string(to)
-        end
+        u === nothing && throw(ArgumentError("$(typeof(to)) does not define get_absolute_url"))
+        return string(u)
     end
-    permanent ? HttpResponsePermanentRedirect(url) : HttpResponseRedirect(url)
+    s = string(to)
+    (startswith(s, "./") || startswith(s, "../")) && return s
+    # (a URL with a scheme or a path is used as it is without trying it as a name)
+    (occursin(r"^[A-Za-z][A-Za-z0-9+.\-]*://", s) || startswith(s, "/")) && return s
+    try
+        return reverse_url(s, args...; kwargs...)
+    catch e
+        e isa NoReverseMatch || rethrow()
+        (occursin('/', s) || occursin('.', s)) || rethrow()
+    end
+    s
 end
 
-"Get one object or raise `Http404`."
+"""
+    redirect(to, args...; permanent = false, preserve_request = false, kwargs...)
+
+A redirect to `resolve_url(to, args...; kwargs...)`: a URL (`"/posts/"`, `"https://…"`), a URL
+pattern name (reversed with `args`/`kwargs`), or a model instance with `get_absolute_url`.
+`preserve_request = true` keeps the method and body (307, or 308 when permanent; Django 5.2).
+"""
+function redirect(to, args...; permanent = false, preserve_request = false, kwargs...)
+    url = resolve_url(to, args...; kwargs...)
+    HttpResponseRedirect(url; status = preserve_request ? (permanent ? 308 : 307) : (permanent ? 301 : 302))
+end
+
+# (as Django's: a model, its manager's queryset or a QuerySet; anything else is a mistake worth saying so)
+function check_queryset_arg(@nospecialize(qs), fname)
+    qs isa QuerySet || (qs isa Type && qs <: Model) ||
+        throw(ArgumentError("First argument to $fname() must be a Model, Manager, or QuerySet, not '$(qs isa Type ? nameof(qs) : nameof(typeof(qs)))'."))
+end
+"Get one object or raise `Http404` (more than one is still `MultipleObjectsReturned`)."
 function get_object_or_404(@nospecialize(qs), qargs::Q...; kw...)
+    check_queryset_arg(qs, "get_object_or_404")
     try
         get(qs, qargs...; kw...)
     catch e
@@ -90,6 +111,7 @@ function get_object_or_404(@nospecialize(qs), qargs::Q...; kw...)
 end
 "Filter, raising `Http404` if nothing matches."
 function get_list_or_404(@nospecialize(qs), qargs::Q...; kw...)
+    check_queryset_arg(qs, "get_list_or_404")
     v = collect(filter(qs isa Type ? objects(qs) : qs, qargs...; kw...))
     isempty(v) && throw(Http404("No objects match the given query."))
     v

@@ -166,6 +166,21 @@ function path_quote(s::AbstractString)
 end
 urlunquote(s) = URIs.unescapeuri(replace(string(s), '+' => ' '))
 
+"""
+    iri_to_uri(iri) -> String
+
+An IRI as a URI, as Django's: non-ASCII characters (as UTF-8) and the few ASCII ones a URL can't
+hold (spaces, quotes, `<>\\^`{|}`) percent-encoded; `%XX` escapes already there are kept. Redirects
+use it, so a `Location` header is always ASCII.
+"""
+function iri_to_uri(iri)
+    s = string(iri)
+    keep(b) = (UInt8('a') <= b <= UInt8('z')) || (UInt8('A') <= b <= UInt8('Z')) || (UInt8('0') <= b <= UInt8('9')) ||
+              b in codeunits("_.-~/#%[]=:;\$&()+,!?*@'")
+    all(keep, codeunits(s)) && return s
+    join(keep(b) ? string(Char(b)) : "%" * uppercase(string(b; base = 16, pad = 2)) for b in codeunits(s))
+end
+
 "Encode a dict / pairs as `application/x-www-form-urlencoded`."
 function urlencode(data)
     parts = String[]

@@ -80,7 +80,7 @@ export Form, @form, ModelForm, is_valid, add_widget_attrs!, add_error!, as_p, cl
        modelform_factory, fields_for_model, construct_instance, model_to_dict, ErrorDict, non_form_errors, total_error_count, all_valid, set_field!, delete_field!
 # views
 export recording, recorded, undo_recorded!, undo_problem, UndoProblem, not_recording, undoing, undoing_recorded, has_changes,
-       render, redirect, query_param, component!, get_text_list, ModelResource, export_data, export_rows, export_download, import_data,
+       render, redirect, resolve_url, query_param, component!, get_text_list, ModelResource, export_data, export_rows, export_download, import_data,
        read_table, parse_csv, read_xlsx, excel_date, has_errors, ImportResult, API, route!, add_router!, api_urls, ModelSchema, openapi_schema,
        paginate_api, api_key_auth, bearer_auth, session_auth, get_object_or_404, get_list_or_404, TemplateView, RedirectView, ListView,
        DetailView, CreateView, UpdateView, DeleteView, FormView, ArchiveIndexView, YearArchiveView,
@@ -131,7 +131,7 @@ export App, get_model, lookup_value, concrete_fields, many_to_many, attname, col
        @background, enqueue, get_result, TaskResult
 # server and commands
 export runserver, execute_from_command_line, call_command, CommandError
-public command_io, required_fields, parse_cookies, urlencode, hasheader
+public command_io, required_fields, parse_cookies, urlencode, hasheader, accepts, iri_to_uri
 
 # --- public, not exported ----------------------------------------------------------------------------
 
