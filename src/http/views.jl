@@ -131,12 +131,22 @@ struct Paginator
     per_page::Int
     count::Int
     num_pages::Int
-    Paginator(@nospecialize(items), per_page::Int, count::Int, num_pages::Int) = new(items, per_page, count, num_pages)
+    orphans::Int
+    allow_empty_first_page::Bool
+    Paginator(@nospecialize(items), per_page::Int, count::Int, num_pages::Int, orphans::Int = 0, allow_empty_first_page::Bool = true) =
+        new(items, per_page, count, num_pages, orphans, allow_empty_first_page)
 end
-Base.@nospecializeinfer function Paginator(@nospecialize(items), per_page::Integer)
+"""
+    Paginator(items, per_page; orphans = 0, allow_empty_first_page = true)
+
+As Django's: the last page takes up to `orphans` more items rather than leaving them on a page of
+their own; with `allow_empty_first_page = false` an empty list has no pages.
+"""
+Base.@nospecializeinfer function Paginator(@nospecialize(items), per_page::Integer; orphans::Integer = 0, allow_empty_first_page::Bool = true)
     items isa QuerySet && warn_unordered(items, "Paginating")          # (Django's UnorderedObjectListWarning)
     n = items isa QuerySet ? count(items) : length(items)
-    Paginator(items, per_page, n, max(1, cld(n, per_page)))
+    pages = n == 0 && !allow_empty_first_page ? 0 : cld(max(1, n - orphans), per_page)
+    Paginator(items, Int(per_page), n, pages, Int(orphans), allow_empty_first_page)
 end
 
 struct Page
@@ -169,7 +179,7 @@ function page(p::Paginator, n)
     num = n isa Integer ? Int(n) : n == "last" ? p.num_pages : something(tryparse(Int, string(n)), 0)
     (1 <= num <= p.num_pages) || throw(Http404("Invalid page ($n)"))
     lo = (num - 1) * p.per_page + 1
-    hi = min(num * p.per_page, p.count)
+    hi = num * p.per_page + p.orphans >= p.count ? p.count : num * p.per_page      # (the last page takes the orphans)
     objs = p.items isa QuerySet ? any_vector(fetch(p.items[lo:max(hi, lo - 1)])) : collect(Any, p.items[lo:hi])
     Page(objs, num, p, num < p.num_pages, num > 1, p.num_pages > 1,
          num < p.num_pages ? num + 1 : nothing, num > 1 ? num - 1 : nothing,
@@ -235,7 +245,20 @@ Base.@nospecializeinfer function generic_view(run, kind::Symbol, @nospecialize(m
     for k in keys(o)
         k in HOOKS || k in GENERIC_OPTIONS || throw(ArgumentError("$kind: unknown option '$k'"))
     end
-    view = (req::Request; kw...) -> run(ViewCall(kind, model, req, Dict{Symbol,Any}(kw), copy(o), nothing, nothing, nothing))
+    # (as Django's View: methods the view doesn't handle get 405 with an Allow header, OPTIONS the Allow header)
+    allowed = String[uppercase(string(m)) for m in get(o, :http_method_names, VIEW_METHODS[kind])]
+    "GET" in allowed && !("HEAD" in allowed) && push!(allowed, "HEAD")
+    "OPTIONS" in allowed || push!(allowed, "OPTIONS")
+    view = function (req::Request; kw...)
+        req.method in allowed || return HttpResponseNotAllowed(allowed)
+        if req.method == "OPTIONS"
+            r = HttpResponse("")
+            setheader!(r, "Allow", join(allowed, ", "))
+            setheader!(r, "Content-Length", "0")
+            return r
+        end
+        run(ViewCall(kind, model, req, Dict{Symbol,Any}(kw), copy(o), nothing, nothing, nothing))
+    end
     test = get(o, :test_func, nothing)
     # (Django's UserPassesTestMixin: a logged-in user who fails it gets 403, an anonymous one the login page)
     test === nothing || (view = UserPassesTestMixin(view, test; login_url = get(o, :login_url, nothing),
@@ -251,7 +274,16 @@ end
 const GENERIC_OPTIONS = Set([:template, :extra_context, :queryset, :paginate_by, :context_object_name, :allow_empty,
     :pk_kwarg, :slug_kwarg, :slug_field, :fields, :success_url, :success_message, :initial, :login_required,
     :permission_required, :test_func, :login_url, :raise_exception, :date_field, :allow_future, :make_object_list,
-    :form, :object_permission_required, :week_format])
+    :form, :object_permission_required, :week_format, :month_format, :http_method_names, :ordering, :page_kwarg,
+    :paginate_orphans, :query_pk_and_slug, :template_name_suffix])
+
+# The methods each view answers, as Django's (HEAD with GET, and OPTIONS, are added); `http_method_names` replaces them.
+const READ_METHODS = ("GET",)
+const VIEW_METHODS = Dict{Symbol,Any}(:TemplateView => READ_METHODS, :ListView => READ_METHODS, :DetailView => READ_METHODS,
+    :ArchiveIndexView => READ_METHODS, :YearArchiveView => READ_METHODS, :MonthArchiveView => READ_METHODS,
+    :DayArchiveView => READ_METHODS, :WeekArchiveView => READ_METHODS, :TodayArchiveView => READ_METHODS,
+    :DateDetailView => READ_METHODS, :CreateView => ("GET", "POST", "PUT"), :UpdateView => ("GET", "POST", "PUT"),
+    :FormView => ("GET", "POST", "PUT"), :DeleteView => ("GET", "POST", "DELETE"))
 
 """
 The view's object (the `get_object` hook), refused with 403 unless the user has every
@@ -276,35 +308,53 @@ const TEMPLATE_SUFFIX = Dict(:ListView => "_list", :DetailView => "_detail", :Cr
     :MonthArchiveView => "_archive_month", :DayArchiveView => "_archive_day", :DateDetailView => "_detail",
     :WeekArchiveView => "_archive_week", :TodayArchiveView => "_archive_day")
 
+# (as Django's: "<app_label>/<model><suffix>.html" first, then Juango's "<model><suffix>.html")
 HOOK_DEFAULTS[:get_template_names] = function (v)
     t = opt(v, :template)
     t !== nothing && return t
-    v.model === nothing && throw(ImproperlyConfigured("$(v.kind) needs a template"))
-    model_name(v.model) * TEMPLATE_SUFFIX[v.kind] * ".html"
+    v.model === nothing && throw(ImproperlyConfigured("$(v.kind) requires either a definition of 'template' or an implementation of 'get_template_names'"))
+    name = model_name(v.model) * string(opt(v, :template_name_suffix, TEMPLATE_SUFFIX[v.kind])) * ".html"
+    [modelmeta(v.model).app * "/" * name, name]
 end
 
 HOOK_DEFAULTS[:get_queryset] = function (v)
     qs = opt(v, :queryset)
-    qs === nothing ? objects(v.model) : resolve_value(qs, v.request)
+    qs = qs === nothing ? objects(v.model) : resolve_value(qs, v.request)
+    o = opt(v, :ordering)                      # (Django's MultipleObjectMixin.ordering)
+    o === nothing ? qs : order_by(qs, (o isa AbstractString || o isa Symbol ? (o,) : o)...)
 end
 
+# (the pk comes from pk_kwarg, or Django's `pk` or Juango's `id` when it isn't given; with both a pk
+# and a slug, the slug is checked too only with query_pk_and_slug, as Django's)
 HOOK_DEFAULTS[:get_object] = function (v)
     qs = hook(:get_queryset, v)
-    pk, slug = opt(v, :pk_kwarg, :id), opt(v, :slug_kwarg, :slug)
-    haskey(v.kwargs, pk) && return get_object_or_404(qs; id = v.kwargs[pk])
-    haskey(v.kwargs, slug) && return get_object_or_404(qs, Q(opt(v, :slug_field, :slug) => v.kwargs[slug]))
-    error("Generic detail view $(v.kind) must be called with either an object pk ($pk) or a slug ($slug) in the URLconf.")
+    pkk = opt(v, :pk_kwarg)
+    pk = pkk !== nothing ? Symbol(pkk) : haskey(v.kwargs, :pk) ? :pk : :id
+    slug = Symbol(opt(v, :slug_kwarg, :slug))
+    if haskey(v.kwargs, pk)
+        q = Q(pk = v.kwargs[pk])
+        haskey(v.kwargs, slug) && opt(v, :query_pk_and_slug, false) && (q = q & Q(Symbol(opt(v, :slug_field, :slug)) => v.kwargs[slug]))
+        return get_object_or_404(qs, q)
+    end
+    haskey(v.kwargs, slug) && return get_object_or_404(qs, Q(Symbol(opt(v, :slug_field, :slug)) => v.kwargs[slug]))
+    throw(ArgumentError("Generic detail view $(v.kind) must be called with either an object pk or a slug in the URLconf."))
 end
 
 HOOK_DEFAULTS[:get_context_data] = (v, ctx) -> ctx
 
+# "{field}" in a success_url is the object's value (Django's success_url.format(**object.__dict__))
+function format_success_url(url::AbstractString, obj)
+    obj === nothing && return String(url)
+    replace(url, r"\{(\w+)\}" => m -> (f = Symbol(m[2:end-1]); string(something(getproperty(obj, f), ""))))
+end
 HOOK_DEFAULTS[:get_success_url] = function (v)
     url = opt(v, :success_url)
     url isa Function && return url(v.object)
-    url === nothing || return string(url)
-    u = v.object === nothing ? nothing : get_absolute_url(v.object)
-    u === nothing && throw(ImproperlyConfigured("No URL to redirect to. Provide success_url" *
-                                                (v.object === nothing ? "." : " or define get_absolute_url for $(typeof(v.object)).")))
+    url === nothing || return format_success_url(string(url), v.object)
+    # (as Django's: a deleted object's own URL is no place to go)
+    u = v.object === nothing || v.kind === :DeleteView ? nothing : get_absolute_url(v.object)
+    u === nothing && throw(ImproperlyConfigured(v.object === nothing || v.kind === :DeleteView ? "No URL to redirect to. Provide a success_url." :
+        "No URL to redirect to.  Either provide a url or define a get_absolute_url method on the Model."))
     u
 end
 
@@ -334,7 +384,10 @@ end
 
 HOOK_DEFAULTS[:form_valid] = function (v, form)
     if v.kind === :DeleteView
+        url = hook(:get_success_url, v)              # (before the delete, as Django's: "{id}" still has a value)
         delete!(v.object)
+        success_message!(v, form)
+        return HttpResponseRedirect(url)
     elseif v.kind !== :FormView
         v.object = save!(form)
     end
@@ -361,8 +414,10 @@ Base.@nospecializeinfer function list_context!(ctx, v::ViewCall, @nospecialize(o
     n = opt(v, :paginate_by)
     cname = something(opt(v, :context_object_name), cname, "object_list")
     if n !== nothing
-        p = Paginator(objs, n)
-        pg = page(p, get(v.request.GET, "page", "1"))
+        p = Paginator(objs, n; orphans = opt(v, :paginate_orphans, 0), allow_empty_first_page = opt(v, :allow_empty, true))
+        pk = string(opt(v, :page_kwarg, "page"))
+        # (the page from the URL's kwargs, else the query string, as Django's)
+        pg = page(p, something(get(v.kwargs, Symbol(pk), nothing), get(v.request.GET, pk, nothing), "1"))
         merge!(ctx, Dict{String,Any}("paginator" => p, "page_obj" => pg, "is_paginated" => p.num_pages > 1,
                                      "object_list" => pg.object_list, cname => pg.object_list))
     else
@@ -380,9 +435,23 @@ TemplateView(template; kw...) =
         render_view(v, Dict{String,Any}(string(k) => x for (k, x) in v.kwargs))
     end
 
-"`RedirectView(url_or_name; permanent=false)`."
-RedirectView(to; permanent = false) =
-    name_view!((req; kw...) -> redirect(to; permanent = permanent, kw...), "RedirectView($(repr(to)))")
+"""
+    RedirectView(url_or_name; permanent = false, query_string = false)
+
+As Django's: a URL (with `%(kwarg)s` placeholders filled from the URL's kwargs) or a URL name,
+reversed with them (Django's `pattern_name`); `query_string = true` keeps the request's query
+string. `RedirectView(nothing)` answers 410 Gone. Every method is redirected.
+"""
+function RedirectView(to; permanent = false, query_string = false)
+    view = function (req; kw...)
+        to === nothing && return HttpResponseGone("")
+        url = to isa AbstractString && occursin('/', to) ? interpolate(to, Dict{String,Any}(string(k) => x for (k, x) in kw)) :
+              getheader(redirect(to; kw...), "Location")
+        query_string && !isempty(req.query_string) && (url *= "?" * req.query_string)
+        permanent ? HttpResponsePermanentRedirect(url) : HttpResponseRedirect(url)
+    end
+    name_view!(view, "RedirectView($(repr(to)))")
+end
 
 """
     ListView(Model; template="<model>_list.html", queryset=nothing, paginate_by=nothing,
@@ -445,7 +514,7 @@ and redirects.
 DeleteView(::Type{T}; kw...) where {T<:Model} =
     generic_view(:DeleteView, T, kw) do v
         v.object = get_checked_object(v)
-        v.request.method == "POST" ? hook(:form_valid, v, nothing) : render_view(v, Dict{String,Any}())
+        v.request.method in ("POST", "DELETE") ? hook(:form_valid, v, nothing) : render_view(v, Dict{String,Any}())
     end
 
 """
@@ -502,12 +571,23 @@ Base.@nospecializeinfer in_period(v, @nospecialize(qs), lo::Date, hi::Date) =
     filter(qs, Q(Symbol(date_field(v), "__gte") => bound(v, lo)) & Q(Symbol(date_field(v), "__lt") => bound(v, hi)))
 Base.@nospecializeinfer dates_of(v, @nospecialize(qs)) = Date[d for d in (local_date(x) for x in values_list(qs, date_field(v); flat = true)) if d !== nothing]
 
-"The start of the period holding the nearest object after `hi` / before `lo` (nothing if none)."
+"""
+The start of the next period (after `hi`) / the previous one (before `lo`), as Django's: with
+`allow_empty` simply the adjacent period (none in the future unless `allow_future`), else the
+period of the nearest object (nothing if none).
+"""
 Base.@nospecializeinfer function next_period(v, @nospecialize(qs), hi::Date, start)
+    if opt(v, :allow_empty, false)
+        return opt(v, :allow_future, false) || hi <= localdate() ? hi : nothing
+    end
     o = first(order_by(filter(qs, Q(Symbol(date_field(v), "__gte") => bound(v, hi))), string(date_field(v))))
     o === nothing ? nothing : start(local_date(getproperty(o, date_field(v))))
 end
 Base.@nospecializeinfer function previous_period(v, @nospecialize(qs), lo::Date, start)
+    if opt(v, :allow_empty, false)
+        p = start(lo - Day(1))
+        return opt(v, :allow_future, false) || p <= localdate() ? p : nothing
+    end
     o = first(order_by(filter(qs, Q(Symbol(date_field(v), "__lt") => bound(v, lo))), "-" * string(date_field(v))))
     o === nothing ? nothing : start(local_date(getproperty(o, date_field(v))))
 end
@@ -517,6 +597,25 @@ function url_int(v::ViewCall, k)
     x isa Integer && return Int(x)
     n = x === nothing ? nothing : tryparse(Int, string(x))
     n === nothing ? throw(Http404("Invalid $k")) : n
+end
+
+const MONTH_ABBRS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+"""
+The URL's month: as `month_format` says, Django's `"%b"` (jan, feb, ...: Django's default) or
+`"%m"` (a number); by default either.
+"""
+function url_month(v::ViewCall)
+    x = get(v.kwargs, :month, nothing)
+    x === nothing && throw(Http404("No month specified"))
+    fmt = opt(v, :month_format)
+    if fmt != "%b"
+        x isa Integer && return Int(x)
+        n = tryparse(Int, string(x))
+        n === nothing || return n
+        fmt == "%m" && throw(Http404("Invalid month"))
+    end
+    i = findfirst(==(lowercase(string(x))), MONTH_ABBRS)
+    i === nothing ? throw(Http404("Invalid date string '$x' given format '%b'")) : i
 end
 
 function period_date(v::ViewCall, parts...)
@@ -577,7 +676,7 @@ URL kwargs `year`, `month` (a number). The template (`<model>_archive_month.html
 """
 MonthArchiveView(::Type{T}; kw...) where {T<:Model} =
     generic_view(:MonthArchiveView, T, kw) do v
-        m = period_date(v, url_int(v, :year), url_int(v, :month))
+        m = period_date(v, url_int(v, :year), url_month(v))
         all_ = dated_queryset(v)
         qs = order_by(in_period(v, all_, m, m + Month(1)), string(date_field(v)))
         archive_response(v, qs, Dict{String,Any}("month" => m, "date_list" => sort(unique(dates_of(v, qs))),
@@ -593,12 +692,8 @@ URL kwargs `year`, `month`, `day`. The template (`<model>_archive_day.html`) get
 """
 DayArchiveView(::Type{T}; kw...) where {T<:Model} =
     generic_view(:DayArchiveView, T, kw) do v
-        d = period_date(v, url_int(v, :year), url_int(v, :month), url_int(v, :day))
-        all_ = dated_queryset(v)
-        qs = order_by(in_period(v, all_, d, d + Day(1)), string(date_field(v)))
-        archive_response(v, qs, Dict{String,Any}("day" => d,
-            "next_day" => next_period(v, all_, d + Day(1), identity),
-            "previous_day" => previous_period(v, all_, d, identity)))
+        d = period_date(v, url_int(v, :year), url_month(v), url_int(v, :day))
+        day_archive(v, d)
     end
 
 """
@@ -647,13 +742,19 @@ WeekArchiveView(::Type{T}; kw...) where {T<:Model} =
 """
 TodayArchiveView(::Type{T}; kw...) where {T<:Model} =
     generic_view(:TodayArchiveView, T, kw) do v
-        d = localdate()
-        all_ = dated_queryset(v)
-        qs = order_by(in_period(v, all_, d, d + Day(1)), string(date_field(v)))
-        archive_response(v, qs, Dict{String,Any}("day" => d,
-            "next_day" => next_period(v, all_, d + Day(1), identity),
-            "previous_day" => previous_period(v, all_, d, identity)))
+        day_archive(v, localdate())
     end
+# (a day's context has its month's neighbours too, as Django's)
+function day_archive(v::ViewCall, d::Date)
+    all_ = dated_queryset(v)
+    qs = order_by(in_period(v, all_, d, d + Day(1)), string(date_field(v)))
+    m = firstdayofmonth(d)
+    archive_response(v, qs, Dict{String,Any}("day" => d,
+        "next_day" => next_period(v, all_, d + Day(1), identity),
+        "previous_day" => previous_period(v, all_, d, identity),
+        "next_month" => next_period(v, all_, m + Month(1), firstdayofmonth),
+        "previous_month" => previous_period(v, all_, m, firstdayofmonth)))
+end
 
 """
     DateDetailView(Model; date_field, allow_future=false, pk_kwarg=:id, slug_kwarg=:slug, hooks...)
@@ -662,7 +763,7 @@ One object, found by `year`/`month`/`day` plus pk or slug: a 404 unless it is da
 """
 DateDetailView(::Type{T}; kw...) where {T<:Model} =
     generic_view(:DateDetailView, T, kw) do v
-        d = period_date(v, url_int(v, :year), url_int(v, :month), url_int(v, :day))
+        d = period_date(v, url_int(v, :year), url_month(v), url_int(v, :day))
         base = get(v.opts, :get_queryset, nothing)            # v.opts is this call's own copy
         v.opts[:get_queryset] = w -> in_period(w, base === nothing ? dated_queryset_default(w) : base(w), d, d + Day(1))
         v.object = get_checked_object(v)

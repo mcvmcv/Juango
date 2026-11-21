@@ -996,7 +996,16 @@ contact = FormView(ContactForm; template = "contact.html", success_url = "/thank
                                               default_hook(:form_valid, v, form)))
 ```
 
-The hooks are `get_queryset`, `get_object`, `get_context_data(v, ctx)`, `get_template_names`, `get_success_url`, `get_initial`, `get_form`, `form_valid(v, form)` and `form_invalid(v, form)`. DeleteView deletes in its `form_valid` step, where the form is `nothing`. Templates get `view` too.
+The hooks are `get_queryset`, `get_object`, `get_context_data(v, ctx)`, `get_template_names`, `get_success_url`, `get_initial`, `get_form`, `form_valid(v, form)` and `form_invalid(v, form)`. DeleteView deletes in its `form_valid` step, where the form is `nothing`. A DELETE request deletes too. Templates get `view` too.
+
+The rest works as in Django:
+
+- **Templates.** The default template is `<app_label>/<model>_list.html` (or `_detail`, `_form`, `_confirm_delete`, ...). If that doesn't exist, Juango's own `<model>_list.html` is used. `template_name_suffix` changes the suffix.
+- **Finding the object.** The object comes from the URL's `pk`, or `id`, or `pk_kwarg`. Without one, `slug` (or `slug_kwarg`) is matched against `slug_field`. With `query_pk_and_slug = true`, a pk and a slug must both match.
+- **Lists.** `ordering = "-pub_date"` sorts the list. `paginate_orphans` lets the last page take a few extra items. The page number comes from a URL kwarg or the query string, named by `page_kwarg` (default `"page"`). `"last"` is the last page.
+- **Success URLs.** `success_url = "/posts/{id}/"` fills in the object's fields. DeleteView fills them in before deleting.
+- **Methods.** A view answers only the methods it handles: GET for the list, detail, template and archive views, plus POST and PUT for the form views, and POST and DELETE for DeleteView. HEAD and OPTIONS are always answered (OPTIONS with an `Allow` header). Other methods get 405. `http_method_names` changes the set.
+- **Redirects.** `RedirectView("/posts/%(id)s/")` fills in the URL's kwargs. `RedirectView("post_detail")` reverses a URL name with them. `query_string = true` keeps the query string, and `RedirectView(nothing)` answers 410 Gone.
 
 Access control works on every generic view: `login_required = true`, `permission_required = "blog.change_post"` (403 when the user lacks it), and `test_func = user -> user.is_staff` (a logged-in user who fails it gets 403, an anonymous one the login page, as Django's UserPassesTestMixin). For other views, the wrappers `LoginRequiredMixin(view)`, `PermissionRequiredMixin(view, perms...)` and `UserPassesTestMixin(view, test)` do the same, with Django's AccessMixin options: `login_url`, `redirect_field_name`, `raise_exception` and `permission_denied_message`. `success_message` (the SuccessMessageMixin) takes `%(field)s` placeholders from the cleaned data.
 
@@ -1013,7 +1022,7 @@ path("archive/week/<int:year>/<int:week>/", A(WeekArchiveView)),  # week (its fi
 path("archive/today/", A(TodayArchiveView)),                    # DayArchiveView for today
 ```
 
-Future-dated objects are left out unless `allow_future = true`. An empty period is a 404 unless `allow_empty = true`. YearArchiveView lists its objects only with `make_object_list = true`. The default templates are `<model>_archive.html`, `_archive_year`, `_archive_month`, `_archive_day` and `_detail`. With USE_TZ, days are counted in the current time zone.
+Future-dated objects are left out unless `allow_future = true`. An empty period is a 404 unless `allow_empty = true`. With `allow_empty`, the next and previous links point to the adjacent periods, as Django's. Without it, they point to the nearest periods that have objects. YearArchiveView lists its objects only with `make_object_list = true`. DayArchiveView also gives `next_month` and `previous_month`. The month in the URL may be a number or Django's `jan`, `feb`, ...; `month_format = "%m"` or `"%b"` allows only one of them. The default templates are `<app_label>/<model>_archive.html`, `_archive_year`, `_archive_month`, `_archive_day` and `_detail`. With USE_TZ, days are counted in the current time zone.
 
 ### Filtering lists: FilterSet
 
