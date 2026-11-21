@@ -6,23 +6,45 @@
 #     r = post(c, "/posts/new/", Dict("title" => "Hi"); follow=true)
 
 """
-    Client(; enforce_csrf=false, host="testserver")
+    Client(; enforce_csrf = false, host = "testserver", headers = Dict(), raise_request_exception = false)
 
 Simulates a browser without opening a socket: keeps cookies between requests and
 calls `handle_request` directly. Responses carry `context` and `templates` from
-`render`.
+`render`. With `raise_request_exception = true` an error in a view is thrown in the test
+(Django's default), instead of becoming the 500 page. `c.session` is the client's session (save
+it with `save_session!` after changing it), as Django's `client.session`.
 """
 mutable struct Client
     cookies::Dict{String,String}
     enforce_csrf::Bool
     host::String
     default_headers::Dict{String,String}
+    raise_request_exception::Bool
 end
-function Client(; enforce_csrf = false, host = "testserver", headers = Dict{String,String}())
+function Client(; enforce_csrf = false, host = "testserver", headers = Dict{String,String}(), raise_request_exception::Bool = false)
     # tests shouldn't send real mail: like Django's test runner, collect it in `Juango.outbox`
     settings.EMAIL_BACKEND === :smtp && configure!(EMAIL_BACKEND = :locmem)
-    Client(Dict{String,String}(), enforce_csrf, host, Dict{String,String}(string(k) => string(v) for (k, v) in headers))
+    Client(Dict{String,String}(), enforce_csrf, host, Dict{String,String}(string(k) => string(v) for (k, v) in headers), raise_request_exception)
 end
+# c.session: the session of the client's cookie, or a new saved one whose cookie the client now has (Django's)
+function Base.getproperty(c::Client, s::Symbol)
+    s === :session || return getfield(c, s)
+    key = get(getfield(c, :cookies), settings.SESSION_COOKIE_NAME, nothing)
+    key === nothing || return load_session(key)
+    sess = save_session!(Session())
+    getfield(c, :cookies)[settings.SESSION_COOKIE_NAME] = sess.key
+    sess
+end
+
+"""
+A redirect chain the test client won't follow (Django's RedirectCycleError): back to a URL it has
+already been to, or more than 20 redirects. `last_response` is the last redirect.
+"""
+struct RedirectCycleError <: Exception
+    msg::String
+    last_response::Any
+end
+Base.showerror(io::IO, e::RedirectCycleError) = print(io, "RedirectCycleError: ", e.msg)
 
 function store_cookies!(c::Client, resp::HttpResponse)
     for sc in resp.cookies
@@ -44,6 +66,14 @@ function make_test_request(method::AbstractString, target::AbstractString; host 
     hs = merge(Dict{String,String}("host" => host), default_headers,
                Dict{String,String}(lowercase(string(k)) => string(v) for (k, v) in pairs_of(headers)))
     payload = UInt8[]
+    # (as Django's: a dict or list posted with a JSON content type is sent as JSON, text as it is)
+    if json === nothing && data !== nothing && content_type !== nothing && !(method in ("GET", "HEAD"))
+        if occursin(r"^application/(.+\+)?json"i, content_type) && (data isa AbstractDict || data isa AbstractVector || data isa Tuple || data isa NamedTuple)
+            body, data = JSON.json(data), nothing
+        elseif data isa Union{AbstractString,AbstractVector{UInt8}}
+            body, data = data, nothing
+        end
+    end
     if json !== nothing
         payload = Vector{UInt8}(codeunits(JSON.json(json)))
         hs["content-type"] = "application/json"
@@ -73,16 +103,24 @@ end
 other HX-* headers too: `htmx = (target = "results", trigger = "search", boosted = true)`.
 """
 function request(c::Client, method::AbstractString, target::AbstractString; data = nothing, json = nothing,
-                 headers = Dict{String,String}(), follow = false, content_type = nothing, body = nothing, htmx = false)
+                 headers = Dict{String,String}(), follow = false, content_type = nothing, body = nothing, htmx = false,
+                 query_params = nothing, host = nothing)
     method = uppercase(method)
+    # (Django 5.1's query_params: the query string for any method)
+    if query_params !== nothing
+        method in ("GET", "HEAD") && data !== nothing && throw(ArgumentError("query_params and data arguments are mutually exclusive."))
+        q = urlencode(query_params)
+        isempty(q) || (target *= (occursin('?', target) ? "&" : "?") * q)
+    end
     if htmx !== false
         hx = Dict{String,String}("HX-Request" => "true")
         htmx === true || foreach(((k, v),) -> hx["HX-" * join(uppercasefirst.(split(string(k), '_')), "-")] = string(v), pairs(htmx))
         headers = merge(hx, Dict{String,String}(string(k) => string(v) for (k, v) in pairs_of(headers)))
     end
-    req = make_test_request(method, target; host = c.host, default_headers = c.default_headers, cookies = c.cookies,
+    req = make_test_request(method, target; host = something(host, c.host), default_headers = c.default_headers, cookies = c.cookies,
                             data = data, json = json, headers = headers, content_type = content_type, body = body)
     req.meta[:test_client] = true
+    c.raise_request_exception && (req.meta[:raise_request_exception] = true)
     c.enforce_csrf || (req.meta[:dont_enforce_csrf] = true)
     resp = handle_request(req)
     # a stream of known length (FileResponse) is read now, so resp.body has it; endless ones
@@ -91,16 +129,39 @@ function request(c::Client, method::AbstractString, target::AbstractString; data
     store_cookies!(c, resp)
     if follow
         chain = Tuple{String,Int}[]
-        while resp.status in (301, 302, 303, 307, 308) && length(chain) < 20
+        path = first(split(target, '?'))
+        while resp.status in (301, 302, 303, 307, 308)
             loc = getheader(resp, "Location")
             push!(chain, (loc, resp.status))
+            # (as Django's: an absolute URL's host is the next request's; a relative one is joined to the path)
+            m_ = match(r"^(?:[A-Za-z][A-Za-z0-9+.\-]*:)?//([^/?#]*)(.*)$", loc)
+            h, rest = m_ === nothing ? (nothing, loc) : (m_[1], isempty(m_[2]) ? "/" : m_[2])
+            startswith(rest, "/") || startswith(rest, "?") || (rest = join_relative(path, rest))
+            startswith(rest, "?") && (rest = path * rest)
             m = resp.status in (307, 308) ? method : "GET"
-            resp = request(c, m, loc; data = m == "GET" ? nothing : data)
+            next_ = first(split(rest, '?'))
+            resp = request(c, m, rest; data = m in ("GET", "HEAD") ? nothing : data, host = h === nothing || isempty(h) ? nothing : h,
+                           content_type = m in ("GET", "HEAD") ? nothing : content_type, json = m in ("GET", "HEAD") ? nothing : json)
+            path = next_
+            last(chain) in chain[1:end-1] && throw(RedirectCycleError("Redirect loop detected.", resp))
+            length(chain) > 20 && throw(RedirectCycleError("Too many redirects.", resp))
         end
         resp.context === nothing && (resp.context = Dict{String,Any}())
         resp.context isa AbstractDict && (resp.context["__redirect_chain__"] = chain)
     end
     resp
+end
+"A relative URL joined to a path, as urljoin does: `join_relative(\"/a/b/c\", \"../d\") == \"/a/d\"`."
+function join_relative(base::AbstractString, rel::AbstractString)
+    q = findfirst('?', rel)
+    p, query = q === nothing ? (rel, "") : (rel[1:prevind(rel, q)], rel[q:end])
+    segs = split(base, '/')[1:end-1]                  # (the directory of the base)
+    for s in split(p, '/')
+        s == "." ? nothing : s == ".." ? (length(segs) > 1 && pop!(segs)) : push!(segs, s)
+    end
+    j = join(segs, '/')
+    (endswith(p, "/.") || endswith(p, "/..") || p in (".", "..")) && (j *= "/")
+    (startswith(j, "/") ? j : "/" * j) * query
 end
 
 "Encode form data (with `UploadedFile` values) as multipart/form-data."
@@ -150,8 +211,19 @@ function login!(c::Client; username, password)
     true
 end
 
-"Forget the session cookie."
-logout!(c::Client) = (delete!(c.cookies, settings.SESSION_COOKIE_NAME); nothing)
+"""
+Log the client out, as Django's `Client.logout`: the user is logged out of the session (which is
+emptied, and `user_logged_out` sent), and the client forgets all its cookies.
+"""
+function logout!(c::Client)
+    key = get(c.cookies, settings.SESSION_COOKIE_NAME, nothing)
+    req = make_test_request("GET", "/"; host = c.host)
+    req.session = key === nothing ? Session() : load_session(key)
+    req.user = get_user(req)
+    logout!(req)
+    empty!(c.cookies)
+    nothing
+end
 
 "Redirect chain recorded by `follow=true`: vector of `(url, status)`."
 redirect_chain(r::HttpResponse) = r.context isa AbstractDict ? get(r.context, "__redirect_chain__", Tuple{String,Int}[]) : Tuple{String,Int}[]

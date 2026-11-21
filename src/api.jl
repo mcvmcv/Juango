@@ -131,7 +131,7 @@ export App, get_model, lookup_value, concrete_fields, many_to_many, attname, col
        @background, enqueue, get_result, TaskResult
 # server and commands
 export runserver, execute_from_command_line, call_command, CommandError
-public command_io, required_fields, parse_cookies, urlencode, hasheader, accepts, iri_to_uri
+public command_io, required_fields, parse_cookies, urlencode, hasheader, accepts, iri_to_uri, save_session!, load_session
 
 # --- public, not exported ----------------------------------------------------------------------------
 
@@ -196,14 +196,14 @@ using ..Juango: Client, RequestFactory, request, post, force_login!, text, outbo
     assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx,
     live_test, live_event!, live_info!, live_flush!, setup_test_database, teardown_test_database, consume_stream!,
     assert_html_equal, assert_html_not_equal, assert_in_html, assert_json_equal, assert_json_not_equal,
-    assert_queryset_equal, assert_formset_error, assert_field_output, assert_matches_snapshot
+    assert_queryset_equal, assert_formset_error, assert_field_output, assert_matches_snapshot, RedirectCycleError, redirect_chain
 export Client, RequestFactory, request, post, force_login!, text, outbox, rollback_after,
     capture_on_commit_callbacks, with_live_server, live_server_url, override_settings, assert_contains,
     assert_not_contains, assert_redirects, assert_template_used, assert_template_not_used,
     assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx,
     live_test, live_event!, live_info!, live_flush!, setup_test_database, teardown_test_database, consume_stream!,
     assert_html_equal, assert_html_not_equal, assert_in_html, assert_json_equal, assert_json_not_equal,
-    assert_queryset_equal, assert_formset_error, assert_field_output, assert_matches_snapshot
+    assert_queryset_equal, assert_formset_error, assert_field_output, assert_matches_snapshot, RedirectCycleError, redirect_chain
 end
 
 module Functions

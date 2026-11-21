@@ -2133,7 +2133,12 @@ force_login!(c, user)
 r = post(c, "/posts/new/", Dict("title" => "X", ...); follow=true)
 ```
 
-The client keeps cookies, skips CSRF unless you pass `Client(enforce_csrf=true)`, and never opens a socket.
+The client keeps cookies, skips CSRF unless you pass `Client(enforce_csrf=true)`, and never opens a socket. It works as Django's:
+
+- **Requests.** `request(c, "PUT", path; ...)` sends any method. `query_params = Dict(...)` adds a query string for any method. `data` sent with a JSON `content_type` is encoded as JSON, and a string `data` is sent as the body.
+- **Following redirects.** `follow = true` follows redirects with GET, except a 307 or 308, which keeps the method and data. Relative and absolute URLs are followed, and `redirect_chain(r)` lists the steps. A loop, or more than 20 redirects, throws `RedirectCycleError`.
+- **Sessions and logins.** `c.session` is the client's session; change it and call `save_session!`. `login!(c; username, password)` and `force_login!(c, user)` log a user in. `logout!(c)` logs them out of the session (emptying it, as `user_logged_out` reports) and forgets the cookies.
+- **Errors.** `Client(raise_request_exception = true)` throws an error from a view in the test, instead of returning the 500 page (Django's default).
 
 **A throwaway test database.** `julia --project manage.jl test [--keepdb] [--failfast] [--reverse] [--shuffle[=SEED]] [-k PATTERN] [file ...]` runs each test file, carrying on after a failing one unless `--failfast` (`-k` picks files by name; `--shuffle` prints its seed so an order that fails can be repeated). It runs the tests against a database of their own, so they never touch the development one: SQLite in memory, or `test_<name>` on the same PostgreSQL or MySQL server (created, migrated, and dropped afterwards; `--keepdb` reuses it). `TEST_DATABASE` names another. A suite run with `julia test/runtests.jl` or `Pkg.test()` does the same with:
 

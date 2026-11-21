@@ -243,6 +243,8 @@ function response_for_exception(req::Request, e, bt)
                                                                     "<h1>Bad Request (400)</h1>"))
     end
     any_receivers(got_request_exception) && send_robust(got_request_exception, :handler; request = req, exception = e)
+    # (a test Client with raise_request_exception: the error is the test's, not a 500 page)
+    get(req.meta, :raise_request_exception, false) === true && throw(e)
     # logged to juango.request: Julia's logger, and mailed to ADMINS when DEBUG is false (see LOGGING)
     log!("juango.request", :error, "Internal Server Error: $(req.path)"; exception = (e, bt), request = req, status_code = 500)
     settings.DEBUG && return technical_500(req, e, bt)
