@@ -141,7 +141,7 @@ public clean, live_snapshot, header, text, render_response!, process_template_re
 # templates
 public render_form, TemplateFormRenderer, JuangoTemplates, MustacheTemplates, LocMemTemplates, engine_template
 # models, files, querysets
-public uuid4, FieldFile, FileSystemStorage, InMemoryStorage, storages, default_storage, save_file, delete_file, image_size,
+public uuid4, FieldFile, FileSystemStorage, InMemoryStorage, storages, default_storage, save_file, delete_file, image_size, listdir, get_available_name, get_modified_time, get_created_time, filepath_to_uri,
        register_lookup, register_transform, deferred_fields, PoolTimeout, pool_status,
        get_for_model, get_for_id, get_for_models, clear_contenttype_cache!, content_type_name, app_labeled_name, GenericPrefetch, model_class, natural_key, get_by_natural_key, manager, default_queryset,
        DatabaseBackend, register_backend!, execute, db_for_read, db_for_write, allow_migrate, allow_relation
@@ -168,7 +168,8 @@ public send_robust, has_receivers, DeserializationError, emit, log!, log_enabled
 public set_language, number_format, localize, language_name, makemessages, compilemessages,
        is_aware, convert_naive_datetimes, JavaScriptCatalog, JSONCatalog
 # caching, HTTP caching, security
-public cache, incr, decr, incr_version, decr_version, create_cache_table, CacheSerializationError, patch_cache_control!,
+public cache, incr, decr, incr_version, decr_version, create_cache_table, CacheSerializationError, patch_cache_control!, get_max_age, patch_response_headers!,
+       add_never_cache_headers!, patch_vary_headers!, has_vary_header,
        BrokenLinkEmailsMiddleware, is_secure, get_host, get_port, csp_override, csp_report_only_override, deploy_issues
 # admin log, contrib apps, tasks
 public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, sitemap_view,

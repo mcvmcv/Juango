@@ -45,31 +45,43 @@ struct InMemoryStorage <: Storage
     files::Dict{String,Vector{UInt8}}
     base_url::Union{Nothing,String}
     lock::ReentrantLock
+    times::Dict{String,Tuple{Float64,Float64}}     # name => (created, modified), as Unix times
 end
-InMemoryStorage(; base_url = nothing, location = nothing) = InMemoryStorage(Dict{String,Vector{UInt8}}(), base_url, ReentrantLock())
+InMemoryStorage(; base_url = nothing, location = nothing) =
+    InMemoryStorage(Dict{String,Vector{UInt8}}(), base_url, ReentrantLock(), Dict{String,Tuple{Float64,Float64}}())
 
 memname(name) = (n = valid_path(name); isempty(n) ? throw(ArgumentError("'$name' is not a valid file name")) : n)
-exists(s::InMemoryStorage, name) = lock(() -> haskey(s.files, memname(name)), s.lock)
+"Whether a file, or a directory (a prefix of stored names), exists (Django's `exists`)."
+exists(s::InMemoryStorage, name) = lock(s.lock) do
+    n = memname(name)
+    haskey(s.files, n) || any(k -> startswith(k, n * "/"), keys(s.files))
+end
 Base.read(s::InMemoryStorage, name) = lock(s.lock) do
-    get(() -> throw(SystemError("no file '$name' in InMemoryStorage", 2)), s.files, memname(name))
+    # (a copy: String(bytes) takes over the vector it's given, which would empty the stored file)
+    copy(get(() -> throw(SystemError("no file '$name' in InMemoryStorage", 2)), s.files, memname(name)))
 end
 Base.size(s::InMemoryStorage, name) = length(read(s, name))
-delete_file(s::InMemoryStorage, name) = lock(() -> (delete!(s.files, memname(name)); nothing), s.lock)
+function delete_file(s::InMemoryStorage, name)
+    isempty(string(name)) && throw(ArgumentError("The name must be given to delete()."))
+    lock(() -> (n = memname(name); delete!(s.files, n); delete!(s.times, n); nothing), s.lock)
+end
 path(::InMemoryStorage, name) = throw(ArgumentError("InMemoryStorage files have no path on disk"))
-url(s::InMemoryStorage, name) = rstrip(something(s.base_url, string(settings.MEDIA_URL)), '/') * "/" *
-                                join(URIs.escapeuri.(split(name, '/')), "/")
-function save_file(s::InMemoryStorage, name::AbstractString, data::AbstractVector{UInt8})
+url(s::InMemoryStorage, name) = storage_url(something(s.base_url, string(settings.MEDIA_URL)), name)
+function save_file(s::InMemoryStorage, name::AbstractString, data::AbstractVector{UInt8}; max_length = nothing)
     name = valid_path(name)
     isempty(name) && (name = "file")
-    stem, ext = splitext(name)
     lock(s.lock) do
-        candidate = name
-        while haskey(s.files, candidate)
-            candidate = stem * "_" * random_string(7) * ext
-        end
+        candidate = get_available_name(s, name; max_length = max_length)
         s.files[candidate] = Vector{UInt8}(data)
+        t = time()
+        s.times[candidate] = (get(s.times, candidate, (t, t))[1], t)
         candidate
     end
+end
+in_memory_time(s::InMemoryStorage, name, i) = lock(s.lock) do
+    n = memname(name)
+    haskey(s.times, n) || throw(SystemError("no file '$name' in InMemoryStorage", 2))
+    s.times[n][i]
 end
 
 """
@@ -169,7 +181,7 @@ anything but letters, digits, `-`, `_` and `.` is dropped.
 """
 function get_valid_name(name::AbstractString)
     s = basename(replace(strip(name), '\\' => '/'))
-    s = replace(s, r"\s+" => "_")
+    s = replace(s, ' ' => '_')                  # (each space, as Django's get_valid_filename)
     s = replace(s, r"[^\w.\-]" => "")
     s = lstrip(s, '.')
     isempty(s) ? "file" : s
@@ -184,17 +196,76 @@ function path(s::FileSystemStorage, name::AbstractString)
     p
 end
 
-exists(s::FileSystemStorage, name) = isfile(path(s, name))
+"Whether a file or directory exists (Django's `exists`)."
+exists(s::FileSystemStorage, name) = (p = path(s, name); ispath(p) || islink(p))
 Base.size(s::FileSystemStorage, name) = filesize(path(s, name))
 Base.read(s::FileSystemStorage, name) = read(path(s, name))
-"Delete a stored file (no error if it is already gone)."
-delete_file(s::FileSystemStorage, name) = (p = path(s, name); isfile(p) && rm(p); nothing)
-url(s::FileSystemStorage, name) = rstrip(something(s.base_url, string(settings.MEDIA_URL)), '/') * "/" *
-                                  join(URIs.escapeuri.(split(name, '/')), "/")
+"Delete a stored file, or an empty directory (no error if it is already gone)."
+function delete_file(s::FileSystemStorage, name)
+    isempty(string(name)) && throw(ArgumentError("The name must be given to delete()."))
+    p = path(s, name)
+    isdir(p) ? rm(p) : isfile(p) || islink(p) ? rm(p) : nothing
+    nothing
+end
+url(s::FileSystemStorage, name) = storage_url(something(s.base_url, string(settings.MEDIA_URL)), name)
+"""
+A stored name's URL under `base` (Django's `url`): quoted as `filepath_to_uri`, backslashes as slashes, and
+leading slashes dropped, so a name can't make a URL to another host (`//evil.com`). `nothing`: the base.
+"""
+storage_url(base, name) = rstrip(base, '/') * "/" * (name === nothing ? "" : lstrip(filepath_to_uri(name), '/'))
 
-"Store an upload: big ones are moved from their temporary file rather than read into memory."
-save_upload(s::Storage, name::AbstractString, f) = save_file(s, name, read(f))
-function save_upload(s::FileSystemStorage, name::AbstractString, f)
+"""
+    get_available_name(storage, name; max_length = nothing) -> String
+
+A name not taken in the storage (Django's): `name`, or with `_` and 7 random characters before its
+extensions (`report_a8Xk2Lq.tar.gz`). With `max_length` the name's stem is shortened to fit; when nothing
+fits, an `ArgumentError` asks for a longer `max_length`.
+"""
+function get_available_name(s::Storage, name::AbstractString; max_length = nothing)
+    name = replace(String(name), '\\' => '/')
+    dir, file = splitdir(name)
+    i = findnext('.', file, nextind(file, firstindex(file)))      # (the extensions; a leading dot isn't one)
+    ext = i === nothing ? "" : file[i:end]
+    stem = i === nothing ? file : file[1:prevind(file, i)]
+    while exists(s, name) || (max_length !== nothing && length(name) > max_length)
+        name = joinpath_(dir, stem * "_" * random_string(7) * ext)
+        max_length === nothing && continue
+        cut = length(name) - max_length
+        if cut > 0
+            stem = first(stem, max(0, length(stem) - cut))
+            isempty(stem) && throw(ArgumentError("Storage can not find an available filename for \"$name\". Please make sure that the corresponding file field allows sufficient \"max_length\"."))
+            name = joinpath_(dir, stem * "_" * random_string(7) * ext)
+        end
+    end
+    name
+end
+joinpath_(dir, file) = isempty(dir) ? file : dir * "/" * file
+
+"""
+    get_modified_time(storage, name)    get_created_time(storage, name)
+
+When a stored file was last changed, or created (Django's): aware and in UTC with USE_TZ, else naive in
+TIME_ZONE. (`get_created_time` is the inode change time on a FileSystemStorage, as Python's getctime.)
+"""
+get_modified_time(s::FileSystemStorage, name) = storage_time(mtime(path(s, name)))
+get_created_time(s::FileSystemStorage, name) = storage_time(ctime(path(s, name)))
+get_modified_time(s::InMemoryStorage, name) = storage_time(in_memory_time(s, name, 2))
+get_created_time(s::InMemoryStorage, name) = storage_time(in_memory_time(s, name, 1))
+function storage_time(t::Real)
+    z = TimeZones.ZonedDateTime(Dates.unix2datetime(t), UTC_TZ)
+    settings.USE_TZ ? z : DateTime(TimeZones.astimezone(z, default_timezone()))
+end
+
+"""
+Store an upload: big ones are moved from their temporary file rather than read into memory. With
+`max_length` (the file field's), the stored name is kept within it, as Django's `get_available_name`.
+"""
+function save_upload(s::Storage, name::AbstractString, f; max_length = nothing)
+    max_length === nothing || (name = get_available_name(s, valid_path(name); max_length = max_length))
+    save_file(s, name, read(f))
+end
+function save_upload(s::FileSystemStorage, name::AbstractString, f; max_length = nothing)
+    max_length === nothing || (name = get_available_name(s, valid_path(name); max_length = max_length))
     temporary_file_path(f) === nothing && return save_file(s, name, read(f))
     save_file(s, name, f)
 end
@@ -208,11 +279,7 @@ gets a random suffix (`report_a8Xk2Lq.pdf`).
 function save_file(s::FileSystemStorage, name::AbstractString, data)
     name = valid_path(name)
     isempty(name) && (name = "file")
-    stem, ext = splitext(name)
-    candidate = name
-    while exists(s, candidate)
-        candidate = stem * "_" * random_string(7) * ext
-    end
+    candidate = get_available_name(s, name)
     p = path(s, candidate)
     dir = dirname(p)
     if !isdir(dir)
@@ -319,7 +386,7 @@ function store_uploaded_files!(obj::Model, data)
         v = data[attname(f)]
         v isa UploadedFile || continue
         st = field_storage(f)
-        data[attname(f)] = FieldFile(save_upload(st, upload_name(f, obj, v.name), v), st)
+        data[attname(f)] = FieldFile(save_upload(st, upload_name(f, obj, v.name), v; max_length = f.max_length), st)
         if f.kind === :image
             d = image_size(read(v))
             wf, hf = f.related[3], f.related[4]

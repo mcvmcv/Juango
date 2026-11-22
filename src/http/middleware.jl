@@ -51,8 +51,25 @@ function SessionMiddleware(get_response)
     end
 end
 
-patch_vary!(resp, h) = (v = getheader(resp, "Vary"); v === nothing ? setheader!(resp, "Vary", h) :
-                        occursin(h, v) ? resp : setheader!(resp, "Vary", v * ", " * h))
+"""
+    patch_vary_headers!(resp, headers)
+
+Add header names to the response's `Vary` (Django's `patch_vary_headers`): names already there (in any
+case) aren't repeated, the existing list is tidied, and `*` stands for everything.
+"""
+function patch_vary_headers!(resp, headers)
+    old = [String(strip(h)) for h in split(something(getheader(resp, "Vary"), ""), ',') if !isempty(strip(h))]
+    out = copy(old)
+    for h in headers
+        h = String(strip(h))
+        any(x -> lowercase(x) == lowercase(h), out) || push!(out, h)
+    end
+    setheader!(resp, "Vary", "*" in out ? "*" : join(out, ", "))
+    resp
+end
+patch_vary!(resp, h::AbstractString) = patch_vary_headers!(resp, (h,))
+"Whether the response's `Vary` names the header (any case; Django's `has_vary_header`)."
+has_vary_header(resp, h) = any(x -> lowercase(strip(x)) == lowercase(h), split(something(getheader(resp, "Vary"), ""), ','))
 
 """
 A path as it goes in a Location header: quoted again (`#`, spaces), and a leading `//` written
@@ -176,7 +193,8 @@ Send the CSRF cookie with this view's response even if its page has no `{% csrf_
 pages whose forms are made by JavaScript, which reads the cookie.
 """
 function ensure_csrf_cookie(view)
-    w = (req; kw...) -> (get_csrf_token(req); view(req; kw...))
+    # (the cookie is read and written here when CsrfViewMiddleware isn't installed, as Django's decorator)
+    w = (req; kw...) -> csrf_process(req, () -> (get_csrf_token(req); to_response(view(req; kw...))); enforce = false)
     propagate_flags!(w, view)
 end
 

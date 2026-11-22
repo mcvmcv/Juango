@@ -181,6 +181,19 @@ function iri_to_uri(iri)
     join(keep(b) ? string(Char(b)) : "%" * uppercase(string(b; base = 16, pad = 2)) for b in codeunits(s))
 end
 
+"""
+    filepath_to_uri(path) -> String
+
+A file path as a URL path (Django's): backslashes become slashes and everything but letters, digits
+and `_ . - ~ / ! * ( ) '` is percent-encoded.
+"""
+function filepath_to_uri(path)
+    s = replace(string(path), '\\' => '/')
+    keep(b) = (UInt8('a') <= b <= UInt8('z')) || (UInt8('A') <= b <= UInt8('Z')) || (UInt8('0') <= b <= UInt8('9')) ||
+              b in codeunits("_.-~/!*()'")
+    join(keep(b) ? string(Char(b)) : "%" * uppercase(string(b; base = 16, pad = 2)) for b in codeunits(s))
+end
+
 "Encode a dict / pairs as `application/x-www-form-urlencoded`."
 function urlencode(data)
     parts = String[]

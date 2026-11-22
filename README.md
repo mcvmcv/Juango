@@ -947,7 +947,7 @@ is in, or `current_app = "news"`, or the instance named like the app.
 `redirect(to)` and `resolve_url(to)` take a URL, a URL name (reversed with the arguments), or a model instance with `get_absolute_url`. As in Django, a name that doesn't reverse is a `NoReverseMatch`, unless it looks like a URL (it has a `/` or a `.`). `redirect(to; preserve_request = true)` keeps the method and body with a 307, or a 308 when permanent. Redirect URLs are percent-encoded to ASCII (`iri_to_uri`). `get_object_or_404` and `get_list_or_404` take a model, a queryset or a related manager, and say so if they're given anything else.
 
 View decorators besides `require_GET`/`require_POST`/`require_safe` and `login_required`:
-`csrf_exempt`, `csrf_protect` (for projects without the middleware), `ensure_csrf_cookie`,
+`csrf_exempt`, `csrf_protect` (for projects without the middleware), `ensure_csrf_cookie` (which also works without the middleware),
 `xframe_options_exempt`/`_deny`/`_sameorigin`, `gzip_page`, `never_cache`, `cache_page`,
 `no_append_slash` and `sensitive_post_parameters(view, "card")` (masked on the error page and in
 error emails). `set_signed_cookie!(resp, name, value)` and `get_signed_cookie(req, name; max_age)`
@@ -1611,7 +1611,7 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
   FileField(storage = "scratch")                         # a field can name one
   ```
   A backend is a `Storage` value, a type or function called with the `OPTIONS`, or `:filesystem`/`:memory`. A storage implements `save_file`, `read`, `exists`, `size`, `delete_file` and `url`, and optionally `path` and `listdir`, so other backends (a cloud bucket, say) plug in the same way. `DEFAULT_FILE_STORAGE` still works when `STORAGES` has no `"default"`.
-- **Safe file names.** Names are sanitised, can't escape `MEDIA_ROOT`, and never overwrite: an existing name gets a random suffix.
+- **Safe file names.** Names are sanitised, can't escape `MEDIA_ROOT`, and never overwrite: an existing name gets a random suffix before its extensions (`report_a8Xk2Lq.tar.gz`, Django's `get_available_name`). An upload's stored name is kept within the field's `max_length` by shortening it, so a long file name can't overflow the column. `exists` is true for directories too, `delete_file` removes an empty directory, and `url` quotes names as Django does (no leading slashes, backslashes as slashes). `get_modified_time(storage, name)` and `get_created_time` give a stored file's times (aware with `USE_TZ`).
 - **Images.** `ImageField` accepts PNG, GIF, JPEG and WebP. Juango reads the size itself, so no image library is needed.
 - **Private uploads.** `path("media/<path:name>", protected_media(allow = (req, name) -> owns(req.user, name)))` serves files only to users `allow` lets through (by default, anyone logged in), confined to MEDIA_ROOT, with `Content-Security-Policy: sandbox` and `nosniff`, and anything but a plain image sent as a download, so an upload can never run as one of the site's pages. `sendfile = :x_accel_redirect` (nginx) or `:x_sendfile` lets the web server send the bytes.
 - **Several files in one field.** `MultipleFileField(max_files = 10)` (a form field; `images = true` checks each is an image) renders `<input type="file" multiple>` and cleans to a `Vector{UploadedFile}`, each checked like a `FileField`'s upload. When required, choosing nothing is an error. Save each one yourself, say as a row of a related model.
@@ -2033,6 +2033,8 @@ condition(view; etag_func, last_modified_func)      # both
 ```
 
 `etag`, `last_modified` and `condition` answer conditional requests without running the view: 304 for an unchanged GET or HEAD, 412 when an `If-Match` or `If-Unmodified-Since` precondition fails.
+
+Django's `utils.cache` helpers are there for responses: `Juango.patch_cache_control!` (directives keep their order; `no_cache = "Set-Cookie"` names fields), `Juango.patch_vary_headers!(resp, ["Cookie"])` (names compared in any case; `*` stands for all), `Juango.has_vary_header`, `Juango.get_max_age`, `Juango.patch_response_headers!(resp; cache_timeout)` and `Juango.add_never_cache_headers!`.
 
 ### Admin
 

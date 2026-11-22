@@ -14,39 +14,77 @@
 "Parse a Cache-Control header into directive => value (`true` for directives without a value)."
 function parse_cache_control(s::AbstractString)
     d = Dict{String,Any}()
-    for part in split(s, ','; keepempty = false)
-        kv = split(strip(part), '='; limit = 2)
-        isempty(kv[1]) && continue
-        d[lowercase(kv[1])] = length(kv) == 2 ? strip(kv[2], '"') : true
+    for (k, v) in cache_control_entries(s)
+        d[k] = v isa AbstractString ? strip(v, '"') : v
     end
     d
 end
+"A Cache-Control header's directives in order, as (lowercased name, raw value or `true`) pairs."
+cache_control_entries(s::AbstractString) =
+    [(lowercase(String(kv[1])), length(kv) == 2 ? String(kv[2]) : true)
+     for kv in (split(strip(part), '='; limit = 2) for part in split(s, ','; keepempty = false)) if !isempty(kv[1])]
 
 """
     patch_cache_control!(resp; max_age = 300, private = true, no_cache = true, ...)
 
-Add Cache-Control directives to a response (underscores become dashes; `true` writes the
-bare directive, `false` removes it). `max_age` keeps the smaller of the old and new values;
-`public` and `private` replace each other.
+Add Cache-Control directives to a response, as Django's `patch_cache_control` (underscores become
+dashes; `true` writes the bare directive, `false` removes it). Directives keep their order, new ones
+are added at the end. `max_age` keeps the smaller of the old and new values; `public` and `private`
+replace each other; `no_cache` may name fields (`no_cache = "Set-Cookie"`), which add up, and a bare
+`no-cache` wins over them.
 """
 function patch_cache_control!(resp::HttpResponse; kw...)
-    d = parse_cache_control(something(getheader(resp, "Cache-Control"), ""))
+    names = String[]                       # the directives, in order
+    vals = Dict{String,Any}()              # name => value; no-cache => a vector of values
+    put!(k, v) = (k in names || push!(names, k);
+                  k == "no-cache" ? push!(get!(() -> Any[], vals, k), v) : (vals[k] = v))
+    foreach(((k, v),) -> put!(k, v), cache_control_entries(something(getheader(resp, "Cache-Control"), "")))
+    haskey(kw, :public) && kw[:public] !== false && "private" in names && (filter!(!=("private"), names); delete!(vals, "private"))
+    haskey(kw, :private) && kw[:private] !== false && "public" in names && (filter!(!=("public"), names); delete!(vals, "public"))
     for (k, v) in kw
         name = replace(string(k), '_' => '-')
-        name == "private" && v === true && delete!(d, "public")
-        name == "public" && v === true && delete!(d, "private")
         if v === false
-            delete!(d, name)
-        elseif name == "max-age" && haskey(d, "max-age")
-            old = tryparse(Int, string(d["max-age"]))
-            d[name] = old === nothing ? v : min(old, Int(v))
+            filter!(!=(name), names); delete!(vals, name)
+        elseif name == "max-age" && haskey(vals, "max-age") && (old = tryparse(Int, string(vals["max-age"]))) !== nothing
+            vals[name] = min(old, Int(v))
         else
-            d[name] = v
+            put!(name, v)
         end
     end
-    setheader!(resp, "Cache-Control", join([v === true ? k : "$k=$v" for (k, v) in sort!(collect(d); by = first)], ", "))
+    parts = String[]
+    for k in names
+        v = vals[k]
+        if k == "no-cache"
+            any(x -> x === true, v) ? push!(parts, k) : append!(parts, ["$k=$x" for x in unique(v)])
+        else
+            push!(parts, v === true ? k : "$k=$v")
+        end
+    end
+    setheader!(resp, "Cache-Control", join(parts, ", "))
     resp
 end
+
+"The response's Cache-Control max-age in seconds, or `nothing` (Django's `get_max_age`)."
+function get_max_age(resp::HttpResponse)
+    v = get(parse_cache_control(something(getheader(resp, "Cache-Control"), "")), "max-age", nothing)
+    v === nothing ? nothing : tryparse(Int, string(v))
+end
+
+"""
+    patch_response_headers!(resp; cache_timeout = settings.CACHE_MIDDLEWARE_SECONDS)
+
+Django's `patch_response_headers`: an `Expires` header (unless there is one) and `max-age`, for
+`cache_timeout` seconds (a negative one is 0).
+"""
+function patch_response_headers!(resp::HttpResponse; cache_timeout = nothing)
+    t = max(0, round(Int, something(cache_timeout, settings.CACHE_MIDDLEWARE_SECONDS)))
+    hasheader(resp, "Expires") || setheader!(resp, "Expires", http_date(now(Dates.UTC) + Second(t)))
+    patch_cache_control!(resp; max_age = t)
+end
+
+"Headers that keep a response out of every cache (Django's `add_never_cache_headers`)."
+add_never_cache_headers!(resp::HttpResponse) =
+    patch_cache_control!(patch_response_headers!(resp; cache_timeout = -1); no_cache = true, no_store = true, must_revalidate = true, private = true)
 
 """
     never_cache(view)
@@ -54,12 +92,7 @@ end
 Tell browsers and proxies not to cache the view's responses.
 """
 function never_cache(view)
-    w = function (req; kw...)
-        resp = to_response(view(req; kw...))
-        patch_cache_control!(resp; max_age = 0, no_cache = true, no_store = true, must_revalidate = true, private = true)
-        hasheader(resp, "Expires") || setheader!(resp, "Expires", http_date(now(Dates.UTC)))
-        resp
-    end
+    w = (req; kw...) -> add_never_cache_headers!(to_response(view(req; kw...)))
     propagate_flags!(w, view)
 end
 
