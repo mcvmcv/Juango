@@ -241,10 +241,19 @@ end
 
 # --- languages --------------------------------------------------------------------------------------------------
 
-"`\"pt-br\"` -> `\"pt_BR\"` (the locale name used for directories)."
+"""
+`\"pt-br\"` -> `\"pt_BR\"` (the locale name used for directories), as Django's: a region of more than two
+letters is title-cased (`sr-latn` -> `sr_Latn`), a private-use tail is kept (`nl-nl-x-informal` ->
+`nl_NL-x-informal`), and a name that is already a locale stays one (`en_US`).
+"""
 function to_locale(lang)
-    parts = split(lowercase(string(lang)), r"[-_]")
-    length(parts) == 1 ? parts[1] : parts[1] * "_" * (length(parts[2]) > 2 ? titlecase(parts[2]) : uppercase(parts[2]))
+    language = string(lang)
+    l, _, country = partition_str(lowercase(language), '-')
+    isempty(country) && return lowercase(first(language, 3)) * language[nextind(language, 0, min(3, length(language)) + 1):end]
+    country, _, tail = partition_str(country, '-')
+    country = length(country) > 2 ? uppercasefirst(country) : uppercase(country)
+    isempty(tail) || (country *= "-" * tail)
+    l * "_" * country
 end
 "`\"pt_BR\"` -> `\"pt-br\"` (the language code used in URLs and headers)."
 to_language(locale) = lowercase(replace(string(locale), '_' => '-'))
@@ -303,13 +312,14 @@ function with_language(f, lang)
 end
 "The language's name from `LANGUAGES`."
 language_name(code) = (i = findfirst(l -> first(l) == code, settings.LANGUAGES); i === nothing ? code : last(settings.LANGUAGES[i]))
-"Whether the language reads right to left."
-get_language_bidi(lang = get_language()) = split(lowercase(lang), '-')[1] in ("ar", "fa", "he", "ur")
+"Whether the language reads right to left (its base code is in `LANGUAGES_BIDI`)."
+get_language_bidi(lang = get_language()) = split(lowercase(string(lang)), '-')[1] in get(settings, :LANGUAGES_BIDI, ["he", "ar", "ar-dz", "ckb", "fa", "ug", "ur"])
 
 # --- translating -------------------------------------------------------------------------------------------------
 
 function translate(context, msgid, plural = nothing, n = 1)
     settings.USE_I18N || return plural === nothing || n == 1 ? msgid : plural
+    isempty(msgid) && plural === nothing && return msgid        # (the catalog's "" entry is its header, not a translation)
     c = catalog(get_language())
     forms = get(c.messages, (context, msgid), nothing)
     if forms === nothing
@@ -328,6 +338,10 @@ ngettext(singular::AbstractString, plural::AbstractString, n::Integer) = transla
 "Translate with a disambiguating context: `pgettext(\"month name\", \"May\")`."
 pgettext(context::AbstractString, msgid::AbstractString) = translate(String(context), String(msgid))
 npgettext(context, singular, plural, n::Integer) = translate(String(context), String(singular), String(plural), n)
+# a safe message stays safe once translated (Django's), so marked-safe HTML isn't escaped afterwards
+gettext(msgid::SafeString) = mark_safe(translate("", msgid.s))
+ngettext(singular::SafeString, plural::AbstractString, n::Integer) = mark_safe(translate("", singular.s, String(plural), n))
+pgettext(context::AbstractString, msgid::SafeString) = mark_safe(translate(String(context), msgid.s))
 
 "`t\"Welcome\"` is `gettext(\"Welcome\")`."
 macro t_str(s)
@@ -481,6 +495,84 @@ function number_format(x::Real; decimals = nothing, lang = get_language(), group
     (neg ? "-" : "") * ip * (isempty(fp) ? "" : f.decimal * fp)
 end
 
+"""
+    numberformat(number, decimal_sep = "."; decimal_pos = nothing, grouping = 0, thousand_sep = "",
+                 force_grouping = false, use_l10n = nothing) -> String
+
+Django's `django.utils.numberformat.format`: `number` (an integer, float, Decimal or numeric string)
+with `decimal_sep`, cut (not rounded) or padded to `decimal_pos` decimals, and the integer part grouped
+by `grouping` (a size, or sizes from the right such as `(3, 2, 0)`, where 0 repeats the one before)
+with `thousand_sep`. Grouping happens with `force_grouping`, or when `USE_THOUSAND_SEPARATOR` is on
+and `use_l10n` isn't false. A Decimal of more than 200 digits is written in scientific notation.
+"""
+function numberformat(number, decimal_sep::AbstractString = "."; decimal_pos = nothing, grouping = 0, thousand_sep::AbstractString = "",
+                      force_grouping::Bool = false, use_l10n = nothing)
+    use_grouping = (use_l10n === nothing || use_l10n === true) && settings.USE_THOUSAND_SEPARATOR
+    use_grouping = (use_grouping || force_grouping) && grouping != 0
+    number isa Integer && !use_grouping && decimal_pos === nothing && return string(number)
+    again(x) = numberformat(x, decimal_sep; decimal_pos, grouping, thousand_sep, force_grouping, use_l10n)
+    str = if number isa AbstractFloat
+        digits, point = float_digits(number)
+        e10 = point - 1
+        if -4 <= e10 < 16                   # Python's str(float) writes these in fixed notation (always with a fraction)
+            (signbit(number) ? "-" : "") * fixed_digits(digits, point; min_fraction = 1)
+        else                                # and the others through Decimal(str(float)), as Django
+            return again(Decimal(parse(BigInt, digits) * (signbit(number) ? -1 : 1), point - length(digits), Val(:raw)))
+        end
+    elseif number isa Decimal
+        d = number
+        if decimal_pos !== nothing && abs(d) < Decimal(1, -max(decimal_pos, 1), Val(:raw))
+            d = Decimal(0, 0, Val(:raw))
+        end
+        digits = string(abs(d.c))
+        if abs(d.q) + length(digits) > 200   # ("{:e}": every digit of the coefficient)
+            adj = d.q + length(digits) - 1
+            coeff = (d.c < 0 ? "-" : "") * digits[1:1] * (length(digits) > 1 ? "." * digits[2:end] : "")
+            return again(coeff) * "e" * (adj < 0 ? "-" : "+") * string(abs(adj))
+        end
+        (d.c < 0 ? "-" : "") * fixed_digits(digits, length(digits) + d.q)
+    else
+        string(number)
+    end
+    sign = ""
+    startswith(str, "-") && (sign = "-"; str = str[2:end])
+    ip, dp = occursin('.', str) ? split(str, '.'; limit = 2) : (str, "")
+    decimal_pos === nothing || (dp = first(dp, decimal_pos))
+    decimal_pos === nothing || (dp *= "0"^max(0, decimal_pos - length(dp)))
+    dp = isempty(dp) ? "" : decimal_sep * dp
+    if use_grouping
+        intervals = grouping isa Integer ? Int[grouping, 0] : collect(Int, grouping)
+        active = popfirst!(intervals)
+        out = IOBuffer(); cnt = 0
+        for ch in reverse(ip)
+            if cnt != 0 && cnt == active
+                isempty(intervals) || (nxt = popfirst!(intervals); nxt == 0 || (active = nxt))
+                print(out, reverse(thousand_sep)); cnt = 0
+            end
+            print(out, ch); cnt += 1
+        end
+        ip = reverse(String(take!(out)))
+    end
+    sign * ip * dp
+end
+"A float's shortest round-trip digits (no leading or trailing zeros) and where the point goes in them."
+function float_digits(x::AbstractFloat)
+    m = match(r"^(\d+)\.(\d+)(?:e([-+]?\d+))?$", repr(abs(Float64(x))))
+    ip, fp = m[1], m[2]
+    point = length(ip) + (m[3] === nothing ? 0 : parse(Int, m[3]))
+    digits = ip * fp
+    lead = length(digits) - length(lstrip(digits, '0'))
+    digits = rstrip(lstrip(digits, '0'), '0')
+    isempty(digits) ? ("0", 1) : (String(digits), point - lead)
+end
+"Digits with the point after `point` of them, in fixed notation (`min_fraction` zeros at least after the point)."
+function fixed_digits(digits, point; min_fraction = 0)
+    ip = point <= 0 ? "0" : length(digits) >= point ? digits[1:point] : digits * "0"^(point - length(digits))
+    fp = point <= 0 ? "0"^(-point) * digits : length(digits) > point ? digits[point+1:end] : ""
+    length(fp) < min_fraction && (fp *= "0"^(min_fraction - length(fp)))
+    isempty(fp) ? ip : ip * "." * fp
+end
+
 "Format a number or date for the active language (the `localize` template filter)."
 localize(x::Real) = x isa Bool ? string(x) : number_format(x)
 localize(x::Union{Date,DateTime}) = format_date(x, x isa Date ? get_format().date : get_format().datetime)
@@ -498,32 +590,77 @@ end
 
 supported_codes() = [lowercase(string(first(l))) for l in settings.LANGUAGES]
 
-"Pick a supported language for `code` (exact, then without the region, then any with the same base)."
-function supported_language(code)
-    c = lowercase(string(code))
-    codes = supported_codes()
-    c in codes && return c
-    base = split(c, '-')[1]
-    base in codes && return base
-    i = findfirst(x -> split(x, '-')[1] == base, codes)
-    i === nothing ? nothing : codes[i]
+"Pick a supported language for `code` (exact, then without the region, then any with the same base), or `nothing`."
+supported_language(code) = supported_variant_or_nothing(code)
+
+"""
+    parse_accept_lang_header(h) -> Vector{Tuple{String,Float64}}
+
+An Accept-Language header as Django parses it: `(language, q)` pairs, lowercased, best first (ties in
+header order). A malformed header gives none at all. Only the first 500 characters are read (up to
+the last whole entry), so a huge header costs nothing.
+"""
+function parse_accept_lang_header(h)
+    s = lowercase(string(h))
+    if length(s) > ACCEPT_LANGUAGE_HEADER_MAX_LENGTH
+        cut = first(s, ACCEPT_LANGUAGE_HEADER_MAX_LENGTH)
+        i = findlast(',', cut)
+        s = i === nothing ? "" : cut[1:prevind(cut, i)]
+    end
+    out = Tuple{String,Float64}[]
+    pos = 1
+    re = r"\G\s*([a-z]{1,8}(?:-[a-z0-9]{1,8})*|\*)(?:\s*;\s*q=(0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?))?\s*(?:,|$)"
+    while pos <= ncodeunits(s)
+        m = match(re, s, pos)
+        m === nothing && return Tuple{String,Float64}[]
+        push!(out, (String(m[1]), m[2] === nothing ? 1.0 : parse(Float64, m[2])))
+        pos = m.offset + ncodeunits(m.match)
+        pos > ncodeunits(s) && break
+        ncodeunits(m.match) == 0 && return Tuple{String,Float64}[]
+    end
+    sort!(out; by = x -> -x[2])           # (stable: equal q keep the header's order)
+end
+const ACCEPT_LANGUAGE_HEADER_MAX_LENGTH = 500
+
+"Languages from an Accept-Language header, best first (`*` and what follows it left out)."
+function parse_accept_language(h)
+    out = String[]
+    for (code, _) in parse_accept_lang_header(h)
+        code == "*" && break
+        push!(out, code)
+    end
+    out
 end
 
-"Languages from an Accept-Language header, best first."
-function parse_accept_language(h)
-    out = Tuple{String,Float64}[]
-    for part in split(h, ',')
-        bits = split(strip(part), ';')
-        code = strip(bits[1])
-        (isempty(code) || code == "*") && continue
-        q = 1.0
-        for b in bits[2:end]
-            m = match(r"q\s*=\s*([0-9.]+)", b)
-            m === nothing || (q = something(tryparse(Float64, m[1]), 0.0))
-        end
-        push!(out, (code, q))
+"""
+    get_supported_language_variant(code; strict = false) -> String
+
+The language of `LANGUAGES` to use for `code` (Django's): the code itself, its base language (`de-at` ->
+`de`), or (unless `strict`) another variant of that base (`pt` -> `pt-br`). Throws `KeyError` if none.
+"""
+function get_supported_language_variant(code; strict::Bool = false)
+    c = lowercase(string(code))
+    (isempty(c) || length(c) > 500) && throw(KeyError(code))
+    codes = supported_codes()
+    base = split(c, '-')[1]
+    for x in (c, base)
+        x in codes && return x
     end
-    [c for (c, _) in sort(out; by = x -> -x[2])]
+    strict || for x in codes
+        startswith(x, base * "-") && return x
+    end
+    throw(KeyError(code))
+end
+supported_variant_or_nothing(code; strict = false) = try get_supported_language_variant(code; strict = strict) catch e; e isa KeyError ? nothing : rethrow() end
+
+"""
+    get_language_from_path(path; strict = false) -> String or nothing
+
+The supported language a path starts with (`/de/about/` -> `"de"`), as Django's.
+"""
+function get_language_from_path(path; strict::Bool = false)
+    m = match(r"^/(\w+(?:[@-]\w+){0,2})(?:/|$)", string(path))
+    m === nothing ? nothing : supported_variant_or_nothing(m[1]; strict = strict)
 end
 
 "The language for a request: URL prefix (i18n_patterns), then cookie, then Accept-Language, then LANGUAGE_CODE."
