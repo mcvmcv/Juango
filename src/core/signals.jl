@@ -47,10 +47,12 @@ Connect a do-block. It gets the sender and the signal's arguments as a NamedTupl
         args.created && notify(args.instance)
     end
 
-Disconnect it with the `dispatch_uid` you give here.
+It returns the do-block. Disconnect it with the `dispatch_uid` you give here (default: `objectid` of the do-block).
 """
 receiver(f, sig::Signal; sender = nothing, dispatch_uid = nothing) =
-    connect!(sig, (s; kw...) -> f(s, (; kw...)); sender = sender, dispatch_uid = something(dispatch_uid, objectid(f)))
+    (connect!(sig, (s; kw...) -> f(s, (; kw...)); sender = sender, dispatch_uid = something(dispatch_uid, objectid(f))); f)
+"`receiver(f, [signal1, signal2]; ...)`: connect the do-block to each of the signals."
+receiver(f, sigs::AbstractVector{Signal}; kw...) = (foreach(sig -> receiver(f, sig; kw...), sigs); f)
 
 "Unsubscribe a receiver (or a `dispatch_uid`); returns whether one was removed."
 function disconnect!(sig::Signal, receiver = nothing; sender = nothing, dispatch_uid = nothing)
@@ -81,7 +83,7 @@ has_receivers(sig::Signal, sender) = lock(() -> any(r -> (r[3] === nothing || r[
     send(signal, sender; kwargs...) -> Vector{Pair{receiver, result}}
 
 Call every matching receiver. An exception in a receiver stops the sending and propagates;
-`send_robust` collects exceptions as results instead.
+`send_robust` collects exceptions as results instead (and logs each to `juango.dispatch` at ERROR).
 """
 send(sig::Signal, sender; kw...) = [r => r(sender; signal = sig, kw...) for r in live_receivers(sig, sender)]
 function send_robust(sig::Signal, sender; kw...)
@@ -90,6 +92,8 @@ function send_robust(sig::Signal, sender; kw...)
         push!(out, r => try
             r(sender; signal = sig, kw...)
         catch e
+            log!("juango.dispatch", :error, "Error calling $(r) in Signal.send_robust() ($(sprint(showerror, e)))";
+                 exception = (e, catch_backtrace()))
             e
         end)
     end
@@ -100,9 +104,12 @@ end
 const pre_save = Signal("pre_save")
 "After `save!`: `instance`, `created`."
 const post_save = Signal("post_save")
-"Before an object is deleted (also for cascaded deletes): `instance`."
+"""
+Before an object is deleted (also for cascaded deletes): `instance`, and `origin`: the object or
+queryset whose `delete!` started the deletion.
+"""
 const pre_delete = Signal("pre_delete")
-"After an object is deleted: `instance`."
+"After an object is deleted: `instance`, `origin` (as `pre_delete`)."
 const post_delete = Signal("post_delete")
 """
 After every write to a model's table, bulk ones included, which Django's signals miss: the one

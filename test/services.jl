@@ -18,7 +18,7 @@
     @test occursin("multipart/mixed", s) && occursin("multipart/alternative", s) && occursin("filename=\"r.csv\"", s)
     @test occursin(Juango.base64encode("body text"), s) && occursin(Juango.base64encode("<p>hi</p>"), s)
     @test Juango.recipients(msg) == ["t@x.io", "c@x.io", "secret@x.io"]
-    @test !occursin("\r\nBcc: evil", Juango.message_string(EmailMessage("a\r\nBcc: evil@x.io", "b"; to = ["t@x.io"])))
+    @test_throws BadHeaderError Juango.message_string(EmailMessage("a\r\nBcc: evil@x.io", "b"; to = ["t@x.io"]))   # (no header injection)
 
     # backends
     configure!(EMAIL_BACKEND = :console)

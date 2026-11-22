@@ -116,7 +116,7 @@ export gettext, ngettext, pgettext, npgettext, gettext_lazy, ngettext_lazy, pget
        i18n_urls, timezone_now, make_aware, make_naive, localtime, localdate, with_timezone, activate_timezone!,
        deactivate_timezone!, get_current_timezone, TimezoneMiddleware
 # caching, HTTP caching and security headers
-export cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, get_or_set, cache_get_many,
+export cache_get, cache_set, cache_add, cache_delete, cache_has, cache_clear, get_or_set, cache_get_many, cache_touch, cache_delete_many,
        cache_set_many, cache_page, CacheMiddleware, never_cache, cache_control, vary_on_headers,
        vary_on_cookie, condition, etag, last_modified, ConditionalGetMiddleware, GZipMiddleware,
        ContentSecurityPolicyMiddleware, CSP, csp_nonce
@@ -168,7 +168,7 @@ public send_robust, has_receivers, emit, log!, log_enabled, MemoryHandler, LogRe
 public set_language, number_format, localize, language_name, makemessages, compilemessages,
        is_aware, convert_naive_datetimes, JavaScriptCatalog, JSONCatalog
 # caching, HTTP caching, security
-public cache, incr, decr, incr_version, create_cache_table, CacheSerializationError, patch_cache_control!,
+public cache, incr, decr, incr_version, decr_version, create_cache_table, CacheSerializationError, patch_cache_control!,
        BrokenLinkEmailsMiddleware, is_secure, get_host, get_port, csp_override, csp_report_only_override, deploy_issues
 # admin log, contrib apps, tasks
 public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, sitemap_view,

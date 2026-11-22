@@ -30,20 +30,22 @@ mutable struct EmailMessage
 end
 EmailMessage(subject, body; from_email = nothing, to = String[], cc = String[], bcc = String[], reply_to = String[],
              headers = Dict{String,String}(), attachments = [], alternatives = []) =
-    EmailMessage(string(subject), string(body), string(something(from_email, settings.DEFAULT_FROM_EMAIL)),
-                 string.(collect(to)), string.(collect(cc)), string.(collect(bcc)), string.(collect(reply_to)),
+    EmailMessage(string(something(subject, "")), string(something(body, "")), string(something(from_email, settings.DEFAULT_FROM_EMAIL)),
+                 addrlist("to", to), addrlist("cc", cc), addrlist("bcc", bcc), addrlist("reply_to", reply_to),
                  Dict{String,String}(string(k) => string(v) for (k, v) in headers),
-                 [(string(a[1]), bytesof(a[2]), string(a[3])) for a in attachments],
+                 [(string(a[1]), bytesof(a[2]), string(length(a) >= 3 && a[3] !== nothing ? a[3] : guess_mimetype(a[1]))) for a in attachments],
                  [(string(a[1]), string(a[2])) for a in alternatives])
+# (a string where a list belongs would be split into characters: refused, as Django's TypeError)
+addrlist(name, x) = x isa AbstractString ? throw(ArgumentError("\"$name\" argument must be a list or tuple")) : String[string(a) for a in x]
 "An `EmailMessage` meant to carry alternatives (`attach_alternative!(msg, html, \"text/html\")`)."
 const EmailMultiAlternatives = EmailMessage
 bytesof(x::AbstractString) = Vector{UInt8}(codeunits(x))
 bytesof(x::AbstractVector{UInt8}) = Vector{UInt8}(x)
 bytesof(x::UploadedFile) = read(x)
 
-"Attach a file: `attach!(msg, \"report.pdf\", bytes, \"application/pdf\")`."
-attach!(m::EmailMessage, filename, content, mimetype = "application/octet-stream") =
-    (push!(m.attachments, (string(filename), bytesof(content), string(mimetype))); m)
+"Attach a file: `attach!(msg, \"report.pdf\", bytes, \"application/pdf\")` (no MIME type: guessed from the file name)."
+attach!(m::EmailMessage, filename, content, mimetype = nothing) =
+    (push!(m.attachments, (string(filename), bytesof(content), string(something(mimetype, guess_mimetype(filename))))); m)
 """
     attach_file(msg, path; mimetype = nothing)
 
@@ -56,14 +58,33 @@ guess_mimetype(path) = (t = get(MIME_TYPES, lowercase(splitext(path)[2]), "appli
 
 "Add an alternative rendering, usually HTML."
 attach_alternative!(m::EmailMessage, content, mimetype = "text/html") = (push!(m.alternatives, (string(content), string(mimetype))); m)
-"Everyone the message is delivered to (to, cc and bcc)."
-recipients(m::EmailMessage) = unique(vcat(m.to, m.cc, m.bcc))
+"Everyone the message is delivered to (to, cc and bcc; empty addresses left out)."
+recipients(m::EmailMessage) = unique(filter(!isempty, vcat(m.to, m.cc, m.bcc)))
 
 # --- MIME ----------------------------------------------------------------------------------------------
 
 "RFC 2047 encoding for header text that isn't plain ASCII."
 encode_header(s) = all(c -> isascii(c) && c != '\n' && c != '\r', s) ? s : "=?utf-8?b?" * base64encode(s) * "?="
-nonl(s) = replace(s, r"[\r\n]+" => " ")     # no header injection
+nonl(s) = replace(s, r"[\r\n]+" => " ")
+
+# a header value with a newline in it (header injection): BadHeaderError (http.jl), as Django's mail
+check_header(k, v) = (occursin('\n', v) || occursin('\r', v)) ?
+    throw(BadHeaderError("Header values can't contain newlines (got $(repr(v)) for header $(repr(k)))")) : v
+
+"""
+An address for a header (Django's `sanitize_address`): a display name that isn't plain ASCII is
+RFC 2047 encoded, and one with specials (`,` `"` ...) is quoted; the address itself is kept.
+"""
+function format_address(a::AbstractString)
+    m = match(r"^\s*(.*?)\s*<([^<>]*)>\s*$"s, a)
+    m === nothing && return String(strip(a))
+    name, addr = strip(m[1]), m[2]
+    length(name) >= 2 && startswith(name, '"') && endswith(name, '"') && (name = replace(name[2:end-1], "\\\"" => "\"", "\\\\" => "\\"))
+    isempty(name) && return String(addr)
+    shown = !all(isascii, name) ? encode_header(name) :
+            occursin(r"[()<>\[\]:;@\\,.\"]", name) ? "\"" * replace(name, "\\" => "\\\\", "\"" => "\\\"") * "\"" : name
+    string(shown, " <", addr, ">")
+end
 wrap76(s) = join([s[i:min(end, i + 75)] for i in 1:76:length(s)], "\r\n")
 b64part(data) = wrap76(base64encode(data))
 
@@ -74,18 +95,24 @@ end
 "The message in RFC 5322 / MIME form, as sent."
 function message_string(m::EmailMessage; message_id = nothing)
     io = IOBuffer()
-    hdr(k, v) = print(io, k, ": ", nonl(v), "\r\n")
-    hdr("From", encode_header(m.from_email))
-    isempty(m.to) || hdr("To", join(m.to, ", "))
-    isempty(m.cc) || hdr("Cc", join(m.cc, ", "))
-    isempty(m.reply_to) || hdr("Reply-To", join(m.reply_to, ", "))
-    hdr("Subject", encode_header(m.subject))
-    hdr("Date", Dates.format(now(Dates.UTC), "e, dd u yyyy HH:MM:SS") * " +0000")
+    hdr(k, v) = print(io, k, ": ", check_header(k, v), "\r\n")
+    foreach(a -> check_header("address", a), vcat([m.from_email], m.to, m.cc, m.bcc, m.reply_to))
+    # headers given in `headers` take the place of the standard ones (From, To, Cc, Reply-To, Subject,
+    # Date, Message-ID; any case), as Django's extra headers; the recipients stay to + cc + bcc
+    ex = Dict(lowercase(k) => k for k in keys(m.headers))
+    std(k, v) = haskey(ex, lowercase(k)) ? hdr(k, m.headers[ex[lowercase(k)]]) : hdr(k, v)
+    addrs(k, list) = (haskey(ex, lowercase(k)) || !isempty(list)) && std(k, join(format_address.(list), ", "))
+    std("From", format_address(m.from_email))
+    addrs("To", m.to)
+    addrs("Cc", m.cc)
+    addrs("Reply-To", m.reply_to)
+    std("Subject", encode_header(check_header("Subject", m.subject)))
+    std("Date", Dates.format(now(Dates.UTC), "e, dd u yyyy HH:MM:SS") * " +0000")
     domain = (i = findlast('@', m.from_email); i === nothing ? "localhost" : strip(m.from_email[i+1:end], '>'))
-    hdr("Message-ID", something(message_id, "<" * random_string(24) * "@" * domain * ">"))
+    std("Message-ID", something(message_id, "<" * random_string(24) * "@" * domain * ">"))
     hdr("MIME-Version", "1.0")
     for (k, v) in m.headers
-        hdr(k, v)
+        lowercase(k) in ("from", "to", "cc", "reply-to", "subject", "date", "message-id", "mime-version") || hdr(k, v)
     end
     body = IOBuffer()
     if isempty(m.alternatives)
@@ -124,12 +151,14 @@ function email_backend(b = settings.EMAIL_BACKEND)
     b isa Function && return b
     b === :smtp && return smtp_send
     b === :console && return msgs -> (foreach(m -> (println(message_string(m)); println("-"^79)), msgs); length(msgs))
-    b === :locmem && return msgs -> (append!(outbox, msgs); length(msgs))
+    # locmem renders each message first, as Django's, so a bad header fails in tests as it would in production
+    b === :locmem && return msgs -> (foreach(message_string, msgs); append!(outbox, msgs); length(msgs))
     b === :dummy && return msgs -> length(msgs)
     if b === :file
         return function (msgs)
             dir = string(settings.EMAIL_FILE_PATH)
             isempty(dir) && throw(ImproperlyConfigured("EMAIL_BACKEND = :file needs EMAIL_FILE_PATH"))
+            ispath(dir) && !isdir(dir) && throw(ImproperlyConfigured("Path for saving email messages exists, but is not a directory: $dir"))
             mkpath(dir)
             path = joinpath(dir, Dates.format(now(), "yyyymmdd-HHMMSS") * "-" * random_string(8) * ".log")
             open(path, "a") do io
@@ -195,33 +224,33 @@ function send!(m::EmailMessage; fail_silently = false, connection = nothing)
 end
 
 """
-    send_mail(subject, message, from_email, recipient_list; html_message=nothing, fail_silently=false) -> Int
+    send_mail(subject, message, from_email, recipient_list; html_message=nothing, fail_silently=false, connection=nothing) -> Int
 
 Send one message to every address in `recipient_list` (they all see each other in To).
 `from_email = nothing` uses `DEFAULT_FROM_EMAIL`.
 """
-function send_mail(subject, message, from_email, recipient_list; html_message = nothing, fail_silently = false)
+function send_mail(subject, message, from_email, recipient_list; html_message = nothing, fail_silently = false, connection = nothing)
     m = EmailMessage(subject, message; from_email = from_email, to = recipient_list)
     html_message === nothing || attach_alternative!(m, html_message, "text/html")
-    send!(m; fail_silently = fail_silently)
+    send!(m; fail_silently = fail_silently, connection = connection)
 end
 
 "Email the site administrators (`settings.ADMINS`, a list of `(name, email)`)."
-function mail_admins(subject, message; html_message = nothing, fail_silently = false)
+function mail_admins(subject, message; html_message = nothing, fail_silently = false, connection = nothing)
     isempty(settings.ADMINS) && return 0
     m = EmailMessage(settings.EMAIL_SUBJECT_PREFIX * subject, message; from_email = settings.SERVER_EMAIL,
                      to = [a isa Tuple || a isa Pair ? last(a) : a for a in settings.ADMINS])
     html_message === nothing || attach_alternative!(m, html_message, "text/html")
-    send!(m; fail_silently = fail_silently)
+    send!(m; fail_silently = fail_silently, connection = connection)
 end
 
 "Email the site managers (`settings.MANAGERS`, a list of `(name, email)`)."
-function mail_managers(subject, message; html_message = nothing, fail_silently = false)
+function mail_managers(subject, message; html_message = nothing, fail_silently = false, connection = nothing)
     isempty(settings.MANAGERS) && return 0
     m = EmailMessage(settings.EMAIL_SUBJECT_PREFIX * subject, message; from_email = settings.SERVER_EMAIL,
                      to = [a isa Tuple || a isa Pair ? last(a) : a for a in settings.MANAGERS])
     html_message === nothing || attach_alternative!(m, html_message, "text/html")
-    send!(m; fail_silently = fail_silently)
+    send!(m; fail_silently = fail_silently, connection = connection)
 end
 
 # --- SMTP ---------------------------------------------------------------------------------------------------

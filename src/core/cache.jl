@@ -17,19 +17,21 @@
 
 abstract type CacheBackend end
 
-"Options shared by every backend: default timeout, key prefix, version and serializer."
+"Options shared by every backend: default timeout, key prefix, version, serializer, culling and key function."
 struct CacheConfig
     timeout::Union{Nothing,Float64}
     key_prefix::String
     version::Int
     serializer::Symbol      # :json or :serialization, for the backends that store text (:db, :redis)
+    cull_frequency::Int     # a full cache drops 1/cull_frequency of its entries (0: all of them), as Django's CULL_FREQUENCY
+    key_function::Any       # nothing, or (key, key_prefix, version) -> the stored key (Django's KEY_FUNCTION)
 end
 
 mutable struct LocMemCache <: CacheBackend
     conf::CacheConfig
     store::Dict{String,Tuple{Any,Union{Nothing,Float64}}}     # key => (value, expires)
     stamps::Dict{String,Int}                                # key => last use (a counter), for LRU culling
-    clock::Int
+    clock::Base.RefValue{Int}
     max_entries::Int
     lock::ReentrantLock
 end
@@ -39,6 +41,7 @@ end
 struct DatabaseCache <: CacheBackend
     conf::CacheConfig
     table::String
+    max_entries::Int
 end
 mutable struct RedisCache <: CacheBackend
     conf::CacheConfig
@@ -52,6 +55,8 @@ end
 
 const CACHE_INSTANCES = Dict{String,CacheBackend}()
 const CACHE_INSTANCES_LOCK = ReentrantLock()
+"The stores of :locmem caches given a :location, shared by every cache with that location (kept across settings changes, as Django's)."
+const LOCMEM_STORES = Dict{String,Any}()
 push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> (foreach(close_cache, values(CACHE_INSTANCES)); empty!(CACHE_INSTANCES)), CACHE_INSTANCES_LOCK))
 close_cache(::CacheBackend) = nothing
 close_cache(c::RedisCache) = (c.sock === nothing || try close(c.sock) catch end; c.sock = nothing)
@@ -62,11 +67,20 @@ function make_cache(d)
     t = opt(d, :timeout, 300)
     ser = Symbol(opt(d, :serializer, :json))
     ser in (:json, :serialization) || throw(ImproperlyConfigured("unknown cache serializer $(repr(ser)); use :json or :serialization"))
-    conf = CacheConfig(t === nothing ? nothing : Float64(t), string(opt(d, :key_prefix, "")), Int(opt(d, :version, 1)), ser)
+    cf = Int(opt(d, :cull_frequency, 3))
+    cf >= 0 || throw(ImproperlyConfigured("cache :cull_frequency must be 0 or more"))
+    conf = CacheConfig(t === nothing ? nothing : Float64(t), string(opt(d, :key_prefix, "")), Int(opt(d, :version, 1)), ser,
+                       cf, opt(d, :key_function, nothing))
     b = Symbol(opt(d, :backend, :locmem))
-    b === :locmem && return LocMemCache(conf, Dict{String,Tuple{Any,Union{Nothing,Float64}}}(), Dict{String,Int}(), 0, Int(opt(d, :max_entries, 300)), ReentrantLock())
+    if b === :locmem
+        # caches with the same :location share one store (Django's LOCATION); without one, each has its own
+        loc = opt(d, :location, nothing)
+        fresh() = (Dict{String,Tuple{Any,Union{Nothing,Float64}}}(), Dict{String,Int}(), Ref(0), ReentrantLock())
+        st = loc === nothing ? fresh() : lock(() -> get!(fresh, LOCMEM_STORES, string(loc)), CACHE_INSTANCES_LOCK)
+        return LocMemCache(conf, st[1], st[2], st[3], Int(opt(d, :max_entries, 300)), st[4])
+    end
     b === :dummy && return DummyCache(conf)
-    b === :db && return DatabaseCache(conf, string(opt(d, :location, "juango_cache")))
+    b === :db && return DatabaseCache(conf, string(opt(d, :location, "juango_cache")), Int(opt(d, :max_entries, 300)))
     b === :file && return FileBasedCache(conf, abspath(string(opt(d, :location, joinpath(tempdir(), "juango_cache")))),
                                          Int(opt(d, :max_entries, 300)), ReentrantLock())
     if b === :memcached
@@ -100,14 +114,19 @@ end
 
 function make_key(c::CacheBackend, key, version)
     k = string(key)
+    v = something(version, c.conf.version)
+    kf = c.conf.key_function
+    kf === nothing || (k = string(kf(k, c.conf.key_prefix, v)))
     (length(k) > 250 || occursin(r"[\x00-\x20\x7f]", k)) && (k = "hashed:" * bytes2hex(sha256(k)))
-    c.conf.key_prefix * ":" * string(something(version, c.conf.version)) * ":" * k
+    kf === nothing ? c.conf.key_prefix * ":" * string(v) * ":" * k : k
 end
+"How many of `n` entries a full cache drops: `n ÷ cull_frequency`, all of them for 0 (Django's culling)."
+cull_count(c::CacheBackend, n) = c.conf.cull_frequency == 0 ? n : max(1, n ÷ c.conf.cull_frequency)
 expiry(c::CacheBackend, timeout) = (t = timeout === :default ? c.conf.timeout : timeout; t === nothing ? nothing : time() + t)
 
 # --- backend primitives: raw_get(c, k) -> (found, value); raw_set(c, k, v, expires); raw_delete(c, k); raw_clear(c) ---
 
-touch!(c::LocMemCache, k) = (c.clock += 1; c.stamps[k] = c.clock)
+touch!(c::LocMemCache, k) = (c.clock[] += 1; c.stamps[k] = c.clock[])
 function raw_get(c::LocMemCache, k)
     lock(c.lock) do
         e = get(c.store, k, nothing)
@@ -124,9 +143,9 @@ end
 function raw_set(c::LocMemCache, k, v, exp)
     lock(c.lock) do
         if !haskey(c.store, k) && length(c.store) >= c.max_entries
-            # full: drop the least recently used third at once (Django culls the same way),
+            # full: drop the least recently used third (cull_frequency) at once (Django culls the same way),
             # so the occasional sort is the only O(n) work
-            n = max(1, length(c.store) ÷ 3)
+            n = cull_count(c, length(c.store))
             for (old, _) in partialsort!(collect(c.stamps), 1:n; by = last)
                 delete!(c.store, old); delete!(c.stamps, old)
             end
@@ -328,9 +347,22 @@ function raw_get(c::DatabaseCache, k)
     end
     read_entry(c, k, String(rows[1][:value]))
 end
+"A full database cache (max_entries) drops its expired rows, then a cull_frequency share by key order (Django's `_cull`)."
+function cull_db!(c::DatabaseCache)
+    t = "\"$(c.table)\""
+    rowcount() = Int(only(execute("SELECT COUNT(*) AS n FROM $t"))[:n])
+    rowcount() <= c.max_entries && return      # (more than max_entries, as Django's database cache)
+    execute_changes("DELETE FROM $t WHERE \"expires\" IS NOT NULL AND \"expires\" <= ?", [time()])
+    n = rowcount()
+    n <= c.max_entries && return
+    c.conf.cull_frequency == 0 && return (execute("DELETE FROM $t"); nothing)
+    rows = execute("SELECT \"cache_key\" FROM $t ORDER BY \"cache_key\" LIMIT 1 OFFSET $(cull_count(c, n))")
+    isempty(rows) || execute_changes("DELETE FROM $t WHERE \"cache_key\" < ?", [rows[1][:cache_key]])
+    nothing
+end
 function raw_set(c::DatabaseCache, k, v, exp)
     atomic() do
-        execute("DELETE FROM \"$(c.table)\" WHERE \"cache_key\" = ?", [k])
+        execute_changes("DELETE FROM \"$(c.table)\" WHERE \"cache_key\" = ?", [k]) == 0 && cull_db!(c)
         execute("INSERT INTO \"$(c.table)\" (\"cache_key\", \"value\", \"expires\") VALUES (?, ?, ?)", [k, serialize_value(c, v), exp])
     end
 end
@@ -415,11 +447,11 @@ function raw_set(c::FileBasedCache, k, v, exp)
     lock(c.lock) do
         mkpath(c.dir)
         files = filter(endswith(".jcache"), readdir(c.dir))
-        if length(files) >= c.max_entries                      # full: drop the oldest third, as Django culls
-            byage = sort(files; by = f -> mtime(joinpath(c.dir, f)))
-            foreach(f -> rm(joinpath(c.dir, f); force = true), byage[1:max(1, length(byage) ÷ 3)])
-        end
         p = cache_file(c, k)
+        if !isfile(p) && length(files) >= c.max_entries       # full: drop the oldest third (cull_frequency), as Django culls
+            byage = sort(files; by = f -> mtime(joinpath(c.dir, f)))
+            foreach(f -> rm(joinpath(c.dir, f); force = true), byage[1:cull_count(c, length(byage))])
+        end
         tmp = p * "." * random_string(8) * ".tmp"
         write(tmp, (exp === nothing ? "" : string(exp)) * "\n" * s)
         mv(tmp, p; force = true)                               # readers never see half a file
@@ -510,6 +542,26 @@ function cache_add(key, value; timeout = :default, version = nothing, cache_name
     true
 end
 
+"""
+    cache_touch(key; timeout=:default, version=nothing, cache_name="default") -> Bool
+
+Give a cached key a new timeout (Django's `touch`); returns whether the key was cached.
+"""
+function cache_touch(key; timeout = :default, version = nothing, cache_name = "default")
+    c = cache(cache_name)
+    k = make_key(c, key, version)
+    if c isa LocMemCache
+        return lock(c.lock) do
+            first(raw_get(c, k)) || return false
+            c.store[k] = (c.store[k][1], expiry(c, timeout))
+            true
+        end
+    end
+    found, v = raw_get(c, k)
+    found && raw_set(c, k, v, expiry(c, timeout))
+    found
+end
+
 "Remove a key; returns whether it was cached."
 cache_delete(key; version = nothing, cache_name = "default") = (c = cache(cache_name); raw_delete(c, make_key(c, key, version)))
 "Whether a key is cached."
@@ -538,9 +590,12 @@ get_or_set(f::Base.Callable, key; kw...) = get_or_set(key, f; kw...)       # do-
 "Several values at once: a `Dict` of the keys that are cached."
 cache_get_many(keys; version = nothing, cache_name = "default") =
     Dict(k => v for (k, v) in ((k, cache_get(k, NOTFOUND; version = version, cache_name = cache_name)) for k in keys) if v !== NOTFOUND)
-"Set several values: `cache_set_many(Dict(\"a\" => 1, \"b\" => 2))`."
+"Set several values: `cache_set_many(Dict(\"a\" => 1, \"b\" => 2))`; returns the keys that couldn't be stored (none: Django's `[]`)."
 cache_set_many(d; timeout = :default, version = nothing, cache_name = "default") =
-    (foreach(((k, v),) -> cache_set(k, v; timeout = timeout, version = version, cache_name = cache_name), d); nothing)
+    (foreach(((k, v),) -> cache_set(k, v; timeout = timeout, version = version, cache_name = cache_name), d); String[])
+"Remove several keys (Django's `delete_many`)."
+cache_delete_many(keys; version = nothing, cache_name = "default") =
+    (foreach(k -> cache_delete(k; version = version, cache_name = cache_name), keys); nothing)
 
 """
     incr(key, delta=1) -> new value
@@ -563,16 +618,18 @@ end
 const CACHE_INCR_LOCK = ReentrantLock()
 decr(key, delta::Integer = 1; kw...) = incr(key, -delta; kw...)
 
-"Bump a key's version, invalidating the old value: `incr_version(\"menu\")`."
-function incr_version(key; version = nothing, cache_name = "default")
+"Bump a key's version, invalidating the old value: `incr_version(\"menu\")`; returns the new version."
+function incr_version(key, delta::Integer = 1; version = nothing, cache_name = "default")
     c = cache(cache_name)
     v = something(version, c.conf.version)
     found, val = raw_get(c, make_key(c, key, v))
     found || throw(KeyError(key))
-    raw_set(c, make_key(c, key, v + 1), val, expiry(c, :default))
+    raw_set(c, make_key(c, key, v + delta), val, expiry(c, :default))
     raw_delete(c, make_key(c, key, v))
-    v + 1
+    v + delta
 end
+"Move a key to the version before (Django's `decr_version`); returns the new version."
+decr_version(key, delta::Integer = 1; kw...) = incr_version(key, -delta; kw...)
 
 # --- whole responses ---------------------------------------------------------------------------------------
 

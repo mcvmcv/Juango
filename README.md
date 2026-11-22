@@ -1712,7 +1712,8 @@ mail_admins("Disk almost full", details)          # to settings.ADMINS = [("Name
 ```
 
 - **Backends.** `EMAIL_BACKEND` is `:smtp` (the default), `:console`, `:file` (`EMAIL_FILE_PATH`), `:locmem` (messages collect in `Juango.outbox`) or `:dummy`. You can also give it any function that takes a vector of messages.
-- **Many messages.** `send_mass_mail([(subject, body, from, [to...]), ...])` sends them over one connection (SMTP logs in once). `get_connection(:console)` picks a backend for some messages: `send!(msg; connection = conn)`, `send_messages(conn, msgs)`.
+- **Headers.** `headers = Dict("Reply-To" => ..., "X-Tag" => ...)` adds headers; one named like a standard header (From, To, Cc, Reply-To, Subject, Date, Message-ID) takes its place, but the recipients stay `to`, `cc` and `bcc`. A header value with a newline in it throws `BadHeaderError` (header injection), also with the `:locmem` backend, so tests catch it. Display names that aren't plain ASCII are encoded (`"Ann Sürname <ann@example.com>"`). `to`, `cc`, `bcc` and `reply_to` must be lists: a single string throws an `ArgumentError`. `attach!` without a MIME type guesses it from the file name.
+- **Many messages.** `send_mass_mail([(subject, body, from, [to...]), ...])` sends them over one connection (SMTP logs in once). `get_connection(:console)` picks a backend for some messages: `send!(msg; connection = conn)`, `send_messages(conn, msgs)`; `send_mail`, `mail_admins` and `mail_managers` take `connection` too.
 - **SMTP** uses `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD` (AUTH PLAIN), and `EMAIL_USE_TLS` (STARTTLS) or `EMAIL_USE_SSL`, with the server's certificate verified against the system roots. `EMAIL_TIMEOUT` (seconds) limits the whole conversation.
 - **Tests.** The test `Client` switches `:smtp` to `:locmem`, so tests never send real mail and can inspect `outbox`.
 - **Errors.** With `DEBUG = false`, unhandled errors are mailed to `ADMINS`.
@@ -1856,18 +1857,18 @@ receiver(post_delete; sender = Post) do sender, args              # do-block: ar
 end
 
 const order_placed = Signal("order_placed")                      # your own signals
-send(order_placed, Order; order = o)                             # send_robust collects exceptions instead
+send(order_placed, Order; order = o)                             # send_robust collects exceptions instead (and logs them to juango.dispatch)
 ```
 
 - **Built-in signals:**
   - `pre_save` and `post_save` (`instance`, `created`)
-  - `pre_delete` and `post_delete` (`instance`, also sent for cascaded deletes)
+  - `pre_delete` and `post_delete` (`instance`, also sent for cascaded deletes; `origin`, the object or queryset whose `delete!` started it)
   - `m2m_changed` (`action`, `instance`, `model`, `pk_set`, `reverse`; the sender is the join model, `through(Post, :tags)`)
   - `post_write`, which Django lacks: after every write, bulk ones included (`save!`, `update!`, `bulk_create`, `bulk_update`, deletes and cascades, many-to-many changes), with `action` (`:insert`, `:update`, `:delete`, `:m2m`), `via`, the rows' `ids`, the `fields` written and the `instances` when the write had them. It's the one hook an audit log or undo needs.
   - `request_started` and `request_finished`
   - `user_logged_in`, `user_logged_out` and `user_login_failed` (without the password)
   - `pre_migrate` and `post_migrate`, once per app around `migrate` (the sender is the app label; `app_label`, `database`, `plan`, and `apps` for historical models). Juango's content types, permissions and default site are created by `post_migrate` receivers for "contenttypes", "auth" and "sites", which run before other apps'.
-- **Filtering.** `sender` limits a receiver to one model (or other sender). `dispatch_uid` identifies a receiver for `disconnect!`.
+- **Filtering.** `sender` limits a receiver to one model (or other sender). `dispatch_uid` identifies a receiver for `disconnect!`. `receiver([sig1, sig2]) do ... end` connects one do-block to several signals.
 - **What doesn't send.** Bulk `update!` doesn't send `pre_save`/`post_save`, as in Django (it sends `post_write`).
 - **When to use them.** To change a model's own behaviour, overriding `save!` (as the blog example does) is usually clearer. Signals are for code that lives elsewhere, such as caches, search indexes and notifications.
 
@@ -1878,6 +1879,7 @@ cache_set("greeting", "hi"; timeout = 60)          # seconds; nothing = for ever
 cache_get("greeting", "default")
 get_or_set("stats", () -> expensive(); timeout = 300)
 Juango.incr("hits"); cache_add(k, v); cache_delete(k); cache_get_many(keys); Juango.incr_version("menu")
+cache_touch(k; timeout = 600); cache_delete_many(keys); Juango.decr_version("menu")
 const home = cache_page(home_view; timeout = 60)   # whole GET responses, keyed by URL
 ```
 
@@ -1888,14 +1890,14 @@ const home = cache_page(home_view; timeout = 60)   # whole GET responses, keyed 
 `cache_delete(make_template_fragment_key("sidebar", [user.id]))` drops one such fragment when its data changes.
 
 - **Backends.** `CACHES` names one or more caches: `Dict("default" => Dict(:backend => :locmem, :max_entries => 1000, :timeout => 300))`. The backends are:
-  - `:locmem` (per process, LRU)
-  - `:db` (run `manage.jl createcachetable`)
+  - `:locmem` (per process, LRU; caches given the same `:location` share one store, as Django's)
+  - `:db` (run `manage.jl createcachetable`; culled at `:max_entries`, default 300)
   - `:redis` (`:location => "redis://host:6379/0"`, using a small built-in client)
   - `:memcached` (`:location => "127.0.0.1:11211"`, also built in)
   - `:file` (`:location => "/var/tmp/cache"`, one file per key, culled at `:max_entries`)
   - `:dummy`
 
-  Use another cache with `cache_name = "shared"`. `:locmem` stores copies of the values.
+  Use another cache with `cache_name = "shared"`. `:locmem` stores copies of the values. Each cache also takes `:key_prefix`, `:version`, `:cull_frequency` (a full `:locmem`, `:file` or `:db` cache drops 1/3 of its entries by default; 0 empties it) and `:key_function` (`(key, prefix, version) -> stored key`), as Django's `KEY_PREFIX`, `VERSION`, `CULL_FREQUENCY` and `KEY_FUNCTION`.
 - **What `:db`, `:redis`, `:memcached` and `:file` store.** They store JSON with type tags, so a value comes back equal and with the same type, and reading an entry never runs code. That covers `nothing`, booleans, numbers (including `BigInt`, `Rational`, `NaN`), strings, symbols, chars, dates and times (with time zones), UUIDs, `SafeString`, byte vectors, vectors, dicts, tuples, named tuples, pairs, sets, model instances and `HttpResponse`s (so `cache_page` works). Vectors, dicts and sets keep simple element types (`Vector{Int}`, `Dict{String,Date}`); nested containers come back with `Any`. Storing anything else raises `Juango.CacheSerializationError`.
 
   `:serializer => :serialization` in a cache's settings uses Julia's `Serialization` instead, which stores any value. Like Django's pickle, it lets anyone who can write to the cache store (the Redis server, the cache table) make the reader construct arbitrary objects, which can lead to running code. It also can't be read by another Julia version. An entry that can't be read counts as a miss and is deleted.
