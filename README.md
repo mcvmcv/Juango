@@ -1511,7 +1511,10 @@ Model and form fields take `validators = [...]`: Django's set (`RegexValidator`,
 `validate_slug`, `validate_ipv46_address`, `int_list_validator`, ...) or any function returning
 `nothing` when the value is fine and a message otherwise (or throwing `ValidationError(msg; code)`).
 Form fields also take `min_value`, `max_value`, `step_size` and `min_length`, which add those
-validators.
+validators. They check what Django's check: `EmailValidator` takes quoted local parts and bracketed
+IP addresses and refuses more than 320 characters; `URLValidator` refuses IPv4 addresses with leading
+zeros and hyphens at the ends of labels; neither lets a trailing newline through. Validators with the
+same settings are `==`, as Django's.
 
 Every message has a code, and `error_messages` replaces it per field. On a model field it carries
 into its ModelForms; `ModelForm(...; error_messages = Dict(:field => Dict(...)))` overrides it:
@@ -1632,9 +1635,10 @@ create(Document; title = "x", file = req.FILES["file"])           # an UploadedF
 - `url_has_allowed_host_and_scheme(url, hosts)` says whether a redirect target (a `next` parameter, say) stays on the site. The login and logout views and `set_language` use it, and it refuses what browsers would read as another site (`//evil`, `/\evil`, `https:evil`).
 - Forms: `AuthenticationForm`, `UserCreationForm` (username, two passwords checked against `AUTH_PASSWORD_VALIDATORS`; `save!` hashes the password), `UserChangeForm` (every field but the password; `Juango.password_summary(user)` describes the stored hash safely), `PasswordChangeForm`, `SetPasswordForm`. The admin's "add user" page uses `UserCreationForm`, then opens the user's change page.
 - One-time messages: `message!(req, :success, "Saved")`, rendered with `{% for m in messages %}<p class="{{ m.tags }}">{{ m }}</p>{% endfor %}`.
-  - Levels are numbers as in Django (debug 10, info 20, success 25, warning 30, error 40). Custom levels are other numbers, named by `MESSAGE_TAGS`, which can also rename the built-in ones (`Dict(40 => "danger")`). `MESSAGE_LEVEL` drops lower ones.
+  - Levels are numbers as in Django (debug 10, info 20, success 25, warning 30, error 40). Custom levels are other numbers, named by `MESSAGE_TAGS`, which can also rename the built-in ones (`Dict(40 => "danger")`). `MESSAGE_LEVEL` drops lower ones. Templates get `DEFAULT_MESSAGE_LEVELS` (`{% if m.level == DEFAULT_MESSAGE_LEVELS.ERROR %}`).
   - `extra_tags = "..."` joins `m.tags`. A `format_html`/`mark_safe` message renders as HTML. `peek_messages(req)` reads them without using them up. `using Juango.Messages` gives `success!(req, msg)` and the other shortcuts, plus `set_level!`.
-  - `MESSAGE_STORAGE`: `:session` (the default), `:cookie` (a signed cookie, no session needed) or `:fallback` (the cookie while they fit, then the session). The cookie storages need `MessageMiddleware`, and `manage.jl check` says so.
+  - `MESSAGE_STORAGE`: `:session` (the default), `:cookie` (a signed cookie, no session needed) or `:fallback` (the cookie while they fit, then the session). The cookie storages need `MessageMiddleware`, and `manage.jl check` says so. The messages cookie takes the session cookie's domain, Secure, HttpOnly and SameSite settings, as Django's.
+  - An empty message is ignored. Without its storage (no SessionMiddleware, or no MessageMiddleware for the cookie storages) `message!` throws `MessageFailure`, or with `fail_silently = true` does nothing.
 
 #### Passwords
 
@@ -1713,7 +1717,8 @@ mail_admins("Disk almost full", details)          # to settings.ADMINS = [("Name
 - **Tests.** The test `Client` switches `:smtp` to `:locmem`, so tests never send real mail and can inspect `outbox`.
 - **Errors.** With `DEBUG = false`, unhandled errors are mailed to `ADMINS`.
 - **Password reset.** `auth_urls()` now includes password reset: `password_reset/` emails a link that works once, expires after `PASSWORD_RESET_TIMEOUT` (3 days), and leads to a page for choosing a new password. The templates are in `registration/password_reset_*`, and you can override them in your own template directory.
-- **Signing.** `signing_dumps(value)` / `signing_loads(s; max_age)` make tamper-proof, URL-safe tokens keyed by `SECRET_KEY`, and `sign_value`/`unsign_value` do the same for plain strings. To rotate the key, put the old one in `SECRET_KEY_FALLBACKS` (as Django): what it signed (signed cookies, password reset links, logged-in sessions) keeps working, and new signatures use the new key.
+- **Signing.** `signing_dumps(value)` / `signing_loads(s; max_age)` make tamper-proof, URL-safe tokens keyed by `SECRET_KEY`, and `sign_value`/`unsign_value` do the same for plain strings. To rotate the key, put the old one in `SECRET_KEY_FALLBACKS` (as Django): what it signed (signed cookies, password reset links, logged-in sessions) keeps working, and new signatures use the new key. `signing_dumps(value; compress = true)` zlib-compresses a long value first, and `max_age` may be a `Period` (`Minute(5)`).
+  Django's `Signer` and `TimestampSigner` are there too: `s = Signer(; salt = "invites")`, then `sign(s, "ann")` and `unsign(s, signed)` (`BadSignature` if it was changed); `sign_object`/`unsign_object` for JSON values; `unsign(TimestampSigner(), signed; max_age = 3600)` throws `SignatureExpired`. They take `key`, `sep`, `algorithm` (sha1 to sha512) and `fallback_keys`.
 
 ### Permissions and groups
 

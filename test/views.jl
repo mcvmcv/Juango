@@ -2117,7 +2117,7 @@ end
         configure!(MESSAGE_LEVEL = 20)
         @test_throws ArgumentError message!(Request("GET", "/"), :loud, "x")
         @test message!(Request("GET", "/"), :info, "x"; fail_silently = true) === nothing     # no session: dropped
-        @test_throws Juango.ImproperlyConfigured message!(Request("GET", "/"), :info, "x")
+        @test_throws MessageFailure message!(Request("GET", "/"), :info, "x")
 
         # cookie storage: no session involved
         configure!(MESSAGE_STORAGE = :cookie, MIDDLEWARE = vcat(old_mw, Any[MessageMiddleware]))

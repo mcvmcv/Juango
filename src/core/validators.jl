@@ -25,6 +25,12 @@ validator_params(v::Validator, x) = Dict{String,Any}("value" => x)
 
 msg_or(v, default) = v.message === nothing ? default : string(v.message)
 
+# (as Django's: validators with the same settings are equal, so migrations see no change)
+validator_field_eq(a, b) = isequal(a, b)
+validator_field_eq(a::Regex, b::Regex) = a.pattern == b.pattern && a.compile_options == b.compile_options && a.match_options == b.match_options
+Base.:(==)(a::V, b::V) where {V<:Validator} = all(f -> validator_field_eq(getfield(a, f), getfield(b, f)), fieldnames(V))
+Base.hash(v::Validator, h::UInt) = hash(nameof(typeof(v)), h)
+
 """
     RegexValidator(regex; message = "Enter a valid value.", code = "invalid", inverse_match = false)
 
@@ -45,7 +51,9 @@ validation_error(v::RegexValidator, x) =
 """
     EmailValidator(; message, code = "invalid", allowlist = ["localhost"])
 
-An email address: a local part, `@`, and a domain with a dot (or one in `allowlist`).
+An email address, as Django's: at most 320 characters; a local part (dot-atoms, or a quoted
+string), `@`, and a domain name with a top-level domain, an IP address in brackets, or a domain
+in `allowlist`.
 """
 struct EmailValidator <: Validator
     message::Any
@@ -53,17 +61,27 @@ struct EmailValidator <: Validator
     allowlist::Vector{String}
 end
 EmailValidator(; message = nothing, code = "invalid", allowlist = ["localhost"]) = EmailValidator(message, string(code), String.(allowlist))
+const EMAIL_USER_RE = Regex("^(?:[-!#\$%&'*+/=?^_`{}|~0-9A-Z]+(?:\\.[-!#\$%&'*+/=?^_`{}|~0-9A-Z]+)*" *
+                             "|\"(?:[\\x01-\\x08\\x0b\\x0c\\x0e-\\x1f!#-\\[\\]-\\x7f]|\\\\[\\x01-\\x09\\x0b\\x0c\\x0e-\\x7f])*\")\\z", "i")
+# Django's DomainNameValidator: labels of letters (any script), digits and inner hyphens; a top-level
+# domain of letters (or punycode) that doesn't start or end with a hyphen
+const DOMAIN_UL = "\u00a1-\uffff"
+const DOMAIN_HOSTNAME_RE = "[a-z$(DOMAIN_UL)0-9](?:[a-z$(DOMAIN_UL)0-9-]{0,61}[a-z$(DOMAIN_UL)0-9])?"
+const DOMAIN_DOMAIN_RE = "(?:\\.(?!-)[a-z$(DOMAIN_UL)0-9-]{1,63}(?<!-))*"
+const DOMAIN_TLD_RE = "\\.(?!-)(?:[a-z$(DOMAIN_UL)-]{2,63}|xn--[a-z0-9]{1,59})(?<!-)"
+const EMAIL_DOMAIN_RE = Regex("^" * DOMAIN_HOSTNAME_RE * DOMAIN_DOMAIN_RE * DOMAIN_TLD_RE * "\\z", "i")
 function validation_error(v::EmailValidator, x)
-    s = string(x)
+    s = x === nothing ? "" : string(x)
     bad = (v.code, msg_or(v, gettext("Enter a valid email address.")))
-    m = match(r"^([^@\s]+)@([^@\s]+)$", s)
-    m === nothing && return bad
-    domain = lowercase(m[2])
+    (isempty(s) || !occursin('@', s) || length(s) > 320) && return bad
+    i = findlast('@', s)
+    user, domain = s[1:prevind(s, i)], s[nextind(s, i):end]
+    occursin(EMAIL_USER_RE, user) || return bad
     domain in v.allowlist && return nothing
-    # (labels may be any script's letters; the top-level one is letters or punycode, as Django's DomainNameValidator)
-    occursin(r"^(?:[a-z0-9\u00a1-\uffff](?:[a-z0-9\u00a1-\uffff-]{0,61}[a-z0-9\u00a1-\uffff])?\.)+(?:[a-z\u00a1-\uffff-]{2,63}|xn--[a-z0-9]{1,59})$"i, domain) ||
-        occursin(r"^\[[0-9a-f:.]+\]$"i, domain) || return bad
-    occursin(r"^[\w!#$%&'*+/=?^`{|}~.-]+$", m[1]) && !startswith(m[1], ".") && !endswith(m[1], ".") && !occursin("..", m[1]) ? nothing : bad
+    (length(domain) <= 255 && occursin(EMAIL_DOMAIN_RE, domain)) && return nothing
+    m = match(r"^\[([A-F0-9:.]+)\]\z"i, domain)
+    m !== nothing && !(clean_ip(String(m[1]), "both", false) isa Tuple) && return nothing
+    bad
 end
 
 """
@@ -83,17 +101,20 @@ function validation_error(v::URLValidator, x)
     s = string(x)
     bad = (v.code, msg_or(v, gettext("Enter a valid URL.")))
     (length(s) > 2048 || occursin(r"\s", s)) && return bad
-    m = match(r"^([a-z][a-z0-9+.-]*)://(?:[^\s:@/?#]+(?::[^\s:@/?#]*)?@)?(\[[0-9a-f:.]+\]|[^\s:/?#\[\]]+)(?::(\d{1,5}))?(?:[/?#]\S*)?$"i, s)
+    m = match(r"^([a-z][a-z0-9+.-]*)://(?:[^\s:@/?#]+(?::[^\s:@/?#]*)?@)?(\[[0-9a-f:.]+\]|[^\s:/?#\[\]@]+)(?::(\d{1,5}))?(?:[/?#]\S*)?\z"i, s)
     m === nothing && return bad
     lowercase(m[1]) in v.schemes || return bad
     host = lowercase(m[2])
     length(host) > 253 && return bad                     # (a domain name's limit, as Django's)
     startswith(host, "[") && return clean_ip(host[2:end-1], "ipv6", false) isa Tuple ? bad : nothing
     ok = host == "localhost" ||
-         occursin(r"^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$", host) ||
-         occursin(r"^(?:[a-z0-9\u00a1-\uffff](?:[a-z0-9\u00a1-\uffff-]{0,61}[a-z0-9\u00a1-\uffff])?\.)+(?:[a-z\u00a1-\uffff-]{2,63}|xn--[a-z0-9]{1,59})\.?$"i, host)
+         occursin(URL_IPV4_RE, host) || occursin(URL_HOST_RE, host)
     ok ? nothing : bad
 end
+
+# (as Django's: no leading zeros in an IPv4 address)
+const URL_IPV4_RE = r"^(?:0|25[0-5]|2[0-4][0-9]|1[0-9]?[0-9]?|[1-9][0-9]?)(?:\.(?:0|25[0-5]|2[0-4][0-9]|1[0-9]?[0-9]?|[1-9][0-9]?)){3}\z"
+const URL_HOST_RE = Regex("^" * DOMAIN_HOSTNAME_RE * DOMAIN_DOMAIN_RE * DOMAIN_TLD_RE * "\\.?\\z", "i")
 
 # --- limits ---------------------------------------------------------------------------------------------
 
@@ -226,7 +247,12 @@ validation_error(v::ProhibitNullCharactersValidator, x) =
 struct IPAddressValidator <: Validator
     protocol::String
 end
-validation_error(v::IPAddressValidator, x) = (r = clean_ip(string(x), v.protocol, false); r isa Tuple ? ("invalid", r[1]) : nothing)
+# (the address exactly: form fields strip their input, a validator doesn't, so "1.1.1.1\n" is refused)
+function validation_error(v::IPAddressValidator, x)
+    s = string(x)
+    r = s == strip(s) ? clean_ip(s, v.protocol, false) : (clean_ip("x", v.protocol, false)[1],)
+    r isa Tuple ? ("invalid", r[1]) : nothing
+end
 
 # Django's ready-made validators
 const validate_email = EmailValidator()

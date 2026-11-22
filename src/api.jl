@@ -97,7 +97,7 @@ export User, AbstractUser, AnonymousUser, USER_MODEL, get_user_model, authentica
        LoginRequiredMiddleware, RemoteUserMiddleware, PersistentRemoteUserMiddleware, RemoteUserBackend,
        AllowAllUsersRemoteUserBackend, AbstractRemoteUserBackend, with_perm, email_user,
        PasswordChangeView, PasswordChangeDoneView, PasswordResetView, PasswordResetConfirmView
-export message!, get_messages, peek_messages, MessageMiddleware, url_has_allowed_host_and_scheme
+export message!, get_messages, peek_messages, MessageMiddleware, MessageFailure, url_has_allowed_host_and_scheme
 export HtmxDetails, is_htmx, hx_redirect, hx_refresh, hx_location, hx_stop_polling, hx_push_url, hx_replace_url,
        hx_retarget, hx_reswap, hx_reselect, hx_trigger, form_status, HtmxMiddleware, HTMX_STOP_POLLING
 export LiveView, live, mount, handle_event, handle_info, live_context, live_redirect, subscribe, unsubscribe, publish,
@@ -159,7 +159,9 @@ public username_field, has_module_perms, get_all_permissions, perm_name, auth_ur
        backend_get_all_permissions, backend_has_module_perms, backend_with_perm, get_user_permissions, get_group_permissions,
        remote_clean_username, remote_configure_user, remote_user_can_authenticate, normalize_email, normalize_username
 # signing
-public signing_dumps, signing_loads, sign_value, unsign_value, BadSignature, SignatureExpired
+public DEFAULT_MESSAGE_LEVELS
+public signing_dumps, signing_loads, sign_value, unsign_value, BadSignature, SignatureExpired, Signer, TimestampSigner, unsign, sign_object, unsign_object,
+       b62_encode, b62_decode, InvalidAlgorithm
 # signals, logging
 public send_robust, has_receivers, emit, log!, log_enabled, MemoryHandler, LogRecord
 # translations and time zones

@@ -548,7 +548,7 @@ display_string(t::LazyCsrfToken) = mask_csrf(get_csrf_token(t.req))        # mas
 Base.string(t::LazyCsrfToken) = mask_csrf(get_csrf_token(t.req))
 Base.print(io::IO, t::LazyCsrfToken) = print(io, mask_csrf(get_csrf_token(t.req)))
 cp_csrf(req) = Dict("csrf_token" => LazyCsrfToken(req))
-cp_messages(req) = Dict("messages" => LazyMessages(req, nothing))
+cp_messages(req) = Dict("messages" => LazyMessages(req, nothing), "DEFAULT_MESSAGE_LEVELS" => DEFAULT_MESSAGE_LEVELS)
 cp_static(req) = Dict("STATIC_URL" => settings.STATIC_URL, "DEBUG" => settings.DEBUG)
 
 tattr(req::Request, ::Val{:get_full_path}) = full_path(req)

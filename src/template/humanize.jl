@@ -14,15 +14,15 @@ function as_number(v)
     something(tryparse(Int, s), tryparse(Float64, s), Some(nothing))
 end
 
-"Group the integer part of a number with commas: `1234567.5` → `\"1,234,567.5\"`."
+"""
+Group the integer part of a number with commas: `1234567.5` → `\"1,234,567.5\"`. As Django's, it works
+on the number's digits (a string's digits as they are), so `\"1234567.1234567\"` keeps all of them.
+"""
 function intcomma(v)
-    n = as_number(v)
-    n === nothing && return str(v)
-    s = n isa Union{Integer,Decimal} ? string(n) : (isinteger(n) && abs(n) < 1e15 ? string(Int(n)) * ".0" : string(n))
-    sign = startswith(s, "-") ? "-" : ""
-    s = lstrip(s, '-')
-    i = findfirst(==('.'), s)
-    int, frac = i === nothing ? (s, "") : (s[1:i-1], s[i:end])
+    s = v isa AbstractFloat ? plain_float_string(v) : v isa Real ? string(v) : strip(str(v))
+    m = match(r"^(-?)(\d+)(?:\.(\d+))?$", s)
+    m === nothing && return str(v)
+    int, frac = m[2], m[3]
     sep, dec = thousand_separator(), decimal_separator()
     groups = String[]
     while length(int) > 3
@@ -30,7 +30,22 @@ function intcomma(v)
         int = int[1:end-3]
     end
     pushfirst!(groups, int)
-    sign * join(groups, sep) * (isempty(frac) ? "" : dec * frac[2:end])
+    m[1] * join(groups, sep) * (frac === nothing ? "" : dec * frac)
+end
+"A float's shortest digits without an exponent: `1.23456725e6` → `\"1234567.25\"` (Python's str doesn't use one below 1e16)."
+function plain_float_string(x::AbstractFloat)
+    s = string(x)
+    occursin('e', s) || return s
+    mant, ex = split(s, 'e')
+    neg = startswith(mant, "-")
+    mant = lstrip(mant, '-')
+    i = something(findfirst('.', mant), length(mant) + 1)
+    digits_ = replace(mant, "." => "")
+    point = i - 1 + parse(Int, ex)                 # digits before the decimal point
+    out = point <= 0 ? "0." * "0"^(-point) * digits_ :
+          point >= length(digits_) ? digits_ * "0"^(point - length(digits_)) * ".0" :
+          digits_[1:point] * "." * digits_[point+1:end]
+    (neg ? "-" : "") * out
 end
 thousand_separator() = get_language() in ("de", "es", "it", "nl", "pt", "id", "tr", "da") ? "." :
                        get_language() in ("fr", "ru", "pl", "cs", "sv", "fi", "nb", "uk") ? " " : ","
@@ -47,6 +62,7 @@ function intword(v)
     n = as_number(v)
     n === nothing && return str(v)
     abs(n) < 1_000_000 && return string(n)
+    abs(n) >= big(10)^103 && return str(v)          # (past a thousand googol: unchanged, as Django's)
     for i in length(INTWORD_UNITS):-1:1
         exp, one, many = INTWORD_UNITS[i]
         unit = big(10)^exp
@@ -95,7 +111,7 @@ function naturaltime(v)
         t === nothing && return str(v)
         ref = now()
     end
-    secs = round(Int, Dates.value(ref - t) / 1000)
+    secs = Dates.value(ref - t) ÷ 1000             # (whole seconds, as Django's timedelta.seconds: 0.6 s is "now")
     future = secs < 0
     s = abs(secs)
     # (a no-break space between a number and its unit, as Django's)

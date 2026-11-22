@@ -28,7 +28,19 @@ struct Message
 end
 Message(level, message; extra_tags = "") =
     Message(message_level(level), display_string(message), message isa SafeString, string(extra_tags))
-Base.show(io::IO, m::Message) = print(io, m.message)
+Base.print(io::IO, m::Message) = print(io, m.message)
+Base.show(io::IO, m::Message) = print(io, "Message(level=", m.level, ", message=", repr(m.message), ")")   # (Django's repr)
+
+"""
+A message that can't be stored (Django's MessageFailure): no SessionMiddleware for the session
+storage, no MessageMiddleware for the cookie ones. `fail_silently = true` drops the message instead.
+"""
+struct MessageFailure <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::MessageFailure) = print(io, "MessageFailure: ", e.msg)
+"The levels by name, for templates: `{% if m.level == DEFAULT_MESSAGE_LEVELS.ERROR %}` (Django's context processor)."
+const DEFAULT_MESSAGE_LEVELS = Dict("DEBUG" => 10, "INFO" => 20, "SUCCESS" => 25, "WARNING" => 30, "ERROR" => 40)
 Base.:(==)(a::Message, b::Message) = a.level == b.level && a.message == b.message && a.extra_tags == b.extra_tags
 Base.hash(m::Message, h::UInt) = hash((m.level, m.message, m.extra_tags), h)
 display_string(m::Message) = m.message
@@ -95,18 +107,19 @@ cookie_store(req::Request) = get(req.meta, :message_store, nothing)
 Queue a one-time message for the next page that shows `messages`. `level` is `:debug`, `:info`,
 `:success`, `:warning`, `:error` or a number (custom levels: see MESSAGE_TAGS). A message made with
 `mark_safe` or `format_html` stays safe, so it renders as HTML (a link, an Undo button); any other
-text is escaped. Without a place to store it (no SessionMiddleware for session storage, no
-MessageMiddleware for the cookie ones) it throws, or with `fail_silently = true` does nothing.
+text is escaped. An empty message is ignored, as Django's. Without a place to store it (no
+SessionMiddleware for session storage, no MessageMiddleware for the cookie ones) it throws
+`MessageFailure`, or with `fail_silently = true` does nothing.
 """
 function message!(req::Request, level, text; extra_tags = "", fail_silently::Bool = false)
     m = Message(level, text; extra_tags = extra_tags)
-    m.level < get_level(req) && return nothing
+    (isempty(m.message) || m.level < get_level(req)) && return nothing
     kind = storage_kind()
     if kind === :session
         s = req.session
         if !(s isa Session)
             fail_silently && return nothing
-            throw(ImproperlyConfigured("messages need SessionMiddleware (or MESSAGE_STORAGE = :cookie with MessageMiddleware)"))
+            throw(MessageFailure("You cannot add messages without installing SessionMiddleware (or MESSAGE_STORAGE = :cookie with MessageMiddleware)"))
         end
         msgs = collect(Any, get(s, MESSAGE_SESSION_KEY, Any[]))
         push!(msgs, message_dict(m))
@@ -115,7 +128,7 @@ function message!(req::Request, level, text; extra_tags = "", fail_silently::Boo
         st = cookie_store(req)
         if st === nothing
             fail_silently && return nothing
-            throw(ImproperlyConfigured("MESSAGE_STORAGE = :$kind needs MessageMiddleware in MIDDLEWARE"))
+            throw(MessageFailure("You cannot add messages without installing MessageMiddleware (MESSAGE_STORAGE = :$kind)"))
         end
         push!(st.added, m)
     end
@@ -191,10 +204,12 @@ function store_cookie_messages!(req::Request, resp::HttpResponse, msgs::Vector{M
             log!("juango.messages", :warning, "Messages dropped: they don't fit in the messages cookie"; request = req)
         end
     end
+    # (as Django's CookieStorage: the session cookie's domain, Secure, HttpOnly and SameSite settings)
     if isempty(keep)
-        had_cookie && delete_cookie!(resp, MESSAGE_COOKIE)
+        had_cookie && delete_cookie!(resp, MESSAGE_COOKIE; domain = settings.SESSION_COOKIE_DOMAIN, samesite = settings.SESSION_COOKIE_SAMESITE)
     else
-        set_cookie!(resp, MESSAGE_COOKIE, value; httponly = true, secure = settings.SESSION_COOKIE_SECURE)
+        set_cookie!(resp, MESSAGE_COOKIE, value; domain = settings.SESSION_COOKIE_DOMAIN, secure = settings.SESSION_COOKIE_SECURE,
+                    httponly = settings.SESSION_COOKIE_HTTPONLY, samesite = settings.SESSION_COOKIE_SAMESITE)
     end
     if fallback && s isa Session
         if isempty(in_session)
