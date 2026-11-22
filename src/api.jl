@@ -163,7 +163,7 @@ public DEFAULT_MESSAGE_LEVELS
 public signing_dumps, signing_loads, sign_value, unsign_value, BadSignature, SignatureExpired, Signer, TimestampSigner, unsign, sign_object, unsign_object,
        b62_encode, b62_decode, InvalidAlgorithm
 # signals, logging
-public send_robust, has_receivers, DeserializationError, emit, log!, log_enabled, MemoryHandler, LogRecord
+public send_robust, has_receivers, DeserializationError, MiddlewareNotUsed, emit, log!, log_enabled, MemoryHandler, LogRecord
 # translations and time zones
 public set_language, number_format, localize, language_name, makemessages, compilemessages,
        is_aware, convert_naive_datetimes, JavaScriptCatalog, JSONCatalog
@@ -193,14 +193,14 @@ export env, read_env, env_db, env_cache, env_email
 end
 
 module Testing
-using ..Juango: Client, RequestFactory, request, post, force_login!, text, outbox, rollback_after,
+using ..Juango: Client, RequestFactory, request, post, put, patch, delete, head, options, trace, force_login!, text, outbox, rollback_after,
     capture_on_commit_callbacks, with_live_server, live_server_url, override_settings, assert_contains,
     assert_not_contains, assert_redirects, assert_template_used, assert_template_not_used,
     assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx,
     live_test, live_event!, live_info!, live_flush!, setup_test_database, teardown_test_database, consume_stream!,
     assert_html_equal, assert_html_not_equal, assert_in_html, assert_json_equal, assert_json_not_equal,
     assert_queryset_equal, assert_formset_error, assert_field_output, assert_matches_snapshot, RedirectCycleError, redirect_chain
-export Client, RequestFactory, request, post, force_login!, text, outbox, rollback_after,
+export Client, RequestFactory, request, post, put, patch, delete, head, options, trace, force_login!, text, outbox, rollback_after,
     capture_on_commit_callbacks, with_live_server, live_server_url, override_settings, assert_contains,
     assert_not_contains, assert_redirects, assert_template_used, assert_template_not_used,
     assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx,

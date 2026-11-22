@@ -182,46 +182,63 @@ function response_text(r::HttpResponse)
     t isa AbstractString ? t : String(r.body)
 end
 
+prefix(msg_prefix) = isempty(msg_prefix) ? "" : msg_prefix * ": "
+
 """
-    assert_contains(resp, text; count = nothing, status = 200, html = false)
+    assert_contains(resp, text; count = nothing, status = 200, html = false, msg_prefix = "")
 
 The response has `status` and contains `text` (exactly `count` times, if given). With
-`html = true` both are compared as HTML (see `assert_html_equal`).
+`html = true` both are compared as HTML (see `assert_html_equal`). Failures read as Django's, after
+`msg_prefix: `.
 """
-function assert_contains(r::HttpResponse, needle::AbstractString; count = nothing, status = 200, html = false)
-    r.status == status || fail("response status was $(r.status), expected $status")
+function assert_contains(r::HttpResponse, needle::AbstractString; count = nothing, status = 200, html = false, msg_prefix = "")
+    p = prefix(msg_prefix)
+    r.status == status || fail(p * "Couldn't retrieve content: Response code was $(r.status) (expected $status)")
     hay = response_text(r)
     n = html ? count_html(parse_html(needle), parse_html(hay)) : length(findall(needle, hay; overlap = false))
     if count === nothing
-        n > 0 || fail("couldn't find $(repr(needle)) in the response")
+        n > 0 || fail(p * "Couldn't find $(repr(needle)) in the following response\n$(repr(hay))")
     else
-        n == count || fail("found $(repr(needle)) $n time(s) in the response, expected $count")
+        n == count || fail(p * "Found $n instances of $(repr(needle)) in response (expected $count)")
     end
     true
 end
 
 "The response has `status` and doesn't contain `text`."
-function assert_not_contains(r::HttpResponse, needle::AbstractString; status = 200, html = false)
-    r.status == status || fail("response status was $(r.status), expected $status")
+function assert_not_contains(r::HttpResponse, needle::AbstractString; status = 200, html = false, msg_prefix = "")
+    p = prefix(msg_prefix)
+    r.status == status || fail(p * "Couldn't retrieve content: Response code was $(r.status) (expected $status)")
     hay = response_text(r)
     found = html ? count_html(parse_html(needle), parse_html(hay)) > 0 : occursin(needle, hay)
-    found && fail("found $(repr(needle)) in the response")
+    found && fail(p * "$(repr(needle)) unexpectedly found in the following response\n$(repr(hay))")
     true
 end
 
-"""
-    assert_redirects(resp, url; status = 302, target_status = 200, client = nothing)
+"A URL as the test client sees it: `http://testserver/x/` is `/x/` (Django's assertRedirects compares them so)."
+local_url(u, host = "testserver") = (m = match(Regex("^https?://\\Q$(host)\\E(?=/|\$|\\?)"), u); m === nothing ? String(u) : (rest = u[ncodeunits(m.match)+1:end]; isempty(rest) ? "/" : rest))
 
-The response redirects to `url` with `status`. With a `client`, the target is fetched too
-and must answer `target_status`.
 """
-function assert_redirects(r::HttpResponse, url::AbstractString; status = 302, target_status = 200, client = nothing)
-    r.status == status || fail("response status was $(r.status), expected a $status redirect")
-    loc = getheader(r, "Location")
-    loc == url || fail("redirected to $(repr(loc)), expected $(repr(url))")
-    if client !== nothing
-        t = get(client, url)
-        t.status == target_status || fail("the redirect target $url answered $(t.status), expected $target_status")
+    assert_redirects(resp, url; status = 302, target_status = 200, client = nothing, msg_prefix = "")
+
+The response redirects to `url` with `status` (`http://testserver/x/` and `/x/` are the same URL). With a
+`client`, the target is fetched too and must answer `target_status`. For a response from
+`get(c, url; follow = true)`, the redirect chain is checked: its first step's status and its last URL.
+"""
+function assert_redirects(r::HttpResponse, url::AbstractString; status = 302, target_status = 200, client = nothing, msg_prefix = "")
+    p = prefix(msg_prefix)
+    chain = redirect_chain(r)
+    if !isempty(chain)
+        chain[1][2] == status || fail(p * "Initial response didn't redirect as expected: Response code was $(chain[1][2]) (expected $status)")
+        loc = chain[end][1]
+        r.status == target_status || fail(p * "Response didn't redirect as expected: Final Response code was $(r.status) (expected $target_status)")
+    else
+        r.status == status || fail(p * "Response didn't redirect as expected: Response code was $(r.status) (expected $status)")
+        loc = getheader(r, "Location")
+    end
+    local_url(something(loc, "")) == local_url(url) || fail(p * "Response redirected to '$loc', expected '$url'")
+    if client !== nothing && isempty(chain)
+        t = get(client, local_url(url))
+        t.status == target_status || fail(p * "Couldn't retrieve redirection page '$url': response code was $(t.status) (expected $target_status)")
     end
     true
 end
@@ -255,13 +272,17 @@ function assert_htmx(r::HttpResponse; status = nothing, kw...)
     true
 end
 
-"The response was rendered with template `name` (by `render`)."
-function assert_template_used(r::HttpResponse, name::AbstractString)
-    name in r.templates || fail("template $(repr(name)) wasn't used; used: $(isempty(r.templates) ? "none" : join(repr.(r.templates), ", "))")
+"The response was rendered with template `name` (by `render`; exactly `count` times, if given), as Django's assertTemplateUsed."
+function assert_template_used(r::HttpResponse, name::AbstractString; count = nothing, msg_prefix = "")
+    p = prefix(msg_prefix)
+    isempty(r.templates) && fail(p * "No templates used to render the response")
+    name in r.templates || fail(p * "Template '$name' was not a template used to render the response. Actual template(s) used: $(join(r.templates, ", "))")
+    n = Base.count(==(name), r.templates)
+    count === nothing || n == count || fail(p * "Template '$name' was expected to be rendered $count time(s) but was actually rendered $n time(s).")
     true
 end
-function assert_template_not_used(r::HttpResponse, name::AbstractString)
-    name in r.templates && fail("template $(repr(name)) was used")
+function assert_template_not_used(r::HttpResponse, name::AbstractString; msg_prefix = "")
+    name in r.templates && fail(prefix(msg_prefix) * "Template '$name' was used unexpectedly in rendering the response")
     true
 end
 

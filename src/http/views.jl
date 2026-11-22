@@ -21,10 +21,14 @@ function render(req::Request, template, context = Dict{String,Any}(); status = 2
     # for the test client, response.context is what the template saw: the context processors' values, then the view's
     # (other engines' templates may not take processor_values)
     seen = get(req.meta, :test_client, false) && t isa Union{Template,MustacheTemplate} ? Dict{String,Any}() : nothing
-    html = seen === nothing ? render(t, ctx; request = req) : render(t, ctx; request = req, processor_values = seen)
+    # for the test client, also the templates extended and included (Django's response.templates)
+    used = seen === nothing ? nothing : String[]
+    go() = seen === nothing ? render(t, ctx; request = req) : render(t, ctx; request = req, processor_values = seen)
+    html = used === nothing ? go() : Base.ScopedValues.with(go, TEMPLATES_USED => used)
     resp = HttpResponse(html; status = status, content_type = content_type)
     resp.context = seen === nothing ? ctx : merge(seen, ctx)
     push!(resp.templates, t.name)
+    used === nothing || append!(resp.templates, used)
     resp
 end
 

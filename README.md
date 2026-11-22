@@ -1989,6 +1989,8 @@ end
 configure!(MIDDLEWARE = [Juango.default_settings()[:MIDDLEWARE]..., Timing])
 ```
 
+A factory can `throw(Juango.MiddlewareNotUsed())` to leave itself out (when a setting turns it off, say); one that returns `nothing` is an `ImproperlyConfigured` error, as in Django. A view that returns `nothing` is an error naming the view.
+
 The defaults are security headers, sessions, `APPEND_SLASH`, CSRF, authentication and htmx (`Vary: HX-Request` and out-of-band messages). The common middleware also does Django's `PREPEND_WWW` and `DISALLOWED_USER_AGENTS` (regexes refused with 403), and gives buffered responses a `Content-Length`. Also available:
 
 - `GZipMiddleware` compresses responses of 200 bytes or more for clients that accept gzip, with random padding in the gzip header against BREACH (as Django does). Put it first. Streaming responses are compressed chunk by chunk, each chunk flushed so it still goes out at once.
@@ -2206,7 +2208,9 @@ req.user = user
 resp = post_list(req)
 ```
 
-The `assert_*` functions return `true` or throw an `AssertionError` that says what went wrong, so `@test assert_...` reports it. `load_fixtures(names...)` loads fixture files.
+The `assert_*` functions return `true` or throw an `AssertionError` that says what went wrong (in Django's words, after `msg_prefix = "..."` if you give one), so `@test assert_...` reports it. `assert_template_used(r, name; count = 1)` checks how often a template was rendered; `r.templates` lists the view's template and those it extends and includes, as Django's. `assert_redirects` treats `http://testserver/x/` and `/x/` as the same URL; for a response from `get(c, url; follow = true)` it checks the redirect chain, and with `client = c` it fetches the target. `load_fixtures(names...)` loads fixture files.
+
+Besides `get` and `post`, the client has Django's `put`, `patch`, `delete` and `options` (the body as a string or bytes with `content_type`, or a Dict sent as JSON with `content_type = "application/json"`), `head` and `trace`, and `secure = true` for an HTTPS request.
 
 ### Static files
 

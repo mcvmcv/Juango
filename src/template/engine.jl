@@ -548,6 +548,10 @@ function note_template_error!(@nospecialize(e), @nospecialize(n))
     info.line == 0 && n isa VarNode && (info.line = n.line)
     nothing
 end
+"While the test client renders a view's template: the names of the templates extended and included."
+const TEMPLATES_USED = Base.ScopedValues.ScopedValue{Union{Nothing,Vector{String}}}(nothing)
+note_template_used(name) = (v = TEMPLATES_USED[]; v === nothing || push!(v, string(name)); nothing)
+
 function note_template_name!(@nospecialize(e), t)
     tls = task_local_storage()
     info = get(tls, :juango_template_error, nothing)

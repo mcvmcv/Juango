@@ -191,6 +191,24 @@ end
 Base.get(c::Client, path::AbstractString; kw...) = request(c, "GET", path; kw...)
 "POST request with the test client: `post(client, \"/path\", Dict(\"field\" => \"value\"))`."
 post(c::Client, path::AbstractString, data = Dict{String,Any}(); kw...) = request(c, "POST", path; data = data, kw...)
+"""
+    put(client, path, data = ""; content_type = "application/octet-stream")    patch(...)    delete(...)    options(...)
+
+Django's `client.put`/`patch`/`delete`/`options`: `data` is the request body as it is (a string or bytes), or
+a Dict sent as JSON with `content_type = "application/json"` (else form-encoded).
+"""
+put(c::Client, path::AbstractString, data = ""; kw...) = body_request(c, "PUT", path, data; kw...)
+patch(c::Client, path::AbstractString, data = ""; kw...) = body_request(c, "PATCH", path, data; kw...)
+delete(c::Client, path::AbstractString, data = ""; kw...) = body_request(c, "DELETE", path, data; kw...)
+options(c::Client, path::AbstractString, data = ""; kw...) = body_request(c, "OPTIONS", path, data; kw...)
+"Django's `client.head(path)` and `client.trace(path)`: no body; query `data` as for `get`."
+head(c::Client, path::AbstractString; kw...) = request(c, "HEAD", path; kw...)
+trace(c::Client, path::AbstractString; kw...) = request(c, "TRACE", path; kw...)
+function body_request(c::Client, method, path, data; content_type = "application/octet-stream", kw...)
+    data isa AbstractDict && content_type == "application/json" && return request(c, method, path; json = data, kw...)
+    data isa AbstractDict && return request(c, method, path; data = data, kw...)
+    request(c, method, path; body = data, content_type = content_type, kw...)
+end
 
 "Log a user in without a password check (creates a session and sets the cookie)."
 function force_login!(c::Client, u::AbstractUser; backend = nothing)

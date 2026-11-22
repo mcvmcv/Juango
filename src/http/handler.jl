@@ -57,12 +57,15 @@ function host_allowed(req::Request)
     false
 end
 
+view_label(v) = v isa Function ? string(parentmodule(v), ".", nameof(v)) : string(typeof(v))
 "Innermost handler: call the resolved view, converting exceptions to responses."
 function dispatch(req::Request)
     try
         rm = req.resolver_match
         rm === nothing && throw(Http404("No URL pattern matches '$(req.path)'"))
-        call = () -> to_response(rm.view(req; rm.kwargs...))
+        call = () -> (r = rm.view(req; rm.kwargs...);
+                      r === nothing && error("The view $(view_label(rm.view)) didn't return an HttpResponse object. It returned nothing instead.");
+                      to_response(r))
         for alias in atomic_request_aliases(rm.view)          # ATOMIC_REQUESTS: the view in a transaction
             inner = call
             call = () -> atomic(inner; db = alias)
@@ -101,12 +104,24 @@ function build_handler()
     c !== nothing && c[1] === mws && return c[2]
     h = dispatch
     for mw in Iterators.reverse(mws)
-        h = mw(h)
+        inner = try
+            mw(h)
+        catch e
+            e isa MiddlewareNotUsed || rethrow()
+            continue                                         # (the factory left itself out, as Django's)
+        end
+        inner === nothing && throw(ImproperlyConfigured("Middleware factory $mw returned None."))
+        h = inner
     end
     HANDLER_CACHE[] = (mws, h)
     h
 end
 const HANDLER_CACHE = Ref{Any}(nothing)
+"Thrown by a middleware factory to leave itself out of the chain (Django's `MiddlewareNotUsed`), e.g. when a setting turns it off."
+struct MiddlewareNotUsed <: Exception
+    msg::String
+end
+MiddlewareNotUsed() = MiddlewareNotUsed("")
 push!(SETTINGS_CHANGED_HOOKS, () -> (HANDLER_CACHE[] = nothing))
 
 """

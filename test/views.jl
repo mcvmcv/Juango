@@ -23,7 +23,7 @@ end
 @testset "client: views, sessions, messages" begin
     c = Client()
     r = get(c, "/")
-    @test r.status == 200 && occursin("Hello World", text(r)) && r.templates == ["child.html"]
+    @test r.status == 200 && occursin("Hello World", text(r)) && r.templates == ["child.html", "mid.html", "base.html", "inc/part.html"]      # (extended and included too, as Django)
     @test getheader(r, "X-Frame-Options") == "DENY"
 
     @test text(get(c, "/counter/")) == "1"
@@ -1103,7 +1103,7 @@ Juango.upload_file(::RefusingUploads, field, name, ctype, data) = endswith(name,
 
         # TemplateResponse: rendered after the middleware's hook
         r = get(c, "/tplresp/")
-        @test occursin("Plain", text(r)) && r.is_rendered && r.templates == ["child.html"]
+        @test occursin("Plain", text(r)) && r.is_rendered && r.templates[1] == "child.html" && "base.html" in r.templates
         configure!(MIDDLEWARE = vcat(old[2], [TplHookMiddleware]))
         r = get(c, "/tplresp/")
         @test occursin("Hooked", text(r)) && !occursin("Plain", text(r))
