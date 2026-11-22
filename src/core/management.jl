@@ -56,6 +56,35 @@ function call_command(name::AbstractString, args...; stdin = "", stdout = IOBuff
     Base.ScopedValues.with(() -> entry[2](String[string(a) for a in args]), COMMAND_IO => io)
 end
 
+"makemessages/compilemessages options, repeatable as Django's: -l/--locale, -x/--exclude, -i/--ignore, -e/--extension, -a/--all, --flag[=value]."
+function i18n_command_options(args)
+    lists = Dict(k => String[] for k in ("locale", "exclude", "ignore", "extension"))
+    short = Dict("-l" => "locale", "-x" => "exclude", "-i" => "ignore", "-e" => "extension")
+    flags, all = Dict{String,String}(), false
+    i = 1
+    while i <= length(args)
+        a = args[i]
+        if haskey(short, a) && i < length(args)
+            push!(lists[short[a]], args[i+1]); i += 1
+        elseif a in ("-a", "--all")
+            all = true
+        elseif a == "-f"
+            flags["f"] = "true"
+        elseif startswith(a, "--")
+            k, v = occursin('=', a) ? split(a[3:end], '='; limit = 2) : (a[3:end], nothing)
+            if haskey(lists, k)
+                v === nothing && i < length(args) && (v = args[i+1]; i += 1)
+                v === nothing || append!(lists[k], split(v, ','))
+            else
+                flags[k] = something(v, "true")
+            end
+        end
+        i += 1
+    end
+    (; locale = lists["locale"], exclude = lists["exclude"], ignore = lists["ignore"], extension = lists["extension"], all,
+       flag = k -> haskey(flags, k), value = k -> get(flags, k, nothing))
+end
+
 function parse_flags(args)
     flags = Dict{String,String}()
     positional = String[]
@@ -690,17 +719,22 @@ for (n, h, f) in (
      args -> println(collectstatic(; clear = haskey(last(parse_flags(args)), "clear")), " static files copied to ", settings.STATIC_ROOT)),
     ("convert_naive_datetimes", "Rewrite stored naive datetimes as UTC when turning USE_TZ on: convert_naive_datetimes [--from Europe/Berlin]",
      args -> (f = last(parse_flags(args)); println("Converted ", convert_naive_datetimes(; from_tz = get(f, "from", settings.TIME_ZONE)), " columns."))),
-    ("makemessages", "Collect translatable strings: makemessages -l de [-l fr]", function (args)
-        _, flags = parse_flags(replace(args, "-l" => "--l"))
-        langs = String[]
-        for (i, a) in enumerate(args)
-            a == "-l" && i < length(args) && push!(langs, args[i+1])
-            startswith(a, "--locale=") && push!(langs, split(a, '=')[2])
+    ("makemessages", "Collect translatable strings: makemessages -l de [-l fr] | -a [-x de] [-e html,txt] [-i pattern] [--no-location | --add-location=file] [--no-obsolete] [--no-default-ignore]",
+     function (args)
+        o = i18n_command_options(args)
+        isempty(o.locale) && !o.all && error("usage: makemessages -l <locale> (or -a for all of them)")
+        for p in makemessages(o.locale; all = o.all, exclude = o.exclude, extensions = isempty(o.extension) ? nothing : o.extension,
+                              ignore = o.ignore, no_default_ignore = o.flag("no-default-ignore"), no_obsolete = o.flag("no-obsolete"),
+                              no_location = o.flag("no-location"), add_location = something(o.value("add-location"), "full"))
+            println("processing locale ", basename(dirname(dirname(p))), ": ", p)
         end
-        isempty(langs) && error("usage: makemessages -l <language>")
-        foreach(l -> println("processing locale ", to_locale(l), ": ", makemessages(l)), langs)
     end),
-    ("compilemessages", "Compile .po translation files into .mo", _ -> foreach(p -> println("compiled ", p), compilemessages())),
+    ("compilemessages", "Compile .po translation files into .mo: compilemessages [-l de] [-x fr] [-f/--use-fuzzy] [-i pattern]",
+     function (args)
+        o = i18n_command_options(args)
+        foreach(p -> println("compiled ", p), compilemessages(; locale = isempty(o.locale) ? nothing : o.locale, exclude = o.exclude,
+                                                             use_fuzzy = o.flag("use-fuzzy") || o.flag("f"), ignore = o.ignore, verbose = true))
+    end),
     ("createcachetable", "Create the table for database caches (CACHES backend :db)", _ -> foreach(create_cache_table, keys(settings.CACHES))),
     ("sqlschema", "Print the SQL schema for all models", _ -> println(schema_sql())),
     ("check", "Run the system checks: check [--deploy] [--tag security,models]", cmd_check),

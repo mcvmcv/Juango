@@ -19,10 +19,13 @@ struct Catalog
     messages::Dict{Tuple{String,String},Vector{String}}   # (context, msgid) => translations (plural forms)
     plural::Function                                      # n -> index of the plural form
     plural_expr::String                                   # the same rule as a C expression (for JavaScriptCatalog)
+    nplurals::Int                                         # the number of plural forms (the header's nplurals)
 end
+Catalog(msgs, plural, expr) = Catalog(msgs, plural, expr, 2)
 Catalog(msgs, plural) = Catalog(msgs, plural, "n != 1")
 Catalog() = Catalog(Dict{Tuple{String,String},Vector{String}}(), n -> n == 1 ? 0 : 1)
 plural_expr(header) = (m = match(r"plural\s*=\s*([^;]+)", header); m === nothing ? "n != 1" : strip(m[1]))
+plural_count(header) = (m = match(r"nplurals\s*=\s*(\d+)", header); m === nothing ? 2 : parse(Int, m[1]))
 
 function po_unescape(s)
     io = IOBuffer()
@@ -140,7 +143,7 @@ function catalog_from_entries(entries)
         (isempty(e.msgid) || e.fuzzy || all(isempty, e.msgstr)) && continue
         msgs[(e.context, e.msgid)] = e.msgstr
     end
-    Catalog(msgs, plural_rule(header_of(entries)), plural_expr(header_of(entries)))
+    Catalog(msgs, plural_rule(header_of(entries)), plural_expr(header_of(entries)), plural_count(header_of(entries)))
 end
 
 # --- .mo (GNU gettext binary catalogue) --------------------------------------------------------------------
@@ -281,17 +284,28 @@ function catalog(lang)
             loc = to_locale(lang)
             names = unique([loc, split(loc, '_')[1]])
             msgs = Dict{Tuple{String,String},Vector{String}}()
-            rule, expr = nothing, "n != 1"
+            rule, expr, np = nothing, "n != 1", 2
             for dir in reverse(locale_dirs()), name in reverse(names)      # later (higher priority) entries overwrite
                 entries = load_catalog_file(dir, name)
                 entries === nothing && continue
                 c = catalog_from_entries(entries)
                 merge!(msgs, c.messages)
-                isempty(header_of(entries)) || (rule = c.plural; expr = c.plural_expr)
+                isempty(header_of(entries)) || (rule = c.plural; expr = c.plural_expr; np = c.nplurals)
             end
-            Catalog(msgs, something(rule, n -> n == 1 ? 0 : 1), expr)
+            Catalog(msgs, something(rule, n -> n == 1 ? 0 : 1), expr, np)
         end
     end
+end
+
+"""
+    fallback_catalog(lang) -> Catalog or nothing
+
+The catalogue a language's missing messages come from, as Django's: LANGUAGE_CODE's, unless `lang`
+is LANGUAGE_CODE or an English variant.
+"""
+function fallback_catalog(lang)
+    l, d = lowercase(string(lang)), lowercase(string(settings.LANGUAGE_CODE))
+    (l == d || startswith(l, "en")) ? nothing : catalog(d)
 end
 
 "The active language: set per task by `activate!`/`LocaleMiddleware`, else `LANGUAGE_CODE`."
@@ -320,10 +334,14 @@ get_language_bidi(lang = get_language()) = split(lowercase(string(lang)), '-')[1
 function translate(context, msgid, plural = nothing, n = 1)
     settings.USE_I18N || return plural === nothing || n == 1 ? msgid : plural
     isempty(msgid) && plural === nothing && return msgid        # (the catalog's "" entry is its header, not a translation)
-    c = catalog(get_language())
+    lang = get_language()
+    c = catalog(lang)
     forms = get(c.messages, (context, msgid), nothing)
-    if forms === nothing
-        return plural === nothing || n == 1 ? msgid : plural
+    if forms === nothing                                        # (then LANGUAGE_CODE's translation, as Django's fallback)
+        fb = fallback_catalog(lang)
+        forms = fb === nothing ? nothing : get(fb.messages, (context, msgid), nothing)
+        forms === nothing && return plural === nothing || n == 1 ? msgid : plural
+        c = fb
     end
     plural === nothing && return isempty(forms[1]) ? msgid : forms[1]
     i = clamp(c.plural(n), 0, length(forms) - 1)
@@ -469,8 +487,11 @@ function get_format(name::AbstractString, lang)
     name == "DATE_INPUT_FORMATS" && return with_language(() -> input_formats(:date), lang)
     name == "DATETIME_INPUT_FORMATS" && return with_language(() -> input_formats(:datetime), lang)
     name == "TIME_INPUT_FORMATS" && return with_language(() -> input_formats(:time), lang)
-    name in FORMAT_SETTINGS && haskey(settings, Symbol(name)) ? settings[Symbol(name)] : name
+    something(get(settings, Symbol(name), nothing), get(FORMAT_DEFAULTS, name, name))
 end
+# Django's global defaults for the format settings Juango has no per-language value for.
+const FORMAT_DEFAULTS = Dict("TIME_FORMAT" => "P", "MONTH_DAY_FORMAT" => "F j", "YEAR_MONTH_FORMAT" => "F Y",
+                             "SHORT_DATETIME_FORMAT" => "m/d/Y P")
 "Django's FORMAT_SETTINGS: the settings `get_format` reads; any other name comes back as it is."
 const FORMAT_SETTINGS = Set(["DECIMAL_SEPARATOR", "THOUSAND_SEPARATOR", "NUMBER_GROUPING", "FIRST_DAY_OF_WEEK", "MONTH_DAY_FORMAT",
     "TIME_FORMAT", "DATE_FORMAT", "DATETIME_FORMAT", "SHORT_DATE_FORMAT", "SHORT_DATETIME_FORMAT", "YEAR_MONTH_FORMAT",
@@ -670,7 +691,7 @@ also as a plain space), unless a lone `.` separator without three digits after i
 point. Anything but a string is returned as it is.
 """
 sanitize_separators(value) = value
-function sanitize_separators(value::AbstractString)
+function sanitize_separators(value::AbstractString; thousands = settings.USE_THOUSAND_SEPARATOR)
     parts = String[]
     dec = get_format("DECIMAL_SEPARATOR")
     v = String(value)
@@ -678,7 +699,7 @@ function sanitize_separators(value::AbstractString)
         v, decimals = split(v, dec; limit = 2)
         push!(parts, decimals)
     end
-    if settings.USE_THOUSAND_SEPARATOR
+    if thousands
         t = get_format("THOUSAND_SEPARATOR")
         if !(t == "." && count(==('.'), v) == 1 && length(split(v, '.')[end]) != 3)     # (#22171: a dot meant as a decimal point)
             for r in unique([t, Base.Unicode.normalize(t; compat = true)])
@@ -689,8 +710,12 @@ function sanitize_separators(value::AbstractString)
     push!(parts, v)
     join(reverse(parts), ".")
 end
-"Parse a number typed in the active language's format (`\"1.234,5\"` in German): `sanitize_separators` after trimming."
-parse_localized_number(s::AbstractString) = sanitize_separators(strip(s))
+"""
+Parse a number typed in the active language's format (`\"1.234,5\"` in German): `sanitize_separators` after
+trimming, with thousands separators always removed. (Django removes them only with USE_THOUSAND_SEPARATOR
+and rejects `1.234,5` otherwise; Juango's forms have always accepted it.)
+"""
+parse_localized_number(s::AbstractString) = sanitize_separators(strip(s); thousands = true)
 
 """
     localize_input(value, default = nothing)
@@ -1127,82 +1152,210 @@ filter!(I18N_LIBRARY, "language_bidi", (v, _) -> get_language_info(string(v)).bi
 const JL_STR = "\"((?:[^\"\\\\]|\\\\.)*)\""
 jl_unescape(s) = po_unescape(s)
 
-"Messages in Julia source: gettext(\"..\"), gettext_lazy, ngettext, pgettext, npgettext and t\"..\"."
-function extract_julia(src::AbstractString, file)
-    out = POEntry[]
-    add(ctx, id, pl = "") = (e = POEntry(); e.context = ctx; e.msgid = id; e.msgid_plural = pl;
-                             e.msgstr = isempty(pl) ? [""] : ["", ""]; e.comments = ["#: $file"]; push!(out, e))
-    src = join([l for l in split(src, '\n') if !startswith(lstrip(l), "#")], '\n')     # not in comments
-    for m in eachmatch(Regex("\\b(?:gettext|gettext_lazy)\\(\\s*" * JL_STR), src); add("", jl_unescape(m[1])); end
-    for m in eachmatch(Regex("(?<![\\w\$\"\\\\])t" * JL_STR), src); add("", jl_unescape(m[1])); end
-    for m in eachmatch(Regex("\\b(?:pgettext|pgettext_lazy)\\(\\s*" * JL_STR * "\\s*,\\s*" * JL_STR), src); add(jl_unescape(m[1]), jl_unescape(m[2])); end
-    for m in eachmatch(Regex("\\b(?:ngettext|ngettext_lazy)\\(\\s*" * JL_STR * "\\s*,\\s*" * JL_STR), src); add("", jl_unescape(m[1]), jl_unescape(m[2])); end
-    for m in eachmatch(Regex("\\bnpgettext\\(\\s*" * JL_STR * "\\s*,\\s*" * JL_STR * "\\s*,\\s*" * JL_STR), src)
-        add(jl_unescape(m[1]), jl_unescape(m[2]), jl_unescape(m[3]))
+"The `#:` reference for a message at `line` of `file`, as `add_location` asks (\"full\", \"file\" or \"never\")."
+po_location(file, line, location) = location == "never" ? String[] : String["#: $file" * (location == "full" ? ":$line" : "")]
+
+"""
+Messages in Julia source: gettext("..") (and gettext_lazy, gettext_noop), ngettext, pgettext, npgettext (and
+their _lazy forms) and t"..". A comment block starting with `# Translators:` right above the call becomes
+the message's `#.` comment, as xgettext's.
+"""
+function extract_julia(src::AbstractString, file; location = "full")
+    out = Tuple{Int,POEntry}[]
+    lines = split(src, '\n')
+    iscomment = [startswith(lstrip(l), "#") for l in lines]
+    code = join([c ? "" : l for (l, c) in zip(lines, iscomment)], '\n')     # (comments blanked; line numbers kept)
+    nls = findall(==('\n'), code)
+    function translators(line)
+        i = line - 1
+        while i >= 1 && iscomment[i]; i -= 1; end
+        block = [strip(lstrip(lstrip(lines[j]), '#')) for j in i+1:line-1]
+        k = findfirst(l -> startswith(l, "Translators"), block)
+        k === nothing ? String[] : String["#. " * l for l in block[k:end]]
     end
-    out
+    function add(off, ctx, id, pl = "")
+        line = searchsortedfirst(nls, off)
+        e = POEntry(); e.context = ctx; e.msgid = id; e.msgid_plural = pl
+        e.msgstr = isempty(pl) ? [""] : ["", ""]
+        e.comments = vcat(translators(line), po_location(file, line, location))
+        push!(out, (off, e))
+    end
+    u = jl_unescape
+    for m in eachmatch(Regex("\\b(?:gettext|gettext_lazy|gettext_noop)\\(\\s*" * JL_STR), code); add(m.offset, "", u(m[1])); end
+    for m in eachmatch(Regex("(?<![\\w\$\"\\\\])t" * JL_STR), code); add(m.offset, "", u(m[1])); end
+    for m in eachmatch(Regex("\\b(?:pgettext|pgettext_lazy)\\(\\s*" * JL_STR * "\\s*,\\s*" * JL_STR), code); add(m.offset, u(m[1]), u(m[2])); end
+    for m in eachmatch(Regex("\\b(?:ngettext|ngettext_lazy)\\(\\s*" * JL_STR * "\\s*,\\s*" * JL_STR), code); add(m.offset, "", u(m[1]), u(m[2])); end
+    for m in eachmatch(Regex("\\b(?:npgettext|npgettext_lazy)\\(\\s*" * JL_STR * "\\s*,\\s*" * JL_STR * "\\s*,\\s*" * JL_STR), code)
+        add(m.offset, u(m[1]), u(m[2]), u(m[3]))
+    end
+    POEntry[e for (_, e) in sort(out; by = first)]
 end
 
-"Messages in a template: {% translate %} and {% blocktranslate %} blocks."
-function extract_template(src::AbstractString, file)
+const TEMPLATE_LITERAL_RE = r"\b_\(\s*(?:\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)')\s*\)"
+template_literal(s) = (m = match(r"^(?:\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)')", s); m === nothing ? nothing : something(m[1], m[2]))
+
+"""
+Messages in a template: {% translate %} (also with `noop`) and {% blocktranslate %} blocks, and `_("..")`
+literals. A `{# Translators: .. #}` comment (the last item on its line) or a `{% comment %}Translators: ..`
+block right before a message becomes its `#.` comment, as Django's.
+"""
+function extract_template(src::AbstractString, file; location = "full")
     out = POEntry[]
     toks = tokenize(src)
+    pending = String[]
+    function add(tk, ctx, id, pl = "")
+        e = POEntry(); e.context = ctx; e.msgid = id; e.msgid_plural = pl; e.msgstr = isempty(pl) ? [""] : ["", ""]
+        e.comments = vcat(pending, po_location(file, tk.line, location))
+        empty!(pending)
+        push!(out, e)
+    end
+    note(text) = (empty!(pending); append!(pending, ["#. " * strip(l) for l in split(strip(text), '\n')]))
+    context_of(bits) = (j = findfirst(==("context"), bits); j === nothing || j == length(bits) ? "" : something(template_literal(bits[j+1]), ""))
     i = 1
     while i <= length(toks)
         tk = toks[i]
         i += 1
-        tk.kind === :block || continue
+        if tk.kind === :text
+            isempty(strip(tk.contents)) || empty!(pending)
+            continue
+        elseif tk.kind === :comment
+            startswith(strip(tk.contents), "Translators") || continue
+            nxt = i <= length(toks) ? toks[i] : nothing
+            last_on_line = nxt === nothing || (nxt.kind === :text && occursin('\n', nxt.contents) && isempty(strip(first(split(nxt.contents, '\n')))))
+            if last_on_line
+                note(tk.contents)
+            else
+                @warn "The translator-targeted comment '$(strip(tk.contents))' (file $file, line $(tk.line)) was ignored, because it wasn't the last item on the line."
+            end
+            continue
+        elseif tk.kind === :var
+            for m in eachmatch(TEMPLATE_LITERAL_RE, tk.contents); add(tk, "", something(m[1], m[2])); end
+            continue
+        end
         bits = split_contents(tk.contents)
         isempty(bits) && continue
-        if bits[1] in ("translate", "trans") && length(bits) >= 2 && (startswith(bits[2], "\"") || startswith(bits[2], "'")) && !("noop" in bits)
-            e = POEntry(); e.msgid = bits[2][2:end-1]; e.comments = ["#: $file:$(tk.line)"]
-            j = findfirst(==("context"), bits)
-            j === nothing || (e.context = strip(bits[j+1], ['"', '\'']))
-            push!(out, e)
+        if bits[1] == "comment"
+            body = IOBuffer()
+            while i <= length(toks) && !(toks[i].kind === :block && strip(toks[i].contents) == "endcomment")
+                toks[i].kind === :text && print(body, toks[i].contents)
+                i += 1
+            end
+            i += 1
+            text = String(take!(body))
+            startswith(lstrip(text), "Translators") ? note(text) : empty!(pending)
+        elseif bits[1] in ("translate", "trans") && length(bits) >= 2 && template_literal(bits[2]) !== nothing
+            add(tk, context_of(bits), template_literal(bits[2]))
         elseif bits[1] in ("blocktranslate", "blocktrans")
             singular, plural = Token[], nothing
             while i <= length(toks)
                 t2 = toks[i]; i += 1
-                t2.kind === :block && strip(t2.contents) == "end" * bits[1] && break
-                t2.kind === :block && strip(t2.contents) == "plural" && (plural = Token[]; continue)
+                if t2.kind === :block
+                    c2 = strip(t2.contents)
+                    c2 == "end" * bits[1] && break
+                    c2 == "plural" && (plural = Token[]; continue)
+                    throw(TemplateSyntaxError("Translation blocks must not include other block tags: $c2 (file $file, line $(t2.line))"))
+                end
                 push!(plural === nothing ? singular : plural, t2)
             end
             trimmed = "trimmed" in bits
-            e = POEntry(); e.msgid = first(blocktrans_msgid(singular, trimmed)); e.comments = ["#: $file:$(tk.line)"]
-            if plural !== nothing
-                e.msgid_plural = first(blocktrans_msgid(plural, trimmed)); e.msgstr = ["", ""]
-            end
-            j = findfirst(==("context"), bits)
-            j === nothing || (e.context = strip(bits[j+1], ['"', '\'']))
-            push!(out, e)
+            add(tk, context_of(bits), first(blocktrans_msgid(singular, trimmed)),
+                plural === nothing ? "" : first(blocktrans_msgid(plural, trimmed)))
+        else
+            found = false
+            for m in eachmatch(TEMPLATE_LITERAL_RE, tk.contents); add(tk, "", something(m[1], m[2])); found = true; end
+            found || empty!(pending)
         end
     end
     out
 end
 
-const PO_HEADER = """Project-Id-Version: PACKAGE VERSION
-Language: LANG
+# The plural rule a new catalogue gets when Juango has none of its own for the language (gettext's).
+const PLURAL_FORMS = let ru = "nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);",
+                         one = "nplurals=1; plural=0;", gt1 = "nplurals=2; plural=(n > 1);", cs = "nplurals=3; plural=(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2;"
+    Dict("ja" => one, "zh" => one, "ko" => one, "vi" => one, "th" => one, "id" => one, "ms" => one,
+         "fr" => gt1, "pt_BR" => gt1, "tr" => gt1, "oc" => gt1,
+         "ru" => ru, "uk" => ru, "be" => ru, "sr" => ru, "hr" => ru, "bs" => ru, "cs" => cs, "sk" => cs,
+         "pl" => "nplurals=3; plural=(n==1 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);",
+         "lt" => "nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && (n%100<10 || n%100>=20) ? 1 : 2);",
+         "ro" => "nplurals=3; plural=(n==1 ? 0 : (n==0 || (n%100 > 0 && n%100 < 20)) ? 1 : 2);",
+         "sl" => "nplurals=4; plural=(n%100==1 ? 0 : n%100==2 ? 1 : n%100==3 || n%100==4 ? 2 : 3);",
+         "ar" => "nplurals=6; plural=(n==0 ? 0 : n==1 ? 1 : n==2 ? 2 : n%100>=3 && n%100<=10 ? 3 : n%100>=11 ? 4 : 5);")
+end
+
+"The Plural-Forms header line for a locale: Juango's own catalogue's (as Django copies its own), else gettext's rule."
+function plural_forms(loc)
+    for name in unique([loc, split(loc, '_')[1]])
+        entries = load_catalog_file(BUILTIN_LOCALE_DIR, name)
+        entries === nothing && continue
+        m = match(r"Plural-Forms:[^\n]*", header_of(entries))
+        m === nothing || return String(m.match)
+    end
+    "Plural-Forms: " * get(PLURAL_FORMS, loc, get(PLURAL_FORMS, split(loc, '_')[1], "nplurals=2; plural=(n != 1);"))
+end
+
+po_header(loc) = """Project-Id-Version: PACKAGE VERSION
+Language: $loc
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-Plural-Forms: nplurals=2; plural=(n != 1);"""
+$(plural_forms(loc))"""
+
+"Shell-style pattern match (`*`, `?`, `[..]`), as Python's fnmatch."
+function fnmatch(pat::AbstractString, name::AbstractString)
+    rx = replace(pat, r"[.+^$(){}|\\]" => s"\\\0")
+    rx = replace(rx, "*" => ".*", "?" => ".")
+    occursin(Regex("^" * rx * "\$"), name)
+end
+const MAKEMESSAGES_DEFAULT_IGNORE = ["CVS", ".*", "*~"]
+"Whether a path (relative to the root) is ignored: a pattern matching a name in it, or the whole path."
+path_ignored(rel, patterns) = any(p -> fnmatch(p, rel) || any(part -> fnmatch(p, part), splitpath(rel)), patterns)
+
+"The catalogues' obsolete (`#~`) entries."
+parse_po_obsolete(text) = parse_po(join([startswith(l, "#~") ? replace(l, r"^#~\s?" => "") : "" for l in split(text, '\n')], '\n'))
 
 """
-    makemessages(lang; root=pwd(), locale_dir=first(LOCALE_PATHS) or root/locale) -> path
+    makemessages(lang; root=pwd(), locale_dir=first(LOCALE_PATHS) or root/locale, ...) -> path
+    makemessages(langs::Vector; ...) / makemessages(; all = true, ...) -> paths
 
 Collect translatable strings from `.jl` files and templates under `root` into
-`locale_dir/<locale>/LC_MESSAGES/juango.po`, keeping existing translations.
+`locale_dir/<locale>/LC_MESSAGES/juango.po`, keeping existing translations, as Django's makemessages:
+
+- `all`: every locale already in `locale_dir` (`exclude` leaves some out);
+- `extensions`: the template extensions (default `.html` and `.txt`; `.jl` files are always read);
+- `ignore`: shell patterns of files and directories to skip (with `.*`, `*~` and `CVS`, unless `no_default_ignore`);
+- `add_location`: `"full"` (`#: file:line`, the default), `"file"` or `"never"` (also `no_location = true`);
+- translations of strings no longer found are kept as obsolete `#~` entries, unless `no_obsolete`.
 """
-function makemessages(lang; root = pwd(), locale_dir = isempty(settings.LOCALE_PATHS) ? joinpath(root, "locale") : string(first(settings.LOCALE_PATHS)))
+function makemessages(lang = nothing; root = pwd(), locale_dir = isempty(settings.LOCALE_PATHS) ? joinpath(root, "locale") : string(first(settings.LOCALE_PATHS)),
+                      all = false, exclude = String[], extensions = nothing, ignore = String[], no_default_ignore = false,
+                      add_location = "full", no_location = false, no_obsolete = false)
+    langs = lang isa AbstractString ? [String(lang)] : lang === nothing ? String[] : String.(collect(lang))
+    if all
+        isdir(locale_dir) && append!(langs, sort([d for d in readdir(locale_dir) if isdir(joinpath(locale_dir, d, "LC_MESSAGES"))]))
+    end
+    excluded = Set(to_locale.(exclude))
+    langs = unique(filter(l -> !(to_locale(l) in excluded), langs))
+    isempty(langs) && !all && isempty(exclude) && throw(ArgumentError("makemessages needs a locale (-l <locale>) or all = true (-a)"))
+    location = no_location ? "never" : string(add_location)
+    location in ("full", "file", "never") || throw(ArgumentError("add_location must be \"full\", \"file\" or \"never\""))
+    exts = extensions === nothing ? [".html", ".txt"] :
+           [startswith(e, ".") ? e : "." * e for x in extensions for e in strip.(split(x, ',')) if !isempty(e)]
+    patterns = vcat(String.(ignore), no_default_ignore ? String[] : MAKEMESSAGES_DEFAULT_IGNORE)
     found = POEntry[]
-    for (dir, _, files) in walkdir(root), f in sort(files)
-        p = joinpath(dir, f)
-        (occursin("/.git", p) || startswith(relpath(p, root), "locale")) && continue
-        rel = relpath(p, root)
-        if endswith(f, ".jl")
-            append!(found, extract_julia(read(p, String), rel))
-        elseif endswith(f, ".html") || endswith(f, ".txt")
-            append!(found, extract_template(read(p, String), rel))
+    locale_prefix = rstrip(abspath(locale_dir), '/') * "/"
+    for (dir, _, files) in walkdir(root)
+        for f in sort(files)
+            p = joinpath(dir, f)
+            rel = relpath(p, root)
+            (path_ignored(rel, patterns) || startswith(abspath(p), locale_prefix) || first(splitpath(rel)) == "locale") && continue
+            isjl = endswith(f, ".jl")
+            (isjl || any(e -> endswith(f, e), exts)) || continue
+            src = read(p, String)
+            if !isvalid(src)
+                @warn "UnicodeDecodeError: skipped file $f in $(relpath(dir, root)) (reason: not valid UTF-8)"
+                continue
+            end
+            append!(found, isjl ? extract_julia(src, rel; location) : extract_template(src, rel; location))
         end
     end
     merged = Dict{Tuple{String,String},POEntry}()
@@ -1210,42 +1363,126 @@ function makemessages(lang; root = pwd(), locale_dir = isempty(settings.LOCALE_P
     for e in found
         k = (e.context, e.msgid)
         if haskey(merged, k)
-            append!(merged[k].comments, e.comments)
+            old = merged[k]
+            for c in e.comments; c in old.comments || push!(old.comments, c); end
+            isempty(old.msgid_plural) && !isempty(e.msgid_plural) && (old.msgid_plural = e.msgid_plural; old.msgstr = e.msgstr)
         else
             merged[k] = e; push!(order, k)
         end
     end
-    path = joinpath(locale_dir, to_locale(lang), "LC_MESSAGES", "juango.po")
-    header = replace(PO_HEADER, "LANG" => to_locale(lang))
-    if isfile(path)
-        old = parse_po(read(path, String))
-        isempty(header_of(old)) || (header = header_of(old))
-        oldmap = Dict((e.context, e.msgid) => e for e in old if !isempty(e.msgid))
-        for k in order
-            haskey(oldmap, k) || continue
-            merged[k].msgstr = oldmap[k].msgstr
-            merged[k].fuzzy = oldmap[k].fuzzy
+    for k in order                                              # (#. comments before the #: references, as xgettext)
+        c = merged[k].comments
+        merged[k].comments = vcat(filter(x -> startswith(x, "#."), c), filter(x -> !startswith(x, "#."), c))
+    end
+    paths = String[]
+    for l in langs
+        loc = to_locale(l)
+        path = joinpath(locale_dir, loc, "LC_MESSAGES", "juango.po")
+        header = po_header(loc)
+        oldmap, obsolete = Dict{Tuple{String,String},POEntry}(), POEntry[]
+        if isfile(path)
+            text = read(path, String)
+            old = parse_po(text)
+            isempty(header_of(old)) || (header = header_of(old))
+            for e in vcat(parse_po_obsolete(text), old)        # (an active entry wins over an obsolete one)
+                isempty(e.msgid) || (oldmap[(e.context, e.msgid)] = e)
+            end
         end
+        np = plural_count(header)
+        entries = POEntry[]
+        for k in order
+            src = merged[k]
+            e = POEntry(src.context, src.msgid, src.msgid_plural, isempty(src.msgid_plural) ? [""] : fill("", np), false, copy(src.comments))
+            o = get(oldmap, k, nothing)
+            if o !== nothing && isempty(o.msgid_plural) == isempty(e.msgid_plural)
+                e.msgstr = copy(o.msgstr); e.fuzzy = o.fuzzy
+            end
+            push!(entries, e)
+        end
+        if !no_obsolete
+            seen = Set(order)
+            for (k, o) in sort(collect(oldmap); by = x -> x[1])
+                (k in seen || Base.all(isempty, o.msgstr)) && continue
+                push!(obsolete, POEntry(o.context, o.msgid, o.msgid_plural, o.msgstr, o.fuzzy, String[]))
+            end
+        end
+        mkpath(dirname(path))
+        open(path, "w") do io
+            write_po(io, entries; header = header)
+            if !isempty(obsolete)
+                buf = IOBuffer()
+                write_po(buf, obsolete)
+                for line in split(String(take!(buf)), '\n')
+                    println(io, isempty(line) ? "" : "#~ " * line)
+                end
+            end
+        end
+        push!(paths, path)
     end
-    mkpath(dirname(path))
-    open(path, "w") do io
-        write_po(io, [merged[k] for k in order]; header = header)
-    end
-    path
+    lang isa AbstractString ? only(paths) : paths
 end
 
-"Compile every juango.po under `dirs` into juango.mo; returns the files written."
-function compilemessages(dirs = vcat(String[string(p) for p in settings.LOCALE_PATHS], [joinpath(pwd(), "locale")]))
-    written = String[]
+"Lines of a .po file that aren't a comment, a keyword or a string continuation: (line number, text)."
+function po_syntax_errors(text)
+    errs = Tuple{Int,String}[]
+    for (n, raw) in enumerate(split(text, '\n'))
+        l = strip(raw)
+        (isempty(l) || startswith(l, "#") || occursin(r"^(msgctxt|msgid_plural|msgid|msgstr(\[\d+\])?)\s+\".*\"$", l) ||
+         occursin(r"^\".*\"$", l)) && continue
+        push!(errs, (n, String(l)))
+    end
+    errs
+end
+
+"""
+    compilemessages(dirs = LOCALE_PATHS + ./locale; locale = nothing, exclude = [], use_fuzzy = false, ignore = []) -> mo files written
+
+Compile every juango.po under `dirs` into juango.mo, as Django's compilemessages: only the given
+locales (`locale`, minus `exclude`), skipping `ignore` patterns and catalogues whose .mo is newer.
+Fuzzy translations are left out unless `use_fuzzy`. A .po with a BOM or a syntax error is reported
+and the others are compiled; then a CommandError is thrown.
+"""
+function compilemessages(dirs = vcat(String[string(p) for p in settings.LOCALE_PATHS], [joinpath(pwd(), "locale")]);
+                         locale = nothing, exclude = String[], use_fuzzy = false, ignore = String[], verbose = false)
+    written, errors = String[], String[]
+    wanted = locale === nothing ? nothing : Set(to_locale.(locale isa AbstractString ? [locale] : locale))
+    excluded = Set(to_locale.(exclude))
     for d in unique(dirs)
         isdir(d) || continue
         for (dir, _, files) in walkdir(d), f in files
             f == "juango.po" || continue
-            po = joinpath(dir, f)
-            write(joinpath(dir, "juango.mo"), write_mo(parse_po(read(po, String))))
-            push!(written, joinpath(dir, "juango.mo"))
+            loc = basename(dirname(dir))
+            (wanted !== nothing && !(loc in wanted)) && continue
+            (loc in excluded || path_ignored(relpath(joinpath(dir, f), d), ignore)) && continue
+            po, mo = joinpath(dir, f), joinpath(dir, "juango.mo")
+            if isfile(mo) && mtime(mo) >= mtime(po)
+                verbose && println("File “$(po)” is already compiled and up to date.")
+                continue
+            end
+            bytes = read(po)
+            if length(bytes) >= 3 && bytes[1:3] == [0xef, 0xbb, 0xbf]
+                push!(errors, "The $(po) file has a BOM (Byte Order Mark). Juango only supports .po files encoded in UTF-8 and without any BOM.")
+                continue
+            end
+            text = String(bytes)
+            bad = po_syntax_errors(text)
+            if !isempty(bad)
+                append!(errors, ["$po:$n: syntax error: $l" for (n, l) in bad])
+                continue
+            end
+            entries = parse_po(text)
+            use_fuzzy && foreach(e -> e.fuzzy = false, entries)
+            try
+                write(mo, write_mo(entries))
+            catch e
+                e isa SystemError || e isa Base.IOError || rethrow()
+                push!(errors, "The po files under $dir are in a seemingly not writable location. mo files will not be updated/created.")
+                continue
+            end
+            push!(written, mo)
         end
     end
     reload_translations!()
+    isempty(errors) || throw(CommandError(join(errors, "\n") * "\ncompilemessages generated one or more errors."))
     written
 end

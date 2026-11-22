@@ -7,19 +7,28 @@
 # The script defines gettext, ngettext, pgettext, npgettext, gettext_noop, interpolate,
 # pluralidx and get_format (also under `juango.`), with the active language's translations.
 
-"The translations of the active language as JavaScript-ready data: msgid (or `context\\x04msgid`) => string or plural forms."
+"""
+The translations of the active language as JavaScript-ready data: msgid (or `context\\x04msgid`) => string,
+or the plural forms (as many as the language has, "" for missing ones), as Django's. The messages
+LANGUAGE_CODE's catalogue adds as a fallback (see `fallback_catalog`) are included.
+"""
 function js_catalog_data(; prefixes = nothing)
-    c = catalog(get_language())
+    lang = get_language()
+    c = catalog(lang)
+    fb = settings.USE_I18N ? fallback_catalog(lang) : nothing
     out = Dict{String,Any}()
-    for ((ctx, id), strs) in c.messages
+    settings.USE_I18N || return out, c.plural_expr
+    for cat in (fb === nothing ? (c,) : (c, fb)), ((ctx, id), strs) in cat.messages
         prefixes === nothing || any(p -> startswith(id, p), prefixes) || continue
-        out[(isempty(ctx) ? "" : ctx * "\x04") * id] = length(strs) == 1 ? strs[1] : strs
+        key = (isempty(ctx) ? "" : ctx * "\x04") * id
+        haskey(out, key) && continue
+        out[key] = length(strs) == 1 ? strs[1] : String[get(strs, i, "") for i in 1:max(c.nplurals, 1)]
     end
     out, c.plural_expr
 end
 
-js_formats() = (f = get_format(); Dict("DATE_FORMAT" => f.date, "DATETIME_FORMAT" => f.datetime,
-                                         "DECIMAL_SEPARATOR" => decimal_separator(), "THOUSAND_SEPARATOR" => thousand_separator()))
+"The active language's formats for JavaScript: each of Django's format settings (FORMAT_SETTINGS)."
+js_formats() = Dict{String,Any}(name => (v = get_format(name); v isa AbstractVector ? collect(v) : v) for name in sort(collect(FORMAT_SETTINGS)))
 
 const JS_CATALOG_TEMPLATE = raw"""
 (function (globals) {

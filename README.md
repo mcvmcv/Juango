@@ -1781,12 +1781,19 @@ urlpatterns = [i18n_patterns(path("about/", about; name = "about")),   # /en/abo
 `set_language` (at `i18n/setlang/`) works as Django's. A POST with `language` sets the language cookie and redirects to `next`, with its language prefix swapped. If `next` isn't safe, it goes to the Referer, then `/`. A GET changes nothing. A fetch or ajax request that doesn't accept HTML and gives no `next` gets 204. The cookie follows the `LANGUAGE_COOKIE_NAME`, `_AGE`, `_PATH`, `_DOMAIN`, `_SECURE`, `_HTTPONLY` and `_SAMESITE` settings. Juango's default age is a year; Django's cookie lasts until the browser closes.
 
 - **Catalogues** are standard gettext files at `locale/<lang>/LC_MESSAGES/juango.po`, editable in Poedit, Weblate and similar tools.
-  - `manage.jl makemessages -l de` collects strings from `.jl` files and templates and keeps existing translations.
-  - `manage.jl compilemessages` builds the `.mo` files.
+  - `manage.jl makemessages -l de` collects strings from `.jl` files and templates and keeps existing translations, as Django's:
+    - `-a` updates every locale already there, and `-x` leaves one out.
+    - `-e` sets the template extensions (default `html,txt`). `-i` adds patterns to skip (with `.*`, `*~` and `CVS`, unless `--no-default-ignore`).
+    - `--add-location=file` or `--no-location` shortens the `#:` references.
+    - Translations of strings that are gone are kept as obsolete `#~` entries, unless `--no-obsolete`.
+    - A `# Translators: ...` comment above a call (`{# Translators: ... #}` in a template) is passed to translators.
+    - A new catalogue gets the language's plural rule.
+    - The same options are keywords of `makemessages(...)` in Julia.
+  - `manage.jl compilemessages` builds the `.mo` files, skipping up-to-date ones. It takes `-l`, `-x`, `-i`, and `-f` to include fuzzy translations. A `.po` with a BOM or a syntax error is reported.
   - Juango reads `.po` files directly too, so compiling is optional.
 - **Language selection.** `LocaleMiddleware` picks the language from the URL prefix, then the `juango_language` cookie, then `Accept-Language`, then `LANGUAGE_CODE`. It also sets `Content-Language`. `Accept-Language` is parsed as Django does (`Juango.parse_accept_lang_header`: q values, a malformed header ignored, only the first 500 characters read), and a code is matched with `Juango.get_supported_language_variant` (`de-at` → `de`, `pt` → `pt-br`; `strict = true` skips other variants). `Juango.get_language_from_path("/de/about/")` gives `"de"`. Routes can be translated, as Django's `path(_("about/"), ...)`: `path(gettext_lazy("about/"), about)` matches and reverses in the active language (under `i18n_patterns`, the prefix's: `/de/ueber/`), and `Juango.translate_url("/en/about/", "de")` gives the same page's URL in another language, which `set_language` uses when it redirects. With `USE_I18N = false`, `i18n_patterns` adds no prefix. Under `i18n_patterns`, a URL without a prefix redirects to the right language, and `reverse_url` adds the active prefix (`prefix_default_language = false` leaves the default language unprefixed).
 - **Formats.** Dates use translated month and day names, and the `date` filter's default format follows the language. `localize` and `number_format` use the language's decimal separator, and thousands separators too with `USE_THOUSAND_SEPARATOR`. `Juango.numberformat(x, "."; decimal_pos, grouping, thousand_sep, force_grouping)` is Django's `numberformat.format` (grouping sizes such as `(3, 2, 0)`, decimals cut rather than rounded). Right-to-left languages are `LANGUAGES_BIDI`. `Juango.get_format("DECIMAL_SEPARATOR")` (and Django's other format names) gives the active language's format, or the setting (`DECIMAL_SEPARATOR`, `THOUSAND_SEPARATOR`, `NUMBER_GROUPING`, `FIRST_DAY_OF_WEEK`, `DATE_FORMAT`...) for a language Juango has no formats for. `Juango.sanitize_separators("1.234,5")` turns a localized number into `"1234.5"`, and `Juango.localize_input(x)` writes a value as a form input shows it. Template output is plain unless you ask: `{% load l10n %}{% localize on %}{{ price }}{% endlocalize %}` (or `|localize`) shows numbers and dates in the language's format, and `|unlocalize` and `{% localize off %}` undo that (Django 5 localizes by default; see #271). Translating a `SafeString` gives a `SafeString`.
-- **Built-in German.** The admin's interface and validation messages are translatable, and Juango ships a German translation (`src/assets/locale/de`). Other languages fall back to English until someone adds a catalogue.
+- **Built-in German.** The admin's interface and validation messages are translatable, and Juango ships a German translation (`src/assets/locale/de`). A message missing from the active language's catalogue comes from `LANGUAGE_CODE`'s, as in Django (not for English variants), then stays in English.
 
 **In JavaScript.** Serve the active language's translations to the browser:
 
@@ -1799,7 +1806,7 @@ path("jsi18n/", Juango.JavaScriptCatalog(); name = "jsi18n")      # Juango.JSONC
 <script>alert(interpolate(ngettext("%s item", "%s items", n), [n]))</script>
 ```
 
-The script defines `gettext`, `ngettext`, `pgettext`, `npgettext`, `interpolate`, `pluralidx` and `get_format`, also under `juango.`. `JavaScriptCatalog(; prefixes = ["Cart"])` sends only msgids with those prefixes.
+The script defines `gettext`, `ngettext`, `pgettext`, `npgettext`, `interpolate`, `pluralidx` and `get_format`, also under `juango.`. `JavaScriptCatalog(; prefixes = ["Cart"])` sends only msgids with those prefixes. The catalogue includes `LANGUAGE_CODE`'s fallback translations, and `get_format` knows all of Django's format names.
 
 ### Time zones
 
