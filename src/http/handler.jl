@@ -57,14 +57,15 @@ function host_allowed(req::Request)
     false
 end
 
-view_label(v) = v isa Function ? string(parentmodule(v), ".", nameof(v)) : string(typeof(v))
+"A view's qualified name for error messages (`Main.home`); `view_label` (middleware.jl) is the short one."
+view_qualname(v) = v isa Function ? string(parentmodule(v), ".", nameof(v)) : string(typeof(v))
 "Innermost handler: call the resolved view, converting exceptions to responses."
 function dispatch(req::Request)
     try
         rm = req.resolver_match
         rm === nothing && throw(Http404("No URL pattern matches '$(req.path)'"))
         call = () -> (r = rm.view(req; rm.kwargs...);
-                      r === nothing && error("The view $(view_label(rm.view)) didn't return an HttpResponse object. It returned nothing instead.");
+                      r === nothing && error("The view $(view_qualname(rm.view)) didn't return an HttpResponse object. It returned nothing instead.");
                       to_response(r))
         for alias in atomic_request_aliases(rm.view)          # ATOMIC_REQUESTS: the view in a transaction
             inner = call

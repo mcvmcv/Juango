@@ -652,7 +652,7 @@ end
         @test text(get(c, "/en/hello/")) == "Save /en/hello/ en"
         r = get(Client(; headers = Dict("Accept-Language" => "fr-CH, fr;q=0.9, de;q=0.8")), "/hello/")
         @test r.status == 302 && getheader(r, "Location") == "/fr/hello/"
-        @test J.parse_accept_language("de;q=0.5, en-GB, *") == ["en-GB", "de"]
+        @test J.parse_accept_language("de;q=0.5, en-GB, *") == ["en-gb"]      # (as Django: lowercased, and * (q=1, ahead of de;q=0.5) ends the list)
         r = post(c, "/i18n/setlang/", Dict("language" => "de", "next" => "/en/hello/"))
         @test r.status == 302 && getheader(r, "Location") == "/de/hello/" && c.cookies["juango_language"] == "de"
         @test getheader(get(c, "/hello/"), "Location") == "/de/hello/"                # the cookie wins now
