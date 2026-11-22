@@ -143,3 +143,6 @@ end
 register_backend!("sqlite", sqlite_from_url)
 
 supports_insert_returning(::SQLiteBackend) = true            # SQLite 3.35+
+
+# A Decimal literal (Value, a Case's then) as a number: bound as text, it would compare as text.
+value_sql(::SQLiteBackend, v::Decimal) = ("CAST(? AS NUMERIC)", Any[v])

@@ -398,7 +398,7 @@ Base.@nospecializeinfer function update_here!(@nospecialize(qs::QuerySet); kw...
         f = getfield_meta(T, k)
         if v isa Expression
             sql, p = compile_expr(c, v)
-            isempty(c.joins) || throw(ArgumentError("update!: expressions can only use the model's own fields (joined field references are not permitted)"))
+            isempty(c.joins) || throw(ArgumentError("Joined field references are not permitted in this query (update!: expressions can only use the model's own fields)"))
             (c.uses_aggregate || contains_aggregate(v)) &&
                 throw(ArgumentError("update!: aggregate functions are not allowed in an update ($k = $(repr(v)))"))
             push!(sets, qname(column(f)) * " = " * sql)

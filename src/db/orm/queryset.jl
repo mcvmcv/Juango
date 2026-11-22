@@ -1483,26 +1483,38 @@ end
 
 function distinct_dates(qs::QuerySet, field, kind, order, kinds, what)
     kind = Symbol(kind)
-    kind in kinds || throw(ArgumentError("$what: kind must be one of $(join(kinds, ", ")), not :$kind"))
-    order in (:asc, :desc) || throw(ArgumentError("$what: order must be :asc or :desc"))
-    f = findfield(modelmeta(model_of(qs)), Symbol(field))
+    kind in kinds || throw(ArgumentError("'kind' must be one of " * join(["'$k'" for k in kinds[1:end-1]], ", ") * ", or '$(kinds[end])'."))
+    order = order isa AbstractString ? Symbol(lowercase(order)) : order          # (Django's "ASC"/"DESC", or :asc/:desc)
+    order in (:asc, :desc) || throw(ArgumentError("'order' must be either 'ASC' or 'DESC'."))
+    parts = split(string(field), "__")
+    M = relation_target(model_of(qs), parts[1:end-1])
+    f = M === nothing ? nothing : findfield(modelmeta(M), Symbol(parts[end]))
     (f === nothing || f.kind in (:date, :datetime, :time)) ||
-        throw(ArgumentError("$what: '$field' isn't a DateField, TimeField or DateTimeField"))
-    vals = DateTime[]
+        throw(ArgumentError("'$field' isn't a DateField, TimeField, or DateTimeField."))
+    (f !== nothing && f.kind === :date && what == "datetimes") &&
+        throw(ArgumentError("Cannot truncate DateField '$field' to DateTimeField"))
+    (f === nothing && length(parts) == 1 && !any(p -> first(p) === Symbol(field), qs.annotations) && !(Symbol(field) in qs.aliases)) &&
+        throw(lookup_error(model_of(qs), string(field)))
+    vals = Any[]
     Symbol(field) in qs.aliases && (qs = chain(qs; aliases = setdiff(qs.aliases, [Symbol(field)])))   # (an alias: read here)
     for v in values_list(order_by(qs), field; flat = true)
         v === nothing && continue
-        v isa TimeZones.ZonedDateTime && (v = DateTime(localtime(v), TimeZones.Local))
-        push!(vals, truncate_datetime(v, kind))
+        if v isa TimeZones.ZonedDateTime              # aware: truncated in the current time zone, and aware (Django's)
+            z = localtime(v)
+            push!(vals, TimeZones.ZonedDateTime(truncate_datetime(DateTime(z), kind), TimeZones.timezone(z); from_utc = false))
+        else
+            push!(vals, truncate_datetime(v, kind))
+        end
     end
-    sort!(unique!(vals); rev = order === :desc)
+    identity.(sort!(unique!(vals); rev = order === :desc))           # (a Vector{DateTime}, or of ZonedDateTime)
 end
 
 """
     dates(qs, :published, :month; order = :asc) -> Vector{Date}
 
 The distinct dates, truncated to `:year`, `:month`, `:week` (starting Monday) or `:day`, on
-which the objects' date or datetime field falls.
+which the objects' date or datetime field falls (across relations too: `"article__pub_date"`).
+`order` is `:asc`/`:desc` or Django's `"ASC"`/`"DESC"`.
 """
 dates(qs::QuerySet, field, kind = :day; order = :asc) =
     Date.(distinct_dates(qs, field, kind, order, DATE_KINDS, "dates"))
@@ -1519,29 +1531,82 @@ datetimes(qs::QuerySet, field, kind = :day; order = :asc) =
 datetimes(@nospecialize(T::Type{<:Model}), args...; kw...) = datetimes(objects(T), args...; kw...)
 
 """
-    raw(Model, sql, params = [])
+    raw(Model, sql, params = []; translations = nothing, db = nothing) -> RawQuerySet
 
-Run hand-written SQL (with `?` placeholders) and build model instances from the rows. The
-rows must include `id`; fields missing from them are deferred, and extra columns become
-attributes, like annotations.
+Hand-written SQL (with `?` placeholders) whose rows become model instances, as Django's `raw()`.
+It runs when first used (iterated, indexed, `length`, `isempty`), once: the objects are kept.
+The rows must include the primary key; fields missing from them are deferred (loaded on access),
+and extra columns become attributes, like annotations. `translations` maps the query's column
+names to the model's fields (`Dict("first" => "first_name")`). `iterator(r)` runs it again
+without keeping the objects.
 """
-Base.@nospecializeinfer raw(@nospecialize(T::Type{<:Model}), sql::AbstractString, params = Any[]; db = nothing) =
-    with_db(() -> raw_here(T, sql, params), something(db, routed_db(T, false), Some(nothing)))
-Base.@nospecializeinfer function raw_here(@nospecialize(T::Type{<:Model}), sql::AbstractString, params = Any[])
+mutable struct RawQuerySet{T<:Model} <: AbstractVector{T}
+    sql::String
+    params::Vector{Any}
+    translations::Dict{String,String}
+    db::Any
+    cache::Union{Nothing,Vector{T}}
+end
+Base.@nospecializeinfer raw(@nospecialize(T::Type{<:Model}), sql::AbstractString, params = Any[]; translations = nothing, db = nothing) =
+    RawQuerySet{T}(String(sql), params === nothing ? Any[] : collect(Any, params),
+                   Dict{String,String}(string(k) => string(v) for (k, v) in something(translations, Dict())), db, nothing)
+function run_raw(r::RawQuerySet{T}) where {T}
+    with_db(() -> raw_here(T, r.sql, r.params; translations = r.translations), something(r.db, routed_db(T, false), Some(nothing)))::Vector{T}
+end
+raw_objects(r::RawQuerySet) = (r.cache === nothing && (r.cache = run_raw(r)); r.cache)
+Base.size(r::RawQuerySet) = (length(raw_objects(r)),)
+Base.getindex(r::RawQuerySet, i::Int) = raw_objects(r)[i]
+Base.IndexStyle(::Type{<:RawQuerySet}) = IndexLinear()
+"`iterator(raw(...))`: the query run again, its objects not kept (Django's RawQuerySet.iterator)."
+iterator(r::RawQuerySet; chunk_size::Integer = 2000) = run_raw(r)
+"The SQL with its parameters filled in, for show: `<RawQuerySet: SELECT ... WHERE last_name = foo>` (Django's repr)."
+function raw_sql_text(r::RawQuerySet)
+    i = Ref(0)
+    replace(r.sql, "?" => _ -> (i[] += 1; i[] <= length(r.params) ? string(r.params[i[]]) : "?"))
+end
+Base.show(io::IO, r::RawQuerySet) = print(io, "<RawQuerySet: ", raw_sql_text(r), ">")
+Base.show(io::IO, ::MIME"text/plain", r::RawQuerySet) = show(io, r)
+
+Base.@nospecializeinfer function raw_here(@nospecialize(T::Type{<:Model}), sql::AbstractString, params = Any[];
+                                          translations::Dict{String,String} = Dict{String,String}())
     rows = execute(sql, collect(Any, params))
     known = Set{Symbol}([:id; [attname(f) for f in all_fields(T)]])
+    columns = Dict{String,Symbol}()                              # (a field's attname, also by its column: db_column)
+    for f in all_fields(T)
+        columns[string(column(f))] = attname(f)
+    end
     out = T[]
     plan = row_plan(T)
+    keycols = is_composite(T) ? [Symbol(column(f)) for f in pk_fields(T)] : [:id]
+    tocol = Dict(string(attname(f)) => string(column(f)) for f in all_fields(T))
+    renames = [(Symbol(from), Symbol(get(tocol, to, to))) for (from, to) in translations]   # (a field name: its column)
     for r in rows
-        is_composite(T) || haskey(r, :id) || throw(ArgumentError("raw(): the query must select the id column"))
+        for (from, to) in renames
+            haskey(r, from) && (r[to] = pop!(r, from))
+        end
+        all(k -> haskey(r, k), keycols) || throw(FieldDoesNotExist("Raw query must include the primary key"))
         o = set_instance_db!(from_row(T, r, plan))
         for (k, v) in r
-            k in known || ((getfield(o, :_data)::Dict{Symbol,Any})[k] = v)
+            (k in known || haskey(columns, string(k))) || ((getfield(o, :_data)::Dict{Symbol,Any})[k] = v)
         end
         push!(out, o)
     end
     out
 end
+
+"A field that isn't there: a raw query without the primary key (Django's FieldDoesNotExist)."
+struct FieldDoesNotExist <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::FieldDoesNotExist) = print(io, "FieldDoesNotExist: ", e.msg)
+
+"""
+    complex_filter(qs, Dict("pk" => 1)) / complex_filter(qs, Q(...))
+
+Filter by a dict of lookups or a Q object, as Django's `complex_filter` (used for `limit_choices_to`).
+"""
+complex_filter(@nospecialize(qs::QuerySet), q) = q isa AbstractDict ? filter(qs; (Symbol(k) => v for (k, v) in q)...) : filter(qs, q)
+complex_filter(@nospecialize(T::Type{<:Model}), q) = complex_filter(objects(T), q)
 
 """
     explain(qs) -> String

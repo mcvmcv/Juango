@@ -142,21 +142,52 @@ BitAnd(x; filter = nothing, default = nothing) = Aggregate("BIT_AND", ref(x), fa
 "Bitwise OR of the values."
 BitOr(x; filter = nothing, default = nothing) = Aggregate("BIT_OR", ref(x), false, filter; default = default)
 
-"`When(Q(...); then=value)` or `When(; then=value, lookups...)`, used inside `Case`."
+"""
+`When(Q(...); then=value)` or `When(; then=value, lookups...)`, used inside `Case`; a Q or a boolean
+expression (`Exists`, `GreaterThan`...) and lookups together are ANDed (`When(Q(a = 1); b = 2, then = x)`).
+"""
 struct When
     cond::Q
     then::Expression
+    When(cond::Q, then::Expression) = new(cond, then)
 end
-When(cond::Q; then) = When(cond, lit_expr(then))
-When(cond::Expression; then) = When(as_q(cond), lit_expr(then))     # When(Exists(...)), When(GreaterThan(...))
-When(; then, kw...) = When(Q(; kw...), lit_expr(then))
+const WHEN_CONDITION_ERROR = "When() supports a Q object, a boolean expression, or lookups as a condition."
+function when_condition(cond, kw)
+    bad = sort([string(k) for k in keys(kw) if startswith(string(k), "_")])
+    isempty(bad) || throw(ArgumentError("The following kwargs are invalid: " * join(["'$b'" for b in bad], ", ")))
+    cond === nothing && isempty(kw) && throw(ArgumentError(WHEN_CONDITION_ERROR))
+    cond === nothing || cond isa Conditional || throw(ArgumentError(WHEN_CONDITION_ERROR))
+    q = cond === nothing ? Q(; kw...) : isempty(kw) ? as_q(cond) : as_q(cond) & Q(; kw...)
+    (q.connector === :AND && isempty(q.children)) && throw(ArgumentError("An empty Q() can't be used as a When() condition."))
+    q
+end
+When(cond; then = nothing, kw...) = When(when_condition(cond, kw), lit_expr(then))
+When(; then = nothing, condition = nothing, kw...) = When(when_condition(condition, kw), lit_expr(then))
+Base.:(==)(a::When, b::When) = a.cond == b.cond && a.then == b.then
+Base.hash(w::When, h::UInt) = hash(expr_hash_key(w.then), hash(expr_hash_key(w.cond), hash(:When, h)))
 
-"`Case(When(...), When(...); default=value)`: SQL CASE WHEN ... END."
+"""
+`Case(When(...), When(...); default = value, output_field = nothing)`: SQL CASE WHEN ... END. The
+values' type comes from `output_field`, else from the first `then` (or the default) with one: a field,
+or a literal's (`true`, a `Date`...).
+"""
 struct Case <: Expression
     whens::Vector{When}
     default::Expression
+    output::Any                     # output_field: a Field, or nothing
+    Case(whens::Vector{When}, default::Expression, output) = new(whens, default, output)
 end
-Case(whens::When...; default = nothing) = Case(collect(When, whens), lit_expr(default))
+Case(whens::When...; default = nothing, output_field = nothing) = Case(collect(When, whens), lit_expr(default), output_field)
+Case(args...; kw...) = throw(ArgumentError("Positional arguments must all be When objects."))
+output_kind(o) = o isa Field ? o.kind : o
+Base.:(==)(a::Case, b::Case) = a.whens == b.whens && a.default == b.default && output_kind(a.output) === output_kind(b.output)
+Base.hash(c::Case, h::UInt) = hash(output_kind(c.output), hash(expr_hash_key(c.default), hash(c.whens, hash(:Case, h))))
+# What two expressions built alike hash as: a Q's lists and tuples alike (as Django's make_hashable).
+expr_hash_key(x::Tuple) = Any[expr_hash_key(v) for v in x]
+expr_hash_key(x::AbstractVector) = Any[expr_hash_key(v) for v in x]
+expr_hash_key(x::Pair) = expr_hash_key(x.first) => expr_hash_key(x.second)
+expr_hash_key(q::Q) = (q.connector, q.negated, expr_hash_key(q.children))
+expr_hash_key(x) = x
 
 "Inside a `Subquery`/`Exists`, a field of the outer query: `filter(Post; author = OuterRef(:id))`."
 struct OuterRef <: Expression
@@ -804,6 +835,7 @@ function aggregate_sql(::SQLiteBackend, func, arg, order, e)
 end
 
 function compile_expr(c::SQLCompiler, e::Case)
+    isempty(e.whens) && return compile_expr(c, e.default)              # (no WHEN: the default, as Django)
     io, ps = IOBuffer(), Any[]
     print(io, "CASE")
     for w in e.whens
@@ -1109,6 +1141,22 @@ Base.@nospecializeinfer function output_field(@nospecialize(T), e::Func)
     end
     nothing
 end
+Base.@nospecializeinfer function output_field(@nospecialize(T), e::Case)
+    e.output isa Field && return e.output
+    for x in vcat(Any[w.then for w in e.whens], Any[e.default])
+        f = x isa Value ? literal_field(x.value) : output_field(T, x)
+        f === nothing || return f
+    end
+    nothing
+end
+"The field a literal value has the type of (a Case's `then`): booleans, dates, times, UUIDs, durations."
+literal_field(v::Bool) = BooleanField()
+literal_field(v::Date) = DateField()
+literal_field(v::DateTime) = DateTimeField()
+literal_field(v::Time) = TimeField()
+literal_field(v::UUID) = UUIDField()
+literal_field(v::Dates.Period) = DurationField()
+literal_field(v) = nothing
 Base.@nospecializeinfer output_field(@nospecialize(T), e::WindowFunc) =
     e.name in ("FIRST_VALUE", "LAST_VALUE", "NTH_VALUE", "LAG", "LEAD") ? output_field(T, e.args[1]) : nothing
 Base.@nospecializeinfer output_field(@nospecialize(T), e::Window) = output_field(T, e.expr)
@@ -1136,7 +1184,7 @@ Base.@nospecializeinfer expr_value(@nospecialize(T), e, v) = expr_value(T, e, v,
 "The output field to convert an expression's values through (`expr_value`), or nothing: work it out once per query."
 Base.@nospecializeinfer function typed_output(@nospecialize(T), @nospecialize(e))
     e isa Union{RawSQL,ExpressionWrapper} && return e.output isa Field ? e.output : nothing
-    e isa Union{F,Aggregate,Func,Subquery,Window,WindowFunc} || return nothing
+    e isa Union{F,Aggregate,Func,Subquery,Window,WindowFunc,Case} || return nothing
     of = output_field(T, e)
     of !== nothing && of.kind in TYPED_OUTPUT_KINDS ? of : nothing
 end

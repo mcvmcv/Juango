@@ -1048,7 +1048,7 @@ end
     rs = raw(Article, "SELECT id, title, views * 2 AS double_views FROM $t WHERE title LIKE ? ORDER BY id", ["qx-%"])
     @test [x.title for x in rs] == ["qx-one!", "qx-two", "qx-three"]
     @test rs[2].double_views == 12 && :body in deferred_fields(rs[2]) && rs[2].body == "body of qx-two"
-    @test_throws ArgumentError raw(Article, "SELECT title FROM $t")
+    @test_throws Juango.FieldDoesNotExist collect(raw(Article, "SELECT title FROM $t"))   # (raw runs when used)
 
     # explain
     plan = explain(filter(qs; status = "p"))

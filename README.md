@@ -177,7 +177,9 @@ distinct(order_by(qs, "author", "-published"), :author)   # DISTINCT ON (Postgre
 latest(objects(Post), :published)            # or Meta(get_latest_by = "published"); earliest() too
 in_bulk(objects(Post), [1, 2, 3])            # Dict(id => post)
 dates(objects(Post), :published, :month)     # distinct months with posts; datetimes() for hours etc.
-raw(Post, "SELECT id, title FROM post WHERE views > ?", [100])   # model instances from your own SQL
+raw(Post, "SELECT id, title FROM post WHERE views > ?", [100])   # model instances from your own SQL (run when first used)
+raw(Post, "SELECT id, name AS t FROM post"; translations = Dict("t" => "title"))   # columns under other names
+complex_filter(objects(Post), Dict("pk" => 1))   # a dict of lookups or a Q, as limit_choices_to
 explain(filter(Post; published=true))        # the database's query plan
 ```
 

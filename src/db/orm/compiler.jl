@@ -30,12 +30,13 @@ mutable struct SQLCompiler
     reuse_upto::Int             # compiling an annotation made after this many filter() calls (0: none)
     outer_refs::Union{Nothing,Vector{String}}   # while compiling an annotation: the columns OuterRefs in it read here
     alias_names::Set{Symbol}    # annotations made by alias(): compiled where used, not selected (#207)
+    expr_negated::Bool          # compiling a negated lookup inside a Case/aggregate condition (its NULL guard)
 end
 Base.@nospecializeinfer function SQLCompiler(@nospecialize(T::Type); outer = nothing)
     table = modelmeta(T).table
     counter = outer === nothing ? Ref(0) : outer.counter
     c = SQLCompiler(T, table, table, String[], Dict{Any,String}(), Set{String}(), counter, false, 0,
-                    Dict{Symbol,Any}(), false, outer, false, Any[], 0, nothing, Set{Symbol}())
+                    Dict{Symbol,Any}(), false, outer, false, Any[], 0, nothing, Set{Symbol}(), false)
     outer === nothing || (c.base = new_alias!(c))   # subqueries alias their table: no clash with the outer one
     c
 end
@@ -173,7 +174,8 @@ function lookup_choices(T)
     end
     for (rn, M, rf) in reverse_relations(T)
         startswith(string(rn), "+") && continue
-        push!(names, string(something(rf.related_query_name, rf.related_name === nothing ? default_related_name(M) : nothing,
+        # (Django's query name: related_query_name, else related_name, else the model's name)
+        push!(names, string(something(rf.related_query_name, rf.related_name === nothing ? default_related_name(M) : rn,
                                       Symbol(lowercase(modelmeta(M).name)))))
     end
     foreach(C -> push!(names, string(child_accessor(C))), child_models(concrete_model(T)))
@@ -222,6 +224,16 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     ends_in_lookup(T, parts) && (lookup = String(pop!(parts)))
     # inside an aggregate's filter or a Case condition, ~Q(store__name = "x") is a condition on the joined
     # row (Django's FILTER (WHERE NOT ...)), not exclude()'s "no related row matches" subquery
+    # (the NULL guard below still applies there, as Django's, through the relations the lookup follows)
+    if c.scope === :expr && negated && !c.expr_negated
+        c.expr_negated = true
+        try
+            return compile_lookup(c, alias, T, key, value, negated)
+        finally
+            c.expr_negated = false
+        end
+    end
+    expr_negated = c.scope === :expr && c.expr_negated
     c.scope === :expr && (negated = false)
     lookup == "isnull" && !(value isa Bool) &&
         throw(ArgumentError("the value for an isnull lookup must be true or false, not $(repr(value)) ($key)"))
@@ -493,11 +505,16 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     if lookup in TEXT_LOOKUPS && kind !== nothing && !(kind in TEXT_KINDS)
         col = text_cast(backend(), col)
     end
+    # an expression (an annotation, a Case) compared with a Decimal on SQLite: the Decimal as a number, not text
+    f === nothing && value isa Decimal && backend() isa SQLiteBackend && lookup in keys(COMPARISON_OPS) && (value = Value(value))
     sql, ps = lookup_condition(c, col, lookup, value, conv)
     # Under exclude()/~Q, a NULL in a nullable column doesn't make the condition true, so the row is kept, as
     # Django does (NOT (x = 1) alone is NULL there and would drop it); a None in an __in list matches NULL
-    if negated && !(lookup in ("isnull", "ne")) && !(lookup == "exact" && value === nothing)
-        if f !== nothing && f.null
+    if (negated || expr_negated) && !(lookup in ("isnull", "ne")) && !(lookup == "exact" && value === nothing)
+        # in a Case/aggregate condition, a column through a reverse, many-to-many or nullable relation is
+        # LEFT JOINed and can be NULL too (~Q(fk_rel__integer = 1) matches a row without related rows)
+        via_outer = expr_negated && alias in c.leftjoined
+        if f !== nothing && (f.null || via_outer)
             sql = lookup == "in" && value isa Union{AbstractArray,Tuple,AbstractSet} && any(isnothing, value) ?
                   "($sql OR $col IS NULL)" : "($sql AND $col IS NOT NULL)"
         end

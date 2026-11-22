@@ -49,7 +49,7 @@ export ContentType, GenericForeignKey, GenericRelation
 # querysets
 export QuerySet, objects, base_objects, Q, exclude, order_by, exists, values_list, annotate, alias, aggregate,
        select_related, prefetch_related, prefetch_related_objects, Prefetch, FilteredRelation, defer, distinct, latest, earliest,
-       none, in_bulk, totally_ordered, dates, datetimes, raw, explain, iterator, select_for_update, intersection,
+       none, in_bulk, totally_ordered, dates, datetimes, raw, complex_filter, explain, iterator, select_for_update, intersection,
        difference, create, get_or_create, update_or_create, update!, save!, refresh!, full_clean,
        clean_fields, validate_unique, validate_constraints, get_next_by, get_previous_by, bulk_create,
        bulk_update, add!, remove!, set!, clear!, through, atomic, advisory_lock, swap_user_model, with_nplusone_allowed, deploy_task!, deploy_waiting, run_deploy_tasks, on_commit, using_db, set_rollback!, get_rollback,
@@ -131,7 +131,7 @@ export App, get_model, lookup_value, concrete_fields, many_to_many, attname, col
        @background, enqueue, get_result, TaskResult
 # server and commands
 export runserver, execute_from_command_line, call_command, CommandError
-public command_io, required_fields, parse_cookies, urlencode, hasheader, accepts, iri_to_uri, save_session!, load_session
+public RawQuerySet, FieldDoesNotExist, command_io, required_fields, parse_cookies, urlencode, hasheader, accepts, iri_to_uri, save_session!, load_session
 
 # --- public, not exported ----------------------------------------------------------------------------
 

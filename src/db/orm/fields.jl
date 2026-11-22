@@ -457,12 +457,12 @@ struct FilePathSpec
     allow_folders::Bool
 end
 """
-    FilePathField(; path, match = nothing, recursive = false, allow_files = true, allow_folders = false, max_length = 100)
+    FilePathField(; path = "", match = nothing, recursive = false, allow_files = true, allow_folders = false, max_length = 100)
 
 A path chosen from the files (and/or folders) under `path` (a directory or a function returning
 one) whose names match `match`. Stored as text; forms offer the matching paths as a select.
 """
-function FilePathField(; path, match = nothing, recursive::Bool = false, allow_files::Bool = true,
+function FilePathField(; path = "", match = nothing, recursive::Bool = false, allow_files::Bool = true,
                        allow_folders::Bool = false, max_length = 100, kw...)
     (allow_files || allow_folders) || throw(ArgumentError("FilePathField needs allow_files or allow_folders"))
     Field(:filepath; related = FilePathSpec(path, match === nothing ? nothing : match isa Regex ? match : Regex(string(match)),
