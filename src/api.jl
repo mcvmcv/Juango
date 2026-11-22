@@ -164,7 +164,7 @@ public signing_dumps, signing_loads, sign_value, unsign_value, BadSignature, Sig
        b62_encode, b62_decode, InvalidAlgorithm
 # signals, logging
 public send_robust, has_receivers, DeserializationError, MiddlewareNotUsed, numberformat, to_locale, to_language,
-       get_supported_language_variant, get_language_from_path, translate_url, parse_accept_lang_header, get_language_bidi, emit, log!, log_enabled, MemoryHandler, LogRecord
+       get_supported_language_variant, get_language_from_path, translate_url, sanitize_separators, localize_input, get_format, parse_accept_lang_header, get_language_bidi, emit, log!, log_enabled, MemoryHandler, LogRecord
 # translations and time zones
 public set_language, number_format, localize, language_name, makemessages, compilemessages,
        is_aware, convert_naive_datetimes, JavaScriptCatalog, JSONCatalog

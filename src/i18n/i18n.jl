@@ -423,9 +423,58 @@ const FORMATS = Dict(
     "it" => (decimal = ",", thousand = ".", date = "j F Y", datetime = "l d F Y H:i", short_date = "d/m/Y"),
     "nl" => (decimal = ",", thousand = ".", date = "j F Y", datetime = "j F Y H:i", short_date = "j-n-Y"),
     "pt" => (decimal = ",", thousand = ".", date = "j \\d\\e F \\d\\e Y", datetime = "j \\d\\e F \\d\\e Y à\\s H:i", short_date = "d/m/Y"),
+    "ru" => (decimal = ",", thousand = "\u00a0", date = "j E Y г.", datetime = "j E Y г. G:i", short_date = "d.m.Y"),
+    "pl" => (decimal = ",", thousand = " ", date = "j E Y", datetime = "j E Y H:i", short_date = "d-m-Y"),
+    "sv" => (decimal = ",", thousand = "\u00a0", date = "j F Y", datetime = "j F Y H:i", short_date = "Y-m-d"),
 )
-"Number and date formats of the active language (falling back to English)."
-get_format(lang = get_language()) = get(FORMATS, split(lowercase(lang), r"[-_]")[1], FORMATS["en"])
+# a language's NUMBER_GROUPING and FIRST_DAY_OF_WEEK where they differ from the settings (Django's locale formats)
+const FORMAT_EXTRAS = Dict("de" => (grouping = 3, first_day = 1), "fr" => (grouping = 3, first_day = 1), "es" => (grouping = 3, first_day = 1),
+                           "it" => (grouping = 3, first_day = 1), "nl" => (grouping = 3, first_day = 1), "pt" => (grouping = 3, first_day = 0),
+                           "ru" => (grouping = 3, first_day = 1), "pl" => (grouping = 3, first_day = 1), "sv" => (grouping = 3, first_day = 1),
+                           "en" => (grouping = 3, first_day = 0))
+"""
+    get_format(lang = get_language())         -> the language's formats (decimal, thousand, date, datetime, short_date)
+    get_format("DECIMAL_SEPARATOR"; lang)     -> one format by Django's name
+
+The active language's formats: Juango's for the languages it has them for, else from the settings
+(`DECIMAL_SEPARATOR`, `THOUSAND_SEPARATOR`, `DATE_FORMAT`...), as Django's `get_format`. The names are
+Django's: `DATE_FORMAT`, `DATETIME_FORMAT`, `SHORT_DATE_FORMAT`, `DECIMAL_SEPARATOR`, `THOUSAND_SEPARATOR`,
+`NUMBER_GROUPING`, `FIRST_DAY_OF_WEEK`, `DATE_INPUT_FORMATS`, `DATETIME_INPUT_FORMATS`, `TIME_INPUT_FORMATS`;
+any other name comes back as it is.
+"""
+get_format(lang = get_language()) = is_format_name(lang) ? get_format(lang, get_language()) :
+    get(FORMATS, split(lowercase(string(lang)), r"[-_]")[1], settings_formats())
+is_format_name(s) = s isa AbstractString && length(s) > 3 && s == uppercase(s) && occursin(r"^[A-Z_]+$", s)
+settings_formats() = (decimal = string(get(settings, :DECIMAL_SEPARATOR, ".")), thousand = string(get(settings, :THOUSAND_SEPARATOR, ",")),
+                      date = string(get(settings, :DATE_FORMAT, "N j, Y")), datetime = string(get(settings, :DATETIME_FORMAT, "N j, Y, P")),
+                      short_date = string(get(settings, :SHORT_DATE_FORMAT, "m/d/Y")))
+function get_format(name::AbstractString, lang)
+    is_format_name(name) || return get_format(name)
+    name in FORMAT_SETTINGS || return name
+    base = split(lowercase(string(lang)), r"[-_]")[1]
+    f = get(FORMATS, base, nothing)
+    ex = get(FORMAT_EXTRAS, base, nothing)
+    if f === nothing                                        # (no locale formats: the settings, as Django)
+        name == "NUMBER_GROUPING" && return get(settings, :NUMBER_GROUPING, 0)
+        name == "FIRST_DAY_OF_WEEK" && return get(settings, :FIRST_DAY_OF_WEEK, 0)
+        f = settings_formats()
+    end
+    name == "DECIMAL_SEPARATOR" && return f.decimal
+    name == "THOUSAND_SEPARATOR" && return f.thousand
+    name == "DATE_FORMAT" && return f.date
+    name == "DATETIME_FORMAT" && return f.datetime
+    name == "SHORT_DATE_FORMAT" && return f.short_date
+    name == "NUMBER_GROUPING" && return ex === nothing ? get(settings, :NUMBER_GROUPING, 0) : ex.grouping
+    name == "FIRST_DAY_OF_WEEK" && return ex === nothing ? get(settings, :FIRST_DAY_OF_WEEK, 0) : ex.first_day
+    name == "DATE_INPUT_FORMATS" && return with_language(() -> input_formats(:date), lang)
+    name == "DATETIME_INPUT_FORMATS" && return with_language(() -> input_formats(:datetime), lang)
+    name == "TIME_INPUT_FORMATS" && return with_language(() -> input_formats(:time), lang)
+    name in FORMAT_SETTINGS && haskey(settings, Symbol(name)) ? settings[Symbol(name)] : name
+end
+"Django's FORMAT_SETTINGS: the settings `get_format` reads; any other name comes back as it is."
+const FORMAT_SETTINGS = Set(["DECIMAL_SEPARATOR", "THOUSAND_SEPARATOR", "NUMBER_GROUPING", "FIRST_DAY_OF_WEEK", "MONTH_DAY_FORMAT",
+    "TIME_FORMAT", "DATE_FORMAT", "DATETIME_FORMAT", "SHORT_DATE_FORMAT", "SHORT_DATETIME_FORMAT", "YEAR_MONTH_FORMAT",
+    "DATE_INPUT_FORMATS", "TIME_INPUT_FORMATS", "DATETIME_INPUT_FORMATS"])
 
 # The date formats forms accept, per language, as Django's locale formats (strftime directives);
 # ISO 8601 is always accepted too. DATE_INPUT_FORMATS & co. are used for languages not listed here.
@@ -518,7 +567,7 @@ function number_format(x::Real; decimals = nothing, lang = get_language(), group
     s = if x isa Decimal
         string(decimals === nothing ? x : round(x, RoundNearestTiesAway; digits = decimals))
     else
-        decimals === nothing ? (x isa Integer ? string(x) : string(Float64(x))) : Printf.format(Printf.Format("%.$(decimals)f"), x)
+        decimals === nothing ? (x isa Integer ? string(x) : !isfinite(x) ? string(Float64(x)) : (signbit(x) ? "-" : "") * fixed_digits(float_digits(x)...; min_fraction = 1)) : Printf.format(Printf.Format("%.$(decimals)f"), x)
     end
     neg = startswith(s, "-")
     neg && (s = s[2:end])
@@ -612,13 +661,57 @@ localize(x::Real) = x isa Bool ? string(x) : number_format(x)
 localize(x::Union{Date,DateTime}) = format_date(x, x isa Date ? get_format().date : get_format().datetime)
 localize(x) = x
 
-"Parse a number typed in the active language's format (`\"1.234,5\"` in German)."
-function parse_localized_number(s::AbstractString)
-    f = get_format()
-    t = replace(strip(s), f.thousand => "")
-    f.decimal == "." || (t = replace(t, f.decimal => "."))
-    t
+"""
+    sanitize_separators(value)
+
+A number typed in the active language's format as one with a `.` decimal point (Django's): the decimal
+separator becomes `.`, and with `USE_THOUSAND_SEPARATOR` the thousands separators go (a non-breaking space
+also as a plain space), unless a lone `.` separator without three digits after it looks like a decimal
+point. Anything but a string is returned as it is.
+"""
+sanitize_separators(value) = value
+function sanitize_separators(value::AbstractString)
+    parts = String[]
+    dec = get_format("DECIMAL_SEPARATOR")
+    v = String(value)
+    if occursin(dec, v)
+        v, decimals = split(v, dec; limit = 2)
+        push!(parts, decimals)
+    end
+    if settings.USE_THOUSAND_SEPARATOR
+        t = get_format("THOUSAND_SEPARATOR")
+        if !(t == "." && count(==('.'), v) == 1 && length(split(v, '.')[end]) != 3)     # (#22171: a dot meant as a decimal point)
+            for r in unique([t, Base.Unicode.normalize(t; compat = true)])
+                v = replace(v, r => "")
+            end
+        end
+    end
+    push!(parts, v)
+    join(reverse(parts), ".")
 end
+"Parse a number typed in the active language's format (`\"1.234,5\"` in German): `sanitize_separators` after trimming."
+parse_localized_number(s::AbstractString) = sanitize_separators(strip(s))
+
+"""
+    localize_input(value, default = nothing)
+
+A value as a form input shows it (Django's): numbers in the language's format, dates and times in the
+first of its input formats (or `default`, a strftime format), strings as they are.
+"""
+localize_input(value::AbstractString, default = nothing) = value
+localize_input(value::Bool, default = nothing) = value ? "True" : "False"
+localize_input(value::Real, default = nothing) = number_format(value)
+localize_input(value::DateTime, default = nothing) = Dates.format(value, strftime_dateformat(something(default, first(input_formats(:datetime)))))
+localize_input(value::Date, default = nothing) = Dates.format(value, strftime_dateformat(something(default, first(input_formats(:date)))))
+localize_input(value::Dates.Time, default = nothing) = Dates.format(value, strftime_dateformat(something(default, first(input_formats(:time)))))
+localize_input(value, default = nothing) = value
+
+"Whether template output is localized here: `{% localize on %}` (true), `off` (false), else Juango's default (false)."
+localize_output() = get(task_local_storage(), :juango_localize, false) === true
+"`{{ x }}` inside `{% localize on %}`: numbers and dates in the language's format."
+localized_output(x::Real) = x isa Bool ? x : number_format(x)
+localized_output(x::Union{Date,DateTime}) = localize(x)
+localized_output(x) = x
 
 # --- choosing the language for a request ------------------------------------------------------------------------------
 
@@ -999,6 +1092,31 @@ for (name, f) in ("translate" => tag_translate, "trans" => tag_translate, "block
 end
 # Library filters ({% load l10n %}, {% load i18n %}); the i18n tags are always available
 const L10N_LIBRARY = filter!(TagLibrary("l10n"), "localize", (v, _) -> localize(v))
+# unlocalize: a number as plain text whatever the language (Django's)
+filter!(L10N_LIBRARY, "unlocalize", (v, _) -> v isa Real && !(v isa Bool) ? (v isa AbstractFloat ? string(v) : string(v)) : v)
+
+"`{% localize on %}...{% endlocalize %}` (or `off`): whether `{{ value }}` shows numbers and dates in the language's format."
+struct LocalizeNode <: Node
+    on::Bool
+    nodes::Vector{Node}
+end
+child_nodelists(n::LocalizeNode) = (n.nodes,)
+function tag_localize(p::Parser, t::Token)
+    bits = split_contents(t.contents)
+    length(bits) <= 2 || throw(TemplateSyntaxError("localize tag accepts at most one argument (on or off)"))
+    length(bits) == 2 && !(bits[2] in ("on", "off")) && throw(TemplateSyntaxError("localize argument should be 'on' or 'off'"))
+    LocalizeNode(length(bits) == 1 || bits[2] == "on", first(parse_nodes(p, ["endlocalize"])))
+end
+function render!(io::IO, n::LocalizeNode, ctx::Context)
+    old = get(task_local_storage(), :juango_localize, nothing)
+    task_local_storage(:juango_localize, n.on)
+    try
+        render_nodes(io, n.nodes, ctx)
+    finally
+        old === nothing ? delete!(task_local_storage(), :juango_localize) : task_local_storage(:juango_localize, old)
+    end
+end
+tag!(L10N_LIBRARY, "localize", tag_localize)
 const I18N_LIBRARY = filter!(TagLibrary("i18n"), "language_name", (v, _) -> language_name(string(v)))
 filter!(I18N_LIBRARY, "language_name_local", (v, _) -> get_language_info(string(v)).name_local)
 filter!(I18N_LIBRARY, "language_name_translated", (v, _) -> get_language_info(string(v)).name_translated)

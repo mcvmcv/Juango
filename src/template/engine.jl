@@ -513,7 +513,9 @@ function render!(io::IO, n::VarNode, ctx::Context)
     if !isempty(inv) && n.fe.base isa Variable && resolve_var(n.fe.base, ctx) === UNDEF
         return write(io, replace(inv, "%s" => join(n.fe.base.parts, ".")))     # filters aren't applied, as in Django
     end
-    write_value(io, eval_fe(n.fe, ctx), ctx.autoescape)
+    v = eval_fe(n.fe, ctx)
+    localize_output() && (v = localized_output(v))           # ({% localize on %})
+    write_value(io, v, ctx.autoescape)
 end
 function render_nodes(io::IO, nodes::Vector{Node}, ctx::Context)
     i = 0

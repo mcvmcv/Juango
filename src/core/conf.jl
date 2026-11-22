@@ -93,6 +93,10 @@ function default_settings()
         :LANGUAGE_COOKIE_HTTPONLY => false,
         :LANGUAGE_COOKIE_SAMESITE => nothing,
         :USE_THOUSAND_SEPARATOR => false,
+        :DECIMAL_SEPARATOR => ".",                     # formats for languages Juango has none for (Django's settings)
+        :THOUSAND_SEPARATOR => ",",
+        :NUMBER_GROUPING => 0,
+        :FIRST_DAY_OF_WEEK => 0,
         :LANGUAGES_BIDI => ["he", "ar", "ar-dz", "ckb", "fa", "ug", "ur"],   # right-to-left languages (Django's)
         :USE_BLANK_CHOICE_DASH => false,     # true: "---------" as the empty choice (Django 6.1's transitional setting), else "- Select an option -"
         :DATE_INPUT_FORMATS => nothing,                # strftime formats forms accept, for languages without their own (nothing: Django's English ones)
