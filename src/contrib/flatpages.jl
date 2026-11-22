@@ -9,8 +9,21 @@
 # A page renders `template_name` (default "flatpages/default.html") with `flatpage` in the
 # context; its `content` is HTML, inserted unescaped.
 
+"""
+A flat page's URL, as Django's FlatpageForm checks it: letters, digits and `. _ - / ~` only, a leading
+slash, and a trailing one when APPEND_SLASH and CommonMiddleware would add it.
+"""
+function flatpage_url_validator(v)
+    occursin(r"^[-\w/\.~]+\z", v) ||
+        return gettext("This value must contain only letters, numbers, dots, underscores, dashes, slashes or tildes.")
+    startswith(v, "/") || return gettext("URL is missing a leading slash.")
+    settings.APPEND_SLASH && CommonMiddleware in settings.MIDDLEWARE && !endswith(v, "/") &&
+        return gettext("URL is missing a trailing slash.")
+    true
+end
+
 @model struct FlatPage
-    url = CharField(max_length = 100, db_index = true, help_text = "Example: “/about/contact/”. Make sure to have leading and trailing slashes.")
+    url = CharField(max_length = 100, db_index = true, validators = [flatpage_url_validator], help_text = "Example: “/about/contact/”. Make sure to have leading and trailing slashes.")
     title = CharField(max_length = 200)
     content = TextField(blank = true)
     template_name = CharField(max_length = 70, blank = true,
@@ -19,7 +32,17 @@
     Meta(table = "juango_flatpage", app_label = "flatpages", ordering = ["url"], verbose_name = "flat page", verbose_name_plural = "flat pages")
 end
 Base.show(io::IO, p::FlatPage) = print(io, p.url, " -- ", p.title)
-get_absolute_url(p::FlatPage) = p.url
+"The page's URL where the flatpage view serves it (under its prefix), else its own URL, IRI-encoded (as Django)."
+function get_absolute_url(p::FlatPage)
+    for u in (lstrip(p.url, '/'), p.url)
+        try
+            return iri_to_uri(reverse_url("flatpage"; url = u))
+        catch e
+            e isa NoReverseMatch || rethrow()
+        end
+    end
+    iri_to_uri(p.url)
+end
 
 const FLATPAGES_APP = App("flatpages"; name = "juango.flatpages", verbose_name = "Flat Pages", ready = function ()
     is_installed("admin") && !Admin.is_registered(FlatPage) &&
@@ -34,7 +57,8 @@ function render_flatpage(req::Request, url::AbstractString)
     page = first(filter(FlatPage; url = url))
     if page === nothing
         if settings.APPEND_SLASH && !endswith(url, "/") && exists(filter(FlatPage; url = url * "/"))
-            return HttpResponsePermanentRedirect(url * "/" * (isempty(req.query_string) ? "" : "?" * req.query_string))
+            # (to this request's path plus the slash: under a prefix, the page's url isn't the path)
+            return HttpResponsePermanentRedirect(req.path * "/" * (isempty(req.query_string) ? "" : "?" * req.query_string))
         end
         throw(Http404("No FlatPage matches the given query."))
     end
@@ -100,3 +124,10 @@ function render!(io::IO, n::GetFlatpagesNode, ctx::Context)
     nothing
 end
 const FLATPAGES_LIBRARY = tag!(TagLibrary("flatpages"), "get_flatpages", tag_get_flatpages)
+
+"""
+    flatpage_sitemap(; kw...) -> Sitemap
+
+Django's `FlatPageSitemap`: the flat pages that don't need a login, at their `get_absolute_url`.
+"""
+flatpage_sitemap(; kw...) = Sitemap(() -> filter(objects(FlatPage); registration_required = false); kw...)

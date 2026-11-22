@@ -172,7 +172,7 @@ public cache, incr, decr, incr_version, decr_version, create_cache_table, CacheS
        BrokenLinkEmailsMiddleware, is_secure, get_host, get_port, csp_override, csp_report_only_override, deploy_issues
 # admin log, contrib apps, tasks
 public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, sitemap_view,
-       sitemap_index_view, flatpage, flatpage_urls, FlatpageFallbackMiddleware, RequestSite,
+       sitemap_index_view, flatpage, flatpage_urls, FlatpageFallbackMiddleware, flatpage_sitemap, add_domain, RequestSite,
        clear_site_cache!, Redirect, RedirectFallbackMiddleware, background, TaskDef, db_worker
 # apps, settings, commands
 public build, build_workload, project_include, on_reload!, CheckMessage, register_check!, run_checks, diffsettings, sendtestemail, findstatic,

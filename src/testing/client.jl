@@ -104,7 +104,7 @@ other HX-* headers too: `htmx = (target = "results", trigger = "search", boosted
 """
 function request(c::Client, method::AbstractString, target::AbstractString; data = nothing, json = nothing,
                  headers = Dict{String,String}(), follow = false, content_type = nothing, body = nothing, htmx = false,
-                 query_params = nothing, host = nothing)
+                 query_params = nothing, host = nothing, secure = false)
     method = uppercase(method)
     # (Django 5.1's query_params: the query string for any method)
     if query_params !== nothing
@@ -120,6 +120,7 @@ function request(c::Client, method::AbstractString, target::AbstractString; data
     req = make_test_request(method, target; host = something(host, c.host), default_headers = c.default_headers, cookies = c.cookies,
                             data = data, json = json, headers = headers, content_type = content_type, body = body)
     req.meta[:test_client] = true
+    secure && (req.meta[:secure] = true)          # (Django's secure=True: an HTTPS request)
     c.raise_request_exception && (req.meta[:raise_request_exception] = true)
     c.enforce_csrf || (req.meta[:dont_enforce_csrf] = true)
     resp = handle_request(req)
@@ -140,7 +141,8 @@ function request(c::Client, method::AbstractString, target::AbstractString; data
             startswith(rest, "?") && (rest = path * rest)
             m = resp.status in (307, 308) ? method : "GET"
             next_ = first(split(rest, '?'))
-            resp = request(c, m, rest; data = m in ("GET", "HEAD") ? nothing : data, host = h === nothing || isempty(h) ? nothing : h,
+            sec = startswith(lowercase(loc), "https://") ? true : startswith(lowercase(loc), "http://") ? false : secure
+            resp = request(c, m, rest; data = m in ("GET", "HEAD") ? nothing : data, host = h === nothing || isempty(h) ? nothing : h, secure = sec,
                            content_type = m in ("GET", "HEAD") ? nothing : content_type, json = m in ("GET", "HEAD") ? nothing : json)
             path = next_
             last(chain) in chain[1:end-1] && throw(RedirectCycleError("Redirect loop detected.", resp))

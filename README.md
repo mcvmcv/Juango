@@ -1929,7 +1929,7 @@ sitemaps = Dict(
 urlpatterns = [..., sitemap_urls(sitemaps)...]
 ```
 
-`/sitemap.xml` is a sitemap index that points at `/sitemap-posts.xml` and `/sitemap-pages.xml`. With a single section, it is that section's urlset. `items` is a collection, a QuerySet or a function returning one. `location`, `lastmod`, `changefreq` and `priority` are each a value, a function of the item, or a field name. Without a `location`, models use `get_absolute_url` and strings are taken as URLs. URLs become absolute with the request's host (set `protocol = "https"` to force a scheme). Sections larger than `limit` (50,000) are split into pages (`?p=2`), and the index lists each page.
+`/sitemap.xml` is a sitemap index that points at `/sitemap-posts.xml` and `/sitemap-pages.xml`. With a single section, it is that section's urlset. `items` is a collection, a QuerySet or a function returning one. `location`, `lastmod`, `changefreq` and `priority` are each a value, a function of the item, or a field name. Without a `location`, models use `get_absolute_url` and strings are taken as URLs. URLs become absolute with the request's host (set `protocol = "https"` to force a scheme). Sections larger than `limit` (50,000) are split into pages (`?p=2`), and the index lists each page. As in Django, a urlset's `<lastmod>` is the date, an index's is the full time, and the response's `Last-Modified` is the latest `lastmod` when every item has one.
 
 ### Syndication feeds
 
@@ -1946,17 +1946,18 @@ urlpatterns = [path("feed/", latest), path("feed/atom/", Feed(latest; feed_type 
                path("authors/<int:id>/feed/", by_author), ...]
 ```
 
-Feed-level options (`title`, `link`, `description`, `items`, `language`, `author_name`, `ttl`, `feed_url`) are values or functions of the object that `get_object` returns. Item options are values, functions of the item, or field names:
+Feed-level options (`title`, `link`, `description`, `subtitle`, `items`, `language`, `author_name`, `author_email`, `author_link`, `categories`, `feed_copyright`, `ttl`, `feed_url`) are values or functions of the object that `get_object` returns. Item options are values, functions of the item, or field names:
 
 - `item_title` (default: the item as a string)
 - `item_description`
 - `item_link` (default: `get_absolute_url`)
 - `item_pubdate` and `item_updateddate`
-- `item_author_name`
-- `item_guid` (default: the link)
-- `item_categories`
+- `item_author_name`, `item_author_email` (RSS shows `email (name)`), `item_author_link` (Atom's `uri`)
+- `item_guid` (default: the link) and `item_guid_is_permalink` (a guid other than the link is marked `isPermaLink="false"` unless you say otherwise)
+- `item_categories`, `item_comments`, `item_copyright`
+- `item_enclosures`: `(url, length, mime_type)` tuples; RSS allows one per item
 
-`title_template` and `description_template` render each item with `obj` and `site` in the context. Links are made absolute with the request's host.
+`title_template` and `description_template` render each item with `obj` and `site` in the context. Links are made absolute with the request's host, as Django's `add_domain` does (https for a secure request; URLs with a scheme, such as `mailto:`, stay as they are). Naive datetimes are taken to be in `TIME_ZONE`, and dates are written with their offset (`+0100`). The response's `Last-Modified` is the latest item date. An item without `item_link` needs `get_absolute_url`, or the feed raises `ImproperlyConfigured`.
 
 ### Flat pages
 
@@ -1969,7 +1970,7 @@ configure!(INSTALLED_APPS = [..., "juango.flatpages"],               # registers
 urlpatterns = [..., path("pages/", Juango.flatpage_urls())]                 # /pages/about/ shows the page with url "/about/"
 ```
 
-The fallback middleware turns any 404 into the flat page at that URL, if there is one. It also adds a missing trailing slash, as APPEND_SLASH does. A page renders its `template_name` (default `flatpages/default.html`) with `flatpage` in the context. The page's title and content are HTML from the admin and are inserted unescaped. Pages with `registration_required` send anonymous visitors to the login page. For menus, `{% load flatpages %}{% get_flatpages '/about/' for user as pages %}` lists pages, optionally under a URL prefix. Pages that need a login are included only for a logged-in `user`.
+The fallback middleware turns any 404 into the flat page at that URL, if there is one. It also adds a missing trailing slash, as APPEND_SLASH does. A page renders its `template_name` (default `flatpages/default.html`) with `flatpage` in the context. The page's title and content are HTML from the admin and are inserted unescaped. Pages with `registration_required` send anonymous visitors to the login page. For menus, `{% load flatpages %}{% get_flatpages '/about/' for user as pages %}` lists pages, optionally under a URL prefix. Pages that need a login are included only for a logged-in `user`. A page's URL must start with a slash, end with one when APPEND_SLASH and CommonMiddleware are on, and use only letters, digits and `. _ - / ~` (checked by `full_clean` and the admin, as Django's form). `get_absolute_url(page)` gives the URL where `flatpage_urls()` serves it. `flatpage_sitemap()` is Django's `FlatPageSitemap`. Flat pages have no `sites` yet (#270).
 
 ### Sites and redirects
 

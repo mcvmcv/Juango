@@ -34,10 +34,15 @@ sitemap_items(s::Sitemap) = (x = s.items isa Function ? s.items() : s.items; x i
 sitemap_count(items) = items isa QuerySet ? count(items) : length(items)
 num_pages(s::Sitemap, items) = max(1, cld(sitemap_count(items), s.limit))
 
+"A <lastmod> in a urlset: the date (Django's `date:\"Y-m-d\"`)."
+w3c_day(x) = (d = x isa Date ? x : x isa TimeZones.ZonedDateTime ? Date(localtime(x)) : todatetime(x); d === nothing ? string(x) : Dates.format(Date(d), "yyyy-mm-dd"))
+"W3C datetime for an index's <lastmod> (Django's `date:\"c\"`: an aware time keeps its offset, a naive one has none)."
+w3c_date(z::TimeZones.ZonedDateTime) = Dates.format(DateTime(z), "yyyy-mm-ddTHH:MM:SS") * offset_string(z)
+offset_string(z) = (m = round(Int, Dates.value(DateTime(z) - DateTime(TimeZones.astimezone(z, UTC_TZ))) / 60_000);
+                    (m < 0 ? "-" : "+") * lpad(abs(m) ÷ 60, 2, '0') * ":" * lpad(abs(m) % 60, 2, '0'))
 "W3C datetime for <lastmod>."
 w3c_date(d::Date) = Dates.format(d, "yyyy-mm-dd")
-w3c_date(d::DateTime) = Dates.format(d, "yyyy-mm-ddTHH:MM:SS") * "+00:00"
-w3c_date(z::TimeZones.ZonedDateTime) = Dates.format(DateTime(TimeZones.astimezone(z, UTC_TZ)), "yyyy-mm-ddTHH:MM:SS") * "+00:00"
+w3c_date(d::DateTime) = Dates.format(d, "yyyy-mm-ddTHH:MM:SS")
 w3c_date(x) = (d = todatetime(x); d === nothing ? string(x) : w3c_date(d))
 utc_datetime(d::Date) = DateTime(d)
 utc_datetime(d::DateTime) = d
@@ -74,7 +79,14 @@ function sitemap_response(xml, lastmod)
     r
 end
 
-page_param(req) = (p = tryparse(Int, get(req.GET, "p", "1")); p === nothing || p < 1 ? throw(Http404("Page $(get(req.GET, "p", "")) empty")) : p)
+"The ?p= page (Django's messages: \"No page 'x'\" for one that isn't a number, \"Page 0 empty\" for one out of range)."
+function page_param(req)
+    raw = get(req.GET, "p", "1")
+    p = tryparse(Int, raw)
+    p === nothing && throw(Http404("No page '$raw'"))
+    p < 1 && throw(Http404("Page $p empty"))
+    p
+end
 
 "A view for one sitemap urlset: all `sitemaps` (a Dict or Vector of `Sitemap`s), or the `section` in the URL."
 function sitemap_view(sitemaps)
@@ -89,10 +101,10 @@ function sitemap_view(sitemaps)
             append!(entries, sitemap_entries(req, s, items, page))
         end
         io = IOBuffer()
-        print(io, """<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n""")
+        print(io, """<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">\n""")
         for e in entries
             print(io, "<url><loc>", xml_escape(e.loc), "</loc>")
-            e.lastmod === nothing || print(io, "<lastmod>", w3c_date(e.lastmod), "</lastmod>")
+            e.lastmod === nothing || print(io, "<lastmod>", w3c_day(e.lastmod), "</lastmod>")
             e.changefreq === nothing || print(io, "<changefreq>", xml_escape(e.changefreq), "</changefreq>")
             e.priority === nothing || print(io, "<priority>", string(e.priority), "</priority>")
             print(io, "</url>\n")
