@@ -38,7 +38,7 @@ function yaml_value(io::IO, v)
     end
 end
 
-function yaml_dump(ds::Vector{Dict{String,Any}})
+function yaml_dump(ds::AbstractVector{<:AbstractDict})
     io = IOBuffer()
     isempty(ds) && return "[]\n"
     for d in ds
@@ -49,7 +49,7 @@ function yaml_dump(ds::Vector{Dict{String,Any}})
             print(io, "  fields: {}\n")
         else
             print(io, "  fields:\n")
-            for k in sort!(collect(keys(fs)))
+            for k in keys(fs)                                  # (the model's field order, as Django)
                 print(io, "    ", k, ": ")
                 yaml_value(io, fs[k])
                 print(io, '\n')
@@ -391,7 +391,7 @@ function xml_ref(io::IO, v)
     end
 end
 
-function xml_dump(ds::Vector{Dict{String,Any}}, objs; indent = nothing)
+function xml_dump(ds::AbstractVector{<:AbstractDict}, objs; indent = nothing)
     io = IOBuffer()
     nl(level) = indent === nothing ? nothing : print(io, '\n', ' '^(indent * level))
     print(io, "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<django-objects version=\"1.0\">")
@@ -399,7 +399,7 @@ function xml_dump(ds::Vector{Dict{String,Any}}, objs; indent = nothing)
         T = typeof(obj)
         nl(1)
         print(io, "<object model=\"", d["model"], '"')
-        haskey(d, "pk") && print(io, " pk=\"", xml_escape(d["pk"] isa AbstractVector ? JSON.json(d["pk"]) : string(d["pk"])), '"')
+        haskey(d, "pk") && d["pk"] !== nothing && print(io, " pk=\"", xml_escape(d["pk"] isa AbstractVector ? JSON.json(d["pk"]) : string(d["pk"])), '"')
         print(io, '>')
         fs = d["fields"]
         m2m = Set(f.name for f in modelmeta(concrete_model(T)).m2m)

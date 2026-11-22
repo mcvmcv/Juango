@@ -1817,7 +1817,8 @@ make_aware(DateTime(2024, 6, 1, 9)); make_naive(z); localtime(z)
 ```
 
 - **Storage.** With `USE_TZ`, datetimes are stored in UTC: `TIMESTAMP WITH TIME ZONE` on PostgreSQL, and UTC on SQLite and MySQL. The ORM returns aware `ZonedDateTime`s (TimeZones.jl).
-- **Naive values.** Naive `DateTime`s you pass in are taken as wall-clock times in the current time zone.
+- **Naive values.** Naive `DateTime`s you pass in are taken as wall-clock times in the current time zone. Around a DST change, `make_aware` follows Python's zoneinfo: a time that happens twice is its first occurrence, and a time that doesn't happen is read with the offset from before the change.
+- **Templates.** `{% load tz %}` gives the `localtime`, `utc` and `timezone` filters (a naive datetime is taken to be in `TIME_ZONE`; anything else, or an unknown zone, gives "") and `{% get_current_timezone as tz %}`. `{% now %}` shows the current time zone's time. `Juango.cp_tz` is Django's `tz` context processor (`TIME_ZONE`, the current zone's name). `with_timezone(nothing)` runs with `TIME_ZONE`.
 - **Display.** Templates and forms show and read times in the current time zone: the one activated for the request (`TimezoneMiddleware` uses the session's `"juango_timezone"`), else `TIME_ZONE`. The `date` filter adds `e` (zone name), `T` (abbreviation) and `O` (offset).
 - **Existing data.** To turn `USE_TZ` on for an existing database, run `manage.jl convert_naive_datetimes --from Europe/Berlin` once. It rewrites stored values as UTC and, on PostgreSQL, converts the columns. Back up first.
 - **Lookups.** Date lookups such as `created__year` compare in UTC.
@@ -1861,7 +1862,7 @@ send(order_placed, Order; order = o)                             # send_robust c
 ```
 
 - **Built-in signals:**
-  - `pre_save` and `post_save` (`instance`, `created`)
+  - `pre_save` and `post_save` (`instance`, `created`, `update_fields`, and `raw`: true when `loaddata` saves the object)
   - `pre_delete` and `post_delete` (`instance`, also sent for cascaded deletes; `origin`, the object or queryset whose `delete!` started it)
   - `m2m_changed` (`action`, `instance`, `model`, `pk_set`, `reverse`; the sender is the join model, `through(Post, :tags)`)
   - `post_write`, which Django lacks: after every write, bulk ones included (`save!`, `update!`, `bulk_create`, `bulk_update`, deletes and cascades, many-to-many changes), with `action` (`:insert`, `:update`, `:delete`, `:m2m`), `via`, the rows' `ids`, the `fields` written and the `instances` when the write had them. It's the one hook an audit log or undo needs.
@@ -2266,7 +2267,7 @@ Juango.natural_key(t::Tag) = (t.name,)
 Juango.get_by_natural_key(::Type{Tag}, name) = get(Tag; name = name)
 ```
 
-`loaddata` runs in one transaction. Objects with a primary key replace the row with that key.
+`loaddata` runs in one transaction. Objects with a primary key replace the row with that key, and on PostgreSQL the id sequences then move past the loaded ids. `loaddata("x"; exclude = ["app", "app.Model"])` skips some models; a name found in two formats in one directory (`x.json` and `x.yaml`) is an error, as in Django. Objects are saved with `pre_save`/`post_save` getting `raw = true` (`raw` is false for ordinary saves). Data that can't be read throws `Juango.DeserializationError`, naming the object and the value (`(blog.post:pk=3) field_value was 'abc'`). `dumpdata("blog.Post"; primary_keys = [1, 2])` dumps just those objects. Serialized fields come in the model's order.
 
 ### Management commands
 

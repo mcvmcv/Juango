@@ -23,10 +23,10 @@ end
 activate_timezone!(tz) = (task_local_storage(:juango_timezone, tz isa TimeZones.TimeZone ? tz : TimeZones.TimeZone(string(tz))); nothing)
 "Back to TIME_ZONE."
 deactivate_timezone!() = (delete!(task_local_storage(), :juango_timezone); nothing)
-"Run `f()` with a time zone current."
+"Run `f()` with a time zone current (`nothing`: TIME_ZONE's, as Django's `override(None)`)."
 function with_timezone(f, tz)
     old = get(task_local_storage(), :juango_timezone, nothing)
-    activate_timezone!(tz)
+    tz === nothing ? deactivate_timezone!() : activate_timezone!(tz)
     try
         f()
     finally
@@ -42,8 +42,23 @@ fields use it.
 """
 timezone_now() = settings.USE_TZ ? TimeZones.now(UTC_TZ) : now()
 
-"Attach the current (or given) time zone to a naive DateTime."
-make_aware(dt::DateTime, tz = get_current_timezone()) = TimeZones.ZonedDateTime(dt, tz; from_utc = false)
+"""
+Attach the current (or given) time zone to a naive DateTime. Across a DST change, as Python's zoneinfo
+(fold = 0): a time that happens twice (clocks going back) is its first occurrence, and a time that
+doesn't happen (clocks going forward) is read with the offset from before the change.
+"""
+function make_aware(dt::DateTime, tz = get_current_timezone())
+    tz isa TimeZones.TimeZone || (tz = TimeZones.TimeZone(string(tz)))
+    try
+        TimeZones.ZonedDateTime(dt, tz; from_utc = false)
+    catch e
+        e isa TimeZones.AmbiguousTimeError && return TimeZones.ZonedDateTime(dt, tz, 1)
+        e isa TimeZones.NonExistentTimeError || rethrow()
+        before = TimeZones.ZonedDateTime(dt - Dates.Hour(6), tz; from_utc = false)     # (a time well before the gap: its offset)
+        offset = DateTime(before) - DateTime(TimeZones.astimezone(before, UTC_TZ))
+        TimeZones.ZonedDateTime(dt - offset, tz; from_utc = true)
+    end
+end
 make_aware(z::TimeZones.ZonedDateTime, tz = nothing) = z
 "Local wall-clock time of an aware datetime in the current (or given) time zone, as a naive DateTime."
 make_naive(z::TimeZones.ZonedDateTime, tz = get_current_timezone()) = DateTime(TimeZones.astimezone(z, tz))
@@ -121,7 +136,11 @@ struct TimezoneNode <: Node
     nodes::Vector{Node}
 end
 child_nodelists(n::TimezoneNode) = (n.nodes,)
-tag_timezone(p::Parser, t::Token) = TimezoneNode(parse_filter_expr(split_contents(t.contents)[2]), first(parse_nodes(p, ["endtimezone"])))
+function tag_timezone(p::Parser, t::Token)
+    bits = split_contents(t.contents)
+    length(bits) == 2 || throw(TemplateSyntaxError("'timezone' takes one argument (timezone)"))
+    TimezoneNode(parse_filter_expr(bits[2]), first(parse_nodes(p, ["endtimezone"])))
+end
 function render!(io::IO, n::TimezoneNode, ctx::Context)
     tz = eval_fe(n.tz, ctx)
     tz === nothing && return write(io, with_timezone(() -> render_nodes(n.nodes, ctx), default_timezone()))
@@ -136,7 +155,9 @@ end
 child_nodelists(n::LocaltimeNode) = (n.nodes,)
 function tag_localtime(p::Parser, t::Token)
     bits = split_contents(t.contents)
-    LocaltimeNode(length(bits) < 2 || bits[2] != "off", first(parse_nodes(p, ["endlocaltime"])))
+    length(bits) <= 2 || throw(TemplateSyntaxError("'localtime' statement takes one argument"))
+    length(bits) == 2 && !(bits[2] in ("on", "off")) && throw(TemplateSyntaxError("'localtime' argument should be 'on' or 'off'"))
+    LocaltimeNode(length(bits) < 2 || bits[2] == "on", first(parse_nodes(p, ["endlocaltime"])))
 end
 function render!(io::IO, n::LocaltimeNode, ctx::Context)
     old = get(task_local_storage(), :juango_localtime_off, false)
@@ -156,12 +177,43 @@ struct PinnedTime
 end
 todatetime(p::PinnedTime) = DateTime(p.z)
 display_string(p::PinnedTime) = format_date(p, get_format().datetime)
-pin(v, tz) = v isa TimeZones.ZonedDateTime ? PinnedTime(TimeZones.astimezone(v, tz)) : v isa PinnedTime ? PinnedTime(TimeZones.astimezone(v.z, tz)) : v
-"`{% load tz %}`: the localtime, utc and timezone filters (the tz tags are always available)."
+"""
+The tz filters, as Django's: a naive datetime is taken to be in TIME_ZONE, and anything that isn't a
+datetime, or a time zone that doesn't exist, gives "" (filters never raise).
+"""
+function pin(v, tz)
+    v isa PinnedTime && (v = v.z)
+    v isa TimeZones.ZonedDateTime || v isa DateTime || return ""
+    z = try
+        tz = tz isa TimeZones.TimeZone ? tz : TimeZones.TimeZone(string(tz))
+        v isa DateTime ? make_aware(v, default_timezone()) : v
+    catch e
+        e isa InterruptException && rethrow()
+        return ""
+    end
+    PinnedTime(TimeZones.astimezone(z, tz))
+end
+"`{% load tz %}`: the localtime, utc and timezone filters and get_current_timezone (timezone and localtime are always available)."
 const TZ_LIBRARY = TagLibrary("tz")
 filter!(TZ_LIBRARY, "localtime", (v, _) -> pin(v, get_current_timezone()))
 filter!(TZ_LIBRARY, "utc", (v, _) -> pin(v, UTC_TZ))
-filter!(TZ_LIBRARY, "timezone", (v, a) -> pin(v, TimeZones.TimeZone(string(a))))
+filter!(TZ_LIBRARY, "timezone", (v, a) -> pin(v, a))
+
+"`{% get_current_timezone as var %}`: the current time zone's name."
+struct GetCurrentTimezoneNode <: Node
+    var::String
+end
+render!(io::IO, n::GetCurrentTimezoneNode, ctx::Context) = (ctx[n.var] = string(get_current_timezone()); 0)
+function tag_get_current_timezone(p::Parser, t::Token)
+    bits = split_contents(t.contents)
+    (length(bits) == 3 && bits[2] == "as") ||
+        throw(TemplateSyntaxError("'get_current_timezone' requires 'as variable' (got $(repr(bits)))"))
+    GetCurrentTimezoneNode(bits[3])
+end
+tag!(TZ_LIBRARY, "get_current_timezone", tag_get_current_timezone)
+
+"Context processor (Django's `context_processors.tz`): `TIME_ZONE`, the current time zone's name."
+cp_tz(req) = Dict("TIME_ZONE" => string(get_current_timezone()))
 
 """
 Activates the time zone stored in the session under `\"juango_timezone\"` (set it from a

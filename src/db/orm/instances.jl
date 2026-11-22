@@ -178,6 +178,9 @@ Base.@nospecializeinfer function sync_related_keys!(@nospecialize(obj::Model), o
     end
 end
 
+"Whether the object is being saved as loaded from a fixture: pre_save and post_save's `raw` (Django's)."
+const SAVE_RAW = Base.ScopedValues.ScopedValue(false)
+
 Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Union{Nothing,Set{Symbol}} = nothing; force_insert::Bool = false)
     T = typeof(obj)
     data = (getfield(obj, :_data)::Dict{Symbol,Any})
@@ -191,7 +194,7 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
         end
     end
     created = data[:id] === nothing
-    has_receivers(pre_save, T) && send(pre_save, T; instance = obj, created = created, update_fields = only)
+    has_receivers(pre_save, T) && send(pre_save, T; instance = obj, created = created, update_fields = only, raw = SAVE_RAW[])
     has_receivers(pre_write, T) && send(pre_write, T; action = created ? :insert : :update, via = :save, ids = Any[data[:id]],
                                         fields = only === nothing ? nothing : collect(only), instances = [obj])
     store_uploaded_files!(obj, data)
@@ -216,7 +219,7 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
     end
     refresh_computed!(obj)
     refresh_expression_fields!(obj, exprs)
-    has_receivers(post_save, T) && send(post_save, T; instance = obj, created = created, update_fields = only)
+    has_receivers(post_save, T) && send(post_save, T; instance = obj, created = created, update_fields = only, raw = SAVE_RAW[])
     has_receivers(post_write, T) && send(post_write, T; action = created ? :insert : :update, via = :save, ids = Any[obj.pk],
                                          fields = only === nothing ? nothing : collect(only), instances = [obj])
     obj

@@ -1265,7 +1265,9 @@ Juango.get_by_natural_key(::Type{Topic}, name) = get(Topic; name = name)
         <django-objects version="1.0"><object model="project.topic"><field name="name" type="CharField">x&amp;y</field></object></django-objects>""")
     configure!(FIXTURE_DIRS = [dir])
     try
-        @test loaddata("hand") == 3         # hand.yml and hand.xml
+        e = try loaddata("hand") catch e; e end      # hand.yml and hand.xml: which one? (as Django: refused)
+        @test e isa ArgumentError && occursin("Multiple fixtures named 'hand'", e.msg)
+        @test loaddata("hand.yml") + loaddata("hand.xml") == 3
         @test exists(filter(Topic; name = "hand: written")) && exists(filter(Topic; name = "flow-style")) && exists(filter(Topic; name = "x&y"))
     finally
         configure!(FIXTURE_DIRS = String[])

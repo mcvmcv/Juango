@@ -34,13 +34,13 @@ PostgreSQL: statements that move each table's id sequence past its largest id (a
 loaded with explicit ids; `manage.jl sqlsequencereset app`). Other databases keep their counters
 right themselves, so there are none.
 """
-function sequence_reset_sql(apps = nothing)
+function sequence_reset_sql(apps = nothing; models = nothing)
     b = backend()
     b isa PostgresBackend || return String[]
     out = String[]
-    for T in all_models()
+    for T in something(models, all_models())
         m = modelmeta(T)
-        (m.proxy || !model_in_use(T) || is_composite(T) || pk_kind(T) === :uuid) && continue
+        (m.proxy || !model_in_use(T) || is_composite(T) || pk_kind(T) === :uuid || natural_pk(T)) && continue
         apps === nothing || m.app in apps || continue
         t = quote_name(b, m.table)
         push!(out, "SELECT setval(pg_get_serial_sequence($(sql_string_literal(b, t)), 'id'), GREATEST(COALESCE(MAX(\"id\"), 1), 1), COALESCE(MAX(\"id\") >= 1, false)) FROM $t")

@@ -718,7 +718,7 @@ function tag_now(p, t)
     NowNode(parse_filter_expr(bits[2]))
 end
 render!(io::IO, n::NowNode, ctx::Context) =
-    write(io, escape_html(format_date(now(), display_string(eval_fe(n.fmt, ctx)))))
+    write(io, escape_html(format_date(timezone_now(), display_string(eval_fe(n.fmt, ctx)))))   # (USE_TZ: in the current time zone)
 
 for (name, f) in (
     "if" => tag_if, "for" => tag_for, "block" => tag_block, "extends" => tag_extends,
