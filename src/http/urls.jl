@@ -71,7 +71,9 @@ struct URLPattern
     view::Any
     name::Union{Nothing,String}
     defaults::Dict{Symbol,Any}
+    lazy::Any                     # a translated route (gettext_lazy), or nothing
 end
+URLPattern(route, regex, params, view, name, defaults) = URLPattern(route, regex, params, view, name, defaults, nothing)
 
 "A set of patterns mounted under a prefix (see [`include_urls`](@ref))."
 struct URLResolver
@@ -81,8 +83,25 @@ struct URLResolver
     patterns::Vector{Any}
     namespace::Union{Nothing,String}     # the instance namespace
     app_name::Union{Nothing,String}      # the application namespace
+    lazy::Any                            # a translated route (gettext_lazy), or nothing
 end
-URLResolver(route, regex, params, patterns, namespace) = URLResolver(route, regex, params, patterns, namespace, nothing)
+URLResolver(route, regex, params, patterns, namespace) = URLResolver(route, regex, params, patterns, namespace, nothing, nothing)
+URLResolver(route, regex, params, patterns, namespace, app_name) = URLResolver(route, regex, params, patterns, namespace, app_name, nothing)
+
+"""
+A pattern's route, regex and parameters in the active language: a translated route (`path(gettext_lazy(\"about/\"), ...)`)
+is translated and compiled once per translation.
+"""
+function current_route(pat)
+    pat.lazy === nothing && return (pat.route, pat.regex, pat.params)
+    tr = string(pat.lazy)
+    tr == pat.route && return (pat.route, pat.regex, pat.params)
+    rx, params = lock(REVERSE_LOCK) do
+        get!(() -> compile_route(tr; endpoint = pat isa URLPattern), TRANSLATED_ROUTES, (tr, pat isa URLPattern))
+    end
+    (tr, rx, params)
+end
+const TRANSLATED_ROUTES = Dict{Tuple{String,Bool},Tuple{Regex,Vector{Tuple{Symbol,String}}}}()
 
 struct Include
     patterns::Vector{Any}
@@ -91,8 +110,8 @@ struct Include
 end
 
 "A URL pattern (or a whole included set) with every view wrapped by `f` (e.g. a permission check)."
-wrap_view(p::URLPattern, f) = URLPattern(p.route, p.regex, p.params, f(p.view), p.name, p.defaults)
-wrap_view(r::URLResolver, f) = URLResolver(r.route, r.regex, r.params, Any[wrap_view(x, f) for x in r.patterns], r.namespace, r.app_name)
+wrap_view(p::URLPattern, f) = URLPattern(p.route, p.regex, p.params, f(p.view), p.name, p.defaults, p.lazy)
+wrap_view(r::URLResolver, f) = URLResolver(r.route, r.regex, r.params, Any[wrap_view(x, f) for x in r.patterns], r.namespace, r.app_name, r.lazy)
 wrap_view(x, f) = x
 
 """
@@ -109,7 +128,11 @@ else the last one mounted.
     path("blog/", include_urls(blog_urls; app_name = "blog")),                     # reverse_url("blog:post", 1)
     path("news/", include_urls(blog_urls; app_name = "blog", namespace = "news")),  # also "news:post"
 """
-include_urls(patterns; namespace = nothing, app_name = nothing) =
+function include_urls(patterns; namespace = nothing, app_name = nothing)
+    any(p -> p isa LocalePrefix, patterns) && throw(ImproperlyConfigured("Using i18n_patterns in an included URLconf is not allowed."))
+    include_urls_(patterns, namespace, app_name)
+end
+include_urls_(patterns, namespace, app_name) =
     Include(collect(Any, patterns), something(namespace, app_name, Some(nothing)) === nothing ? nothing : string(something(namespace, app_name)),
             app_name === nothing ? nothing : string(app_name))
 
@@ -205,31 +228,37 @@ joinns(a, b) = a === nothing ? b : b === nothing ? a : a * ":" * b
 function _resolve(patterns, p::AbstractString, kwargs, ns, prefix, app = nothing)
     for pat in patterns
         if pat isa URLPattern
-            m = match(pat.regex, p)
+            route, rx, params = current_route(pat)
+            m = match(rx, p)
             m === nothing && continue
-            ck = capture_kwargs(m, pat.params)
+            ck = capture_kwargs(m, params)
             ck === nothing && continue
             kw = merge(kwargs, ck, pat.defaults)
-            return ResolverMatch(pat.view, kw, pat.name, ns, prefix * pat.route, nothing, app)
+            return ResolverMatch(pat.view, kw, pat.name, ns, prefix * route, nothing, app)
         elseif pat isa URLResolver
-            m = match(pat.regex, p)
+            route, rx, params = current_route(pat)
+            m = match(rx, p)
             m === nothing && continue
             rest = p[ncodeunits(m.match)+1:end]
-            ck = capture_kwargs(m, pat.params)
+            ck = capture_kwargs(m, params)
             ck === nothing && continue
             r = _resolve(pat.patterns, rest, merge(kwargs, ck),
-                         joinns(ns, pat.namespace), prefix * pat.route, joinns(app, pat.app_name))
+                         joinns(ns, pat.namespace), prefix * route, joinns(app, pat.app_name))
             r === nothing || return r
         elseif pat isa AbstractVector
             r = _resolve(pat, p, kwargs, ns, prefix, app)
             r === nothing || return r
+        elseif pat isa LocalePrefix && !settings.USE_I18N            # (without i18n: the patterns, unprefixed, as Django's)
+            r = _resolve(pat.patterns, p, kwargs, ns, prefix, app)
+            r === nothing || return r
         elseif pat isa LocalePrefix
             m = match(r"^([A-Za-z]{2}(?:-[A-Za-z0-9]+)?)/", p)
+            # (translated routes under the prefix are read in the prefix's language, as LocaleMiddleware activates it)
             if m !== nothing && lowercase(m[1]) in supported_codes() && (pat.prefix_default || lowercase(m[1]) != default_language())
-                r = _resolve(pat.patterns, p[ncodeunits(m.match)+1:end], kwargs, ns, prefix * m.match, app)
+                r = with_language(() -> _resolve(pat.patterns, p[ncodeunits(m.match)+1:end], kwargs, ns, prefix * m.match, app), lowercase(m[1]))
                 r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, lowercase(m[1]), r.app_name)
             elseif !pat.prefix_default
-                r = _resolve(pat.patterns, p, kwargs, ns, prefix, app)
+                r = with_language(() -> _resolve(pat.patterns, p, kwargs, ns, prefix, app), default_language())
                 r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, default_language(), r.app_name)
             end
         end
@@ -278,11 +307,11 @@ function ReverseEntry(route::AbstractString, params)
     ReverseEntry(String(route), params, pieces)
 end
 
-const REVERSE_CACHE = IdDict{Any,Dict{String,Vector{ReverseEntry}}}()
+const REVERSE_CACHE = IdDict{Any,Dict{String,Dict{String,Vector{ReverseEntry}}}}()     # urlconf => language => name => entries
 "Per URLconf: application namespace => its instance namespaces, in the order they're mounted."
 const APP_INSTANCES = IdDict{Any,Dict{String,Vector{String}}}()
 const REVERSE_LOCK = ReentrantLock()
-push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> (empty!(REVERSE_CACHE); empty!(APP_INSTANCES)), REVERSE_LOCK))
+push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> (empty!(REVERSE_CACHE); empty!(APP_INSTANCES); empty!(TRANSLATED_ROUTES)), REVERSE_LOCK))
 
 function collect_app_instances!(apps, patterns, ns, app)
     for pat in patterns
@@ -321,14 +350,15 @@ function build_reverse_index!(idx, patterns, prefix, ns)
     for pat in patterns
         if pat isa URLPattern
             pat.name === nothing && continue
-            if is_regex_route(pat.route)          # a re_path: its groups are the parameters
-                push!(get!(idx, joinns(ns, pat.name), ReverseEntry[]), regex_reverse_entry(prefix, pat.route))
+            route = current_route(pat)[1]
+            if is_regex_route(route)              # a re_path: its groups are the parameters
+                push!(get!(idx, joinns(ns, pat.name), ReverseEntry[]), regex_reverse_entry(prefix, route))
                 continue
             end
-            _, params = compile_route(prefix * pat.route; endpoint = true)
-            push!(get!(idx, joinns(ns, pat.name), ReverseEntry[]), ReverseEntry(prefix * pat.route, params))
+            _, params = compile_route(prefix * route; endpoint = true)
+            push!(get!(idx, joinns(ns, pat.name), ReverseEntry[]), ReverseEntry(prefix * route, params))
         elseif pat isa URLResolver
-            build_reverse_index!(idx, pat.patterns, prefix * pat.route, joinns(ns, pat.namespace))
+            build_reverse_index!(idx, pat.patterns, prefix * current_route(pat)[1], joinns(ns, pat.namespace))
         elseif pat isa AbstractVector
             build_reverse_index!(idx, pat, prefix, ns)
         elseif pat isa LocalePrefix
@@ -410,7 +440,9 @@ Build the URL for the named pattern. Use `"namespace:name"` for included pattern
 """
 function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLCONF, query = nothing, current_app = nothing, kwargs...)
     idx, apps = lock(REVERSE_LOCK) do
-        get!(() -> build_reverse_index!(Dict{String,Vector{ReverseEntry}}(), urlconf, "", nothing), REVERSE_CACHE, urlconf),
+        # (one index per language: translated routes reverse to the active language's)
+        get!(() -> build_reverse_index!(Dict{String,Vector{ReverseEntry}}(), urlconf, "", nothing),
+             get!(() -> Dict{String,Dict{String,Vector{ReverseEntry}}}(), REVERSE_CACHE, urlconf), get_language()),
         get!(() -> collect_app_instances!(Dict{String,Vector{String}}(), urlconf, nothing, nothing), APP_INSTANCES, urlconf)
     end
     i = findlast(':', name)
@@ -458,7 +490,8 @@ function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLC
         url = String(take!(io))
         if occursin("\0lang", url)
             lang = something(supported_language(get_language()), default_language())
-            url = replace(url, LANG_ALWAYS => lang * "/", LANG_OPTIONAL => lang == default_language() ? "" : lang * "/")
+            url = !settings.USE_I18N ? replace(url, LANG_ALWAYS => "", LANG_OPTIONAL => "") :
+                  replace(url, LANG_ALWAYS => lang * "/", LANG_OPTIONAL => lang == default_language() ? "" : lang * "/")
         end
         query === nothing || (url *= "?" * urlencode(query))
         return url

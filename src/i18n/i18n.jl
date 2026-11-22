@@ -375,6 +375,40 @@ gettext_lazy(msgid) = LazyText("", string(msgid), nothing, 1)
 pgettext_lazy(context, msgid) = LazyText(string(context), string(msgid), nothing, 1)
 ngettext_lazy(singular, plural, n) = LazyText("", string(singular), string(plural), Int(n))
 
+# --- translated URL routes: path(gettext_lazy("about/"), view) ------------------------------------------------
+# The route is matched and reversed in the active language (under i18n_patterns: the prefix's); it's compiled
+# once per translation (urls.jl's current_route).
+function path(route::LazyText, view; name = nothing, kwargs...)
+    p = path(route.msgid, view; name = name, kwargs...)
+    URLPattern(p.route, p.regex, p.params, p.view, p.name, p.defaults, route)
+end
+function path(route::LazyText, inc::Include)
+    r = path(route.msgid, inc)
+    URLResolver(r.route, r.regex, r.params, r.patterns, r.namespace, r.app_name, route)
+end
+
+"""
+    translate_url(url, lang) -> String
+
+The same page in another language (Django's): `url`'s path is resolved and reversed with `lang` active, so
+its language prefix and translated routes change (`/en/account/register/` -> `/nl/profiel/registreren/`); the
+query string and fragment are kept. A URL that doesn't resolve or reverse comes back unchanged.
+"""
+function translate_url(url::AbstractString, lang)
+    m = match(r"^(?<head>[a-z][a-z0-9+.-]*://[^/?#]*)?(?<path>[^?#]*)(?<rest>.*)$"si, url)
+    m === nothing && return String(url)
+    rm = resolve(URIs.unescapeuri(m[:path]))
+    (rm === nothing || rm.url_name === nothing) && return String(url)
+    target = rm.namespace === nothing ? rm.url_name : rm.namespace * ":" * rm.url_name
+    t = try
+        with_language(() -> reverse_url(target; rm.kwargs...), string(lang))
+    catch e
+        e isa NoReverseMatch || rethrow()
+        return String(url)
+    end
+    something(m[:head], "") * t * m[:rest]
+end
+
 "Fill `%(name)s`/`%(name)d` placeholders: `interpolate(\"%(n)d items\", Dict(\"n\" => 3))`."
 interpolate(s::AbstractString, vars) =
     replace(s, r"%\((\w+)\)[sd]" => m -> string(get(vars, match(r"\((\w+)\)", m)[1], get(vars, Symbol(match(r"\((\w+)\)", m)[1]), ""))))
@@ -685,12 +719,21 @@ function LocaleMiddleware(get_response)
         lang = language_from_request(req)
         req.meta[:LANGUAGE_CODE] = lang
         resp = with_language(() -> get_response(req), lang)
-        if resp.status == 404 && get(req.meta, :language_prefix, nothing) === nothing && uses_i18n_patterns()
+        prefixed = get(req.meta, :language_prefix, nothing) !== nothing
+        if resp.status == 404 && !prefixed && uses_i18n_patterns()
+            # (the language's prefix, and a missing slash under APPEND_SLASH, as Django's)
             target = "/" * lang * req.path
-            resolve(target) === nothing || return HttpResponseRedirect(target * (isempty(req.query_string) ? "" : "?" * req.query_string))
+            ok = resolve(target) !== nothing
+            !ok && settings.APPEND_SLASH && !endswith(target, "/") && resolve(target * "/") !== nothing && (target *= "/"; ok = true)
+            if ok
+                resp = HttpResponseRedirect(target * (isempty(req.query_string) ? "" : "?" * req.query_string))
+                patch_vary_headers!(resp, ("Accept-Language", "Cookie"))      # (the language came from these)
+                return resp
+            end
         end
         hasheader(resp, "Content-Language") || setheader!(resp, "Content-Language", lang)
-        patch_vary!(resp, "Accept-Language")
+        # a page whose language comes from its URL doesn't vary with Accept-Language (Django's)
+        (prefixed && uses_i18n_patterns()) || patch_vary!(resp, "Accept-Language")
         resp
     end
 end
@@ -716,7 +759,8 @@ function set_language(req)
         lang = supported_language(get(req.POST, "language", ""))
         if lang !== nothing
             if nxt !== nothing
-                t = swap_language_prefix(nxt, lang)
+                t = translate_url(nxt, lang)                      # (translated routes too, as Django's)
+                t == nxt && (t = swap_language_prefix(nxt, lang))
                 t == nxt || (resp = HttpResponseRedirect(t))
             end
             st = settings
