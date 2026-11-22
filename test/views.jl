@@ -531,7 +531,7 @@ end
         @test_throws Juango.ImproperlyConfigured Juango.sitemap_entries(Request("GET", "/"), Sitemap([1]), [1], 1)
         x = text(Juango.sitemap_view(Dict("a" => Sitemap(() -> [a1])))(Request("GET", "/"; headers = Dict("host" => "h"))))
         @test occursin("<loc>http://h/articles/$(a1.id)/</loc>", x)
-        @test Juango.w3c_date(DateTime(2024, 2, 3, 4, 5, 6)) == "2024-02-03T04:05:06+00:00"
+        @test Juango.w3c_date(DateTime(2024, 2, 3, 4, 5, 6)) == "2024-02-03T04:05:06"      # (naive: no offset, as Django's date:"c")
     finally
         configure!(ROOT_URLCONF = old_urls)
     end
