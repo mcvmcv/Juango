@@ -259,8 +259,8 @@ struct RawSQL <: Expression
     params::Vector{Any}
     output::Any
 end
-RawSQL(sql::AbstractString, params = Any[]; output = nothing) =
-    RawSQL(replace(String(sql), "%s" => "?"), collect(Any, params), output_of(output))
+RawSQL(sql::AbstractString, params = Any[]; output = nothing, output_field = nothing) =         # (output_field: Django's name)
+    RawSQL(replace(String(sql), "%s" => "?"), collect(Any, params), output_of(something(output, output_field, Some(nothing))))
 
 """
     ExpressionWrapper(expr; output)

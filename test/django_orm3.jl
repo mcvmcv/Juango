@@ -79,33 +79,33 @@ end
     Meta(table = "dmu_child")
 end
 # --- tests/null_fk_ordering/models.py -----------------------------------------------------------------
-@model struct DnfAuthor
+@model struct DnoAuthor
     name = CharField(max_length = 150)
-    Meta(table = "dnf_author")
+    Meta(table = "dno_author")
 end
-@model struct DnfArticle
+@model struct DnoArticle
     title = CharField(max_length = 150)
-    author = ForeignKey(DnfAuthor; on_delete = :SET_NULL, null = true)
-    Meta(table = "dnf_article", ordering = ["author__name"])
+    author = ForeignKey(DnoAuthor; on_delete = :SET_NULL, null = true)
+    Meta(table = "dno_article", ordering = ["author__name"])
 end
-@model struct DnfSystemInfo
+@model struct DnoSystemInfo
     system_name = CharField(max_length = 32)
-    Meta(table = "dnf_systeminfo")
+    Meta(table = "dno_systeminfo")
 end
-@model struct DnfForum
-    system_info = ForeignKey(DnfSystemInfo; on_delete = :CASCADE)
+@model struct DnoForum
+    system_info = ForeignKey(DnoSystemInfo; on_delete = :CASCADE)
     forum_name = CharField(max_length = 32)
-    Meta(table = "dnf_forum")
+    Meta(table = "dno_forum")
 end
-@model struct DnfPost
-    forum = ForeignKey(DnfForum; on_delete = :SET_NULL, null = true)
+@model struct DnoPost
+    forum = ForeignKey(DnoForum; on_delete = :SET_NULL, null = true)
     title = CharField(max_length = 32)
-    Meta(table = "dnf_post")
+    Meta(table = "dno_post")
 end
-@model struct DnfComment
-    post = ForeignKey(DnfPost; on_delete = :SET_NULL, null = true)
+@model struct DnoComment
+    post = ForeignKey(DnoPost; on_delete = :SET_NULL, null = true)
     comment_text = CharField(max_length = 250)
-    Meta(table = "dnf_comment", ordering = ["post__forum__system_info__system_name", "comment_text"])
+    Meta(table = "dno_comment", ordering = ["post__forum__system_info__system_name", "comment_text"])
 end
 # --- tests/string_lookup/models.py --------------------------------------------------------------------
 @model struct DslFoo
@@ -325,7 +325,7 @@ end
 redirect_stdout(devnull) do
     ms = [DmrCategory, DmrPerson, DmmPerson, DmmColleague, through(DmmPerson, :friends), through(DmmPerson, :idols),
           DmnReporter, DmnArticle, DmnCar, DmnDriver, DrlUser, DrlPoll, DrlChoice, DmuParent, DmuChild,
-          DnfAuthor, DnfArticle, DnfSystemInfo, DnfForum, DnfPost, DnfComment,
+          DnoAuthor, DnoArticle, DnoSystemInfo, DnoForum, DnoPost, DnoComment,
           DslFoo, DslWhiz, DslBar, DslBase, DslChild, DslArticle, DmlPersonWithDefaultMaxLengths, DmlPersonWithCustomMaxLengths,
           DemEmpty, DsdPerson, DfiCounter, DfiInheritedCounter, DfiSubCounter, DfiSubSubCounter, DfiWithCustomPK,
           DsoUser, DsoUserProfile, DsoUserStatResult, DsoUserStat, DsoStatDetails, DsoImage, DsoProduct, DsoParent1, DsoParent2,
@@ -563,22 +563,22 @@ end
     @test !exists(objects(DmuParent)) && !exists(objects(DmuChild))
   end
   port_block() do                     # NullFkOrderingTests.test_ordering_across_null_fk
-    author_1 = create(DnfAuthor; name = "Tom Jones"); author_2 = create(DnfAuthor; name = "Bob Smith")
-    create(DnfArticle; title = "No author on this article")
-    create(DnfArticle; author = author_1, title = "This article written by Tom Jones")
-    create(DnfArticle; author = author_2, title = "This article written by Bob Smith")
-    @test length(collect(objects(DnfArticle))) == 3
-    s = create(DnfSystemInfo; system_name = "System Info")
-    f = create(DnfForum; system_info = s, forum_name = "First forum")
-    p = create(DnfPost; forum = f, title = "First Post")
-    create(DnfComment; post = p, comment_text = "My first comment")
-    create(DnfComment; comment_text = "My second comment")
-    s2 = create(DnfSystemInfo; system_name = "More System Info")
-    f2 = create(DnfForum; system_info = s2, forum_name = "Second forum")
-    p2 = create(DnfPost; forum = f2, title = "Second Post")
-    create(DnfComment; comment_text = "Another first comment")
-    create(DnfComment; post = p2, comment_text = "Another second comment")
-    @test length(collect(objects(DnfComment))) == 4
+    author_1 = create(DnoAuthor; name = "Tom Jones"); author_2 = create(DnoAuthor; name = "Bob Smith")
+    create(DnoArticle; title = "No author on this article")
+    create(DnoArticle; author = author_1, title = "This article written by Tom Jones")
+    create(DnoArticle; author = author_2, title = "This article written by Bob Smith")
+    @test length(collect(objects(DnoArticle))) == 3
+    s = create(DnoSystemInfo; system_name = "System Info")
+    f = create(DnoForum; system_info = s, forum_name = "First forum")
+    p = create(DnoPost; forum = f, title = "First Post")
+    create(DnoComment; post = p, comment_text = "My first comment")
+    create(DnoComment; comment_text = "My second comment")
+    s2 = create(DnoSystemInfo; system_name = "More System Info")
+    f2 = create(DnoForum; system_info = s2, forum_name = "Second forum")
+    p2 = create(DnoPost; forum = f2, title = "Second Post")
+    create(DnoComment; comment_text = "Another first comment")
+    create(DnoComment; post = p2, comment_text = "Another second comment")
+    @test length(collect(objects(DnoComment))) == 4
   end
   port_block() do                     # EmptyModelTests.test_empty
     m = DemEmpty()
@@ -671,6 +671,9 @@ end
 @testset "django force_insert_update: ForceInsertInheritanceTests" begin
     C, S, SS = DfiCounter, DfiSubCounter, DfiSubSubCounter
     nq(f, n) = in_test_tx(() -> assert_num_queries(f, n))
+    # a save that INSERTs a new root row with its id given: on PostgreSQL Juango then moves the id sequence past it
+    # (one query more; Django leaves the sequence behind, for the next row without an id to collide with)
+    nqi(f, n) = nq(f, n + IS_POSTGRES)
     port_block() do                   # test_force_insert_not_bool_or_tuple
         for x in (1, "test", [])
             e = try atomic(() -> save!(C(name = "", value = 0); force_insert = x)); nothing catch e; e end
@@ -685,7 +688,7 @@ end
     end
     port_block() do                   # test_force_insert_false
         obj = nothing
-        @test nq(3) do
+        @test nqi(3) do
             obj = create(S; id = 1, name = "", value = 0); true
         end
         @test nq(() -> save!(S(id = obj.pk, name = "", value = 1)), 2)
@@ -700,15 +703,15 @@ end
         @test_broken try nq(() -> create(S; id = parent.pk, name = "", value = 2), 2) catch; false end   # (create doesn't force an insert: #276)
     end
     port_block() do                   # test_force_insert_parent
-        @test nq(() -> save!(S(id = 1, name = "", value = 1); force_insert = true), 3)
-        @test nq(() -> save!(S(id = 2, name = "", value = 1); force_insert = (C,)), 2)       # a new parent, no UPDATE first
-        @test nq(() -> save!(S(id = 3, name = "", value = 1); force_insert = (Juango.Model,)), 2)
+        @test nqi(() -> save!(S(id = 1, name = "", value = 1); force_insert = true), 3)
+        @test nqi(() -> save!(S(id = 2, name = "", value = 1); force_insert = (C,)), 2)       # a new parent, no UPDATE first
+        @test nqi(() -> save!(S(id = 3, name = "", value = 1); force_insert = (Juango.Model,)), 2)
     end
     port_block() do                   # test_force_insert_with_grandparent
-        @test nq(() -> save!(SS(id = 1, name = "", value = 1); force_insert = true), 4)
-        @test nq(() -> save!(SS(id = 2, name = "", value = 1); force_insert = (Juango.Model,)), 3)
-        @test nq(() -> save!(SS(id = 3, name = "", value = 1); force_insert = (C,)), 3)
-        @test nq(() -> save!(SS(id = 4, name = "", value = 1); force_insert = (S,)), 4)     # only the last parent
+        @test nqi(() -> save!(SS(id = 1, name = "", value = 1); force_insert = true), 4)
+        @test nqi(() -> save!(SS(id = 2, name = "", value = 1); force_insert = (Juango.Model,)), 3)
+        @test nqi(() -> save!(SS(id = 3, name = "", value = 1); force_insert = (C,)), 3)
+        @test nqi(() -> save!(SS(id = 4, name = "", value = 1); force_insert = (S,)), 4)     # only the last parent
     end
     port_block() do                   # test_force_insert_with_existing_grandparent
         gp = create(C; name = "", value = 1)
@@ -927,14 +930,14 @@ if Juango.backend() isa Juango.PostgresBackend
     @test collect(values_list(distinct(order_by(annotate(objects(St); name_alias = F(:name)), "name_alias"), :name_alias), :name, :name_alias)) ==
           [("p1", "p1"), ("p2", "p2"), ("p3", "p3")]
     # test_distinct_on_duplicated_selected_columns(_descending)
-    fs = ("stafftag__tag__name", "tags__name", "name")
+    fs = ("ddostafftag__tag__name", "tags__name", "name")
     @test collect(values_list(distinct(order_by(objects(St), (Asc(F(f); nulls_last = true) for f in fs)...), Symbol.(fs)...), Symbol.(fs)...)) ==
           [("t1", "t1", "p1"), (nothing, nothing, "p1"), (nothing, nothing, "p2"), (nothing, nothing, "p3")]
     @test collect(values_list(distinct(order_by(objects(St), (Desc(F(f); nulls_first = true) for f in fs)...), Symbol.(fs)...), Symbol.(fs)...)) ==
           [(nothing, nothing, "p3"), (nothing, nothing, "p2"), (nothing, nothing, "p1"), ("t1", "t1", "p1")]
     # test_distinct_on_duplicated_selected_columns_with_annotation
     @test collect(values_list(distinct(order_by(annotate(objects(St); tag_name = F(:tags__name)), (Asc(F(f); nulls_last = true) for f in fs)...),
-                                       Symbol.(fs)...), :stafftag__tag__name, :tag_name, :tags__name, :name)) ==
+                                       Symbol.(fs)...), :ddostafftag__tag__name, :tag_name, :tags__name, :name)) ==
           [("t1", "t1", "t1", "p1"), (nothing, nothing, nothing, "p1"), (nothing, nothing, nothing, "p2"), (nothing, nothing, nothing, "p3")]
     # test_distinct_on_duplicated_raw_sql_annotations
     @test length(collect(order_by(distinct(values(annotate(objects(St); a = RawSQL("random()", []; output_field = FloatField()),

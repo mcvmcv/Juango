@@ -297,6 +297,7 @@ like_insensitive_sql(::DatabaseBackend, col, pat) = "LOWER($col) LIKE LOWER($pat
 
 "A column as text, for a text lookup on a column that isn't (PostgreSQL needs the cast; the others convert)."
 text_cast(::DatabaseBackend, col) = col
+text_cast(b::DatabaseBackend, col, kind::Symbol) = text_cast(b, col)
 
 "The `regex` / `iregex` lookups (PostgreSQL's `~` and `~*`)."
 regex_sql(::DatabaseBackend, col, pattern, icase::Bool) = ("$col $(icase ? "~*" : "~") ?", Any[pattern])

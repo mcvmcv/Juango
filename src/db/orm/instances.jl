@@ -423,6 +423,7 @@ Base.@nospecializeinfer function save_table!(@nospecialize(M::Type), data, root:
         phs, vals = ins()
         execute(fill_placeholders(insert_sql(backend(), tbl, vcat(qname("id"), cols)), vcat("?", phs)) |> s -> replace(s, r" RETURNING .*$" => ""),
                 vcat(data[:id], vals))
+        root && pk_kind(M) !== :uuid && sync_sequence(backend(), meta.table)        # (an id given by hand: as below)
         return true
     end
     if data[:id] !== nothing

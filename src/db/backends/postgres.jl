@@ -43,6 +43,8 @@ function sync_sequence(b::PostgresBackend, table)
 end
 
 text_cast(::PostgresBackend, col) = "($col)::text"
+# (an inet's text has its mask, 192.0.2.100/32: a text lookup compares HOST(), its address, as Django's)
+text_cast(b::PostgresBackend, col, kind::Symbol) = kind === :ipaddress ? "HOST($col)" : text_cast(b, col)
 # a Decimal parameter is typed from the other operand (bigint for F(:integer) / Value(Decimal("3.0")))
 value_sql(::PostgresBackend, v::Decimal) = ("CAST(? AS NUMERIC)", Any[v])
 # typed literals (a Case's then, an update's Value): an untyped parameter in a CASE resolves to text

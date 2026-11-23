@@ -483,6 +483,11 @@ function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true,
                 @goto ordered_col
             end
             alias = field_alias!(c, alias, M, f)
+            # order_by("parent__pk"): the key column itself, no join (as Django, and as F() does)
+            if i == length(segs) - 1 && (segs[end] == string(target_name(f)) || (fk_to_field(f) === nothing && segs[end] in ("pk", "id")))
+                col = qcol(alias, column(f))
+                @goto ordered_col
+            end
             alias = join!(c, alias, (alias, f.name), modelmeta(related_model(f)).table, target_column(f), column(f); left = true)
             M = related_model(f)
         end

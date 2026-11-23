@@ -529,7 +529,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     # id__iexact = "12", gt__regex = "^4": a text lookup on a number, date or UUID column compares its text
     # (PostgreSQL has no LOWER(bigint) or integer ~ text; Django casts there too)
     if lookup in TEXT_LOOKUPS && kind !== nothing && !(kind in TEXT_KINDS)
-        col = text_cast(backend(), col)
+        col = text_cast(backend(), col, kind)
     end
     # an expression (an annotation, a Case) compared with a Decimal on SQLite: the Decimal as a number, not text
     f === nothing && value isa Decimal && backend() isa SQLiteBackend && lookup in keys(COMPARISON_OPS) && (value = Value(value))
