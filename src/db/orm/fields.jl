@@ -538,7 +538,9 @@ The other side gets `tag.post_set` (or `related_name`).
 
 A relation of a model to itself (`friends = ManyToManyField(:self)`) is symmetrical: when
 `a` is a friend of `b`, `b` is a friend of `a` (adding or removing either way changes both).
-Pass `symmetrical = false` for one-way relations such as "follows".
+Pass `symmetrical = false` for one-way relations such as "follows". A symmetrical relation can have
+its own `through` model, as Django's since 3.0: each link is then two of its rows, both given the
+`through_defaults`.
 
 A `through` model with more than one foreign key to the same model (an invitation's inviter and
 invitee) needs `through_fields = (:event, :invitee)`: its keys to this model and to the related one.
@@ -546,8 +548,6 @@ invitee) needs `through_fields = (:event, :invitee)`: its keys to this model and
 function ManyToManyField(to; symmetrical = nothing, kw...)
     sym = something(symmetrical, to === :self)
     sym && to !== :self && throw(ArgumentError("symmetrical = true is for a ManyToManyField(:self)"))
-    sym && haskey(kw, :through) && kw[:through] !== nothing &&
-        throw(ArgumentError("a symmetrical ManyToManyField can't have a custom through model; use symmetrical = false"))
     Field(:m2m; related = to, symmetrical = sym, kw...)
 end
 

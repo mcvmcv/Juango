@@ -171,13 +171,38 @@ function select_related(@nospecialize(qs::QuerySet), paths...)
             C = mti_child(M, s)                   # a multi-table child's link (place.restaurant)
             C === nothing || (M = C; continue)
             r = reverse_one_to_one(M, s)          # the other side of a OneToOneField: at most one row
-            r === nothing && throw(LookupError("select_related: '$s' is not a foreign key or reverse one-to-one of $M " *
-                                               "(use prefetch_related for other reverse relations)"))
+            r === nothing && throw(select_related_error(M, s, M === T ? qs : nothing))
             M = r[2]
         end
         segs in rel || push!(rel, segs)
     end
     chain(qs; related = rel)
+end
+"A DISTINCT ON term: an annotation by its alias (as ORDER BY), a field through registered transforms, or a path."
+function distinct_on_sql(c, @nospecialize(T::Type), f::String)
+    haskey(c.annotations, Symbol(f)) && return qname(f)
+    segs = split(f, "__")
+    if length(segs) > 1
+        for i in length(segs)-1:-1:1          # the longest field path, then transforms (name__lower)
+            p = join(segs[1:i], "__")
+            col, fld = try resolve_path(c, c.base, T, p) catch; (nothing, nothing) end
+            (col === nothing || fld === nothing || fld.kind === :fk) && continue
+            tr = apply_transforms(col, fld.kind, String.(segs[i+1:end]); field = fld)
+            tr === nothing || return tr[1]
+        end
+    end
+    resolve_path(c, c.base, T, f)[1]
+end
+"Django's select_related() errors: the relations `M` offers (forward keys, reverse one-to-ones, filtered relations)."
+Base.@nospecializeinfer function select_related_error(@nospecialize(M::Type), s::Symbol, @nospecialize(qs))
+    choices = String[string(f.name) for f in all_fields(M) if f.kind === :fk]
+    append!(choices, [string(child_accessor(C)) for C in child_models(M)])
+    append!(choices, [string(rn) for (rn, _, rf) in reverse_relations(M) if rf.one_to_one])
+    qs === nothing || append!(choices, [string(k) for (k, v) in qs.annotations if is_filtered_relation(v)])
+    ch = isempty(choices) ? "(none)" : join(unique(choices), ", ")
+    findfield(modelmeta(M), s) !== nothing && return LookupError("Non-relational field given in select_related: '$s'. Choices are: $ch")
+    hint = any(x -> x[1] === s, reverse_relations(M)) ? " (prefetch_related follows reverse relations that aren't one-to-one)" : ""
+    LookupError("Invalid field name(s) given in select_related: '$s'. Choices are: $ch" * hint)
 end
 select_related(@nospecialize(T::Type{<:Model}), paths...) = select_related(objects(T), paths...)
 select_related(paths::Union{AbstractString,Symbol}...) = qs -> select_related(qs, paths...)
@@ -307,6 +332,11 @@ function check_combinable(@nospecialize(a::QuerySet), @nospecialize(b::QuerySet)
     end
     (a.values_fields === nothing) == (b.values_fields === nothing) ||
         throw(ArgumentError("cannot combine ($op) a values() queryset with a model queryset"))
+    # (Django's: distinct with not distinct, or different DISTINCT ON fields)
+    (a.distinct_fields === nothing) == (b.distinct_fields === nothing) ||
+        throw(ArgumentError("Cannot combine a unique query with a non-unique query."))
+    something(a.distinct_fields, String[]) == something(b.distinct_fields, String[]) ||
+        throw(ArgumentError("Cannot combine queries with different distinct fields."))
 end
 
 """
@@ -757,10 +787,11 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     (columns === nothing && !idonly && !grouped) && append!(sel, extra)
     gps = grouped ? Any[x for g in unique(group) for x in get(group_ps, g, Any[])] : Any[]
     dkw = distinct ? "DISTINCT " : ""
-    if distinct && qs.distinct_fields !== nothing && !isempty(qs.distinct_fields)
+    grouped && has_distinct_fields(qs) && throw(ErrorException("annotate() + distinct(fields) is not implemented."))
+    if distinct && has_distinct_fields(qs)
         backend() isa PostgresBackend ||
             throw(ArgumentError("distinct(fields...) (DISTINCT ON) is only supported on PostgreSQL"))
-        dkw = "DISTINCT ON (" * join([resolve_path(c, c.base, T, f)[1] for f in qs.distinct_fields], ", ") * ") "
+        dkw = "DISTINCT ON (" * join([distinct_on_sql(c, T, f) for f in qs.distinct_fields], ", ") * ") "
     end
     sql = "SELECT $dkw$(join(sel, ", ")) FROM $(qname(c.table))" *
           (c.base == c.table ? "" : " " * qname(c.base)) * join(c.joins) *
@@ -1440,7 +1471,13 @@ Base.only(@nospecialize(T::Type{<:Model}), field::Union{Symbol,AbstractString}, 
 Remove duplicate rows (`SELECT DISTINCT`). With fields, keep the first row of each group of
 equal values: order by those fields first.
 """
-distinct(qs::QuerySet, fields::Union{Symbol,AbstractString}...) = chain(qs; distinct_fields = String[string(f) for f in fields])
+function distinct(qs::QuerySet, fields::Union{Symbol,AbstractString}...)
+    isempty(fields) || (qs.limit === nothing && qs.offset == 0) ||
+        throw(ArgumentError("Cannot create distinct fields once a slice has been taken."))
+    chain(qs; distinct_fields = String[string(f) for f in fields])
+end
+"Does the queryset have distinct(fields...) (DISTINCT ON)?"
+has_distinct_fields(@nospecialize(qs::QuerySet)) = qs.distinct_fields !== nothing && !isempty(qs.distinct_fields)
 distinct(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...) = distinct(objects(T), fields...)
 
 Base.@nospecializeinfer function latest_order(@nospecialize(qs::QuerySet), fields, what)

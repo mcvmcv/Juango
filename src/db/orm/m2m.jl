@@ -97,7 +97,7 @@ function m2m_add_ids!(o, ids, through_defaults)
     isempty(ids) && return
     # a callable default is called once for the call, every new link getting the same value (as Django)
     through_defaults = Dict{Symbol,Any}(Symbol(k) => (v isa Function ? v() : v) for (k, v) in pairs(through_defaults))
-    atomic() do
+    atomic(savepoint = false) do     # (no savepoint of its own, as Django's)
         have = Set(values_list(filter(base_objects(o.through), Q(idkey(o.mine) => o.id), Q(idkeys(o.other) => ids)),
                                idkey(o.other); flat = true))
         new = [id for id in ids if !(id in have)]
@@ -110,7 +110,8 @@ function m2m_add_ids!(o, ids, through_defaults)
         if o.symmetrical          # and the other way round
             back = Set(values_list(filter(base_objects(o.through), Q(idkey(o.other) => o.id), Q(idkeys(o.mine) => new)),
                                    idkey(o.mine); flat = true))
-            append!(rows, [o.through(; attname(o.mine) => stored_value(o.mine, id), attname(o.other) => stored_value(o.other, o.id))
+            append!(rows, [o.through(; attname(o.mine) => stored_value(o.mine, id), attname(o.other) => stored_value(o.other, o.id),
+                                     (Symbol(k) => v for (k, v) in pairs(through_defaults))...)
                            for id in new if !(id in back || id == o.id)])
         end
         bulk_create(rows)
@@ -172,8 +173,8 @@ function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}(), bulk::B
         qs.owner isa GenericOwner && return gen_set!(qs, objs; bulk = bulk, clear = clear)
         o = m2m_owner(qs)
         want = unique(Any[m2m_obj_id(o, x) for x in collect(objs)])
-        clear && return atomic(() -> (clear!(qs); m2m_add_ids!(o, want, through_defaults); qs))
-        atomic() do
+        clear && return atomic(() -> (clear!(qs); m2m_add_ids!(o, want, through_defaults); qs); savepoint = false)
+        atomic(savepoint = false) do
             have = collect(values_list(filter(base_objects(o.through), Q(idkey(o.mine) => o.id)), idkey(o.other); flat = true))
             m2m_remove_ids!(o, setdiff(have, want))
             m2m_add_ids!(o, setdiff(want, have), through_defaults)
@@ -199,6 +200,13 @@ function rev_check(o::ReverseFKOwner, @nospecialize(obj))
         throw(ArgumentError("'$(nameof(o.model))' instance expected, got $(repr(obj))"))
     obj
 end
+"The owner's key the relation stores, refusing an owner without one (Django's message)."
+function rev_key(o::ReverseFKOwner)
+    v = target_value(o.fk, o.instance)
+    v === nothing && throw(ArgumentError("\"$(repr(o.instance))\" needs to have a value for field \"$(something(fk_to_field(o.fk), :id))\" " *
+                                         "before this relationship can be used."))
+    v
+end
 function rev_nullable(o::ReverseFKOwner, what)
     o.fk.null || throw(ArgumentError("$what: $(nameof(o.model)).$(o.fk.name) isn't nullable, so its objects can't be removed " *
                                      "from $(nameof(typeof(o.instance))) (delete them, or give them another)"))
@@ -212,17 +220,16 @@ Point the objects' foreign key at the owner (Django's `RelatedManager.add`): one
 """
 function rev_add!(qs::QuerySet, objs...; bulk::Bool = true)
     o = qs.owner::ReverseFKOwner
+    v = rev_key(o)
     foreach(x -> rev_check(o, x), objs)
     isempty(objs) && return qs
-    v = target_value(o.fk, o.instance)
-    v === nothing && throw(ArgumentError("save the $(nameof(typeof(o.instance))) before adding objects to its $(o.fk.name) relation"))
     if bulk
         any(x -> x.pk === nothing, objs) &&
             throw(ArgumentError("$(repr(first(x for x in objs if x.pk === nothing))) isn't saved: use bulk = false or save it first"))
         update!(filter(base_objects(o.model); pk__in = [x.pk for x in objs]); attname(o.fk) => v)
         foreach(x -> setproperty!(x, o.fk.name, o.instance), objs)
     else
-        atomic() do
+        atomic(savepoint = false) do
             foreach(x -> (setproperty!(x, o.fk.name, o.instance); save!(x)), objs)
         end
     end
@@ -232,18 +239,19 @@ end
 "`remove!(reporter.article, a)`: set the objects' foreign key to NULL (a nullable key only), as Django."
 function rev_remove!(qs::QuerySet, objs...; bulk::Bool = true)
     o = qs.owner::ReverseFKOwner
+    v = rev_key(o)
     rev_nullable(o, "remove!")
     foreach(x -> rev_check(o, x), objs)
     isempty(objs) && return qs
-    v = target_value(o.fk, o.instance)
     for x in objs
-        field_data(x, attname(o.fk)) == v || throw(DoesNotExist(o.model, "$(repr(x)) is not related to $(repr(o.instance))"))
+        # (as Django: the owner's model's DoesNotExist, Reporter.DoesNotExist)
+        field_data(x, attname(o.fk)) == v || throw(DoesNotExist(typeof(o.instance), "$(repr(x)) is not related to $(repr(o.instance))"))
     end
     if bulk
         update!(filter(base_objects(o.model); pk__in = [x.pk for x in objs]); attname(o.fk) => nothing)
         foreach(x -> setproperty!(x, o.fk.name, nothing), objs)
     else
-        atomic(() -> foreach(x -> (setproperty!(x, o.fk.name, nothing); save!(x)), objs))
+        atomic(() -> foreach(x -> (setproperty!(x, o.fk.name, nothing); save!(x; update_fields = [o.fk.name])), objs); savepoint = false)
     end
     rev_changed!(o)
     qs
@@ -251,10 +259,12 @@ end
 "`clear!(reporter.article)`: set every related object's foreign key to NULL (a nullable key only)."
 function rev_clear!(qs::QuerySet; bulk::Bool = true)
     o = qs.owner::ReverseFKOwner
+    rev_key(o)
     rev_nullable(o, "clear!")
     # the rows this relation's queryset sees (its manager's, as Django: clear!(book.readers(manager = :boring)))
     rel = chain(qs; owner = nothing, cache = nothing)
-    bulk ? update!(rel; attname(o.fk) => nothing) : atomic(() -> foreach(x -> (setproperty!(x, o.fk.name, nothing); save!(x)), fetch(rel)))
+    bulk ? update!(rel; attname(o.fk) => nothing) :
+        atomic(() -> foreach(x -> (setproperty!(x, o.fk.name, nothing); save!(x; update_fields = [o.fk.name])), fetch(rel)); savepoint = false)
     rev_changed!(o)
     qs
 end
@@ -266,10 +276,11 @@ stay, as Django can't take them away), and the new ones added.
 """
 function rev_set!(qs::QuerySet, objs; bulk::Bool = true, clear::Bool = false)
     o = qs.owner::ReverseFKOwner
+    rev_key(o)
     want = collect(objs)
     foreach(x -> rev_check(o, x), want)
-    clear && o.fk.null && return atomic(() -> (rev_clear!(qs; bulk = bulk); isempty(want) || rev_add!(qs, want...; bulk = bulk); qs))
-    atomic() do
+    clear && o.fk.null && return atomic(() -> (rev_clear!(qs; bulk = bulk); isempty(want) || rev_add!(qs, want...; bulk = bulk); qs); savepoint = false)
+    atomic(savepoint = false) do
         if o.fk.null
             keep = Set(x.pk for x in want)
             gone = [x for x in fetch(filter(base_objects(o.model), Q(attname(o.fk) => target_value(o.fk, o.instance)))) if !(x.pk in keep)]
@@ -293,6 +304,7 @@ function create(qs::QuerySet; through_defaults = Dict{Symbol,Any}(), kw...)
     in_db(qs, true) do
         if qs.owner isa ReverseFKOwner
             o = qs.owner::ReverseFKOwner
+            rev_key(o)
             obj = create(o.model; kw..., (o.fk.name => o.instance,)...)
             rev_changed!(o)
             return obj

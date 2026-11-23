@@ -159,13 +159,15 @@ Base.@nospecializeinfer function find_reverse(@nospecialize(T::Type), name)
 end
 
 """
-The names a lookup on `T` may start with, sorted as Django lists them: fields (inherited too),
-many-to-many fields, reverse relations by their query names, multi-table children. Hidden ones
+The names a lookup on `T` may start with, sorted as Django lists them: fields (inherited too) and
+a key's `_id` attribute, many-to-many fields, reverse relations by their query names, multi-table children. Hidden ones
 (`related_name = "+"`, auto-created through tables) are left out.
 """
 function lookup_choices(T)
     names = Set{String}(["id"])
     foreach(f -> push!(names, string(f.name)), all_fields(T))
+    # (and a key's column attribute, author_id, as Django's)
+    foreach(f -> attname(f) === f.name || push!(names, string(attname(f))), all_fields(T))
     for r in m2m_relations(T)
         f = r[2]
         !r[3] && f.symmetrical && continue          # a symmetrical self relation has no reverse name
@@ -507,9 +509,18 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     if cl !== nothing
         rsql, rps = value isa Expression ? ((e = compile_expr(c, value)); ("(" * e[1] * ")", e[2])) : (bwrap("?"), Any[conv(cl.prepare(value))])
         # a lookup registered for a transform may skip it: sql(lhs, rhs, inner) is given the column under the transform
-        sql = cl.transform !== nothing && tr_inner !== nothing && applicable(cl.sql, col, rsql, tr_inner) ?
-              cl.sql(col, rsql, tr_inner) : cl.sql(col, rsql)
-        return sql::AbstractString, vcat(colps, rps)
+        # (given markers, so a lookup can use its lhs or rhs more than once, as Django's YearLte: each use gets
+        # its own copy of that side's parameters, in the order they appear)
+        L, R, I = "\0LHS\0", "\0RHS\0", "\0INNER\0"
+        sql = cl.transform !== nothing && tr_inner !== nothing && applicable(cl.sql, L, R, tr_inner) ?
+              cl.sql(L, R, I) : cl.sql(L, R)
+        out, ps = IOBuffer(), Any[]
+        for m in eachmatch(r"\0(LHS|RHS|INNER)\0|[^\0]+"s, String(sql::AbstractString))
+            m.captures[1] === nothing ? print(out, m.match) :
+            m.captures[1] == "LHS" ? (print(out, col); append!(ps, colps)) :
+            m.captures[1] == "RHS" ? (print(out, rsql); append!(ps, rps)) : print(out, tr_inner)
+        end
+        return String(take!(out)), ps
     end
     if f !== nothing || lookup == "search"
         sl = special_lookup(c, something(f, Field(:text)), col, lookup, value)

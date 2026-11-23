@@ -597,6 +597,15 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
             last_ && return resolve_path(c, alias, T, "id")
             continue
         end
+        # place__restaurant (a multi-table child): LEFT JOIN its table on id, as a filter does
+        ci = findfirst(C -> string(child_accessor(C)) == s, child_models(concrete_model(T)))
+        if ci !== nothing
+            Cm = child_models(concrete_model(T))[ci]
+            alias = join!(c, alias, expr_key(c, alias, child_accessor(Cm)), modelmeta(Cm).table, "id", "id"; left = true)
+            T = Cm
+            last_ && return qcol(alias, "id"), nothing
+            continue
+        end
         rel = find_reverse(T, s)
         rel === nothing && throw(lookup_error(T, s))
         rn, M, rf = rel
@@ -847,7 +856,11 @@ function compile_expr(c::SQLCompiler, e::Case)
     end
     d, dps = compile_expr(c, e.default)
     print(io, " ELSE ", d, " END")
-    String(take!(io)), vcat(ps, dps)
+    sql = String(take!(io))
+    # PostgreSQL types a CASE of parameters as text, which it won't write to an inet column: the output field's
+    # type, as Django's
+    backend() isa PostgresBackend && output_kind(e.output) === :ipaddress && (sql = "CAST($sql AS inet)")
+    sql, vcat(ps, dps)
 end
 
 """
@@ -1251,6 +1264,7 @@ end
 Base.@nospecializeinfer function aggregate_here(@nospecialize(qs::QuerySet); kw...)
     T = model_of(qs)
     isempty(kw) && return Dict{Symbol,Any}()
+    has_distinct_fields(qs) && throw(ErrorException("aggregate() + distinct(fields) not implemented."))
     for (k, v) in kw                                     # Django: "fail is not an aggregate expression" (#203)
         v isa Expression || throw(ArgumentError("aggregate received a non-expression: $k = $(repr(v))"))
         contains_aggregate(v) || throw(ArgumentError("aggregate: $k is not an aggregate expression ($(repr(v)))"))

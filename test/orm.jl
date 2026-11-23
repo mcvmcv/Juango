@@ -354,7 +354,7 @@ end
     @test count(ann.pals) == 0 && count(bob.pals) == 0
     @test sort([p.name for p in filter(Person; pals__name = "Cy")]) == ["Cy"]
     @test_throws ArgumentError ManyToManyField(Topic; symmetrical = true)
-    @test_throws ArgumentError ManyToManyField(:self; through = :Membership)
+    @test ManyToManyField(:self; through = :Membership).symmetrical        # (allowed, as Django's since 3.0)
 
     # custom intermediate model
     chess = create(Club; name = "Chess")
@@ -1972,7 +1972,7 @@ Juango.tattr!(b::EcBlock, ::Val{:well}, v) = (b.position = (findfirst(v[1], EC_R
             save!(a; update_fields = [:author_id])
             @test_throws ArgumentError save!(Article(title = "new", author = au); update_fields = [:title])
             gone = get(Article; id = a.id); delete!(get(Article; id = a.id))
-            @test_throws ArgumentError save!(gone; update_fields = [:views])     # no row
+            @test_throws Juango.DatabaseError save!(gone; update_fields = [:views])     # no row (Django's DatabaseError)
         finally
             disconnect!(pre_save, rec; sender = Article)
         end

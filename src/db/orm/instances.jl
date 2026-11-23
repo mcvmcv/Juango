@@ -14,17 +14,25 @@ an unknown name is an error, and so is a row that no longer exists. `pre_save` a
 `post_save` receive `update_fields` (a `Set{Symbol}`, or `nothing`).
 
 `force_insert = true` INSERTs even when the object has a primary key (an IntegrityError if the row
-exists); `force_update = true` UPDATEs, and it's an error if no row was there to update (Django's
-`save(force_insert=..., force_update=...)`).
+exists); `force_update = true` UPDATEs, and it's a `DatabaseError` ("Forced update did not affect any
+rows.") if no row was there to update (Django's `save(force_insert=..., force_update=...)`). For a
+multi-table child, as Django: `force_insert = true` INSERTs the child's own table, and a parent's only
+when a table above it was inserted (else UPDATE, then INSERT if there was no row); a tuple of parents
+(`force_insert = (Counter,)`, or `(Juango.Model,)` for all) INSERTs into those tables without trying an
+UPDATE first.
 """
 Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, update_fields = nothing, touch_auto_now::Bool = true,
-                                      force_insert::Bool = false, force_update::Bool = false)
+                                      force_insert = false, force_update::Bool = false)
     T = typeof(obj)
-    force_insert && force_update && throw(ArgumentError("Cannot force both insert and updating in model saving."))
-    force_insert && update_fields !== nothing && throw(ArgumentError("Cannot force an insert with update_fields."))
+    force_insert = validate_force_insert(T, force_insert)
+    !isempty(force_insert) && force_update && throw(ArgumentError("Cannot force both insert and updating in model saving."))
+    !isempty(force_insert) && update_fields !== nothing && throw(ArgumentError("Cannot force an insert with update_fields."))
+    keyed = false               # a natural or composite key given by hand, on an object not saved before
     if force_update
-        (getfield(obj, :_data)::Dict{Symbol,Any})[:id] === nothing && throw(ArgumentError("Cannot force an update in save!() with no primary key."))
         d = getfield(obj, :_data)::Dict{Symbol,Any}
+        key = d[:id] === nothing && is_composite(T) ? composite_pk(T, d) : d[:id]
+        key === nothing && throw(ArgumentError("Cannot force an update in save() with no primary key."))
+        d[:id] === nothing && (d[:id] = key; keyed = true)
         update_fields === nothing && (update_fields = [attname(f) for f in all_fields(T) if haskey(d, attname(f)) && f.generated === nothing])
     end
     only = update_fields === nothing ? nothing : update_field_set(T, update_fields)
@@ -47,7 +55,12 @@ Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, 
     with_db(alias) do
         check_relations_db(obj)
         number_in_order!(obj)
-        save_here!(obj, only; force_insert = force_insert)
+        try
+            Base.ScopedValues.with(() -> save_here!(obj, only; force_insert = force_insert), FORCED_UPDATE => force_update)
+        catch
+            keyed && ((getfield(obj, :_data)::Dict{Symbol,Any})[:id] = nothing)       # (still not saved)
+            rethrow()
+        end
         set_instance_db!(obj)
     end
 end
@@ -198,7 +211,24 @@ end
 "Whether the object is being saved as loaded from a fixture: pre_save and post_save's `raw` (Django's)."
 const SAVE_RAW = Base.ScopedValues.ScopedValue(false)
 
-Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Union{Nothing,Set{Symbol}} = nothing; force_insert::Bool = false)
+"save!'s force_insert as Django's: false is (), true the model itself, else a tuple of the model's bases (or Model) whose tables to INSERT into."
+function validate_force_insert(@nospecialize(T::Type), x)
+    x === false && return ()
+    x === true && return (T,)
+    x isa Tuple || throw(TypeError(Symbol("save!"), "force_insert must be a bool or tuple.", Union{Bool,Tuple}, x))
+    for m in x
+        (m isa Type && m <: Model) || throw(TypeError(Symbol("save!"), "Invalid force_insert member. $(repr(m)) must be a model subclass.", Type{<:Model}, m))
+        (m === Model || T <: m || m in ancestors(T)) ||
+            throw(TypeError(Symbol("save!"), "Invalid force_insert member. $(nameof(m)) must be a base of $(nameof(T)).", Type{<:Model}, m))
+    end
+    x
+end
+"Is table `M` one force_insert names (itself, a subtype of a member, or with Model, every table)?"
+forced_table(@nospecialize(M::Type), fi::Tuple) = any(m -> m === Model || M <: m || m in ancestors(M) || M === concrete_model(m), fi)
+const FORCED_UPDATE = Base.ScopedValues.ScopedValue(false)
+
+Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Union{Nothing,Set{Symbol}} = nothing; force_insert = ())
+    force_insert isa Bool && (force_insert = validate_force_insert(typeof(obj), force_insert))
     T = typeof(obj)
     data = (getfield(obj, :_data)::Dict{Symbol,Any})
     sync_related_keys!(obj, only)
@@ -217,7 +247,7 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
     store_uploaded_files!(obj, data)
     exprs = [f for f in all_fields(T) if get(data, attname(f), nothing) isa Expression && (only === nothing || attname(f) in only)]
     chain_ = reverse(vcat([concrete_model(T)], ancestors(T)))     # root table first
-    fresh = force_insert && data[:id] !== nothing      # save!(...; force_insert): INSERT with the key given
+    fresh = !isempty(force_insert) && data[:id] !== nothing      # save!(...; force_insert): INSERT with the key given
     if data[:id] === nothing && pk_kind(T) === :uuid
         data[:id] = uuid4()           # UUID keys are made here, so the row is inserted directly
         fresh = true
@@ -229,10 +259,24 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
         length(tables) == 1 ? mark_for_rollback_on_error(() -> update_columns!(tables[1], data, only)) :
             atomic(() -> foreach(M -> update_columns!(M, data, only), tables); savepoint = false)
     else
-        length(chain_) == 1 ? mark_for_rollback_on_error(() -> save_table!(chain_[1], data, true, fresh)) :
+        if length(chain_) == 1
+            mark_for_rollback_on_error(() -> save_table!(chain_[1], data, true, fresh))
+        else
             # a new object: its parent row is inserted first, then each child table's row straight after (an
-            # INSERT, not an UPDATE that finds nothing, as Django)
-            atomic(() -> foreach(M -> save_table!(M, data, M === chain_[1], fresh || (created && M !== chain_[1])), chain_); savepoint = false)
+            # INSERT, not an UPDATE that finds nothing, as Django). With a key and force_insert, as Django's
+            # _save_parents: a parent's table is INSERTed when force_insert names it or a table above was inserted,
+            # else UPDATEd (and INSERTed if no row); the model's own table is INSERTed.
+            atomic(savepoint = false) do
+                inserted = false
+                for M in chain_
+                    own = M === chain_[end]
+                    force = created ? fresh || M !== chain_[1] :
+                            own ? fresh || inserted : inserted || (fresh && forced_table(M, force_insert))
+                    ins = save_table!(M, data, M === chain_[1], force)
+                    inserted = inserted || ins === true
+                end
+            end
+        end
     end
     refresh_computed!(obj)
     refresh_expression_fields!(obj, exprs)
@@ -250,7 +294,9 @@ Base.@nospecializeinfer function refresh_computed!(@nospecialize(obj::Model))
     isempty(fs) && return obj
     for tbl in unique(modelmeta(f.model).table for f in fs)
         mine = [f for f in fs if modelmeta(f.model).table == tbl]
-        row = execute("SELECT " * join([qname(column(f)) for f in mine], ", ") * " FROM $(qname(tbl)) WHERE $(qname("id")) = ?", [data[:id]])
+        w = row_where(mine[1].model, data[:id])
+        w === nothing && continue
+        row = execute("SELECT " * join([qname(column(f)) for f in mine], ", ") * " FROM $(qname(tbl)) WHERE $(w[1])", w[2])
         isempty(row) && continue
         for f in mine
             data[attname(f)] = from_db(f, row[1][Symbol(column(f))])
@@ -291,13 +337,25 @@ function fill_placeholders(sql::AbstractString, phs::Vector{String})
     i = 0
     replace(sql, "?" => _ -> (i += 1; i <= length(phs) ? phs[i] : "?"))
 end
+"""
+The WHERE clause and parameters for an object's row of `M`'s table: by id, or by the parts of a natural or
+composite key. `nothing` while the key isn't known (a key part left to an expression db_default).
+"""
+Base.@nospecializeinfer function row_where(@nospecialize(M::Type), id)
+    is_composite(M) || return (qname("id") * " = ?", Any[id])
+    parts = pk_parts(id)
+    any(p -> p === nothing || p === DB_DEFAULT, parts) && return nothing
+    (join([qname(column(f)) * " = ?" for f in pk_fields(M)], " AND "), parts)
+end
 "After a save with expression values: read the values the database computed into the object."
 Base.@nospecializeinfer function refresh_expression_fields!(@nospecialize(obj::Model), exprs)
     isempty(exprs) && return
     data = (getfield(obj, :_data)::Dict{Symbol,Any})
     for tbl in unique(modelmeta(f.model).table for f in exprs)
         mine = [f for f in exprs if modelmeta(f.model).table == tbl]
-        row = execute("SELECT " * join([qname(column(f)) for f in mine], ", ") * " FROM $(qname(tbl)) WHERE $(qname("id")) = ?", [data[:id]])
+        w = row_where(mine[1].model, data[:id])
+        w === nothing && continue
+        row = execute("SELECT " * join([qname(column(f)) for f in mine], ", ") * " FROM $(qname(tbl)) WHERE $(w[1])", w[2])
         isempty(row) && continue
         for f in mine
             data[attname(f)] = from_db(f, row[1][Symbol(column(f))])
@@ -318,13 +376,21 @@ Base.@nospecializeinfer function update_columns!(@nospecialize(M::Type), data, o
     else
         n = execute_changes("UPDATE $(qname(modelmeta(M).table)) SET $sets WHERE $(qname("id")) = ?", vcat(vals, data[:id]))
     end
-    n == 0 && throw(ArgumentError("save!(...; update_fields or force_update) didn't affect any rows: no $(nameof(M)) with key $(repr(data[:id]))"))
+    # (Django's DatabaseError and messages)
+    n == 0 && throw(DatabaseError(FORCED_UPDATE[] ? "Forced update did not affect any rows." : "Save with update_fields did not affect any rows.", ""))
     nothing
 end
 
-"Write the columns of one table (`M`'s own fields) for an object's data."
+"Write the columns of one table (`M`'s own fields) for an object's data; true if it INSERTed the row."
 Base.@nospecializeinfer function save_table!(@nospecialize(M::Type), data, root::Bool, fresh::Bool = false)
     meta = modelmeta(M)
+    # a key part left to a plain db_default ("en"): that's its value, so the object knows its key (Django reads
+    # it back with RETURNING); an expression db_default stays the database's
+    if is_composite(M) && data[:id] === nothing
+        for f in pk_fields(M)
+            get(data, attname(f), nothing) === DB_DEFAULT && !(f.db_default isa Expression) && (data[attname(f)] = f.db_default)
+        end
+    end
     # deferred fields keep their stored values; generated and not-yet-filled db_default ones are the database's
     fields = [f for f in meta.fields if haskey(data, attname(f)) && f.generated === nothing && data[attname(f)] !== DB_DEFAULT]
     cols = [qname(column(f)) for f in fields]
@@ -346,18 +412,18 @@ Base.@nospecializeinfer function save_table!(@nospecialize(M::Type), data, root:
             cond = join([qname(column(f)) * " = ?" for f in pk_fields(M)], " AND ")
             sets, vals = upd()
             n = execute_changes("UPDATE $tbl SET $sets WHERE $cond", vcat(vals, pk_parts(key)))
-            n > 0 && (data[:id] = key; return)
+            n > 0 && (data[:id] = key; return false)
         end
         phs, vals = ins()
         execute_changes(fill_placeholders(insert_sql(backend(), tbl, cols), phs) |> s -> replace(s, r" RETURNING .*$" => ""), vals)
         data[:id] = composite_pk(M, data)
-        return
+        return true
     end
     if fresh
         phs, vals = ins()
         execute(fill_placeholders(insert_sql(backend(), tbl, vcat(qname("id"), cols)), vcat("?", phs)) |> s -> replace(s, r" RETURNING .*$" => ""),
                 vcat(data[:id], vals))
-        return
+        return true
     end
     if data[:id] !== nothing
         n = if isempty(cols) && isempty(dbd)
@@ -366,15 +432,16 @@ Base.@nospecializeinfer function save_table!(@nospecialize(M::Type), data, root:
             sets, vals = upd()
             execute_changes("UPDATE $tbl SET $sets WHERE $(qname("id")) = ?", vcat(vals, data[:id]))
         end
-        n > 0 && return
+        n > 0 && return false
         phs, vals = ins()
         execute_insert(fill_placeholders(insert_sql(backend(), tbl, vcat(qname("id"), cols)), vcat("?", phs)), vcat(data[:id], vals))
         root && sync_sequence(backend(), meta.table)
-        return
+        return true
     end
     root || error("internal: child table saved before its parent")
     phs, vals = ins()
     data[:id] = execute_insert(fill_placeholders(insert_sql(backend(), tbl, cols), phs), vals)
+    true
 end
 
 "Delete the object (and cascade to related objects)."

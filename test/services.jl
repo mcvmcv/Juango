@@ -463,10 +463,11 @@ end
         add!(e.topics, t1, t2)
         @test through_saves[] == 0              # (the through rows are bulk-inserted, as Django's: no post_save, #253)
         disconnect!(post_save, on_through; sender = through)
-        add!(e.topics, t1)                                               # nothing new: no signal
+        add!(e.topics, t1)                                  # nothing new: the signals with an empty pk_set, as Django's
         remove!(e.topics, t2)
         clear!(t1.essays)
         @test changes == [(:pre_add, "sig-essay", Topic, Set([t1.id, t2.id]), false), (:post_add, "sig-essay", Topic, Set([t1.id, t2.id]), false),
+                          (:pre_add, "sig-essay", Topic, Set(), false), (:post_add, "sig-essay", Topic, Set(), false),
                           (:pre_remove, "sig-essay", Topic, Set([t2.id]), false), (:post_remove, "sig-essay", Topic, Set([t2.id]), false),
                           (:pre_clear, "sig-t1", Essay, nothing, true), (:post_clear, "sig-t1", Essay, nothing, true)]
         disconnect!(m2m_changed, on_m2m; sender = through)

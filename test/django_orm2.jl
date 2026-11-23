@@ -1017,6 +1017,7 @@ end
     save!(DfdDBDefaults(id = obj1.pk)); refresh!(obj1)
     @test obj1.null == 1.1
     o = create(DfdDBDefaultsPK)                                                           # test_pk_db_default
+    @test o.pk == "en"
     o = get(DfdDBDefaultsPK; pk = "en")
     @test o.pk == "en" && o.language_code == "en"
     o2 = create(DfdDBDefaultsPK; language_code = "de")

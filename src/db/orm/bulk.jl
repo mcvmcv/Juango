@@ -361,6 +361,7 @@ unless the call sets them itself or passes `touch_auto_now = false` (Django leav
 """
 function update!(qs::QuerySet; touch_auto_now::Bool = true, kw...)
     assert_unsliced(qs, "update")          # Django: "Cannot update a query once a slice has been taken."
+    has_distinct_fields(qs) && throw(ArgumentError("Cannot call update() after .distinct(*fields)."))
     vals = touch_auto_now && !isempty(kw) ? with_auto_now(model_of(qs), kw) : kw
     in_db(qs, true) do
         T = model_of(qs)

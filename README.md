@@ -187,6 +187,8 @@ explain(filter(Post; published=true))        # the database's query plan
 
 Saving an object with deferred fields writes only the fields that were loaded.
 
+As in Django, `distinct(qs, fields...)` terms may be annotations or go through registered transforms (`:name__lower`), and it refuses a sliced queryset, `update!`, `aggregate` and an aggregate `annotate`; querysets combined with `|` or `&` must have the same `distinct` ("Cannot combine queries with different distinct fields.").
+
 For many rows at once:
 
 ```julia
