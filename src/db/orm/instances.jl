@@ -319,6 +319,7 @@ Base.@nospecializeinfer function write_values(@nospecialize(M::Type), fields, da
         v = data[attname(f)]
         if v isa Expression
             contains_aggregate(v) && throw(ArgumentError("Aggregate functions are not allowed in this query ($(f.name) = $(repr(v)))"))
+            contains_window(v) && throw(ArgumentError("Window expressions are not allowed in this query ($(f.name)=$(repr(v)))."))
             insert && refs_columns(v) && throw(ArgumentError(
                 "$(nameof(M)).$(f.name) = $(repr(v)): F() expressions can only be used to update, not to insert"))
             c = SQLCompiler(M)

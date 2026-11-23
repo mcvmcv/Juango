@@ -31,12 +31,15 @@ mutable struct SQLCompiler
     outer_refs::Union{Nothing,Vector{String}}   # while compiling an annotation: the columns OuterRefs in it read here
     alias_names::Set{Symbol}    # annotations made by alias(): compiled where used, not selected (#207)
     expr_negated::Bool          # compiling a negated lookup inside a Case/aggregate condition (its NULL guard)
+    fr_override::Vector{Any}    # compiling a FilteredRelation's condition: (alias, relation path, its join's alias, model)
+    fr_models::Dict{Any,Any}    # FilteredRelation join key => its model
+    qualify::Union{Nothing,Set{Symbol}}   # recompiling a condition on a window for the wrapping query: the annotations it reads
 end
 Base.@nospecializeinfer function SQLCompiler(@nospecialize(T::Type); outer = nothing)
     table = modelmeta(T).table
     counter = outer === nothing ? Ref(0) : outer.counter
     c = SQLCompiler(T, table, table, String[], Dict{Any,String}(), Set{String}(), counter, false, 0,
-                    Dict{Symbol,Any}(), false, outer, false, Any[], 0, nothing, Set{Symbol}(), false)
+                    Dict{Symbol,Any}(), false, outer, false, Any[], 0, nothing, Set{Symbol}(), false, Any[], Dict{Any,Any}(), nothing)
     outer === nothing || (c.base = new_alias!(c))   # subqueries alias their table: no clash with the outer one
     c
 end
@@ -69,67 +72,148 @@ function join!(c::SQLCompiler, parent, key, table, childcol, parentcol; left::Bo
     c.aliases[key] = a
 end
 
-"Strip `prefix__` from the lookups of a FilteredRelation condition."
-function strip_relation(q::Q, prefix::AbstractString, rel::AbstractString)
-    kids = Any[]
-    for ch in q.children
-        if ch isa Q
-            push!(kids, strip_relation(ch, prefix, rel))
-        elseif ch isa Pair
-            k = string(ch.first)
-            startswith(k, prefix) ||
-                throw(ArgumentError("FilteredRelation condition '$k' must start with the relation name '$rel'"))
-            push!(kids, Symbol(chopprefix(k, prefix)) => ch.second)
-        else
-            throw(ArgumentError("FilteredRelation conditions must be lookups, not $(typeof(ch))"))
-        end
+"""
+One step of a FilteredRelation's path from `M` at `alias`: LEFT JOIN relation `seg` (a foreign key, reverse
+relation or generic relation; many-to-many ones are split into their two steps first) and return
+`(alias, model, multi)`. `on(alias, model)`, when given, adds SQL to the ON clause.
+"""
+Base.@nospecializeinfer function fr_step!(c::SQLCompiler, alias, @nospecialize(M::Type), seg::AbstractString, key; on = nothing)
+    f = findfield(modelmeta(M), Symbol(seg))
+    if f !== nothing && f.kind === :fk
+        alias = field_alias!(c, alias, M, f)
+        R = related_model(f)
+        return join!(c, alias, key, modelmeta(R).table, target_column(f), column(f); left = true,
+                     extra_on = on === nothing ? nothing : (x -> on(x, R))), R, false
     end
-    Q(q.connector, kids, q.negated)
+    g = f === nothing ? find_generic(generic_relations(M), seg) : nothing
+    if g !== nothing
+        R = related_model(g)
+        ctf, fkf = g.through
+        ctcol, ctid = column(getfield_meta(R, ctf)), generic_ct(M, g).id::Integer
+        return join!(c, alias, key, modelmeta(R).table, column(getfield_meta(R, fkf)), "id"; left = true,
+                     extra_on = x -> "$(qcol(x, ctcol)) = $ctid" * (on === nothing ? "" : " AND " * on(x, R))), R, true
+    end
+    r = f === nothing ? find_reverse(M, seg) : nothing
+    r === nothing && throw(lookup_error(M, seg))
+    _, R, rf = r
+    join!(c, alias, key, modelmeta(R).table, column(rf), target_column(rf); left = true,
+          extra_on = on === nothing ? nothing : (x -> on(x, R))), R, true
 end
 
-"""
-The relation of FilteredRelation annotation `name` on `T`: `(model, related column, base column)`,
-joined as related.col = base.col.
-"""
-Base.@nospecializeinfer function filtered_target(@nospecialize(T::Type), fr)
-    rel = fr.relation
-    occursin("__", rel) && throw(ArgumentError("FilteredRelation('$rel'): nested relations are not supported"))
-    f = findfield(modelmeta(T), Symbol(rel))
-    if f !== nothing
-        f.kind === :fk || throw(ArgumentError("FilteredRelation('$rel'): '$rel' is not a relation of $T"))
-        modelmeta(f.model).table == modelmeta(T).table ||
-            throw(ArgumentError("FilteredRelation('$rel'): relations inherited from a parent model are not supported"))
-        return related_model(f), target_column(f), column(f), false
+"A FilteredRelation's path from `M` as join steps: many-to-many relations become their two steps (via the through model)."
+Base.@nospecializeinfer function fr_segments(@nospecialize(M::Type), parts)
+    segs, ends = String[], Int[]           # (ends: each part's last step)
+    for p in parts
+        mm = findfield(modelmeta(M), Symbol(p)) === nothing ? find_m2m_query(M, p) : nothing
+        if mm !== nothing
+            s1, s2 = m2m_path(mm[2], mm[3])
+            push!(segs, string(s1), string(s2))
+        else
+            push!(segs, String(p))
+        end
+        push!(ends, length(segs))
+        M = fr_target(M, p)
+        M === nothing && break
     end
-    find_m2m_query(T, rel) === nothing ||
-        throw(ArgumentError("FilteredRelation('$rel'): many-to-many relations are not supported; filter the through model"))
-    r = find_reverse(T, rel)
-    r === nothing && throw(lookup_error(T, rel))
-    _, M, rf = r
-    M, column(rf), target_column(rf), true
+    segs, ends
+end
+"The model relation `p` of `M` leads to (generic relations too), or nothing."
+Base.@nospecializeinfer function fr_target(@nospecialize(M::Type), p)
+    R = relation_target(M, [p])
+    R !== nothing && return R
+    g = find_generic(generic_relations(M), p)
+    g === nothing ? nothing : related_model(g)
 end
 
 """
 Join FilteredRelation annotation `name` (once per query) and return `(alias, model)`. The
-condition goes in the ON clause, so rows of the base model without a match survive
-(LEFT JOIN) and aggregates see only matching related rows.
+condition goes in the last join's ON clause, so rows of the base model without a match survive
+(LEFT JOIN) and aggregates see only matching related rows. It is compiled against the base model,
+with the relation's path standing for this join (Django's filtered relation).
 """
 Base.@nospecializeinfer function filtered_join!(c::SQLCompiler, alias, @nospecialize(T::Type), name::Symbol)
     key = (alias, :__filtered, name)
+    haskey(c.aliases, key) && return c.aliases[key], c.fr_models[key]
     fr = c.annotations[name]::FilteredRelation
-    M, childcol, parentcol, reverse = filtered_target(T, fr)
-    reverse && c.scope !== :expr && c.scope != 0 && (c.distinct = true)
-    haskey(c.aliases, key) && return c.aliases[key], M
-    a = new_alias!(c)
-    njoins = length(c.joins)
-    csql, cps = compile_q(c, a, M, strip_relation(fr.condition, fr.relation * "__", fr.relation), false)
-    length(c.joins) == njoins ||
-        throw(ArgumentError("FilteredRelation('$(fr.relation)'): the condition may only use $(nameof(M))'s own fields"))
-    push!(c.leftjoined, a)
-    push!(c.joins, " LEFT OUTER JOIN $(qname(modelmeta(M).table)) $(qname(a)) ON $(qcol(a, childcol)) = $(qcol(alias, parentcol)) AND $csql")
-    append!(c.join_params, cps)
-    c.aliases[key] = a
+    parts = String.(split(fr.relation, "__"))
+    a, M, rest = alias, T, parts
+    # a path that starts with another filtered relation starts from its join
+    if Symbol(parts[1]) != name && is_filtered_relation(get(c.annotations, Symbol(parts[1]), nothing))
+        a, M = filtered_join!(c, alias, T, Symbol(parts[1]))
+        rest = parts[2:end]
+    end
+    isempty(rest) && throw(ArgumentError("FilteredRelation('$(fr.relation)'): not a relation"))
+    segs, ends = fr_segments(M, rest)
+    steps = Any[]                    # (path prefix, its join, model): the condition's paths through them reuse them
+    for (i, sg) in enumerate(segs[1:end-1])
+        a, M, _ = fr_step!(c, a, M, sg, (a, :__filtered_step, name, i))
+        j = findfirst(==(i), ends)                         # the end of the path's j-th part
+        rest === parts && j !== nothing && push!(steps, (parts[1:j], a, M))
+    end
+    on = isempty(fr.condition.children) ? nothing : function (x, R)
+        for st in steps
+            push!(c.fr_override, (alias, st...))
+        end
+        push!(c.fr_override, (alias, parts, x, R))
+        sc, ru, dst = c.scope, c.reuse_upto, c.distinct
+        c.scope, c.reuse_upto = :expr, 0
+        try
+            csql, cps = compile_q(c, alias, T, fr.condition, false)
+            append!(c.join_params, cps)
+            csql
+        finally
+            for _ in 0:length(steps)
+                pop!(c.fr_override)
+            end
+            c.scope, c.reuse_upto, c.distinct = sc, ru, dst     # (the condition's joins don't make rows distinct)
+        end
+    end
+    a, M, _ = fr_step!(c, a, M, segs[end], key; on)
+    # (no DISTINCT: as Django, a multi-valued filtered relation gives a row per related row)
+    c.fr_models[key] = M
     a, M
+end
+
+"""
+Django's checks on a FilteredRelation annotation `name` of a query on `T` (`anns`: the query's other
+annotations): the alias, the relation path and the condition's lookups.
+"""
+Base.@nospecializeinfer function validate_filtered_relation(@nospecialize(T::Type), name, fr, anns)
+    occursin('.', string(name)) && throw(ArgumentError("FilteredRelation doesn't support aliases with periods (got '$name')."))
+    rparts = String.(split(fr.relation, "__"))
+    M = T
+    for (i, p) in enumerate(rparts)
+        if i == 1 && haskey(anns, Symbol(p)) && is_filtered_relation(anns[Symbol(p)])
+            M = relation_target(T, String.(split(anns[Symbol(p)].relation, "__")))
+            M === nothing && break                     # (a chained path through a generic relation: not checked further)
+            continue
+        end
+        R = fr_target(M, p)
+        if R === nothing
+            (is_lookup_name(p) || findfield(modelmeta(M), Symbol(p)) !== nothing) &&
+                throw(ArgumentError("FilteredRelation's relation_name cannot contain lookups (got '$(fr.relation)')."))
+            throw(lookup_error(M, p))
+        end
+        M = R
+    end
+    check(q::Q) = foreach(check, q.children)
+    check(@nospecialize(x)) = nothing
+    function check(ch::Pair)
+        ch.second isa QuerySet && throw(ArgumentError("Passing a QuerySet within a FilteredRelation is not supported."))
+        k = string(ch.first)
+        ps = String.(split(k, "__"))
+        explicit = length(ps) > 1 && is_lookup_name(ps[end]) && ends_in_lookup(T, ps)
+        fparts = explicit ? ps[1:end-1] : ps
+        path = fparts[1:max(length(fparts) - (explicit ? 1 : 2), 0)]
+        for (i, p) in enumerate(path)
+            i <= length(rparts) && rparts[i] != p && throw(ArgumentError(
+                "FilteredRelation's condition doesn't support relations outside the '$(fr.relation)' (got '$k')."))
+        end
+        startswith(k, fr.relation * "__") && length(fparts) > length(rparts) + 1 && throw(ArgumentError(
+            "FilteredRelation's condition doesn't support nested relations deeper than the relation_name (got '$k' for '$(fr.relation)')."))
+    end
+    check(fr.condition)
+    nothing
 end
 
 """
@@ -224,6 +308,12 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     parts = split(string(key), "__")
     lookup = "exact"
     ends_in_lookup(T, parts) && (lookup = String(pop!(parts)))
+    # in a FilteredRelation's condition, its relation's path is its join
+    for (oa, op, ta, TM) in Iterators.reverse(c.fr_override)
+        (alias == oa && length(parts) >= length(op) && parts[1:length(op)] == op) || continue
+        rem = String.(parts[length(op)+1:end])
+        return compile_lookup(c, ta, TM, join(vcat(isempty(rem) ? ["id"] : rem, [lookup]), "__"), value, negated)
+    end
     # inside an aggregate's filter or a Case condition, ~Q(store__name = "x") is a condition on the joined
     # row (Django's FILTER (WHERE NOT ...)), not exclude()'s "no related row matches" subquery
     # (the NULL guard below still applies there, as Django's, through the relations the lookup follows)
@@ -262,20 +352,26 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     if alias == c.base && is_filtered_relation(get(c.annotations, Symbol(fname), nothing))
         subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
         if negated
-            # exclude(): no matching related row, as an EXISTS over the filtered relation
-            fr = c.annotations[Symbol(fname)]::FilteredRelation
-            M, childcol, parentcol, _ = filtered_target(T, fr)
-            a = new_alias!(c)
-            csql, cps = compile_q(c, a, M, strip_relation(fr.condition, fr.relation * "__", fr.relation), false)
-            sql, ps = compile_lookup(c, a, M, subkey, value, negated)
-            return ("EXISTS (SELECT 1 FROM $(qname(modelmeta(M).table)) $(qname(a)) WHERE $(qcol(a, childcol)) = $(qcol(alias, parentcol)) AND $csql AND $sql)",
-                    vcat(cps, ps))
+            # exclude(): no row of the base model with a matching row through the filtered relation (EXISTS
+            # here: the caller negates it)
+            sub = SQLCompiler(T; outer = c)
+            merge!(sub.annotations, c.annotations)
+            a, M = filtered_join!(sub, sub.base, T, Symbol(fname))
+            sql, ps = compile_lookup(sub, a, M, subkey, value, false)
+            return ("EXISTS (SELECT 1 FROM $(qname(sub.table)) $(qname(sub.base))$(join(sub.joins)) WHERE " *
+                    "$(qcol(sub.base, "id")) = $(qcol(alias, "id")) AND $sql)", vcat(sub.join_params, ps))
         end
         a, M = filtered_join!(c, alias, T, Symbol(fname))
         return compile_lookup(c, a, M, subkey, value, negated)
-    elseif alias == c.base && isempty(rest) && haskey(c.annotations, Symbol(fname)) && contains_window(c.annotations[Symbol(fname)])
+    elseif alias == c.base && isempty(rest) && haskey(c.annotations, Symbol(fname)) && c.scope isa Int && c.scope > 0 &&
+           windowing(c.annotations[Symbol(fname)], c.annotations)
         # Window functions can't appear in WHERE: the query is wrapped and this compares the column.
         c.uses_window = true
+        c.qualify === nothing || push!(c.qualify, Symbol(fname))
+        col = qname(fname)
+    elseif alias == c.base && isempty(rest) && haskey(c.annotations, Symbol(fname)) && c.qualify !== nothing && c.scope isa Int && c.scope > 0
+        # the same condition reads other annotations too: they are columns of the wrapped query
+        push!(c.qualify, Symbol(fname))
         col = qname(fname)
     elseif alias == c.base && isempty(rest) && haskey(c.annotations, Symbol(fname))
         a = c.annotations[Symbol(fname)]

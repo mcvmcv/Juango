@@ -162,7 +162,11 @@ function select_related(@nospecialize(qs::QuerySet), paths...)
     for p in paths
         segs = Symbol.(split(string(p), "__"))
         M = T
-        for s in segs
+        for (i, s) in enumerate(segs)
+            if i == 1 && (j = findlast(a -> a.first === s, qs.annotations)) !== nothing && is_filtered_relation(qs.annotations[j].second)
+                M = filtered_model(T, qs.annotations, s)               # a FilteredRelation: its related object
+                continue
+            end
             f = findfield(modelmeta(M), s)
             if f !== nothing && f.kind === :fk && f.name === s
                 M = related_model(f)
@@ -193,6 +197,23 @@ function distinct_on_sql(c, @nospecialize(T::Type), f::String)
     end
     resolve_path(c, c.base, T, f)[1]
 end
+"Annotation `k` of a query's annotation list, or nothing."
+ann_get(anns, k::Symbol) = (j = findlast(a -> a.first === k, anns); j === nothing ? nothing : anns[j].second)
+"The model FilteredRelation annotation `name` of a query on `T` leads to."
+Base.@nospecializeinfer function filtered_model(@nospecialize(T::Type), anns, name::Symbol)
+    fr = anns[findlast(a -> a.first === name, anns)].second
+    parts = split(fr.relation, "__")
+    M = T
+    if Symbol(parts[1]) != name && (j = findlast(a -> a.first === Symbol(parts[1]), anns)) !== nothing && is_filtered_relation(anns[j].second)
+        M = filtered_model(T, anns, Symbol(parts[1]))
+        parts = parts[2:end]
+    end
+    for p in parts
+        M = fr_target(M, p)
+        M === nothing && throw(ArgumentError("FilteredRelation('$(fr.relation)'): not a relation path"))
+    end
+    M
+end
 "Django's select_related() errors: the relations `M` offers (forward keys, reverse one-to-ones, filtered relations)."
 Base.@nospecializeinfer function select_related_error(@nospecialize(M::Type), s::Symbol, @nospecialize(qs))
     choices = String[string(f.name) for f in all_fields(M) if f.kind === :fk]
@@ -215,9 +236,15 @@ After fetching, load related objects with one extra query per lookup: reverse re
 (`:comments__author`). Prefetched reverse relations answer `count`, iteration, `first`
 and `exists` from memory; further filtering queries the database again.
 """
-prefetch_related(@nospecialize(qs::QuerySet), lookups...) =
-    lookups == (nothing,) ? chain(qs; prefetch = Prefetch[]) :         # prefetch_related(qs, nothing) clears, as Django's None
+function prefetch_related(@nospecialize(qs::QuerySet), lookups...)
+    lookups == (nothing,) && return chain(qs; prefetch = Prefetch[])          # prefetch_related(qs, nothing) clears, as Django's None
+    for l in lookups
+        l isa Prefetch && continue
+        is_filtered_relation(ann_get(qs.annotations, Symbol(first(split(string(l), "__"))))) &&
+            throw(ArgumentError("prefetch_related() is not supported with FilteredRelation."))
+    end
     chain(qs; prefetch = vcat(qs.prefetch, Prefetch[l isa Prefetch ? l : Prefetch(l) for l in lookups]))
+end
 prefetch_related(@nospecialize(T::Type{<:Model}), lookups...) = prefetch_related(objects(T), lookups...)
 prefetch_related(lookups::Union{AbstractString,Symbol,Prefetch}...) = qs -> prefetch_related(qs, lookups...)
 
@@ -578,7 +605,10 @@ function related_columns!(c::SQLCompiler, paths, deferred = Symbol[]; required =
         for (i, s) in enumerate(path)
             f = findfield(modelmeta(M), s)
             C = f === nothing ? mti_child(M, s) : nothing
-            if C !== nothing                      # a multi-table child: LEFT JOIN child.id = this.id
+            if i == 1 && is_filtered_relation(get(c.annotations, s, nothing))
+                left = true                       # a FilteredRelation: its (LEFT) join
+                alias, M = filtered_join!(c, alias, M, s)
+            elseif C !== nothing                      # a multi-table child: LEFT JOIN child.id = this.id
                 left = true
                 alias = join!(c, alias, (alias, s, :child), modelmeta(C).table, "id", "id"; left = true)
                 M = C
@@ -639,6 +669,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     # WHERE is compiled first, so values() and annotations can reuse its joins (its SQL still goes after them)
     # WHERE, HAVING for conditions on aggregate annotations, or an outer WHERE for window ones
     wparts, wps, hparts, hps, oparts, ops = String[], Any[], String[], Any[], String[], Any[]
+    qual_set = Set{Symbol}()
     if qs.isnone
         push!(wparts, sql_false(backend()))
     else
@@ -648,6 +679,11 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
             c.uses_window = false
             sql, p = compile_q(c, c.base, T, q, false)
             if c.uses_window
+                # again, reading every annotation as a column of the wrapped query (an aggregate one in the same
+                # Q as a window one can't go in HAVING), and noting which: they're selected inside
+                c.qualify = qual_set
+                sql, p = compile_q(c, c.base, T, q, false)
+                c.qualify = nothing
                 push!(oparts, sql); append!(ops, p)
             elseif c.uses_aggregate
                 push!(hparts, sql); append!(hps, p)
@@ -721,6 +757,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     end
     pre_ann = copy(sel)            # the select list without annotations (for a wrapping query)
     ann_sel, ann_ps = String[], Any[]
+    hidden_anns = Set{String}()          # selected only for the wrapping query's conditions
     # values() rows have only the fields asked for: an annotation made before values() is selected only
     # when values() names it, the GROUP BY uses it or the query is ordered by it (#201)
     vsel = qs.values_fields === nothing || columns !== nothing || idonly ? nothing :
@@ -728,10 +765,14 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
                             [lstrip(o, '-') for o in qs.order if o isa AbstractString],
                             [o.expr.name for o in qs.order if o isa OrderBy && o.expr isa F]))
     for (k, v) in qs.annotations
-        (is_filtered_relation(v) || k in qs.aliases) && continue           # alias(): not selected, not grouped by
-        vsel === nothing || string(k) in vsel || contains_window(v) || continue      # (a window one may be filtered on, outside)
+        qual = k in qual_set          # read by a condition outside a wrapped query
+        is_filtered_relation(v) && continue
+        (k in qs.aliases && !qual) && continue           # alias(): not selected, not grouped by
+        vsel === nothing || string(k) in vsel || windowing(v, c.annotations) || qual || continue      # (a window one may be filtered on, outside)
+        (k in qs.aliases || (vsel !== nothing && !(string(k) in vsel))) && push!(hidden_anns, qname(string(k)))
         # ordered by but neither asked for nor an aggregate: grouped by too, as Django adds it
         if vsel !== nothing && (grouped || qs.group_fields !== nothing) && !aggregating(v, qs.annotations) && !(string(k) in qs.values_fields) &&
+           !windowing(v, c.annotations) && !qual &&
            (qs.group_fields === nothing || !(string(k) in qs.group_fields))
             push!(group, qname(string(k)))
         end
@@ -814,14 +855,31 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     if !isempty(oparts)
         # Conditions on window annotations: compute them in a subquery (named like the base table,
         # so conditions on the model's own columns still resolve) and filter outside it.
-        inner_sel = vcat(columns !== nothing || idonly ? [qname(c.base) * ".*"] : pre_ann, ann_sel)
-        inner_ps = ann_ps
+        qual_sel, qual_ps = String[], Any[]
+        for (k, v) in c.annotations                   # windows filtered on directly: hidden columns
+            startswith(string(k), "__qualify") || continue
+            s_, p_ = compile_expr(c, v)
+            push!(qual_sel, "$s_ AS $(qname(string(k)))"); append!(qual_ps, p_)
+        end
+        outer_sel = idonly ? pk_select(c.base, T) : columns !== nothing ? columns : "*"
+        if columns !== nothing || idonly
+            inner_sel = vcat([qname(c.base) * ".*"], ann_sel, qual_sel)
+        elseif qs.values_fields !== nothing
+            # values(): the model's columns too (conditions may read them), the values under other names
+            vals = [match(r"^(.*) AS (\S+)$", x) for x in pre_ann]
+            inner_sel = vcat([qname(c.base) * ".*"], ["$(m[1]) AS $(qname("__v_" * strip(m[2], ['"', '`'])))" for m in vals],
+                             ann_sel, qual_sel)
+            outer_sel = join(vcat(["$(qname("__v_" * strip(m[2], ['"', '`']))) AS $(m[2])" for m in vals],
+                                  [m[1] for m in (match(r" AS (\S+)$", x) for x in ann_sel) if !(m[1] in hidden_anns)]), ", ")
+        else
+            inner_sel = vcat(pre_ann, ann_sel, qual_sel)
+        end
+        inner_ps = vcat(ann_ps, qual_ps)
         inner = "SELECT $dkw$(join(inner_sel, ", ")) FROM $(qname(c.table))" *
                 (c.base == c.table ? "" : " " * qname(c.base)) * join(c.joins) *
                 (isempty(wparts) ? "" : " WHERE " * join(wparts, " AND ")) *
                 (grouped && !isempty(group) ? " GROUP BY " * join(unique(group), ", ") : "") *
                 (isempty(hparts) ? "" : " HAVING " * join(hparts, " AND "))
-        outer_sel = idonly ? pk_select(c.base, T) : columns !== nothing ? columns : "*"
         sql = "SELECT $outer_sel FROM ($inner) AS $(qname(c.base)) WHERE " * join(oparts, " AND ") *
               o * limit_offset_sql(backend(), qs.limit, qs.offset)
         return sql, vcat(inner_ps, c.join_params, wps, gps, hps, ops, ops_order), c, related
@@ -980,7 +1038,17 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
                 parent === nothing && continue
                 r = from_prefixed_row(M, row, alias * "__")
                 pf = findfield(modelmeta(typeof(parent)), path[end])
-                if pf === nothing
+                if length(path) == 1 && is_filtered_relation(ann_get(qs.annotations, path[1]))
+                    # a FilteredRelation's object (or nothing): obj.name, and the start of longer paths
+                    (getfield(parent, :_cache)::Dict{Symbol,Any})[path[1]] = r
+                    (getfield(parent, :_data)::Dict{Symbol,Any})[path[1]] = r
+                    # through a reverse foreign key: the object points back (book_join.author: no query), as Django
+                    rel = ann_get(qs.annotations, path[1]).relation
+                    if r !== nothing && !occursin("__", rel)
+                        rr = find_reverse(typeof(parent), rel)
+                        rr === nothing || rr[3].kind !== :fk || ((getfield(r, :_cache)::Dict{Symbol,Any})[rr[3].name] = parent)
+                    end
+                elseif pf === nothing
                     # a reverse one-to-one: remember that there's no row too, so the accessor doesn't query
                     (getfield(parent, :_cache)::Dict{Symbol,Any})[path[end]] = PrefetchedList(r === nothing ? Any[] : Any[r])
                     # and the row points back (pool.style.pool: no query)
@@ -1042,7 +1110,9 @@ Base.@nospecializeinfer function fetch_values(@nospecialize(qs::QuerySet))
     convs = Dict{Symbol,Any}()
     for f in qs.values_fields
         (haskey(c.annotations, Symbol(f)) || any(p -> p.first === Symbol(f), anns)) && continue
-        _, fld = resolve_path(SQLCompiler(T), modelmeta(T).table, T, f)
+        rc = SQLCompiler(T)
+        merge!(rc.annotations, c.annotations)          # (a path through a FilteredRelation)
+        _, fld = resolve_path(rc, modelmeta(T).table, T, f)
         fld === nothing || (convs[Symbol(f)] = fld)
     end
     outs = Dict{Symbol,Union{Nothing,Field}}(k => typed_output(T, v) for (k, v) in anns if !is_filtered_relation(v))
@@ -1373,12 +1443,16 @@ Base.@nospecializeinfer Base.last(@nospecialize(T::Type{<:Model})) = last(object
 Check the names given to only/defer: the model's fields, inherited ones included, or a related
 model's (`:profile__salary`, for select_related).
 """
-function check_deferrable(T, names)
+function check_deferrable(T, names, anns = Pair{Symbol,Any}[])
     for n in names
         n in (:id, :pk) && throw(ArgumentError("the primary key can't be deferred"))
         M = T
         parts = split(string(n), "__")
         for (i, p) in enumerate(parts)
+            if i == 1 && i < length(parts) && is_filtered_relation(ann_get(anns, Symbol(p)))
+                M = filtered_model(T, anns, Symbol(p))              # a FilteredRelation (select_related)
+                continue
+            end
             f = findfirst(g -> g.name === Symbol(p), all_fields(M))
             if f === nothing && i < length(parts) && (C = mti_child(M, p)) !== nothing
                 M = C                                         # through a multi-table child link (select_related)
@@ -1408,7 +1482,7 @@ function defer(@nospecialize(qs::QuerySet), fields...)
     T = model_of(qs)
     fields == (nothing,) && return chain(qs; deferred = Symbol[], immediate = nothing)
     names = ignore_unloadable(T, deferrable_names(T, fields))
-    check_deferrable(T, names)
+    check_deferrable(T, names, qs.annotations)
     qs.immediate === nothing && return chain(qs; deferred = unique(vcat(qs.deferred, names)))
     # after only(): those names leave the set to load; if none is left, only these are deferred (as Django)
     left = setdiff(qs.immediate, names)
@@ -1475,6 +1549,8 @@ a later `only` replaces an earlier one, as Django.
 """
 function Base.only(@nospecialize(qs::QuerySet), field::Union{Symbol,AbstractString,Nothing}, fields::Union{Symbol,AbstractString,Nothing}...)
     qs.values_fields === nothing || throw(ArgumentError("only() can't follow values() or values_list()"))
+    any(x -> x !== nothing && is_filtered_relation(ann_get(qs.annotations, Symbol(first(split(string(x), "__"))))), (field, fields...)) &&
+        throw(ArgumentError("only() is not supported with FilteredRelation."))
     T = model_of(qs)
     keep = ignore_unloadable(T, deferrable_names(T, (field, fields...)))
     check_deferrable(T, filter(n -> n !== :id, keep))

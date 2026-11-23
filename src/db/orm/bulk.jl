@@ -406,6 +406,7 @@ Base.@nospecializeinfer function update_here!(@nospecialize(qs::QuerySet); kw...
     for (k, v) in kw
         f = getfield_meta(T, k)
         if v isa Expression
+            contains_window(v) && throw(ArgumentError("Window expressions are not allowed in this query ($k=$(repr(v)))."))
             sql, p = compile_expr(c, v)
             isempty(c.joins) || throw(ArgumentError("Joined field references are not permitted in this query (update!: expressions can only use the model's own fields)"))
             (c.uses_aggregate || contains_aggregate(v)) &&

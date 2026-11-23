@@ -36,15 +36,23 @@ A relation joined with an extra condition in its ON clause, for `annotate`:
     filter(qs; approved__title__contains = "Julia")       # authors with a matching published post
     annotate(qs; n = Count(:approved))                   # count only published posts
 
-The relation is a forward foreign key or a reverse relation of the model (one level). The
-condition's lookups start with the relation's name and use only the related model's own
-fields.
+As Django's, the relation is a path of foreign keys, reverse relations, many-to-many and generic
+relations (`"book__editor"`), and may start with another FilteredRelation of the query
+(`"my_books__reservation"`). The condition is a `Q` of lookups and expressions on the base model,
+where the relation's path means the filtered join. It may not follow relations past the relation's
+own fields (`book__editor__name` for `"book"`).
 """
 struct FilteredRelation
     relation::String
     condition::Q
+    function FilteredRelation(relation::AbstractString, condition::Q)
+        isempty(relation) && throw(ArgumentError("relation_name cannot be empty."))
+        new(String(relation), condition)
+    end
 end
-FilteredRelation(relation; condition::Q = Q()) = FilteredRelation(string(relation), condition)
+FilteredRelation(relation; condition = Q()) =
+    condition isa Q ? FilteredRelation(string(relation), condition) : throw(ArgumentError("condition argument must be a Q() instance."))
+Base.:(==)(a::FilteredRelation, b::FilteredRelation) = a.relation == b.relation && a.condition == b.condition
 
 "Whether an annotation is a `FilteredRelation` (a join, not a selected value)."
 is_filtered_relation(x) = x isa FilteredRelation
@@ -90,6 +98,7 @@ JSONObject(; kw...) = Func(:jsonobject, Any[x for (k, v) in kw for x in (string(
 Concat(xs...) = Func(:concat, Any[ref(x) for x in xs])
 "Convert to a field kind: `Cast(:views, :float)`, `Cast(:n, :string)`."
 Cast(x, kind::Symbol) = Func(:cast, Any[ref(x), kind === :integer ? :int : kind])
+Cast(x, f::Field) = Cast(x, f.kind)            # Django's Cast(x, IntegerField())
 "The current local date and time (Julia's `now()`, the same clock `auto_now` uses)."
 Now() = Func(:now, Any[])
 
@@ -335,16 +344,33 @@ end
 RowNumber() = WindowFunc("ROW_NUMBER", Any[])
 Rank() = WindowFunc("RANK", Any[])
 DenseRank() = WindowFunc("DENSE_RANK", Any[])
-Lag(x, offset::Integer = 1) = WindowFunc("LAG", Any[ref(x), Value(offset)])
-Lead(x, offset::Integer = 1) = WindowFunc("LEAD", Any[ref(x), Value(offset)])
+"""
+    Lag(x, offset = 1, default = nothing)
+    Lead(x, offset = 1, default = nothing)
+
+The value of `x` `offset` rows before (`Lag`) or after (`Lead`) the row in its partition, or `default`
+(NULL when `nothing`) when there's no such row. `offset` and `default` may also be given as keywords.
+"""
+Lag(x, offset::Integer = 1, default = nothing; kw...) = lead_lag("LAG", x, offset, default; kw...)
+Lead(x, offset::Integer = 1, default = nothing; kw...) = lead_lag("LEAD", x, offset, default; kw...)
+function lead_lag(name, x, offset, default; kw...)
+    offset = get(kw, :offset, offset)
+    default = get(kw, :default, default)
+    offset isa Integer && offset > 0 || throw(ArgumentError("$(titlecase(name)) requires a positive integer for the offset."))
+    WindowFunc(name, default === nothing ? Any[ref(x), Value(offset)] : Any[ref(x), Value(offset), ref_value(default)])
+end
+ref_value(v::Expression) = v
+ref_value(v) = Value(v)
 "The value of `x` in the first row of the window frame."
 FirstValue(x) = WindowFunc("FIRST_VALUE", Any[ref(x)])
 "The value of `x` in the last row of the window frame (give the Window a frame to the end: `frame = RowRange()`)."
 LastValue(x) = WindowFunc("LAST_VALUE", Any[ref(x)])
 "The value of `x` in the `n`th row of the window frame (1-based)."
-NthValue(x, n::Integer = 1) = (n >= 1 || throw(ArgumentError("NthValue: n must be at least 1")); WindowFunc("NTH_VALUE", Any[ref(x), Value(n)]))
+NthValue(x, n::Integer = 1; nth::Integer = n) =
+    (nth >= 1 || throw(ArgumentError("NthValue requires a positive integer as for nth.")); WindowFunc("NTH_VALUE", Any[ref(x), Value(nth)]))
 "Which of `n` roughly equal buckets the row is in (1 to n)."
-Ntile(n::Integer = 1) = (n >= 1 || throw(ArgumentError("Ntile: n must be at least 1")); WindowFunc("NTILE", Any[Value(n)]))
+Ntile(n::Integer = 1; num_buckets::Integer = n) =
+    (num_buckets >= 1 || throw(ArgumentError("num_buckets must be greater than 0.")); WindowFunc("NTILE", Any[Value(num_buckets)]))
 "The row's relative rank, from 0 to 1: (rank - 1) / (rows - 1)."
 PercentRank() = WindowFunc("PERCENT_RANK", Any[])
 "The fraction of rows up to and including the row's peers, from 0 to 1."
@@ -367,12 +393,22 @@ struct WindowFrame
     exclusion::Union{Nothing,Symbol}
     function WindowFrame(kind, start, stop, exclusion)
         exclusion === nothing || exclusion in (:current_row, :group, :ties, :no_others) ||
-            throw(ArgumentError("exclusion must be :current_row, :group, :ties or :no_others"))
-        start !== nothing && stop !== nothing && start > stop && throw(ArgumentError("a window frame's start must not be after its stop"))
+            throw(ArgumentError("$(kind == "ROWS" ? "RowRange" : "ValueRange").exclusion must be :current_row, :group, :ties or :no_others."))
+        # Django's checks: a RANGE frame's offsets count back from (start) or on from (end) the current row
+        rows = kind == "ROWS"
+        bad(v, ok) = !(v === nothing || (v isa Integer && ok(v)))
+        bad(start, rows ? (_ -> true) : <=(0)) && throw(ArgumentError(
+            "start argument must be $(rows ? "an integer" : "a negative integer"), zero, or None, but got '$start'."))
+        bad(stop, rows ? (_ -> true) : >=(0)) && throw(ArgumentError(
+            "end argument must be $(rows ? "an integer" : "a positive integer"), zero, or None, but got '$stop'."))
+        start !== nothing && stop !== nothing && start > stop && throw(ArgumentError("start cannot be greater than end."))
         new(string(kind), start, stop, exclusion)
     end
 end
 RowRange(; start = nothing, stop = nothing, exclusion = nothing) = WindowFrame("ROWS", start, stop, exclusion)
+frame_text(f::WindowFrame) = "$(f.kind) BETWEEN $(frame_bound(f.start, "PRECEDING")) AND $(frame_bound(f.stop, "FOLLOWING"))" *
+    (f.exclusion === nothing ? "" : " EXCLUDE " * uppercase(replace(string(f.exclusion), "_" => " ")))
+Base.show(io::IO, f::WindowFrame) = print(io, "<", f.kind == "ROWS" ? "RowRange" : "ValueRange", ": ", frame_text(f), ">")
 frame_bound(n, unbounded) = n === nothing ? "UNBOUNDED $unbounded" : n == 0 ? "CURRENT ROW" : n < 0 ? "$(-n) PRECEDING" : "$n FOLLOWING"
 function frame_sql(b::DatabaseBackend, f::WindowFrame)
     s = "$(f.kind) BETWEEN $(frame_bound(f.start, "PRECEDING")) AND $(frame_bound(f.stop, "FOLLOWING"))"
@@ -395,8 +431,21 @@ struct Window <: Expression
     order_by::Vector{Any}            # "field" / "-field" strings and OrderBy terms
     frame::Union{Nothing,WindowFrame}
 end
-Window(expr; partition_by = [], order_by = [], frame = nothing) =
-    Window(expr, Any[ref(p) for p in partition_by], Any[order_item(o) for o in order_by], frame)
+function Window(expr; partition_by = [], order_by = [], frame = nothing)
+    window_compatible(expr) || throw(ArgumentError("Expression '$(window_name(expr))' isn't compatible with OVER clauses."))
+    # one term or a list of them, as Django's
+    one(x) = x isa Union{AbstractString,Symbol,Expression,OrderBy}
+    one(order_by) || order_by isa Union{AbstractVector,Tuple} || throw(ArgumentError(
+        "Window.order_by must be either a string reference to a field, an expression, or a list or tuple of them not $(repr(order_by))."))
+    Window(expr, Any[ref(p) for p in (one(partition_by) ? (partition_by,) : partition_by)],
+           Any[order_item(o) for o in (one(order_by) ? (order_by,) : order_by)], frame)
+end
+window_compatible(::WindowFunc) = true
+window_compatible(::Aggregate) = true
+window_compatible(e::ExpressionWrapper) = window_compatible(e.expr)
+window_compatible(@nospecialize(e)) = false
+window_name(e::Func) = titlecase(string(e.name))
+window_name(@nospecialize(e)) = string(nameof(typeof(e)))
 
 """
     Asc(expr; nulls_first = false, nulls_last = false)
@@ -428,6 +477,22 @@ order_item(o) = string(o)
 "The term for the opposite direction (`last`, `latest`): NULL placement flips too, as in Django."
 reverse_order(o::OrderBy) = OrderBy(o.expr, !o.descending, o.nulls_first === nothing ? nothing : !o.nulls_first)
 reverse_order(o::AbstractString) = startswith(o, "-") ? o[2:end] : "-" * o
+
+# Django's repr: <Window: Sum(F(salary)) OVER (PARTITION BY F(department))>
+dj_repr(e::F) = "F($(e.name))"
+dj_repr(e::Value) = "Value($(e.value))"
+dj_repr(e::Aggregate) = titlecase(lowercase(e.func)) * "(" * (e.arg === nothing ? "*" : dj_repr(e.arg)) * ")"
+dj_repr(e::WindowFunc) = join(titlecase.(split(lowercase(e.name), "_"))) * "(" * join(dj_repr.(e.args), ", ") * ")"
+dj_repr(o::OrderBy) = "OrderBy($(dj_repr(o.expr)), descending=$(o.descending ? "True" : "False"))"
+dj_repr(o::AbstractString) = dj_repr(OrderBy(F(lstrip(o, '-')), startswith(o, "-"), nothing))
+dj_repr(@nospecialize(e)) = repr(e)
+function Base.show(io::IO, w::Window)
+    over = String[]
+    isempty(w.partition_by) || push!(over, "PARTITION BY " * join(dj_repr.(w.partition_by), ", "))
+    isempty(w.order_by) || push!(over, join(dj_repr.(w.order_by), ", "))
+    w.frame === nothing || push!(over, frame_text(w.frame))
+    print(io, "<Window: ", dj_repr(w.expr), " OVER (", join(over, " "), ")>")
+end
 
 "SQL for an ordering term, with its parameters."
 function compile_order_item(c::SQLCompiler, o; by_alias::Bool = false)
@@ -469,6 +534,27 @@ bare_refs(e::F) = [e.name]
 bare_refs(e::CombinedExpression) = vcat(bare_refs(e.lhs), bare_refs(e.rhs))
 bare_refs(e::Func) = reduce(vcat, (bare_refs(a) for a in e.args); init = String[])
 bare_refs(e::Case) = vcat(reduce(vcat, (bare_refs(w.then) for w in e.whens); init = String[]), bare_refs(e.default))
+
+"""
+Whether an annotation is or reads a window function, itself or through other annotations it refers to,
+in its values or its conditions (`Case(When(rank = 1, ...))` after `rank = Window(Rank())`): a filter on it
+needs the wrapping query.
+"""
+function windowing(@nospecialize(v), anns::AbstractDict, depth::Int = 0)
+    contains_window(v) && return true
+    depth > 8 && return false
+    for r in cond_refs(v)
+        a = get(anns, Symbol(r), nothing)
+        a === nothing || is_filtered_relation(a) || !windowing(a, anns, depth + 1) || return true
+    end
+    false
+end
+cond_refs(@nospecialize(e)) = bare_refs(e)
+cond_refs(e::Case) = vcat(bare_refs(e), String[r for w in e.whens for r in cond_refs(w.cond)])
+cond_refs(e::LookupExpr) = vcat(cond_refs(e.lhs), cond_refs(e.rhs))
+cond_refs(e::Condition) = cond_refs(e.q)
+cond_refs(q::Q) = String[r for ch in q.children
+                         for r in (ch isa Pair ? vcat(String(first(split(string(ch.first), "__"))), cond_refs(ch.second)) : cond_refs(ch))]
 
 contains_aggregate(::Any) = false
 contains_aggregate(::Aggregate) = true
@@ -535,6 +621,11 @@ end
 "Resolve a field path for expressions: returns (SQL column, Field or nothing)."
 Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospecialize(T::Type), path::AbstractString)
     segs = String.(split(path, "__"))
+    for (oa, op, ta, TM) in Iterators.reverse(c.fr_override)      # (in a FilteredRelation's condition: its join)
+        (alias == oa && length(segs) >= length(op) && segs[1:length(op)] == op) || continue
+        rem = segs[length(op)+1:end]
+        return resolve_path(c, ta, TM, isempty(rem) ? "id" : join(rem, "__"))
+    end
     for (i, s) in enumerate(segs)
         last_ = i == length(segs)
         s == "pk" && (s = "id")
@@ -633,6 +724,12 @@ function compile_expr(c::SQLCompiler, e::F)
     end
     if !occursin("__", e.name) && haskey(c.annotations, Symbol(e.name)) && !is_filtered_relation(c.annotations[Symbol(e.name)])
         a = c.annotations[Symbol(e.name)]
+        if c.scope isa Int && c.scope > 0 && (c.qualify !== nothing || windowing(a, c.annotations))
+            # in a filter: windows can't go in WHERE, so the query is wrapped and this reads the column
+            windowing(a, c.annotations) && (c.uses_window = true)
+            c.qualify === nothing || push!(c.qualify, Symbol(e.name))
+            return qname(e.name), Any[]
+        end
         contains_aggregate(a) && (c.uses_aggregate = true)
         sql, ps = compile_expr(c, a)
         return "($sql)", ps
@@ -643,6 +740,8 @@ end
 
 function compile_expr(c::SQLCompiler, e::OuterRef)
     c.outer === nothing && throw(ArgumentError("OuterRef($(repr(e.name))) used outside a Subquery/Exists"))
+    e.nested === nothing && windowing(get(c.outer.annotations, Symbol(e.name), nothing), c.outer.annotations) &&
+        throw(NotSupportedError("Referencing outer query window expression is not supported: $(e.name)."))
     sql, ps = e.nested === nothing ? compile_expr(c.outer, F(e.name)) : compile_expr(c.outer, e.nested)
     c.outer.outer_refs === nothing || push!(c.outer.outer_refs, sql)
     sql, ps
@@ -922,6 +1021,16 @@ function compile_expr(c::SQLCompiler, e::WindowFunc)
 end
 
 function compile_expr(c::SQLCompiler, e::Window)
+    if c.scope isa Int && c.scope > 0
+        # a window in a filter (filter(Exact(Window(Rank(), ...), 1))): computed as a hidden column of the
+        # wrapped query, as Django's QUALIFY emulation, and compared outside it
+        i = findfirst(p -> startswith(string(p.first), "__qualify") && p.second === e, collect(c.annotations))
+        k = i === nothing ? Symbol("__qualify", count(k -> startswith(string(k), "__qualify"), keys(c.annotations)) + 1) :
+                            collect(c.annotations)[i].first
+        c.annotations[k] = e
+        c.uses_window = true
+        return qname(string(k)), Any[]
+    end
     sql, ps = compile_expr(c, e.expr)
     over = String[]
     if !isempty(e.partition_by)
@@ -959,6 +1068,7 @@ Base.@nospecializeinfer function annotate(@nospecialize(qs::QuerySet); kw...)
     for (k, v) in kw
         (findfield(modelmeta(T), k) !== nothing || k in (:id, :pk)) &&
             throw(ArgumentError("annotation '$k' conflicts with a field of $T"))
+        v isa FilteredRelation && validate_filtered_relation(T, k, v, Dict{Symbol,Any}(anns))
         check_alias_name(k)
         # an annotation or alias of that name is replaced; F(k) in the new one means the old one (as Django)
         i = findlast(p -> p.first === k, anns)
@@ -1090,12 +1200,21 @@ ORM's `filter`, and `findfirst`/indexing by position need `keys`. `union(qs1, qs
 # A plain method that gathers the fields, and a despecialized one with fixed arguments: a
 # @nospecializeinfer method with both a vararg and keywords lost its last field in some
 # precompiled callers (#185).
-values_list(qs::QuerySet, fields::Union{Symbol,AbstractString}...; flat::Bool = false, named::Bool = false) =
+values_list(qs::QuerySet, fields::Union{Symbol,AbstractString,Expression}...; flat::Bool = false, named::Bool = false) =
     values_list_of(qs, Any[f for f in fields], flat, named)
 Base.@nospecializeinfer function values_list_of(@nospecialize(qs::QuerySet), fields::Vector{Any}, flat::Bool, named::Bool)
     flat && named && throw(ArgumentError("values_list: pass flat or named, not both"))
     flat && length(fields) > 1 && throw(ArgumentError("values_list: flat=true takes one field"))
     T = model_of(qs)
+    if any(f -> f isa Expression, fields)       # as Django, expressions too: annotated under a hidden name
+        fields = copy(fields)
+        for (i, f) in enumerate(fields)
+            f isa Expression || continue
+            k = Symbol("_values_list_expr$i")
+            qs = annotate(qs; (k => f,)...)
+            fields[i] = k
+        end
+    end
     flat && isempty(fields) && (fields = Any[:id])      # as Django: the first field, the primary key (#213)
     fs = isempty(fields) ? Any[:id; [attname(f) for f in all_fields(T)];          # the annotations too, as Django
                                [p.first for p in qs.annotations if !is_filtered_relation(p.second) && !(p.first in qs.aliases)]] : fields
@@ -1103,7 +1222,7 @@ Base.@nospecializeinfer function values_list_of(@nospecialize(qs::QuerySet), fie
     length(vq.values_fields) == length(fs) || error("values_list: asked for $(length(fs)) fields, got $(length(vq.values_fields))")
     chain(vq; values_mode = flat ? :flat : named ? :named : :tuple)
 end
-values_list(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}...; kw...) = values_list(objects(T), fields...; kw...)
+values_list(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString,Expression}...; kw...) = values_list(objects(T), fields...; kw...)
 
 """
     aggregate(qs; name = Aggregate(...), ...) -> Dict{Symbol,Any}
