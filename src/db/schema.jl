@@ -231,6 +231,7 @@ end
 function column_state(f::Field)
     d = f.default isa NoDefault || f.default isa Function || f.default isa Type ? nothing : f.default
     d isa Choice && (d = d.value)
+    f.name === :_order && !f.editable && d === nothing && (d = 0)      # (order_with_respect_to's column keeps its DEFAULT 0)
     f.db_default === nothing || (d = db_default_value(f.db_default))
     gen = f.generated === nothing ? nothing : GeneratedSpec(expr_to_columns(f.model, f.generated[1]), f.generated[2])
     gen === nothing || (d = nothing)

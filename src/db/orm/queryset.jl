@@ -28,10 +28,43 @@ struct QuerySet{T<:Model}
     group_fields::Union{Nothing,Vector{String}}    # values(...) |> annotate(aggregate): the GROUP BY it fixed (#201)
     aliases::Vector{Symbol}                        # annotations made by alias(): usable, not selected (#207)
     immediate::Union{Nothing,Vector{Symbol}}       # only()'s names (nothing: defer() mode), so defer/only combine as Django
+    # Django's known_related_objects: FK name => (key => object) for objects already in hand (a related manager's
+    # instance: tournament.pool_set's pools get it as their `tournament`, without a query)
+    known::Union{Nothing,Dict{Symbol,Dict{Any,Any}}}
 end
 QuerySet{T}(where, order, limit, offset, isnone) where {T} =
     QuerySet{T}(where, order, limit, offset, isnone, Vector{Symbol}[], Prefetch[], nothing, nothing,
-                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing, Dict{Symbol,Int}(), :dict, nothing, Symbol[], nothing)
+                Pair{Symbol,Any}[], nothing, false, Symbol[], nothing, nothing, nothing, nothing, Dict{Symbol,Int}(), :dict, nothing, Symbol[], nothing,
+                nothing)
+
+"Two querysets' known related objects together (for | and &, as Django's _merge_known_related_objects)."
+function merge_known(@nospecialize(a::QuerySet), @nospecialize(b::QuerySet))
+    a.known === nothing && return b.known
+    b.known === nothing && return a.known
+    d = Dict{Symbol,Dict{Any,Any}}(k => copy(v) for (k, v) in a.known)
+    for (k, v) in b.known
+        merge!(get!(Dict{Any,Any}, d, k), v)
+    end
+    d
+end
+"Give each loaded object the related objects its queryset already knows (a related manager's instance)."
+Base.@nospecializeinfer function set_known!(@nospecialize(objs::Vector), known)
+    known === nothing && return
+    isempty(objs) && return
+    T = typeof(objs[1])
+    for (name, d) in known
+        f = findfield(modelmeta(T), name)
+        f === nothing && continue
+        a = attname(f)
+        for o in objs
+            data = getfield(o, :_data)::Dict{Symbol,Any}
+            v = get(data, a, nothing)
+            v === nothing && continue
+            r = get(d, v, nothing)
+            r === nothing || ((getfield(o, :_cache)::Dict{Symbol,Any})[name] = r)
+        end
+    end
+end
 
 """
     using_db(qs, "replica")
@@ -247,9 +280,9 @@ function Base.:|(a::QuerySet, b::QuerySet)
     a, b = sa, sb
     check_combinable(a, b, "|")
     (a.isnone || b.isnone) && return a.isnone ? b : a
-    (isempty(a.where) || isempty(b.where)) && return chain(a; where = Q[])          # one matches every row
+    (isempty(a.where) || isempty(b.where)) && return chain(a; where = Q[], known = merge_known(a, b))     # one matches every row
     either = Q(:OR, Any[Q(:SCOPES, Any[a.where...], false), Q(:SCOPES, Any[b.where...], false)], false)
-    chain(a; where = Q[either])
+    chain(a; where = Q[either], known = merge_known(a, b))
 end
 "qs1 ⊻ qs2: the rows exactly one of them matches (Django's ^)."
 function Base.xor(a::QuerySet, b::QuerySet)
@@ -263,7 +296,7 @@ function Base.xor(a::QuerySet, b::QuerySet)
 end
 function Base.:&(a::QuerySet, b::QuerySet)
     check_combinable(a, b, "&")
-    chain(a; where = vcat(a.where, b.where), isnone = a.isnone || b.isnone)
+    chain(a; where = vcat(a.where, b.where), isnone = a.isnone || b.isnone, known = merge_known(a, b))
 end
 function check_combinable(@nospecialize(a::QuerySet), @nospecialize(b::QuerySet), op)
     model_of(a) === model_of(b) ||
@@ -402,6 +435,14 @@ function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true,
             if f !== nothing && f.kind === :json         # order_by("data__run"): a key inside a JSON field
                 push!(parts, json_order_sql(backend(), qcol(field_alias!(c, alias, M, f), column(f)), String.(segs[i+1:end]), desc))
                 @goto next_order
+            end
+            if f !== nothing && f.kind !== :fk          # order_by("age__lastdigit"): a field through registered transforms
+                fa = field_alias!(c, alias, M, f)
+                tr = apply_transforms(qcol(fa, column(f)), f.kind, String.(segs[i+1:end]); field = f)
+                if tr !== nothing
+                    col, alias = tr[1], fa
+                    @goto ordered_col
+                end
             end
             if f === nothing || f.kind !== :fk
                 # a reverse relation or a many-to-many (order_by("article__headline")): joined as values() joins
@@ -875,6 +916,7 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
     for i in eachindex(rows)
         objs[i] = set_instance_db!(from_row(T, rows[i], plan))
     end
+    set_known!(objs, qs.known)
     for (k, v) in qs.annotations
         (is_filtered_relation(v) || k in qs.aliases) && continue
         of = typed_output(T, v)
@@ -894,11 +936,19 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
                 end
                 parent === nothing && continue
                 r = from_prefixed_row(M, row, alias * "__")
-                if findfield(modelmeta(typeof(parent)), path[end]) === nothing
+                pf = findfield(modelmeta(typeof(parent)), path[end])
+                if pf === nothing
                     # a reverse one-to-one: remember that there's no row too, so the accessor doesn't query
                     (getfield(parent, :_cache)::Dict{Symbol,Any})[path[end]] = PrefetchedList(r === nothing ? Any[] : Any[r])
-                else
-                    r === nothing || ((getfield(parent, :_cache)::Dict{Symbol,Any})[path[end]] = r)
+                    # and the row points back (pool.style.pool: no query)
+                    if r !== nothing
+                        rr = findfirst(x -> x[1] === path[end], reverse_relations(typeof(parent)))
+                        rr === nothing || ((getfield(r, :_cache)::Dict{Symbol,Any})[reverse_relations(typeof(parent))[rr][3].name] = parent)
+                    end
+                elseif r !== nothing
+                    (getfield(parent, :_cache)::Dict{Symbol,Any})[path[end]] = r
+                    # a one-to-one: the object points back (style.pool.style: no query)
+                    pf.kind === :fk && pf.one_to_one && ((getfield(r, :_cache)::Dict{Symbol,Any})[reverse_name(pf)] = PrefetchedList(Any[parent]))
                 end
             end
         end
@@ -1055,6 +1105,8 @@ Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), na
                 (getfield(o, :_cache)::Dict{Symbol,Any})[to_attr] = r
             elseif r !== nothing
                 (getfield(o, :_cache)::Dict{Symbol,Any})[name] = r
+                # a one-to-one: the object points back (style.pool.style: no query)
+                f.one_to_one && ((getfield(r, :_cache)::Dict{Symbol,Any})[reverse_name(f)] = PrefetchedList(Any[o]))
             end
         end
         return rel

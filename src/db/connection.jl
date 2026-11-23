@@ -944,6 +944,9 @@ Base.@nospecializeinfer function transaction(@nospecialize(f), b, h::Union{Datab
             depth == 0 || execute(release_savepoint_sql(b, sp))
         else
             execute(depth == 0 ? commit_sql(b) : release_savepoint_sql(b, sp))
+            # a released savepoint's callbacks now belong to the enclosing block: a later sibling block's
+            # rollback mustn't drop them
+            depth > 0 && map!(k -> k.level > depth ? CommitHook(depth, k.f, k.robust) : k, h.hooks, h.hooks)
         end
         r
     catch
@@ -1084,7 +1087,9 @@ function run_hook(k::CommitHook)
     try
         k.f()
     catch e
-        log!("juango.db.backends", :error, "on_commit callback failed: " * sprint(showerror, e))
+        # (Django's message: "Error calling f in on_commit() [during transaction] (robust callback).")
+        log!("juango.db.backends", :error, "Error calling $(k.f) in on_commit()$(k.level > 0 ? " during transaction" : "") (robust callback). " *
+                                           sprint(showerror, e); exception = (e, catch_backtrace()))
     end
 end
 
@@ -1103,6 +1108,7 @@ propagating (and the remaining callbacks still run).
     end
 """
 function on_commit(f; robust::Bool = false, db = nothing)
+    applicable(f) || throw(ArgumentError("on_commit()'s callback must be a callable."))   # (a function of no arguments)
     db === nothing || return with_db(() -> on_commit(f; robust = robust), db)
     h = commit_holder()
     if h.depth == 0

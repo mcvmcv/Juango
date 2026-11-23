@@ -60,15 +60,36 @@ Base.@nospecializeinfer function order_wrt_field(@nospecialize(T::Type))
     k === nothing ? nothing : getfield_meta(T, Symbol(k))
 end
 
-"A new object of an ordered model goes last among its parent's (its `_order` is how many there are)."
+"The next `_order` among the objects with `pv` as their order_with_respect_to field's value (Django's Max(_order) + 1, else 0)."
+Base.@nospecializeinfer function next_in_order(@nospecialize(T::Type), f::Field, pv)
+    m = aggregate(filter(base_objects(T), Q(attname(f) => pv)); m = Max(:_order))[:m]
+    m === nothing ? 0 : Int(m) + 1
+end
+
+"A new object of an ordered model goes last among its parent's (one past the highest `_order`, as Django's)."
 Base.@nospecializeinfer function number_in_order!(@nospecialize(obj::Model))
     T = typeof(obj)
     f = order_wrt_field(T)
     f === nothing && return
     data = getfield(obj, :_data)::Dict{Symbol,Any}
     data[:id] === nothing || return
-    pv = get(data, attname(f), nothing)
-    data[:_order] = pv === nothing ? 0 : count(filter(base_objects(T), Q(attname(f) => pv)))
+    data[:_order] = next_in_order(T, f, get(data, attname(f), nothing))
+    nothing
+end
+
+"bulk_create's numbering: the objects without an `_order` go last among their parent's, in the order given (one query per parent)."
+Base.@nospecializeinfer function number_in_order!(@nospecialize(objs::AbstractVector), @nospecialize(T::Type))
+    f = order_wrt_field(T)
+    f === nothing && return
+    next = Dict{Any,Int}()
+    for o in objs
+        data = getfield(o, :_data)::Dict{Symbol,Any}
+        get(data, :_order, nothing) === nothing || continue
+        pv = get(data, attname(f), nothing)
+        n = get!(() -> next_in_order(T, f, pv), next, pv)
+        data[:_order] = n
+        next[pv] = n + 1
+    end
     nothing
 end
 
@@ -81,27 +102,23 @@ model with `Meta(order_with_respect_to = :parent_field)`.
 Base.@nospecializeinfer function get_order(@nospecialize(parent::Model), @nospecialize(T::Type{<:Model}))
     f = order_wrt_field(T)
     f === nothing && throw(ArgumentError("$(nameof(T)) has no Meta(order_with_respect_to = ...)"))
-    collect(values_list(order_by(filter(base_objects(T), Q(attname(f) => parent.id)), "_order", "id"), :id; flat = true))
+    collect(values_list(order_by(filter(base_objects(T), Q(attname(f) => target_value(f, parent))), "_order", "id"), :id; flat = true))
 end
 
 """
     set_order!(parent, Child, ids)
 
-Put `parent`'s `Child` objects in this order (Django's `parent.set_child_order(ids)`): `ids` must be
-all of them, each once.
+Put `parent`'s `Child` objects in this order (Django's `parent.set_child_order(ids)`): the `i`th id's
+`_order` becomes `i - 1`, in one UPDATE. Ids of other parents' objects are ignored.
 """
 Base.@nospecializeinfer function set_order!(@nospecialize(parent::Model), @nospecialize(T::Type{<:Model}), ids)
     f = order_wrt_field(T)
     f === nothing && throw(ArgumentError("$(nameof(T)) has no Meta(order_with_respect_to = ...)"))
     want = collect(ids)
-    have = get_order(parent, T)
-    (length(want) == length(have) && Set(string.(want)) == Set(string.(have))) ||
-        throw(ArgumentError("set_order!: give every one of the $(length(have)) $(nameof(T)) ids of this parent, once"))
-    atomic() do
-        for (i, id) in enumerate(want)
-            update!(filter(base_objects(T); id = id), _order = i - 1)
-        end
-    end
+    isempty(want) && return nothing
+    # one UPDATE of this parent's objects, as Django's bulk_update: an id that isn't one of them is left alone
+    update!(filter(base_objects(T), Q(attname(f) => target_value(f, parent)), Q(id__in = want));
+            _order = Case((When(Q(id = id); then = Value(i - 1)) for (i, id) in enumerate(want))...; output_field = IntegerField()))
     nothing
 end
 
@@ -312,7 +329,14 @@ Base.@nospecializeinfer function save_table!(@nospecialize(M::Type), data, root:
     fields = [f for f in meta.fields if haskey(data, attname(f)) && f.generated === nothing && data[attname(f)] !== DB_DEFAULT]
     cols = [qname(column(f)) for f in fields]
     tbl = qname(meta.table)
-    upd() = (w = write_values(M, fields, data, false); (join(["$c = $ph" for (c, ph) in zip(cols, w[1])], ", "), w[2]))
+    # an UPDATE (Django's blind overwrite, save!(M(id = 1))) sets a db_default field left unset to its db_default
+    dbd = [f for f in meta.fields if f.generated === nothing && get(data, attname(f), nothing) === DB_DEFAULT]
+    function upd()
+        ufs = vcat(fields, dbd)
+        d = isempty(dbd) ? data : merge(data, Dict{Symbol,Any}(attname(f) => f.db_default for f in dbd))
+        w = write_values(M, ufs, d, false)
+        (join(["$(qname(column(f))) = $ph" for (f, ph) in zip(ufs, w[1])], ", "), w[2])
+    end
     ins() = write_values(M, fields, data, true)
     if is_composite(M)
         # Like a changed primary key elsewhere: saving under a new key writes a new row.
@@ -336,7 +360,7 @@ Base.@nospecializeinfer function save_table!(@nospecialize(M::Type), data, root:
         return
     end
     if data[:id] !== nothing
-        n = if isempty(cols)
+        n = if isempty(cols) && isempty(dbd)
             length(execute("SELECT 1 FROM $tbl WHERE $(qname("id")) = ?", [data[:id]]))
         else
             sets, vals = upd()

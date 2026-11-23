@@ -240,6 +240,8 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     meta = modelmeta(T)
     fname = parts[1] == "pk" ? "id" : String(parts[1])
     rest = String.(parts[2:end])
+    bil = Any[]                 # bilateral transforms' SQL, applied to the value too
+    tr_last, tr_inner = nothing, nothing      # the last registered transform, and the column it was applied to
     # an annotation whose name has "__" in it (alias(qs, Sum(:book__pages)) is book__pages__sum): longest name first
     if alias == c.base
         ks = string(key)
@@ -430,7 +432,9 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             col, colps = tr
             lookup == "isnull" && f.kind in (:json, :hstore) && return truthy(value) ? (col, colps) : ("NOT " * col, colps)
             f = nothing
-        elseif !isempty(rest) && (tr = apply_transforms(qcol(alias, column(f)), f.kind, rest)) !== nothing
+        elseif !isempty(rest) && (tr = apply_transforms(qcol(alias, column(f)), f.kind, rest; field = f, bilateral = bil)) !== nothing
+            tr_last = rest[end]
+            tr_inner = something(apply_transforms(qcol(alias, column(f)), f.kind, rest[1:end-1]; field = f), (nothing,))[1]
             col, kind = tr                  # registered transforms: name__lower__...
             kind === f.kind || (f = nothing)
             # when__day = "31": an integer part compared with text given as a number, as Django
@@ -439,8 +443,11 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                 value = value isa AbstractVector ? map(pint, value) : pint(value)
             end
         elseif !isempty(rest)
-            f.kind === :fk || throw(LookupError("unsupported lookup '$(join(rest, "__"))' for $(f.kind) field '$fname'" *
-                                                suggest_lookup(rest[1])))
+            if f.kind !== :fk
+                left, k = failed_transform(f.kind, rest; field = f)
+                throw(LookupError("Unsupported lookup '$(join(left, "__"))' for $(kind_class_name(k)) or join on the field not permitted" *
+                                  (isempty(left) ? "." : (s = suggest_lookup(left[1]); isempty(s) ? "." : s))))
+            end
             if rest == [string(target_name(f))] || (fk_to_field(f) === nothing && rest == ["pk"])
                 col = qcol(alias, column(f))     # author__id is just author_id: no join
                 # restaurant__place where the restaurant's key is its one-to-one place: the column holds a place's
@@ -488,13 +495,21 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             return (all_on_side ? "$col IS NOT NULL" : sql_false(backend())), copy(colps)
         end
     end
-    cl = isempty(CUSTOM_LOOKUPS) ? nothing : find_custom(CUSTOM_LOOKUPS, lookup, kind)
+    # a bilateral transform applies to the value too: name__upper = "doe" is UPPER(name) = UPPER('doe')
+    if !isempty(bil)
+        value isa QuerySet && throw(ErrorException("Bilateral transformations on nested querysets are not implemented."))
+        value isa Expression && (value = Bilateral(value, copy(bil)))
+    end
+    bwrap(x) = foldl((acc, g) -> String(g(acc)), bil; init = String(x))
+    # (exact = nothing is isnull, even with an exact lookup registered, as Django's)
+    cl = isempty(CUSTOM_LOOKUPS) || (lookup == "exact" && value === nothing) ? nothing :
+         find_custom(CUSTOM_LOOKUPS, lookup, kind; field = f, after = tr_last)
     if cl !== nothing
-        if value isa Expression
-            vsql, vps = compile_expr(c, value)
-            return cl.sql(col, "(" * vsql * ")")::AbstractString, vcat(colps, vps)
-        end
-        return cl.sql(col, "?")::AbstractString, vcat(colps, Any[conv(cl.prepare(value))])
+        rsql, rps = value isa Expression ? ((e = compile_expr(c, value)); ("(" * e[1] * ")", e[2])) : (bwrap("?"), Any[conv(cl.prepare(value))])
+        # a lookup registered for a transform may skip it: sql(lhs, rhs, inner) is given the column under the transform
+        sql = cl.transform !== nothing && tr_inner !== nothing && applicable(cl.sql, col, rsql, tr_inner) ?
+              cl.sql(col, rsql, tr_inner) : cl.sql(col, rsql)
+        return sql::AbstractString, vcat(colps, rps)
     end
     if f !== nothing || lookup == "search"
         sl = special_lookup(c, something(f, Field(:text)), col, lookup, value)
@@ -507,7 +522,13 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     end
     # an expression (an annotation, a Case) compared with a Decimal on SQLite: the Decimal as a number, not text
     f === nothing && value isa Decimal && backend() isa SQLiteBackend && lookup in keys(COMPARISON_OPS) && (value = Value(value))
-    sql, ps = lookup_condition(c, col, lookup, value, conv)
+    if isempty(bil) || value isa Expression
+        sql, ps = lookup_condition(c, col, lookup, value, conv)
+    else                    # each of the value's placeholders through the bilateral transforms
+        mark = "\0COL\0"
+        sql, ps = lookup_condition(c, mark, lookup, value, conv)
+        sql = replace(replace(sql, "?" => bwrap("?")), mark => col)
+    end
     # Under exclude()/~Q, a NULL in a nullable column doesn't make the condition true, so the row is kept, as
     # Django does (NOT (x = 1) alone is NULL there and would drop it); a None in an __in list matches NULL
     if (negated || expr_negated) && !(lookup in ("isnull", "ne")) && !(lookup == "exact" && value === nothing)

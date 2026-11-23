@@ -45,6 +45,13 @@ end
 text_cast(::PostgresBackend, col) = "($col)::text"
 # a Decimal parameter is typed from the other operand (bigint for F(:integer) / Value(Decimal("3.0")))
 value_sql(::PostgresBackend, v::Decimal) = ("CAST(? AS NUMERIC)", Any[v])
+# typed literals (a Case's then, an update's Value): an untyped parameter in a CASE resolves to text
+value_sql(::PostgresBackend, v::Date) = ("CAST(? AS date)", Any[v])
+value_sql(::PostgresBackend, v::DateTime) = ("CAST(? AS timestamp)", Any[v])
+value_sql(::PostgresBackend, v::TimeZones.ZonedDateTime) = ("CAST(? AS timestamptz)", Any[v])
+value_sql(::PostgresBackend, v::Time) = ("CAST(? AS time)", Any[v])
+value_sql(::PostgresBackend, v::UUID) = ("CAST(? AS uuid)", Any[v])
+value_sql(::PostgresBackend, v::Vector{UInt8}) = ("CAST(? AS bytea)", Any[v])
 
 # Postgres has ILIKE, which can use trigram indexes. LOWER(...) LIKE would also work.
 for (L, pre, post) in ((:icontains, "%", "%"), (:istartswith, "", "%"), (:iendswith, "%", ""))

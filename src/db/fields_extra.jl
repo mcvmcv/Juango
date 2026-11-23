@@ -138,6 +138,8 @@ function parse_temporal_string(f::Field, s::AbstractString)
 end
 
 function to_db(f::Field, v)
+    h = field_hook(f, :get_prep_value)
+    h === nothing || (v = h(v))
     f.kind in (:file, :image) && return v === nothing ? "" : file_to_db(f, v)     # no file is stored as ''
     v === nothing && return dbparam(v)
     f.kind === :fk && fk_to_field(f) !== nothing && return to_db(getfield_meta(related_model(f), fk_to_field(f)), v)   # (#220)

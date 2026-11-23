@@ -143,6 +143,8 @@ Juango.register_transform(lhs -> "CHAR_LENGTH($lhs)", "len"; kinds = [:char, :te
 filter(Author; name__lower__startswith = "an", name__len__gte = 3, email__notequal = "")
 ```
 
+A transform registered with `bilateral = true` applies to the value too (`name__upper = "doe"` is `UPPER(name) = UPPER('doe')`, each value of an `__in` list and an `F()` alike). `field = getfield_meta(Author, :name)` registers a lookup or transform for that one field (Django's instance lookups, which take precedence over the kind's). `transform = "testyear"` registers a lookup for use right after that transform: its function may take a third argument, the column under the transform, to skip it (`(lhs, rhs, inner) -> "$inner <= ($rhs || '-12-31')::date"`). As in Django, `exact = nothing` stays `IS NULL` with an `exact` lookup registered, and a misspelt transform is "Unsupported lookup 'junk' for IntegerField or join on the field not permitted."
+
 Lookups across relations compile to JOINs, following Django's rules:
 
 - **Forward foreign keys** join once per path. The join is INNER when the column is NOT NULL and LEFT OUTER when it is nullable, so `Q(author__name="Ann") | Q(title="x")` still finds posts without an author.
@@ -519,7 +521,7 @@ objects(Post) |> published |> order_by("-created")
 
 `CharField(db_collation = "C")` (or `TextField`) gives the column a collation, for a case- or accent-insensitive column, or byte order: `"C"` or an ICU collation such as `"und-x-icu"` on PostgreSQL, `"utf8mb4_bin"` on MySQL, `"NOCASE"` on SQLite. Changing it is a migration (`AlterField`).
 
-`Meta(order_with_respect_to = :question)` keeps each question's answers in an order of their own, as Django's: a hidden `_order` column (a migration adds it), new answers go last, `get_order(question, Answer)` gives their ids in order, `set_order!(question, Answer, ids)` reorders them, and `get_next_in_order(answer)` / `get_previous_in_order(answer)` step through them. It's the default ordering unless `Meta(ordering)` says otherwise.
+`Meta(order_with_respect_to = :question)` keeps each question's answers in an order of their own, as Django's: a hidden `_order` column (a migration adds it), new answers go last (one past the highest `_order`; `bulk_create` numbers its objects per question and keeps an `_order` given by hand), `get_order(question, Answer)` gives their ids in order, `set_order!(question, Answer, ids)` reorders them in one UPDATE (ids of other questions' answers are ignored), and `get_next_in_order(answer)` / `get_previous_in_order(answer)` step through them. It's the default ordering unless `Meta(ordering)` says otherwise.
 
 `Meta(default_related_name = "%(class)s_items")` names the reverse side of a model's relations that don't set `related_name` (and their query name), as Django's.
 
@@ -1873,7 +1875,7 @@ send(order_placed, Order; order = o)                             # send_robust c
 - **Built-in signals:**
   - `pre_save` and `post_save` (`instance`, `created`, `update_fields`, and `raw`: true when `loaddata` saves the object)
   - `pre_delete` and `post_delete` (`instance`, also sent for cascaded deletes; `origin`, the object or queryset whose `delete!` started it)
-  - `m2m_changed` (`action`, `instance`, `model`, `pk_set`, `reverse`; the sender is the join model, `through(Post, :tags)`)
+  - `m2m_changed` (`action`, `instance`, `model`, `pk_set`, `reverse`, `raw` (true while loading a fixture); the sender is the join model, `through(Post, :tags)`)
   - `post_write`, which Django lacks: after every write, bulk ones included (`save!`, `update!`, `bulk_create`, `bulk_update`, deletes and cascades, many-to-many changes), with `action` (`:insert`, `:update`, `:delete`, `:m2m`), `via`, the rows' `ids`, the `fields` written and the `instances` when the write had them. It's the one hook an audit log or undo needs.
   - `request_started` and `request_finished`
   - `user_logged_in`, `user_logged_out` and `user_login_failed` (without the password)

@@ -82,6 +82,7 @@ function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_
     end
     verb = ignore_conflicts && b isa MySQLBackend ? "INSERT IGNORE INTO" : "INSERT INTO"
     prepare_for_insert!(objs, T)
+    number_in_order!(objs, T)
     all_objs = objs
     if update_conflicts && unique_fields !== nothing
         objs = dedupe_upsert(objs, [Symbol(n) in (:id, :pk) ? :id : attname(fieldsof([n])[1]) for n in unique_fields])
@@ -101,9 +102,8 @@ function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_
         for batch in Iterators.partition(group, n)
             # db_default columns left out when no row of the batch sets them; DEFAULT where some do
             bf = [f for f in fields if !all(o -> isdef(o, f), batch)]
-            if any(f -> any(o -> isdef(o, f), batch), bf) && occursin("SQLite", vendor(b))
-                throw(ArgumentError("bulk_create on SQLite: give every object of a batch a value for a db_default field, or none"))
-            end
+            # (SQLite has no DEFAULT in a VALUES row: the db_default itself there, as Django's)
+            nodefault = occursin("SQLite", vendor(b))
             cols = vcat(with_id ? [qname("id")] : String[], [qname(column(f)) for f in bf])
             ps, rows_sql = Any[], String[]
             for o in batch
@@ -111,7 +111,15 @@ function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_
                 marks = String[]
                 with_id && (push!(ps, data[:id]); push!(marks, "?"))
                 for f in bf
-                    if isdef(o, f)
+                    if isdef(o, f) && nodefault
+                        dv = f.db_default
+                        if dv isa Expression
+                            m, v = write_values(concrete_model(T), [f], Dict{Symbol,Any}(attname(f) => dv), true)
+                            push!(marks, m[1]); append!(ps, v)
+                        else
+                            push!(ps, to_db(f, dv)); push!(marks, "?")
+                        end
+                    elseif isdef(o, f)
                         push!(marks, "DEFAULT")
                     elseif get(data, attname(f), nothing) isa Expression
                         # Lower(Value("x")), Now(): computed by the database, as save! does (it used to store their text)
@@ -297,7 +305,7 @@ Base.@nospecializeinfer function combine(op, @nospecialize(qs::QuerySet), others
     end
     vm = first(parts).values_mode
     QuerySet{T}(Q[], String[], nothing, 0, false, Vector{Symbol}[], copy(qs.prefetch), nothing, nothing,
-                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all), qs.db, Dict{Symbol,Int}(), vm, nothing, Symbol[], nothing)
+                Pair{Symbol,Any}[], vf, false, Symbol[], nothing, nothing, (op, parts, keep_all), qs.db, Dict{Symbol,Int}(), vm, nothing, Symbol[], nothing, nothing)
 end
 
 """

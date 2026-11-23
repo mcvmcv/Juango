@@ -614,6 +614,7 @@ value_sql(b, v::Duration) = (duration_param_sql(b), Any[v])
 value_sql(b, v) = ("?", Any[v])
 
 compile_expr(c::SQLCompiler, e::Value) = value_sql(backend(), e.value)
+compile_expr(c::SQLCompiler, e::Bilateral) = ((sql, ps) = compile_expr(c, e.expr); (foldl((a, g) -> String(g(a)), e.sqls; init = "(" * sql * ")"), ps))
 
 function compile_expr(c::SQLCompiler, e::F)
     # F(:published__year): a transform of an annotation
@@ -966,6 +967,8 @@ Base.@nospecializeinfer function annotate(@nospecialize(qs::QuerySet); kw...)
     gf = qs.group_fields
     if gf === nothing && !qs.group_by_object && any(p -> contains_aggregate(ref(p.second)), kw)
         gf = [f for f in qs.values_fields if !any(p -> string(p.first) == f && contains_aggregate(p.second), qs.annotations)]
+        # and by the plain annotations made alongside it (annotate(values(qs, :s); c = Case(...), n = Sum(:x)))
+        qs.values_mode === :flat || append!(gf, [string(k) for (k, v) in kw if !contains_aggregate(ref(v)) && !(string(k) in gf)])
     end
     chain(qs; annotations = anns, annotated_after = after, values_fields = vf, group_fields = gf, aliases = als)
 end
@@ -1186,7 +1189,8 @@ Base.@nospecializeinfer function typed_output(@nospecialize(T), @nospecialize(e)
     e isa Union{RawSQL,ExpressionWrapper} && return e.output isa Field ? e.output : nothing
     e isa Union{F,Aggregate,Func,Subquery,Window,WindowFunc,Case} || return nothing
     of = output_field(T, e)
-    of !== nothing && of.kind in TYPED_OUTPUT_KINDS ? of : nothing
+    # (a custom field's from_db_value applies too: Max(:cash) is a Cash, as Django's)
+    of !== nothing && (of.kind in TYPED_OUTPUT_KINDS || field_hook(of, :from_db_value) !== nothing) ? of : nothing
 end
 Base.@nospecializeinfer function expr_value(@nospecialize(T), e, v, of::Union{Nothing,Field})
     v === nothing && return nothing

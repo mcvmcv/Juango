@@ -1,12 +1,19 @@
 # --- (de)serialisation ------------------------------------------------------------------
 
-from_db(f::Field, ::Nothing) = nothing
+"A custom field's `from_db_value` / `get_prep_value` function, or nothing."
+field_hook(f::Field, k::Symbol) = (o = f.form; o === nothing ? nothing : get(o, k, nothing))
+function from_db(f::Field, v)
+    h = field_hook(f, :from_db_value)
+    r = from_db_builtin(f, v)
+    h === nothing ? r : h(r)
+end
+from_db_builtin(f::Field, ::Nothing) = nothing
 # An integer column's value, or an expression's declared to be one: a float or decimal text (pages + rating on
 # SQLite gives 451.5) is truncated, as Python's int() in Django's converter.
 db_int(v) = v isa Integer ? Int(v) : v isa Real ? trunc(Int, v) :
            (s = strip(string(v)); something(tryparse(Int, s), trunc(Int, parse(Float64, s))))
 
-function from_db(f::Field, v)
+function from_db_builtin(f::Field, v)
     f.kind === :fk && fk_to_field(f) !== nothing && return from_db(getfield_meta(related_model(f), fk_to_field(f)), v)   # (#220)
     r = from_db_extra(f, v)
     r === NOTFOUND || return r

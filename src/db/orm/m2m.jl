@@ -65,9 +65,10 @@ function m2m_signal(o, action, ids)
     pw = startswith(string(action), "pre_") && has_receivers(pre_write, o.through)
     (m2m || w || pw) || return
     owner = related_model(o.mine)
-    inst = get(base_objects(owner); id = o.id)
+    inst = o.instance isa Model ? o.instance : get(base_objects(owner); id = o.id)   # (the object itself, as Django sends it)
     pks = ids === nothing ? nothing : Set(ids)
-    m2m && send(m2m_changed, o.through; action = action, instance = inst, model = related_model(o.other), pk_set = pks, reverse = !o.forward)
+    m2m && send(m2m_changed, o.through; action = action, instance = inst, model = related_model(o.other), pk_set = pks, reverse = !o.forward,
+                raw = SAVE_RAW[])                             # (raw: loading a fixture, as Django's set_base(raw = true))
     pw && send(pre_write, o.through; action = :m2m, via = action, ids = nothing, fields = nothing, instances = nothing,
                instance = inst, model = related_model(o.other), pk_set = pks)
     w && send(post_write, o.through; action = :m2m, via = action, ids = nothing, fields = nothing, instances = nothing,
@@ -100,7 +101,8 @@ function m2m_add_ids!(o, ids, through_defaults)
         have = Set(values_list(filter(base_objects(o.through), Q(idkey(o.mine) => o.id), Q(idkeys(o.other) => ids)),
                                idkey(o.other); flat = true))
         new = [id for id in ids if !(id in have)]
-        isempty(new) && return
+        # nothing new: the signals still go, with an empty pk_set, as Django's
+        isempty(new) && (m2m_signal(o, :pre_add, new); m2m_signal(o, :post_add, new); return)
         m2m_signal(o, :pre_add, new)
         # the through rows in one insert, as Django's bulk_create: no pre_save/post_save for them, only m2m_changed (#253)
         rows = [o.through(; attname(o.mine) => stored_value(o.mine, o.id), attname(o.other) => stored_value(o.other, id),

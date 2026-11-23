@@ -1475,7 +1475,8 @@ end
         @test [s.text for s in filter(Step146; essay = e1)] == ["three", "one", "two"]
         @test get_next_in_order(refresh!(s3)).id == s1.id && get_previous_in_order(refresh!(s3)) === nothing
         @test get_previous_in_order(refresh!(s2)).id == s1.id && get_next_in_order(refresh!(s2)) === nothing
-        @test_throws ArgumentError set_order!(e1, Step146, [s1.id])
+        set_order!(e1, Step146, [s1.id, t1.id])           # (as Django: just the ids given, and only this parent's)
+        @test refresh!(t1)._order == 0 && refresh!(s1)._order == 0
         @test_throws ArgumentError get_order(e1, Topic)
         @test !any(f -> f.name === :_order, ModelForm(Step146).fields)                   # not editable
         @test any(f -> f.name === :_order, Juango.concrete_fields(Step146))

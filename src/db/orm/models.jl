@@ -276,7 +276,8 @@ Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields:
     if owrt !== nothing
         k = findfirst(f -> f.name === Symbol(owrt) && f.kind === :fk, fs)
         k === nothing && error("$T: order_with_respect_to = :$owrt must name one of its foreign keys")
-        of = Field(:int; default = 0, editable = false, blank = true)
+        # (no default: a new object is numbered when saved; bulk_create keeps an _order given by hand)
+        of = Field(:int; default = nothing, editable = false, blank = true)
         of.name = :_order
         of.model = T
         push!(fs, of)
@@ -689,7 +690,8 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
         # an unsaved object has no related rows (it used to match rows whose key is NULL); add! asks for a save
         base = target_value(rf, m) === nothing ? none(M) : filter(objects(M), Q(attname(rf) => target_value(rf, m)))
         qs = chain(base; db = instance_db(m),
-                   owner = rf.one_to_one ? nothing : ReverseFKOwner(rf, M, m, rn))
+                   owner = rf.one_to_one ? nothing : ReverseFKOwner(rf, M, m, rn),
+                   known = target_value(rf, m) === nothing ? nothing : Dict{Symbol,Dict{Any,Any}}(rf.name => Dict{Any,Any}(target_value(rf, m) => m)))
         if rf.one_to_one
             pre isa PrefetchedList && (note_eager_use(T, s); return isempty(pre.items) ? nothing : pre.items[1])
             note_lazy_load(T, s, :fk, m)

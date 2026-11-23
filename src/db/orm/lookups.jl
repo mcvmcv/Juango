@@ -39,26 +39,48 @@ const LOOKUPS = Set(["exact", "iexact", "contains", "icontains", "startswith", "
 
 # --- custom lookups and transforms ---------------------------------------------------------------
 
+"A value expression through a lookup's bilateral transforms (see `register_transform`)."
+struct Bilateral <: Expression
+    expr::Any
+    sqls::Vector{Any}
+end
+
 struct CustomLookup
     kinds::Union{Nothing,Vector{Symbol}}   # field kinds it applies to (nothing: all)
-    sql::Any                               # (lhs, rhs) -> SQL
+    sql::Any                               # (lhs, rhs) -> SQL, or (lhs, rhs, inner) after a transform
     prepare::Any                           # value -> parameter
+    fields::Union{Nothing,Vector{Any}}     # only these model fields (Django's instance lookups), or nothing
+    transform::Union{Nothing,String}       # only right after this transform (Django's Transform.register_lookup)
 end
 struct CustomTransform
     kinds::Union{Nothing,Vector{Symbol}}
     sql::Any                               # lhs -> SQL
     output::Union{Nothing,Symbol}          # kind of the result (nothing: same as the input)
+    fields::Union{Nothing,Vector{Any}}
+    bilateral::Bool                        # applied to the value too (Django's Transform.bilateral)
 end
 const CUSTOM_LOOKUPS = Dict{String,Vector{CustomLookup}}()
 const CUSTOM_TRANSFORMS = Dict{String,Vector{CustomTransform}}()
 
 kinds_vec(k) = k === nothing ? nothing : k isa Symbol ? [k] : Symbol[Symbol(x) for x in k]
+fields_vec(f) = f === nothing ? nothing : f isa AbstractVector ? collect(Any, f) : Any[f]
 applies(x, kind) = x.kinds === nothing || kind !== nothing && kind in x.kinds
-function find_custom(d, name, kind)
+"""
+The registration of `name` for a column of `kind`: one for this very field (`field`) first, as Django's instance
+lookups override the class's, then the latest of the others; a lookup registered for a transform applies only
+right after it (`after`, the last transform's name), and before any registered for the kind.
+"""
+function find_custom(d, name, kind; field = nothing, after = nothing)
     v = get(d, name, nothing)
     v === nothing && return nothing
-    for x in Iterators.reverse(v)              # the latest registration wins
-        applies(x, kind) && return x
+    tr(x) = hasfield(typeof(x), :transform) ? x.transform : nothing
+    for pass in 1:2, x in Iterators.reverse(v)              # the latest registration wins
+        fs = x.fields
+        (pass == 1) == (fs !== nothing || tr(x) !== nothing) || continue
+        fs === nothing || field !== nothing && any(g -> g === field, fs) || continue
+        t = tr(x)
+        t === nothing || t == after || continue
+        (t !== nothing || applies(x, kind)) && return x
     end
     nothing
 end
@@ -76,8 +98,10 @@ A registered lookup takes precedence over a built-in one of the same name.
     end
     filter(Author; name__notequal = "Ann")
 """
-function register_lookup(sql, name::Union{AbstractString,Symbol}; kinds = nothing, prepare = identity)
-    push!(get!(Vector{CustomLookup}, CUSTOM_LOOKUPS, string(name)), CustomLookup(kinds_vec(kinds), sql, prepare))
+function register_lookup(sql, name::Union{AbstractString,Symbol}; kinds = nothing, prepare = identity, field = nothing,
+                         transform = nothing)
+    push!(get!(Vector{CustomLookup}, CUSTOM_LOOKUPS, string(name)),
+          CustomLookup(kinds_vec(kinds), sql, prepare, fields_vec(field), transform === nothing ? nothing : string(transform)))
     nothing
 end
 
@@ -94,9 +118,10 @@ lookups apply after it.
     end
     filter(Author; name__lower__startswith = "an")
 """
-function register_transform(sql, name::Union{AbstractString,Symbol}; kinds = nothing, output = nothing)
+function register_transform(sql, name::Union{AbstractString,Symbol}; kinds = nothing, output = nothing, field = nothing,
+                            bilateral::Bool = false)
     push!(get!(Vector{CustomTransform}, CUSTOM_TRANSFORMS, string(name)),
-          CustomTransform(kinds_vec(kinds), sql, output === nothing ? nothing : Symbol(output)))
+          CustomTransform(kinds_vec(kinds), sql, output === nothing ? nothing : Symbol(output), fields_vec(field), bilateral))
     nothing
 end
 
@@ -122,10 +147,15 @@ function suggest_lookup(name::AbstractString)
     isempty(scored) ? "" : ", perhaps you meant " * join(last.(scored[1:min(end, 2)]), " or ") * "?"
 end
 
-"Apply registered transforms `names` to `col` of kind `kind`: `(sql, kind)`, or `nothing` if one doesn't apply."
-function apply_transforms(col::String, kind, names)
+"""
+Apply registered transforms `names` to `col` of kind `kind`: `(sql, kind)`, or `nothing` if one doesn't apply.
+`field` is the model field the column is (for transforms registered on a field); `bilateral` collects the
+bilateral transforms' SQL functions, in order, to apply to the value too.
+"""
+function apply_transforms(col::String, kind, names; field = nothing, bilateral = nothing)
     for n in names
-        t = find_custom(CUSTOM_TRANSFORMS, n, kind)
+        t = find_custom(CUSTOM_TRANSFORMS, n, kind; field = field)
+        field = nothing
         if t === nothing                    # the built-in date transforms: year, hour, date, week_day, ...
             d = date_transform(col, kind, n)
             d === nothing && return nothing
@@ -133,6 +163,7 @@ function apply_transforms(col::String, kind, names)
             continue
         end
         col = t.sql(col)::AbstractString
+        t.bilateral && bilateral !== nothing && push!(bilateral, t.sql)
         t.output === nothing || (kind = t.output)
     end
     String(col), kind
@@ -143,3 +174,24 @@ struct LookupError <: Exception
     msg::String
 end
 Base.showerror(io::IO, e::LookupError) = print(io, "FieldError: ", e.msg)
+
+"""
+Where `names` stop being transforms of a column of `kind`: `(the names left, the kind there)`, for Django's
+"Unsupported lookup 'junk' for IntegerField or join on the field not permitted."
+"""
+function failed_transform(kind, names; field = nothing)
+    for (i, n) in enumerate(names)
+        t = find_custom(CUSTOM_TRANSFORMS, n, kind; field = field)
+        field = nothing
+        if t === nothing
+            d = date_transform("x", kind, n)
+            d === nothing && return names[i:end], kind
+            kind = d[2]
+        else
+            t.output === nothing || (kind = t.output)
+        end
+    end
+    String[], kind
+end
+"A field kind as Django's field class name (:int is IntegerField)."
+kind_class_name(kind) = (k = kind === nothing ? nothing : get(XML_TYPE_NAMES, kind, nothing); k === nothing ? string(kind) : k)
