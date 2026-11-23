@@ -10,6 +10,7 @@ struct M2MOwner
     symmetrical::Bool  # also keep the mirrored rows (other -> instance)
     instance::Any    # the object whose relation it is (its prefetched rows are dropped by a change)
     name::Symbol     # the relation's name on it
+    sticky::Any      # the relation's own condition (in qs.where): the next filter() shares its joins, as Django's
 end
 
 Base.@nospecializeinfer function m2m_queryset(@nospecialize(m::Model), f::Field, forward::Bool, name::Symbol = f.name; base = nothing)
@@ -20,13 +21,21 @@ Base.@nospecializeinfer function m2m_queryset(@nospecialize(m::Model), f::Field,
     step1, step2 = m2m_path(f, !forward)      # from the other model back to this instance
     # (a to_field through key holds another field than the id: compared through the related id then)
     qs = filter(something(base, objects(Other)), Q((fk_to_field(mine) === nothing ? Symbol(step1, "__", step2) : Symbol(step1, "__", step2, "__id")) => id))
-    chain(qs; owner = M2MOwner(through_model(f), mine, other, id, forward, f.symmetrical, m, name), db = instance_db(m))
+    chain(qs; owner = M2MOwner(through_model(f), mine, other, id, forward, f.symmetrical, m, name, qs.where[end]), db = instance_db(m))
 end
 
 function m2m_owner(qs::QuerySet)
     qs.owner isa M2MOwner || throw(ArgumentError("add!/remove!/set!/clear! need a many-to-many relation such as post.tags"))
-    qs.owner.id === nothing && throw(ArgumentError("save the object before changing its many-to-many relations"))
+    qs.owner.id === nothing && throw(m2m_unsaved_error(qs.owner))
     qs.owner
+end
+"Django's error for a many-to-many relation of an object without its key (or its to_field's value)."
+function m2m_unsaved_error(o::M2MOwner)
+    tf = fk_to_field(o.mine)
+    inst = o.instance
+    tf !== nothing && inst isa Model && field_data(inst, tf) === nothing &&
+        return ArgumentError("\"$(repr(inst))\" needs to have a value for field \"$tf\" before this many-to-many relationship can be used.")
+    ArgumentError("'$(nameof(typeof(inst)))' instance needs to have a primary key value before a many-to-many relationship can be used.")
 end
 # The join model's keys may store another field than the id (to_field, #220): conditions go through the
 # related id (`mine__id`, which is the column itself without a to_field), and new rows get the stored value.
@@ -42,7 +51,7 @@ function m2m_obj_id(o, @nospecialize(x))
     R = related_model(o.other)
     if x isa Model
         check_model_type(R, x)
-        x.id === nothing && throw(ArgumentError("cannot relate an unsaved $(typeof(x))"))
+        x.id === nothing && throw(ArgumentError("Cannot add \"$(repr(x))\": the value for field \"$(o.other.name)\" is None"))
         return x.id
     end
     tf = fk_to_field(o.other)

@@ -73,6 +73,7 @@ Base.@nospecializeinfer function serialize_object(@nospecialize(obj::Model); fie
     end
     for f in modelmeta(concrete_model(T)).m2m
         (fields === nothing || f.name in fields) || continue
+        through_model(f) <: AutoThrough || continue      # (a through model of its own is serialized as its rows, as Django)
         R = related_model(f)
         rel = collect(getproperty(obj, f.name))
         fs[string(f.name)] = natural_foreign && has_natural_key(R) ? [collect(natural_key(r)) for r in rel] : [r.id for r in rel]
@@ -158,6 +159,7 @@ function deserialize_one(d::AbstractDict)
     end
     for f in modelmeta(concrete_model(T)).m2m
         haskey(fs, string(f.name)) || continue
+        through_model(f) <: AutoThrough || continue      # (its rows come as objects of the through model)
         m2m[f.name] = Any[resolve_ref(related_model(f), v) for v in fs[string(f.name)]]
     end
     obj = T()

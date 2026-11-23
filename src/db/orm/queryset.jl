@@ -243,7 +243,14 @@ function Base.filter(@nospecialize(qs::QuerySet), qargs::Union{Q,Expression}...;
     (isempty(qargs) && isempty(kw)) && return chain(qs)
     w = copy(qs.where)
     q = Q(:AND, Any[qargs..., (k => v for (k, v) in kw)...], false)
-    push!(w, q)
+    # the first filter on a many-to-many relation (rock.members) goes with the relation's own condition, so a
+    # condition through the join model (membership__price = 50) is on the same row of it, as Django's sticky filter
+    o = qs.owner
+    if o isa M2MOwner && o.sticky !== nothing && !isempty(w) && w[end] === o.sticky
+        w[end] = Q(:AND, Any[w[end], q], false)
+    else
+        push!(w, q)
+    end
     # a condition that can't match (id__in = []): no rows, without a query, as Django's EmptyResultSet (#224)
     chain(qs; where = w, isnone = qs.isnone || cannot_match(q, model_of(qs)))
 end
@@ -1337,15 +1344,23 @@ Base.@nospecializeinfer default_order(@nospecialize(qs::QuerySet)) =
     order_cleared(qs) ? Any["id"] :
     isempty(qs.order) ? (isempty(modelmeta(model_of(qs)).ordering) ? Any["id"] : modelmeta(model_of(qs)).ordering) : qs.order
 
+# values(...) |> annotate(aggregate) grouped by fields other than the key, and not ordered: ordering it by id
+# would change the groups, so first()/last() refuse it, as Django's
+Base.@nospecializeinfer function check_first_last_grouping(@nospecialize(qs::QuerySet), what)
+    qs.group_fields === nothing || !(isempty(qs.order) || order_cleared(qs)) || any(in(("id", "pk")), qs.group_fields) ||
+        throw(ArgumentError("Cannot use QuerySet.$what() on an unordered queryset performing aggregation. Add an ordering with order_by()."))
+end
 "First object (by the queryset's ordering, or by id), or `nothing`."
 Base.@nospecializeinfer function Base.first(@nospecialize(qs::QuerySet))
     qs.cache === nothing || return isempty(qs.cache) ? nothing : qs.cache[1]
+    check_first_last_grouping(qs, "first")
     v = fetch(chain(qs[1:1]; order = default_order(qs)))
     isempty(v) ? nothing : v[1]
 end
 "Last object, or `nothing`."
 Base.@nospecializeinfer function Base.last(@nospecialize(qs::QuerySet))
     assert_unsliced(qs, "take last of")
+    check_first_last_grouping(qs, "last")
     flipped = Any[reverse_order(o) for o in default_order(qs)]
     first(chain(qs; order = flipped))
 end
@@ -1487,8 +1502,9 @@ distinct(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString}..
 
 Base.@nospecializeinfer function latest_order(@nospecialize(qs::QuerySet), fields, what)
     T = model_of(qs)
+    (qs.limit === nothing && qs.offset == 0) || throw(ArgumentError("Cannot change a query once a slice has been taken."))
     fs = isempty(fields) ? get(modelmeta(T).extra, :get_latest_by, nothing) : fields
-    fs === nothing && throw(ArgumentError("$what needs field names or Meta(get_latest_by = ...) on $(nameof(T))"))
+    fs === nothing && throw(ArgumentError("earliest() and latest() require either fields as positional arguments or 'get_latest_by' in the model's Meta."))
     String[string(f) for f in (fs isa Union{Symbol,AbstractString} ? (fs,) : fs)]
 end
 

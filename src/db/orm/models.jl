@@ -331,7 +331,7 @@ target_name(f::Field, owner) = f.related === :self ? string(nameof(owner)) : f.r
                                f.related isa Type ? string(nameof(f.related)) : string(f.related)
 
 Base.@nospecializeinfer function make_through_model(@nospecialize(T::Type), m::ModelMeta, f::Field)
-    table = m.table * "_" * string(f.name)
+    table = something(getfield(f, :db_column), m.table * "_" * string(f.name))    # (ManyToManyField(...; db_table))
     tname = target_name(f, T)
     src, dst = lowercase(m.name), lowercase(tname)
     if src == dst

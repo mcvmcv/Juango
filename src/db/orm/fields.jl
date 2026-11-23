@@ -79,7 +79,7 @@ function refresh_att!(f)
     name = getfield(f, :name)
     a = field_att(getfield(f, :kind), name)
     setfield!(f, :att, a)
-    dc = getfield(f, :db_column)
+    dc = getfield(f, :kind) === :m2m ? nothing : getfield(f, :db_column)     # (a many-to-many keeps its db_table there)
     setfield!(f, :col, dc === nothing ? string(a) : dc)
     setfield!(f, :attfor, name)
     a
@@ -542,13 +542,18 @@ Pass `symmetrical = false` for one-way relations such as "follows". A symmetrica
 its own `through` model, as Django's since 3.0: each link is then two of its rows, both given the
 `through_defaults`.
 
+`db_table = "post_tag"` names the join table Juango makes (by default the model's table and the field's
+name, `blog_post_tags`), as Django's.
+
 A `through` model with more than one foreign key to the same model (an invitation's inviter and
 invitee) needs `through_fields = (:event, :invitee)`: its keys to this model and to the related one.
 """
-function ManyToManyField(to; symmetrical = nothing, kw...)
+function ManyToManyField(to; symmetrical = nothing, db_table = nothing, kw...)
     sym = something(symmetrical, to === :self)
     sym && to !== :self && throw(ArgumentError("symmetrical = true is for a ManyToManyField(:self)"))
-    Field(:m2m; related = to, symmetrical = sym, kw...)
+    db_table === nothing || get(kw, :through, nothing) === nothing ||
+        throw(ArgumentError("db_table is for the join table Juango makes; with a through model, give it Meta(table = ...)"))
+    Field(:m2m; related = to, symmetrical = sym, db_column = db_table === nothing ? nothing : string(db_table), kw...)
 end
 
 const STRING_KINDS = (:char, :text, :email, :slug, :url)
