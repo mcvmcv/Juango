@@ -1,0 +1,18 @@
+[
+    {
+        "pk": 1,
+        "model": "fixtures_regress.dfrnkchild",
+        "fields": {
+            "data": "apple"
+        }
+    },
+    {
+        "pk": 1,
+        "model": "fixtures_regress.dfrreftonkchild",
+        "fields": {
+            "text": "my text",
+            "nk_fk" : ["apple"],
+            "nk_m2m": [["apple"]]
+        }
+    }
+]

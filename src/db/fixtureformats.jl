@@ -518,12 +518,17 @@ function xml_pk(R::Type, s::AbstractString)
 end
 
 "The JSON-format dicts for a `<django-objects>` document."
-function xml_objects(src::AbstractString)
+function xml_objects(src::AbstractString; ignorenonexistent::Union{Nothing,Bool} = nothing)
     root = parse_xml(src)
-    root.tag == "django-objects" || throw(ArgumentError("expected <django-objects>, got <$(root.tag)>"))
     out = Dict{String,Any}[]
+    root.tag == "django-objects" || return out           # (no <object>s: no objects, as Django's reader finds none)
     for o in xml_elements(root, "object")
-        T = get_model(o.attrs["model"])
+        T = try
+            get_model(o.attrs["model"])
+        catch e
+            (ignorenonexistent === true && e isa ImproperlyConfigured) || rethrow()
+            continue                                      # (a model that's gone, with ignorenonexistent)
+        end
         d = Dict{String,Any}("model" => o.attrs["model"])
         haskey(o.attrs, "pk") && (d["pk"] = xml_pk(T, o.attrs["pk"]))
         fs = Dict{String,Any}()
@@ -531,6 +536,7 @@ function xml_objects(src::AbstractString)
         for fe in xml_elements(o, "field")
             name = fe.attrs["name"]
             f = get(byname, name, nothing)
+            f === nothing && ignorenonexistent === true && continue
             f === nothing && throw(ArgumentError("$(nameof(T)) has no field '$name'"))
             rel = get(fe.attrs, "rel", "")
             fs[name] = if !isempty(xml_elements(fe, "None"))

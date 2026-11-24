@@ -1,0 +1,15 @@
+[
+  {
+    "model": "fixtures_regress.dfrperson",
+    "fields": {
+      "name": "J.R.R. Tolkien"
+    }
+  },
+  {
+    "model": "fixtures_regress.dfrnaturalkeywithfkdependency",
+    "fields": {
+      "name": "The Lord of the Rings",
+      "author": ["J.R.R. Tolkien"]
+    }
+  }
+]

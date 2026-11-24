@@ -1,0 +1,17 @@
+[
+    {
+        "pk": 1,
+        "model": "fixtures_regress.dfrbook",
+        "fields": {
+            "name": "Cryptonomicon",
+            "author": 4
+        }
+    },
+    {
+        "pk": "4",
+        "model": "fixtures_regress.dfrperson",
+        "fields": {
+            "name": "Neal Stephenson"
+        }
+    }
+]

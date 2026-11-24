@@ -1,0 +1,4 @@
+[
+    {"pk": 1, "model": "fixtures_regress.dfrparent", "fields": {"name": "fred"}},
+    {"pk": 1, "model": "fixtures_regress.dfrchild", "fields": {"data": "apple"}}
+]

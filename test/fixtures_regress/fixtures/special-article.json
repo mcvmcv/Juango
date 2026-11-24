@@ -1,0 +1,16 @@
+[
+    {
+        "pk": 1,
+        "model": "fixtures_regress.dfrarticle",
+        "fields": {"title": "foof"
+        }
+    },
+    {
+        "pk": 1,
+        "model": "fixtures_regress.dfrspecialarticle",
+        "fields": {
+            "title": "Article Title 1",
+            "channels": []
+        }
+    }
+]

@@ -126,15 +126,23 @@ function deserial_value(f::Field, v)
     from_db(f, v)
 end
 
-function deserialize_one(d::AbstractDict)
+function deserialize_one(d::AbstractDict; ignorenonexistent::Union{Nothing,Bool} = nothing)
     label = string(get(d, "model", ""))
     T = try
         get_model(label)
     catch e
         e isa ImproperlyConfigured || rethrow()
+        ignorenonexistent === true && return nothing          # (a model that's gone: skipped, Django's #21799)
         throw(DeserializationError("Invalid model identifier: '$label'"))
     end
     fs = get(d, "fields", Dict{String,Any}())
+    if ignorenonexistent === false                            # a field the model doesn't have is an error, as Django's
+        known = Set(vcat([string(f.name) for f in all_fields(T)], [string(attname(f)) for f in all_fields(T)],
+                         [string(f.name) for f in modelmeta(concrete_model(T)).m2m]))
+        for k in keys(fs)
+            string(k) in known || throw(DeserializationError("$(nameof(T)) has no field named '$k'"))
+        end
+    end
     data = Dict{Symbol,Any}()
     m2m = Dict{Symbol,Vector{Any}}()
     for f in all_fields(T)
@@ -182,12 +190,12 @@ end
 Read objects written by `serialize` (or Django's `dumpdata`). Nothing is saved until you
 call `save!` on each.
 """
-function deserialize(format::Symbol, data::AbstractString)
+function deserialize(format::Symbol, data::AbstractString; ignorenonexistent::Union{Nothing,Bool} = nothing)
     items = try
             format === :json ? JSON.parse(data) :
             format === :jsonl ? [JSON.parse(l) for l in split(data, '\n') if !isempty(strip(l))] :
             format === :yaml ? something(parse_yaml(data), Any[]) :
-            format === :xml ? xml_objects(data) :
+            format === :xml ? xml_objects(data; ignorenonexistent) :
             throw(ArgumentError("unknown serialization format :$format (have $(join(SERIAL_FORMATS, ", ")))"))
     catch e
         e isa ArgumentError && startswith(e.msg, "unknown serialization format") && rethrow()
@@ -195,7 +203,12 @@ function deserialize(format::Symbol, data::AbstractString)
         throw(DeserializationError("not valid $format: $(sprint(showerror, e))"))
     end
     items isa AbstractVector || throw(DeserializationError("a fixture is a list of objects"))
-    [deserialize_one(d) for d in items]
+    out = DeserializedObject[]
+    for d in items
+        o = deserialize_one(d; ignorenonexistent)
+        o === nothing || push!(out, o)
+    end
+    out
 end
 
 """
@@ -253,6 +266,63 @@ function dependency_order(models)
 end
 
 """
+    natural_key_dependencies(::Type{T}) -> labels
+
+The models (`"app.Model"`) whose objects must be loaded before `T`'s for its natural key to resolve (Django's
+`natural_key.dependencies`): define a method next to `natural_key` and `get_by_natural_key`.
+"""
+natural_key_dependencies(@nospecialize(T::Type)) = String[]
+
+"""
+    sort_dependencies(models; allow_cycles = false) -> Vector
+
+The models in an order that serializes each one's natural-key dependencies first (Django's
+`serializers.sort_dependencies`): `natural_key_dependencies`, foreign keys to models with natural keys, and
+automatic many-to-many relations to them. A cycle throws (`Can't resolve dependencies for ...`), unless
+`allow_cycles`, which breaks it.
+"""
+function sort_dependencies(models; allow_cycles::Bool = false)
+    ms = collect(Any, models)
+    mset = Set{Any}(ms)
+    deps = Tuple{Any,Vector{Any}}[]
+    for T in ms
+        d = Any[get_model(l) for l in natural_key_dependencies(T)]
+        for f in all_fields(T)
+            f.kind === :fk || continue
+            R = related_model(f)
+            has_natural_key(R) && R !== T && push!(d, R)
+        end
+        for f in modelmeta(concrete_model(T)).m2m
+            through_model(f) <: AutoThrough || continue
+            R = related_model(f)
+            has_natural_key(R) && R !== T && push!(d, R)
+        end
+        push!(deps, (T, d))
+    end
+    reverse!(deps)
+    out = Any[]
+    while !isempty(deps)
+        skipped = Tuple{Any,Vector{Any}}[]
+        changed = false
+        while !isempty(deps)
+            T, d = pop!(deps)
+            if all(x -> !(x in mset) || x in out, d)
+                push!(out, T); changed = true
+            else
+                push!(skipped, (T, d))
+            end
+        end
+        if !changed
+            allow_cycles || throw(ErrorException("Can't resolve dependencies for " *
+                join([model_label(T) for (T, _) in sort(skipped; by = x -> string(nameof(x[1])))], ", ") * " in serialized app list."))
+            push!(out, pop!(skipped)[1])
+        end
+        deps = skipped
+    end
+    out
+end
+
+"""
     dumpdata(labels...; format = :json, indent = nothing, exclude = [], natural_foreign = false,
              natural_primary = false, output = nothing) -> String
 
@@ -293,7 +363,13 @@ function find_fixture(name::AbstractString)
         length(here) > 1 && throw(ArgumentError("Multiple fixtures named '$name' in '$dir'. Aborting."))
         append!(found, here)
     end
-    isempty(found) && throw(ArgumentError("no fixture named '$name' (looked in: $(join(fixture_dirs(), ", ")))"))
+    if isempty(found)
+        # a name with an extension that isn't a format (Django's CommandError)
+        parts = rsplit(basename(name), '.'; limit = 2)
+        length(parts) == 2 && !any(e -> e == "." * parts[2], exts) && any(d -> isfile(joinpath(d, name)), fixture_dirs()) &&
+            throw(ArgumentError("Problem installing fixture '$(parts[1])': $(parts[2]) is not a known serialization format."))
+        throw(ArgumentError("no fixture named '$name' (looked in: $(join(fixture_dirs(), ", ")))"))
+    end
     found
 end
 
@@ -302,25 +378,42 @@ end
 
 Load fixture files (paths, or names found in `fixture_dirs()`: `\"initial_data\"` finds
 `initial_data.json`, `.jsonl`, `.yaml`, `.yml` or `.xml`; one name in two formats in one directory is an
-error) in one transaction; returns the number of objects. Objects with a primary key replace the row with
+error) in one transaction; returns the number of objects. `ignorenonexistent = true` skips fields and models the
+fixture names that don't exist (Django's `--ignorenonexistent`), `false` refuses them; by default an unknown field is
+skipped and an unknown model refused. Objects with a primary key replace the row with
 that key. `exclude` skips apps or `"app.Model"`s (Django's `--exclude`). On PostgreSQL the id sequences of
 the models loaded move past the loaded ids, so new objects don't collide with them.
 """
-function loaddata(names::AbstractString...; exclude = String[])
+function loaddata(names::AbstractString...; exclude = String[], ignorenonexistent::Union{Nothing,Bool} = nothing)
     n = 0
     excl = Set(lowercase.(string.(exclude)))
     loaded = Set{Any}()
-    atomic() do
-        for name in names, f in find_fixture(name)
-            for d in deserialize(fixture_format(f), read(f, String))
-                T = typeof(d.object)
-                (lowercase(modelmeta(T).app) in excl || serial_label(T) in excl) && continue
-                save!(d)
-                push!(loaded, concrete_model(T)); foreach(A -> push!(loaded, A), ancestors(T))
-                n += 1
+    try
+        atomic() do
+            for name in names, f in find_fixture(name)
+                objs = deserialize(fixture_format(f), read(f, String); ignorenonexistent)
+                # (as Django's: a fixture with no objects is a warning, not an error)
+                isempty(objs) && @warn "No fixture data found for '$(first(splitext(basename(f))))'. (File format may be invalid.)"
+                for d in objs
+                    T = typeof(d.object)
+                    (lowercase(modelmeta(T).app) in excl || serial_label(T) in excl) && continue
+                    try
+                        save!(d)
+                    catch e
+                        e isa IntegrityError && !startswith(e.msg, "Problem installing") &&
+                            throw(IntegrityError("Problem installing fixture '$f': $(e.msg)"))
+                        rethrow()
+                    end
+                    push!(loaded, concrete_model(T)); foreach(A -> push!(loaded, A), ancestors(T))
+                    n += 1
+                end
             end
+            foreach(execute, sequence_reset_sql(; models = collect(loaded)))
         end
-        foreach(execute, sequence_reset_sql(; models = collect(loaded)))
+    catch e
+        # (a key to a row that isn't there shows when the transaction commits its deferred checks)
+        e isa IntegrityError && !startswith(e.msg, "Problem installing") && throw(IntegrityError("Problem installing fixtures: $(e.msg)"))
+        rethrow()
     end
     n
 end

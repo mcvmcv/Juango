@@ -1,0 +1,9 @@
+[
+    {
+        "pk": "4",
+        "model": "fixtures_regress.dfrperson",
+        "fields": {
+            "name": "Neal Stephenson"
+        }
+    }
+]
