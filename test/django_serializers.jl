@@ -8,36 +8,36 @@
 
 @model struct DseCategory
     name = CharField(max_length = 20)
-    Meta(table = "dse_category", ordering = ["name"])
+    Meta(table = "dse_category", app_label = "serializers", ordering = ["name"])
 end
 @model struct DseAuthor
     name = CharField(max_length = 20)
-    Meta(table = "dse_author", ordering = ["name"])
+    Meta(table = "dse_author", app_label = "serializers", ordering = ["name"])
 end
 @model struct DseArticle
     author = ForeignKey(DseAuthor; on_delete = :CASCADE)
     headline = CharField(max_length = 50)
     pub_date = DateTimeField()
     categories = ManyToManyField(DseCategory; blank = true)
-    Meta(table = "dse_article", ordering = ["pub_date"])
+    Meta(table = "dse_article", app_label = "serializers", ordering = ["pub_date"])
 end
 @model struct DseScore
     score = FloatField()
-    Meta(table = "dse_score")
+    Meta(table = "dse_score", app_label = "serializers")
 end
 @model struct DsePlayer
     name = CharField(max_length = 50)
     rank = IntegerField()
-    Meta(table = "dse_player")
+    Meta(table = "dse_player", app_label = "serializers")
 end
 @model struct DsePerson          # with a natural key
     name = CharField(max_length = 50, unique = true)
-    Meta(table = "dse_person")
+    Meta(table = "dse_person", app_label = "serializers")
 end
 @model struct DseBook
     title = CharField(max_length = 50)
     writer = ForeignKey(DsePerson; on_delete = :CASCADE)
-    Meta(table = "dse_book")
+    Meta(table = "dse_book", app_label = "serializers")
 end
 Juango.natural_key(p::DsePerson) = (p.name,)
 Juango.get_by_natural_key(::Type{DsePerson}, name) = get(DsePerson; name = name)
