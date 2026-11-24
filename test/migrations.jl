@@ -1068,7 +1068,7 @@ end
         Juango.unregister_model!(CpShip)
 
         # what isn't supported says so
-        @test_throws Juango.LookupError collect(filter(CpLine; pk__gt = (1, "a")))
+        @test_throws Juango.LookupError collect(filter(CpLine; pk__contains = (1, "a")))     # (gt and the like compare tuples, as Django's)
         @eval @model struct CpNote
             line = ForeignKey(CpLine, on_delete = :CASCADE)
             Meta(table = "cp_note", app_label = "migcomp")
