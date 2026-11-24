@@ -798,6 +798,11 @@ Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::S
                 a, b = concrete_model(R), concrete_model(typeof(v))
                 (a === b || a in lineage(b) || b in lineage(a)) ||
                     throw(ArgumentError("cannot assign $(repr(v)): \"$(nameof(typeof(m))).$s\" must be a \"$(nameof(R))\" instance"))
+                # an unsaved object without a database takes the other's (Django's instance hint), then the link is
+                # checked as a forward assignment
+                if instance_db(m) === nothing && getfield(m, :_data)[:id] === nothing && instance_db(v) !== nothing && !db_pinned()
+                    cache[:__db] = instance_db(v)
+                end
                 setproperty!(v, rf.name, m)
                 cache[s] = PrefetchedList(Any[v])
             end

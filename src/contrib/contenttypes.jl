@@ -210,7 +210,11 @@ Base.@nospecializeinfer function generic_relations(@nospecialize(T::Type))
 end
 find_generic(list, name) = (i = findfirst(f -> string(f.name) == string(name), list); i === nothing ? nothing : list[i])
 
+# (on the object's database: its content types, and the row its key points at, are there)
 Base.@nospecializeinfer function get_generic(@nospecialize(m::Model), f::Field)
+    with_db(() -> get_generic_here(m, f), instance_db(m))
+end
+Base.@nospecializeinfer function get_generic_here(@nospecialize(m::Model), f::Field)
     ctf, fkf = f.related
     data, cache = (getfield(m, :_data)::Dict{Symbol,Any}), (getfield(m, :_cache)::Dict{Symbol,Any})
     ctid, oid = data[Symbol(ctf, :_id)], data[fkf]
@@ -247,7 +251,8 @@ Base.@nospecializeinfer function generic_queryset(@nospecialize(m::Model), f::Fi
     ctf, fkf = f.through
     M = related_model(f)
     id = (getfield(m, :_data)::Dict{Symbol,Any})[:id]
-    qs = filter(objects(M), Q(Symbol(ctf, :_id) => generic_ct(typeof(m), f).id), Q(fkf => getfield_meta(M, fkf).kind in STRING_KINDS ? string(id) : id))
+    ctid = with_db(() -> generic_ct(typeof(m), f).id, instance_db(m))         # (the content type of the object's database)
+    qs = filter(objects(M), Q(Symbol(ctf, :_id) => ctid), Q(fkf => getfield_meta(M, fkf).kind in STRING_KINDS ? string(id) : id))
     chain(qs; owner = GenericOwner(f, M, m, f.name), db = instance_db(m))
 end
 

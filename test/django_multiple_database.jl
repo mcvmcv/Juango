@@ -13,7 +13,15 @@ using Dates
     Meta(table = "dmd_person", ordering = [:name])
 end
 Base.string(p::DmdPerson) = p.name
+@model struct DmdReview
+    source = CharField(max_length = 100)
+    content_type = ForeignKey(Juango.ContentType; on_delete = :CASCADE)
+    object_id = PositiveIntegerField()
+    content_object = GenericForeignKey()
+    Meta(table = "dmd_review", ordering = [:source])
+end
 @model struct DmdBook
+    reviews = GenericRelation(:DmdReview)
     title = CharField(max_length = 100)
     published = DateField()
     authors = ManyToManyField(DmdPerson)
@@ -27,7 +35,18 @@ Base.string(b::DmdBook) = b.title
     owner = ForeignKey(DmdPerson; on_delete = :CASCADE)
     Meta(table = "dmd_pet", ordering = [:name])
 end
-const DMD_MODELS = Any[DmdPerson, DmdBook, through(DmdBook, :authors), DmdPet]
+@model struct DmdAccount
+    username = CharField(max_length = 150, unique = true)
+    Meta(table = "dmd_account", ordering = [:username])
+end
+Base.string(a::DmdAccount) = a.username
+@model struct DmdProfile
+    account = OneToOneField(DmdAccount; on_delete = :SET_NULL, null = true)
+    flavor = CharField(max_length = 100)
+    Meta(table = "dmd_profile", ordering = [:flavor])
+end
+Base.string(p::DmdProfile) = p.flavor
+const DMD_MODELS = Any[DmdPerson, DmdBook, through(DmdBook, :authors), DmdPet, DmdReview, DmdAccount, DmdProfile]
 redirect_stdout(devnull) do
     Juango.sync_models!(DMD_MODELS); append!(PORT_MODELS, DMD_MODELS)
 end
@@ -38,7 +57,7 @@ function dmd_block(f)
     old = get(settings, :DATABASES, nothing)
     configure!(DATABASES = Dict("default" => settings.DATABASE, "other" => DMD_OTHER))
     try
-        using_db(() -> redirect_stdout(() -> Juango.sync_models!(DMD_MODELS), devnull), "other")
+        using_db(() -> redirect_stdout(() -> Juango.sync_models!(vcat(Any[Juango.ContentType], DMD_MODELS)), devnull), "other")
         port_block(f)
     finally
         using_db("other") do
@@ -191,6 +210,64 @@ dmd_titles(qs) = collect(values_list(qs, :title; flat = true))
     create(mark.edited; title = "Dive into Water", published = Date(2009, 5, 4))
     get_or_create(mark.edited; title = "Dive into Water", published = Date(2009, 5, 4))
     @test count(filter(using_db(B, "other"); title__in = ["Dive into Python 2", "Dive into Water"])) == 2
+  end
+end
+
+@testset "django multiple_database: QueryTestCase (one-to-one, generic keys)" begin
+  dmd_block() do
+    A, Pr = DmdAccount, DmdProfile
+    flavors(d) = collect(values_list(using_db(objects(Pr), d), :flavor; flat = true))
+    users(d) = collect(values_list(using_db(objects(A), d), :username; flat = true))
+    # test_o2o_separation
+    alice = using_db(() -> create(A; username = "alice"), "default")
+    using_db(() -> create(Pr; account = alice, flavor = "chocolate"), "default")
+    bob = using_db(() -> create(A; username = "bob"), "other")
+    using_db(() -> create(Pr; account = bob, flavor = "crunchy frog"), "other")
+    @test get(using_db(A, "default"); username = "alice").dmdprofile.flavor == "chocolate"
+    @test get(using_db(A, "other"); username = "bob").dmdprofile.flavor == "crunchy frog"
+    un(d, fl) = collect(values_list(filter(using_db(A, d); dmdprofile__flavor = fl), :username; flat = true))
+    @test un("default", "chocolate") == ["alice"] && isempty(un("other", "chocolate"))
+    @test isempty(un("default", "crunchy frog")) && un("other", "crunchy frog") == ["bob"]
+    @test get(using_db(Pr, "default"); flavor = "chocolate").account.username == "alice"
+    @test get(using_db(Pr, "other"); flavor = "crunchy frog").account.username == "bob"
+  end
+  dmd_block() do
+    A, Pr = DmdAccount, DmdProfile
+    flavors(d) = collect(values_list(using_db(objects(Pr), d), :flavor; flat = true))
+    users(d) = sort(collect(values_list(using_db(objects(A), d), :username; flat = true)))
+    # test_o2o_cross_database_protection
+    alice = using_db(() -> create(A; username = "alice"), "default")
+    bob = using_db(() -> create(A; username = "bob"), "other")
+    alice_profile = using_db(() -> create(Pr; account = alice, flavor = "chocolate"), "default")
+    @test_throws ArgumentError (bob.dmdprofile = alice_profile)
+    bob_profile = using_db(() -> create(Pr; account = bob, flavor = "crunchy frog"), "other")
+    new_bob_profile = Pr(; flavor = "spring surprise")
+    charlie = A(; username = "charlie")
+    @test Juango.instance_db(new_bob_profile) === nothing && Juango.instance_db(charlie) === nothing
+    new_bob_profile.account = bob
+    charlie.dmdprofile = bob_profile
+    @test Juango.instance_db(new_bob_profile) == "other" && Juango.instance_db(charlie) == "other"     # (they take bob's database)
+    @test users("other") == ["bob"] && flavors("other") == ["crunchy frog"]
+    save!(charlie); save!(bob_profile); save!(new_bob_profile)
+    @test users("default") == ["alice"] && users("other") == ["bob", "charlie"]
+    @test flavors("default") == ["chocolate"] && flavors("other") == ["crunchy frog", "spring surprise"]
+    denise = using_db(() -> create(A; username = "denise"), "other")
+    denise_profile = Pr(; flavor = "tofu", account = denise)
+    @test Juango.instance_db(denise_profile) == "other"
+    save!(denise_profile)
+    @test flavors("default") == ["chocolate"] && flavors("other") == ["crunchy frog", "spring surprise", "tofu"]
+  end
+  dmd_block() do
+    B, R = DmdBook, DmdReview
+    # test_generic_key_separation
+    pro = create(B; title = "Pro Django", published = Date(2008, 12, 16))
+    create(R; source = "Python Monthly", content_object = pro)
+    dive = using_db(() -> create(B; title = "Dive into Python", published = Date(2009, 5, 4)), "other")
+    using_db(() -> create(R; source = "Python Weekly", content_object = dive), "other")
+    @test get(using_db(R, "default"); source = "Python Monthly").content_object.title == "Pro Django"
+    @test get(using_db(R, "other"); source = "Python Weekly").content_object.title == "Dive into Python"
+    dive = get(using_db(B, "other"); title = "Dive into Python")
+    @test collect(values_list(dive.reviews, :source; flat = true)) == ["Python Weekly"]
   end
 end
 
