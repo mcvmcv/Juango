@@ -171,6 +171,13 @@ function re_path(rx::AbstractString, view; name = nothing, kwargs...)
     URLPattern(String(rx), r, params, view, name === nothing ? nothing : string(name), Dict{Symbol,Any}(kwargs))
 end
 
+"A regex prefix for an included set (`re_path(raw\"^outer/(?P<outer>[0-9]+)/\", include_urls(...))`): its named groups go to the views."
+function re_path(rx::AbstractString, inc::Include)
+    r = startswith(rx, "^") ? Regex(rx) : Regex("^" * rx)
+    params = Tuple{Symbol,String}[(Symbol(n), "str") for n in Base.PCRE.capture_names(r.regex) |> values]
+    URLResolver(String(rx), r, params, inc.patterns, inc.namespace, inc.app_name)
+end
+
 "Result of resolving a path."
 struct ResolverMatch
     view::Any
@@ -180,9 +187,13 @@ struct ResolverMatch
     route::String
     language::Union{Nothing,String}      # the language prefix matched by i18n_patterns
     app_name::Union{Nothing,String}      # the application namespaces of the includes it's in ("blog")
+    args::Vector{Any}                    # a re_path's unnamed groups, when it has no named ones (Django's args)
 end
-ResolverMatch(view, kwargs, name, ns, route) = ResolverMatch(view, kwargs, name, ns, route, nothing, nothing)
-ResolverMatch(view, kwargs, name, ns, route, language) = ResolverMatch(view, kwargs, name, ns, route, language, nothing)
+ResolverMatch(view, kwargs, name, ns, route) = ResolverMatch(view, kwargs, name, ns, route, nothing, nothing, Any[])
+ResolverMatch(view, kwargs, name, ns, route, language) = ResolverMatch(view, kwargs, name, ns, route, language, nothing, Any[])
+ResolverMatch(view, kwargs, name, ns, route, language, app) = ResolverMatch(view, kwargs, name, ns, route, language, app, Any[])
+"A regex's unnamed groups as Django's args: all its groups when it has no named ones, else none."
+capture_args(m::RegexMatch, rx::Regex) = isempty(Base.PCRE.capture_names(rx.regex)) ? Any[c === nothing ? nothing : String(c) for c in m.captures] : Any[]
 
 """
     i18n_patterns(patterns...; prefix_default_language=true)
@@ -245,7 +256,7 @@ function _resolve(patterns, p::AbstractString, kwargs, ns, prefix, app = nothing
             ck = capture_kwargs(m, params)
             ck === nothing && continue
             kw = merge(kwargs, ck, pat.defaults)
-            return ResolverMatch(pat.view, kw, pat.name, ns, prefix * route, nothing, app)
+            return ResolverMatch(pat.view, kw, pat.name, ns, prefix * route, nothing, app, capture_args(m, rx))
         elseif pat isa URLResolver
             route, rx, params = current_route(pat)
             m = match(rx, p)
@@ -255,7 +266,9 @@ function _resolve(patterns, p::AbstractString, kwargs, ns, prefix, app = nothing
             ck === nothing && continue
             r = _resolve(pat.patterns, rest, merge(kwargs, ck),
                          joinns(ns, pat.namespace), prefix * route, joinns(app, pat.app_name))
-            r === nothing || return r
+            # (the prefix's unnamed groups come first when nothing is named, as Django's)
+            r === nothing || return isempty(r.kwargs) ?
+                ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, r.language, r.app_name, vcat(capture_args(m, rx), r.args)) : r
         elseif pat isa AbstractVector
             r = _resolve(pat, p, kwargs, ns, prefix, app)
             r === nothing || return r
@@ -267,10 +280,10 @@ function _resolve(patterns, p::AbstractString, kwargs, ns, prefix, app = nothing
             # (translated routes under the prefix are read in the prefix's language, as LocaleMiddleware activates it)
             if m !== nothing && lowercase(m[1]) in supported_codes() && (pat.prefix_default || lowercase(m[1]) != default_language())
                 r = _resolve_in(lowercase(m[1]), pat.patterns, p[ncodeunits(m.match)+1:end], kwargs, ns, prefix * m.match, app)
-                r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, lowercase(m[1]), r.app_name)
+                r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, lowercase(m[1]), r.app_name, r.args)
             elseif !pat.prefix_default
                 r = _resolve_in(default_language(), pat.patterns, p, kwargs, ns, prefix, app)
-                r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, default_language(), r.app_name)
+                r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, default_language(), r.app_name, r.args)
             end
         end
     end
@@ -301,24 +314,24 @@ function all_routes(patterns = settings.ROOT_URLCONF, prefix = "", ns = nothing)
 end
 
 # --- reversing ------------------------------------------------------------------------
+#
+# As Django's: each named pattern's whole regex (its includes' prefixes, then its own) is turned into the URLs it
+# can match (`regex_normalize`, Django's regex_helper.normalize: an optional part both ways, `x+` once, `x{2,4}`
+# twice, a character class its first character, \d "0"), with the groups to fill in. A candidate URL is kept
+# only if the whole regex matches it.
 
+"One way to reverse a pattern: literal text and parameter references, in order."
 struct ReverseEntry
-    route::String                       # full route with <conv:name> placeholders
-    params::Vector{Tuple{Symbol,String}}
-    pieces::Vector{String}              # the literal text around the parameters (length(params) + 1)
-end
-function ReverseEntry(route::AbstractString, params)
-    pieces = String[]
-    last = 1
-    for m in eachmatch(ROUTE_PARAM, route)
-        push!(pieces, route[last:prevind(route, m.offset)])
-        last = m.offset + ncodeunits(m.match)
-    end
-    push!(pieces, route[last:end])
-    ReverseEntry(String(route), params, pieces)
+    shown::String                       # the pattern, for NoReverseMatch's "pattern(s) tried"
+    params::Vector{Symbol}              # the groups to fill in (positional ones are :_0, :_1, ...)
+    pieces::Vector{Any}                 # String (literal text) or Symbol (a parameter's value)
+    convs::Dict{Symbol,String}          # path() parameters' converters (but str: the whole regex checks it)
+    check_src::String                   # the whole pattern, which the candidate URL must match (compiled when first used)
+    check::Base.RefValue{Union{Nothing,Regex}}
+    defaults::Dict{Symbol,Any}          # the pattern's extra kwargs (a reverse's kwargs must agree with them)
 end
 
-const REVERSE_CACHE = IdDict{Any,Dict{String,Dict{String,Vector{ReverseEntry}}}}()     # urlconf => language => name => entries
+const REVERSE_CACHE = IdDict{Any,Dict{String,Dict{Any,Vector{ReverseEntry}}}}()     # urlconf => language => name or view => entries
 "Per URLconf: application namespace => its instance namespaces, in the order they're mounted."
 const APP_INSTANCES = IdDict{Any,Dict{String,Vector{String}}}()
 const REVERSE_LOCK = ReentrantLock()
@@ -357,70 +370,335 @@ function pick_instance(apps, app::AbstractString, current_app)
     insts[end]
 end
 
-function build_reverse_index!(idx, patterns, prefix, ns)
+"""
+A level's namespaces, as Django's resolver has them: instance namespace => its patterns (the first include of a name
+wins), and application namespace => its instances (the last mounted first). Includes without a namespace are part
+of the level.
+"""
+function level_namespaces(patterns)
+    lock(REVERSE_LOCK) do
+        get!(NAMESPACE_CACHE, patterns) do
+            nsd, appd = Dict{String,Vector{Any}}(), Dict{String,Vector{String}}()
+            add!(ps) = for pat in ps
+                if pat isa URLResolver && pat.namespace !== nothing
+                    haskey(nsd, pat.namespace) || (nsd[pat.namespace] = pat.patterns)
+                    pat.app_name === nothing || (v = get!(appd, pat.app_name, String[]); pat.namespace in v || pushfirst!(v, pat.namespace))
+                elseif pat isa URLResolver || pat isa LocalePrefix
+                    add!(pat.patterns)
+                elseif pat isa AbstractVector
+                    add!(pat)
+                end
+            end
+            add!(patterns)
+            (nsd, appd)
+        end
+    end
+end
+const NAMESPACE_CACHE = IdDict{Any,Tuple{Dict{String,Vector{Any}},Dict{String,Vector{String}}}}()
+push!(SETTINGS_CHANGED_HOOKS, () -> lock(() -> empty!(NAMESPACE_CACHE), REVERSE_LOCK))
+
+"""
+The instance namespaces `path` (`["inc-ns1", "testapp"]`) reverses in, joined, as Django's reverse: an application
+namespace is its instance in `current_app` (followed while it agrees), else the request's (CURRENT_APP), else the
+instance named like it, else the last mounted. `(nothing, message)` for a namespace that isn't there.
+"""
+function resolve_namespaces(urlconf, path, current_app)
+    level, resolved = urlconf, String[]
+    cur = current_app === nothing ? nothing : String.(split(string(current_app), ':'))
+    for (k, n) in enumerate(path)
+        ns = String(n)
+        cns = cur !== nothing && !isempty(cur) ? popfirst!(cur) : nothing
+        nsd, appd = level_namespaces(level)
+        lst = get(appd, ns, nothing)
+        if lst !== nothing
+            req = CURRENT_APP[]
+            if cns !== nothing && cns in lst
+                ns = cns
+            elseif k == 1 && cns === nothing && req !== nothing && req.first == ns && req.second in lst
+                ns = req.second
+            elseif !(ns in lst)
+                ns = lst[1]
+            end
+        end
+        ns != cns && (cur = nothing)
+        if !haskey(nsd, ns)
+            return nothing, isempty(resolved) ? "'$ns' is not a registered namespace" :
+                                                "'$ns' is not a registered namespace inside '$(join(resolved, ':'))'"
+        end
+        push!(resolved, ns)
+        level = nsd[ns]
+    end
+    join(resolved, ':'), nothing
+end
+
+# Django's regex_helper.normalize ------------------------------------------------------
+
+const REGEX_ESCAPES = Dict{Char,Union{Nothing,Char}}('A' => nothing, 'b' => nothing, 'B' => nothing, 'd' => '0', 'D' => 'x',
+                                                     's' => ' ', 'S' => 'x', 'w' => 'x', 'W' => '!', 'Z' => nothing, 'z' => nothing)
+struct RxGroup                  # a group: the text is `ref`'s value; `param` is what the caller passes (nothing: a backreference)
+    ref::Symbol
+    param::Union{Nothing,Symbol}
+end
+struct RxNonCapture
+    items::Vector{Any}
+end
+struct RxChoice                 # either of `items` (nothing: no text)
+    items::Vector{Any}
+end
+
+"A regex's characters with their escapes resolved: `(char, escaped)`, `\\d` as an escaped '0', `\\b` dropped."
+function regex_tokens(p::AbstractString)
+    cs, out, i = collect(p), Tuple{Char,Bool}[], 1
+    while i <= length(cs)
+        c = cs[i]
+        if c != '\\'
+            push!(out, (c, false)); i += 1; continue
+        end
+        i == length(cs) && break
+        r = get(REGEX_ESCAPES, cs[i+1], cs[i+1])
+        i += 2
+        r === nothing || push!(out, (r, true))
+    end
+    out
+end
+rx_contains_group(x) = x isa RxGroup || (x isa RxNonCapture && any(rx_contains_group, x.items))
+
+"""
+The URLs a regular expression can match, for reversing: `[(pieces, params)]`, the pieces literal text (String) and
+group references (Symbol), as Django's `normalize`. A regex with an alternation (`a|b`) gives one empty way.
+"""
+function regex_normalize(pattern::AbstractString)
+    toks = regex_tokens(pattern)
+    isempty(toks) && return [(Any[""], Symbol[])]
+    pos = Ref(0)
+    nxt() = (pos[] += 1; pos[] > length(toks) ? throw(EOFError()) : toks[pos[]])
+    peek() = pos[] < length(toks) ? toks[pos[]+1] : nothing
+    function walk_to_end(ch)
+        nesting = ch == '(' ? 1 : 0
+        while true
+            c, esc = nxt()
+            esc && continue
+            if c == '('
+                nesting += 1
+            elseif c == ')'
+                nesting == 0 && return
+                nesting -= 1
+            end
+        end
+    end
+    function quantifier(ch)
+        if ch in "*?+"
+            t = peek() === nothing ? nothing : nxt()
+            t !== nothing && t[1] == '?' && (t = nothing)            # (a lazy quantifier)
+            return (ch == '+' ? 1 : 0), t
+        end
+        q = Char[]
+        while ch != '}'
+            ch, _ = nxt()
+            push!(q, ch)
+        end
+        n = parse(Int, split(String(q[1:end-1]), ",")[1])
+        t = peek() === nothing ? nothing : nxt()
+        t !== nothing && t[1] == '?' && (t = nothing)
+        n, t
+    end
+    result, ncg, nargs = Any[], Int[], 0
+    ch, escaped = nxt()
+    try
+        while true
+            consume = true
+            if escaped
+                push!(result, string(ch))
+            elseif ch == '.'
+                push!(result, ".")
+            elseif ch == '|'
+                return [(Any[""], Symbol[])]                          # (not reversible: Django's NotImplementedError)
+            elseif ch == '^'
+            elseif ch == '$'
+                break
+            elseif ch == ')'
+                isempty(ncg) && throw(ArgumentError("unbalanced parenthesis in $(repr(pattern))"))
+                start = pop!(ncg)
+                result = vcat(result[1:start], Any[RxNonCapture(result[start+1:end])])
+            elseif ch == '['                                          # a character class: its first character
+                ch, escaped = nxt()
+                push!(result, string(ch))
+                ch, escaped = nxt()
+                while escaped || ch != ']'
+                    ch, escaped = nxt()
+                end
+            elseif ch == '('
+                ch, escaped = nxt()
+                if ch != '?' || escaped
+                    name = Symbol("_", nargs); nargs += 1
+                    push!(result, RxGroup(name, name))
+                    walk_to_end(ch)
+                else
+                    ch, escaped = nxt()
+                    pk = peek()
+                    if ch in "!=" || (ch == '<' && pk !== nothing && pk[1] in "!=")    # lookahead, lookbehind
+                        walk_to_end(ch)
+                    elseif ch == ':'
+                        push!(ncg, length(result))
+                    elseif ch == '<' || ch == 'P'                         # (?<name>...), (?P<name>...), (?P=name)
+                        ch == 'P' && ((ch, escaped) = nxt())
+                        ch in ('<', '=') || throw(ArgumentError("Non-reversible reg-exp portion: '(?P$ch'"))
+                        terminal = ch == '<' ? '>' : ')'
+                        name = Char[]
+                        ch, escaped = nxt()
+                        while ch != terminal
+                            push!(name, ch)
+                            ch, escaped = nxt()
+                        end
+                        p = Symbol(String(name))
+                        if terminal != ')'
+                            push!(result, RxGroup(p, p))
+                            walk_to_end(ch)
+                        else
+                            push!(result, RxGroup(p, nothing))
+                        end
+                    else
+                        throw(ArgumentError("Non-reversible reg-exp portion: '(?$ch'"))
+                    end
+                end
+            elseif ch in "*?+{"
+                n, t = quantifier(ch)
+                t === nothing || ((ch, escaped) = t; consume = false)
+                if n == 0
+                    isempty(result) || (rx_contains_group(result[end]) ? (result[end] = RxChoice(Any[nothing, result[end]])) : pop!(result))
+                elseif n > 1
+                    append!(result, fill(result[end], n - 1))
+                end
+            else
+                push!(result, string(ch))
+            end
+            consume && ((ch, escaped) = nxt())
+        end
+    catch e
+        e isa EOFError || rethrow()
+    end
+    r, a = rx_flatten(result)
+    collect(zip(r, a))
+end
+
+rx_flatten(::Nothing) = ([Any[]], [Symbol[]])
+rx_flatten(s::String) = ([Any[s]], [Symbol[]])
+rx_flatten(g::RxGroup) = ([Any[g.ref]], [g.param === nothing ? Symbol[] : Symbol[g.param]])
+rx_flatten(n::RxNonCapture) = rx_flatten(n.items)
+function rx_flatten(source::Vector{Any})
+    result, rargs = [Any[]], [Symbol[]]
+    last = 1
+    for (pos, elt) in enumerate(source)
+        elt isa String && continue
+        piece = Any[source[last:pos-1]...]
+        last = pos + 1
+        for i in eachindex(result)
+            append!(result[i], piece)
+            if elt isa RxGroup
+                push!(result[i], elt.ref)
+                elt.param === nothing || push!(rargs[i], elt.param)
+            end
+        end
+        if elt isa RxChoice || elt isa RxNonCapture
+            items = elt isa RxNonCapture ? Any[elt] : elt.items
+            ir, ia = Vector{Any}[], Vector{Symbol}[]
+            for item in items
+                r, a = rx_flatten(item)
+                append!(ir, r); append!(ia, a)
+            end
+            nr, na = Vector{Any}[], Vector{Symbol}[]
+            for (r, ra) in zip(result, rargs), (x, xa) in zip(ir, ia)
+                push!(nr, vcat(r, x)); push!(na, vcat(ra, xa))
+            end
+            result, rargs = nr, na
+        end
+    end
+    for r in result
+        append!(r, source[last:end])
+    end
+    result, rargs
+end
+
+"A level's regex source without its leading `^` (levels are joined into one regex, as Django's resolver does)."
+level_source(rx::Regex) = (s = rx.pattern; startswith(s, "^") ? s[2:end] : s)
+"How a pattern is shown in NoReverseMatch's message: a re_path's regex as written, a path's regex."
+level_shown(route, rx) = (s = is_regex_route(route) ? String(route) : rx.pattern; startswith(s, "^") ? s[2:end] : s)
+const LANG_CHECK = "(?:[A-Za-z]{2,3}(?:-[A-Za-z0-9]+)*/)?"
+
+"Add the reverse entries of `patterns` under the prefix (its regex source, check source, shown text, converters)."
+function build_reverse_index!(idx, patterns, src, chk, shown, convs, ns, seen = Set{String}())
     for pat in patterns
         if pat isa URLPattern
-            pat.name === nothing && continue
-            route = current_route(pat)[1]
-            if is_regex_route(route)              # a re_path: its groups are the parameters
-                push!(get!(idx, joinns(ns, pat.name), ReverseEntry[]), regex_reverse_entry(prefix, route))
-                continue
+            (pat.name === nothing && ns !== nothing) && continue
+            route, rx, params = current_route(pat)
+            level = level_source(rx)
+            cv = merge(convs, Dict{Symbol,String}(n => c for (n, c) in params if c != "str"))
+            ways = try
+                regex_normalize(src * level)
+            catch e
+                e isa ArgumentError || rethrow()
+                continue                                              # (a regex that can't be reversed)
             end
-            _, params = compile_route(prefix * route; endpoint = true)
-            push!(get!(idx, joinns(ns, pat.name), ReverseEntry[]), ReverseEntry(prefix * route, params))
+            check = "^/" * chk * level
+            sh = shown * level_shown(route, rx)
+            # (reverse_url tries a name's entries last first: a pattern's ways go in backwards, so it tries them in order)
+            es = [ReverseEntry(sh, a, merge_pieces(p), cv, check, Ref{Union{Nothing,Regex}}(nothing), pat.defaults) for (p, a) in Iterators.reverse(ways)]
+            pat.name === nothing || append!(get!(idx, joinns(ns, pat.name), ReverseEntry[]), es)
+            ns === nothing && append!(get!(idx, pat.view, ReverseEntry[]), es)        # (by the view too, as Django)
         elseif pat isa URLResolver
-            build_reverse_index!(idx, pat.patterns, prefix * current_route(pat)[1], joinns(ns, pat.namespace))
+            route, rx, params = current_route(pat)
+            level = level_source(rx)
+            cv = merge(convs, Dict{Symbol,String}(n => c for (n, c) in params if c != "str"))
+            # (a namespace mounted twice in a level: the first one, as Django's)
+            pat.namespace === nothing || !(joinns(ns, pat.namespace) in seen) || continue
+            pat.namespace === nothing || push!(seen, joinns(ns, pat.namespace))
+            build_reverse_index!(idx, pat.patterns, src * level, chk * level, shown * level_shown(route, rx), cv,
+                                 joinns(ns, pat.namespace), seen)
         elseif pat isa AbstractVector
-            build_reverse_index!(idx, pat, prefix, ns)
+            build_reverse_index!(idx, pat, src, chk, shown, convs, ns, seen)
         elseif pat isa LocalePrefix
-            build_reverse_index!(idx, pat.patterns, prefix * (pat.prefix_default ? LANG_ALWAYS : LANG_OPTIONAL), ns)
+            build_reverse_index!(idx, pat.patterns, src * (pat.prefix_default ? LANG_ALWAYS : LANG_OPTIONAL), chk * LANG_CHECK,
+                                 shown, convs, ns, seen)
         end
     end
     idx
 end
+build_reverse_index!(idx, patterns, prefix, ns) = build_reverse_index!(idx, patterns, "", "", "", Dict{Symbol,String}(), ns)
+"An entry's whole-pattern regex, compiled when first used."
+entry_check(e::ReverseEntry) = something(e.check[], lock(REVERSE_LOCK) do
+    e.check[] === nothing && (e.check[] = Regex(unique_group_names(e.check_src)))
+    e.check[]
+end)
+"""
+A regex with a group name that repeats (nested prefixes each capturing `outer`) renamed so PCRE takes it: a later
+group gets a new name, and backreferences after it follow.
+"""
+function unique_group_names(src::AbstractString)
+    seen, cur = Dict{String,Int}(), Dict{String,String}()
+    replace(src, r"\(\?P?<([A-Za-z_]\w*)>|\(\?P=([A-Za-z_]\w*)\)" => function (m)
+        g = match(r"^\(\?P?<([A-Za-z_]\w*)>$", m)
+        if g !== nothing
+            n = String(g[1])
+            k = get(seen, n, 0)
+            seen[n] = k + 1
+            cur[n] = k == 0 ? n : "$(n)__$k"
+            return "(?P<$(cur[n])>"
+        end
+        n = String(match(r"^\(\?P=(\w+)\)$", m)[1])
+        "(?P=$(get(cur, n, n)))"
+    end)
+end
+"Adjacent literal pieces joined."
+function merge_pieces(p)
+    out = Any[]
+    for x in p
+        x isa Symbol ? push!(out, x) : !isempty(out) && out[end] isa String ? (out[end] *= x) : push!(out, String(x))
+    end
+    out
+end
 
 "Whether a route is a `re_path`'s regular expression rather than a `path` route."
 is_regex_route(r::AbstractString) = startswith(r, "^") || endswith(r, "\$") || occursin('(', r) || occursin('\\', r)
-"""
-A `re_path` for reversing, as Django's: the literal text around its groups (escapes removed,
-percent-encoded) and a parameter per group, named groups by their names (keyword arguments),
-the others positional.
-"""
-function regex_reverse_entry(prefix::AbstractString, rx::AbstractString)
-    cs = collect(rx)
-    !isempty(cs) && cs[1] == '^' && popfirst!(cs)
-    !isempty(cs) && cs[end] == '$' && (length(cs) < 2 || cs[end-1] != '\\') && pop!(cs)
-    pieces, params, buf, i, npos = String[], Tuple{Symbol,String}[], IOBuffer(), 1, 0
-    quote_piece(p) = join(path_quote.(split(p, '/')), '/')
-    while i <= length(cs)
-        c = cs[i]
-        if c == '\\' && i < length(cs)
-            print(buf, cs[i+1]); i += 2
-        elseif c == '('
-            depth, j = 0, i
-            while j <= length(cs)
-                cs[j] == '\\' && (j += 2; continue)
-                cs[j] == '(' && (depth += 1)
-                cs[j] == ')' && (depth -= 1; depth == 0 && break)
-                j += 1
-            end
-            grp = String(cs[i:min(j, length(cs))])
-            if startswith(grp, "(?:")
-                i = j + 1                          # (a non-capturing group: nothing to fill in)
-                continue
-            end
-            m = match(r"^\(\?P?<(\w+)>", grp)
-            push!(pieces, quote_piece(String(take!(buf))))
-            push!(params, (m === nothing ? Symbol("_", npos += 1) : Symbol(m[1]), "str"))
-            i = j + 1
-        else
-            print(buf, c); i += 1
-        end
-    end
-    push!(pieces, quote_piece(String(take!(buf))))
-    pieces[1] = prefix * pieces[1]
-    ReverseEntry(prefix * rx, params, pieces)
-end
 
 struct NoReverseMatch <: Exception
     msg::String
@@ -441,71 +719,125 @@ Functions that may translate a view name `reverse_url` doesn't know: `(name, arg
 """
 const REVERSE_FALLBACKS = Function[]
 
-"""
-    reverse_url(name, args...; urlconf=settings.ROOT_URLCONF, query=nothing, kwargs...)
+# Python's repr, for NoReverseMatch's messages as Django's
+url_repr(s::AbstractString) = "'" * replace(s, "\\" => "\\\\", "'" => "\\'") * "'"
+url_repr(x::Bool) = x ? "True" : "False"
+url_repr(::Nothing) = "None"
+url_repr(x) = string(x)
+url_tuple(xs) = "(" * join(map(url_repr, xs), ", ") * (length(xs) == 1 ? ",)" : ")")
 
-Build the URL for the named pattern. Use `"namespace:name"` for included patterns.
+"""
+    reverse_url(name, args...; urlconf=settings.ROOT_URLCONF, query=nothing, fragment=nothing, current_app=nothing, kwargs...)
+
+Build the URL for the named pattern (or a view: the pattern it's mounted at). Use `"namespace:name"` for included
+patterns. `query` (a Dict, pairs or a QueryDict) is added as the query string and `fragment` after `#`, as Django's.
 
     reverse_url("article"; id=3)        # "/articles/3/"
     reverse_url("blog:post", 3)         # positional arguments also work
 """
-function reverse_url(name::AbstractString, args...; urlconf = settings.ROOT_URLCONF, query = nothing, current_app = nothing, kwargs...)
+function reverse_url(name, args...; urlconf = settings.ROOT_URLCONF, query = nothing, fragment = nothing, current_app = nothing, kwargs...)
+    name === nothing && throw(NoReverseMatch("Reverse for 'None' not found. 'None' is not a valid view function or pattern name."))
+    !isempty(args) && !isempty(kwargs) && throw(ArgumentError("Don't mix *args and **kwargs in call to reverse()!"))
+    fragment === nothing || fragment isa AbstractString || throw(ArgumentError("fragment must be a string, not $(typeof(fragment))"))
     idx, apps = lock(REVERSE_LOCK) do
         # (one index per language: translated routes reverse to the active language's)
-        get!(() -> build_reverse_index!(Dict{String,Vector{ReverseEntry}}(), urlconf, "", nothing),
-             get!(() -> Dict{String,Dict{String,Vector{ReverseEntry}}}(), REVERSE_CACHE, urlconf), get_language()),
+        get!(() -> build_reverse_index!(Dict{Any,Vector{ReverseEntry}}(), urlconf, "", nothing),
+             get!(() -> Dict{String,Dict{Any,Vector{ReverseEntry}}}(), REVERSE_CACHE, urlconf), get_language()),
         get!(() -> collect_app_instances!(Dict{String,Vector{String}}(), urlconf, nothing, nothing), APP_INSTANCES, urlconf)
     end
-    i = findlast(':', name)
-    inst = nothing
-    if i !== nothing                                   # an application namespace: pick its instance
-        inst = pick_instance(apps, name[1:prevind(name, i)], current_app)
-        inst === nothing || (name = inst * name[i:end])
-    end
-    app = CURRENT_APP[]
-    if inst === nothing && app !== nothing && startswith(name, app.first * ":")     # (an admin site's own name)
-        alias = app.second * name[length(app.first)+1:end]
-        haskey(idx, alias) && (name = alias)
+    nserr = nothing
+    if name isa AbstractString
+        i = findlast(':', name)
+        inst = nothing
+        nserr = nothing
+        if i !== nothing                                   # namespaces: each one an instance, or an application's (Django's walk)
+            r, nserr = resolve_namespaces(urlconf, split(name[1:prevind(name, i)], ':'), current_app)
+            r === nothing || (inst = r; name = r * name[i:end])
+        end
+        app = CURRENT_APP[]
+        if inst === nothing && app !== nothing && startswith(name, app.first * ":")     # (an admin site's own name)
+            alias = app.second * name[length(app.first)+1:end]
+            haskey(idx, alias) && (name = alias)
+        end
     end
     entries = get(idx, name, nothing)
+    shown_name = name isa AbstractString ? name : string(name)
     if entries === nothing
-        for fb in REVERSE_FALLBACKS
-            r = fb(name, args, kwargs)
-            r === nothing || return reverse_url(r[1], r[2]...; urlconf = urlconf, query = query, current_app = current_app, r[3]...)
+        if name isa AbstractString
+            for fb in REVERSE_FALLBACKS
+                r = fb(name, args, kwargs)
+                r === nothing || return reverse_url(r[1], r[2]...; urlconf = urlconf, query = query, fragment = fragment, current_app = current_app, r[3]...)
+            end
         end
-        throw(NoReverseMatch("'$name' is not a valid view name"))
+        name isa AbstractString && nserr !== nothing && throw(NoReverseMatch(nserr))
+        throw(NoReverseMatch("Reverse for '$shown_name' not found. '$shown_name' is not a valid view function or pattern name."))
     end
     kw = kwargs                                   # (Base.Pairs: haskey, getindex and length, no Dict to build)
     for e in Iterators.reverse(entries)
         if !isempty(args)
             length(args) == length(e.params) || continue
         else
-            (length(kw) == length(e.params) && all(p -> haskey(kw, p[1]), e.params)) || continue
+            # the kwargs are the parameters, give or take the pattern's defaults, and agree with the defaults (Django's rule)
+            all(k -> k in e.params || haskey(e.defaults, k), keys(kw)) || continue
+            all(p -> haskey(kw, p) || haskey(e.defaults, p), e.params) || continue
+            any(d -> haskey(kw, d.first) && kw[d.first] != d.second, e.defaults) && continue
         end
-        io = IOBuffer(sizehint = 64)
-        write(io, '/')
+        text = Dict{Symbol,String}()
         ok = true
-        for (i, (pn, conv)) in enumerate(e.params)
-            c = CONVERTERS[conv]
-            s = try
-                string(c.to_url(isempty(args) ? kw[pn] : args[i]))
-            catch e
-                no_match_error(e) || rethrow()
-                (ok = false; break)                # (the converter refuses the value: try the next pattern)
+        for (i, p) in enumerate(e.params)
+            conv = get(e.convs, p, nothing)
+            v = !isempty(args) ? args[i] : haskey(kw, p) ? kw[p] : e.defaults[p]
+            s = if conv === nothing
+                v isa Bool ? url_repr(v) : string(v)
+            else
+                c = CONVERTERS[conv]
+                t = try
+                    string(c.to_url(v))
+                catch err
+                    no_match_error(err) || rethrow()
+                    nothing                        # (the converter refuses the value: try the next pattern)
+                end
+                (t === nothing || !occursin(c.full, t)) && (ok = false; break)
+                t
             end
-            occursin(c.full, s) || (ok = false; break)
-            print(io, e.pieces[i], conv == "path" ? join(path_quote.(split(s, '/')), '/') : path_quote(s))
+            text[p] = s
         end
         ok || continue
-        print(io, e.pieces[end])
+        io = IOBuffer(sizehint = 64)
+        write(io, '/')
+        for x in e.pieces
+            print(io, x isa Symbol ? get(text, x, "") : x)
+        end
         url = String(take!(io))
         if occursin("\0lang", url)
             lang = something(supported_language(get_language()), default_language())
             url = !settings.USE_I18N ? replace(url, LANG_ALWAYS => "", LANG_OPTIONAL => "") :
                   replace(url, LANG_ALWAYS => lang * "/", LANG_OPTIONAL => lang == default_language() ? "" : lang * "/")
         end
-        query === nothing || (url *= "?" * urlencode(query))
+        occursin(entry_check(e), url) || continue                         # (the whole pattern matches it)
+        url = join(path_quote.(split(url, '/')), '/')
+        startswith(url, "//") && (url = "/%2F" * url[3:end])            # (not a scheme-relative URL: Django's escape_leading_slashes)
+        q = query_string(query)
+        isempty(q) || (url *= "?" * q)
+        fragment === nothing || (url *= "#" * fragment)
         return url
     end
-    throw(NoReverseMatch("Reverse for '$name' with arguments $(args) and keyword arguments $(kw) not found"))
+    tried = unique([e.shown for e in Iterators.reverse(entries)])
+    argmsg = !isempty(args) ? "arguments '$(url_tuple(args))'" :
+             !isempty(kw) ? "keyword arguments '{" * join(["'$k': $(url_repr(v))" for (k, v) in kw], ", ") * "}'" : "no arguments"
+    throw(NoReverseMatch("Reverse for '$shown_name' with $argmsg not found. $(length(tried)) pattern(s) tried: [" *
+                         join(map(url_repr, tried), ", ") * "]"))
 end
+"A reverse's query string: a Dict, NamedTuple, pairs or QueryDict (empty or nothing: none), as Django's."
+query_string(::Nothing) = ""
+query_string(q::AbstractString) = String(q)
+query_string(q::QueryDict) = urlencode(q)
+query_string(q::Union{AbstractDict,NamedTuple}) = isempty(q) ? "" : plus_spaces(urlencode(Pair{Any,Any}[k => (v isa Tuple || v isa AbstractSet ? collect(v) : v) for (k, v) in pairs(q)]))
+"Spaces as `+` (Python's urlencode, which reverse's query uses)."
+plus_spaces(s) = replace(s, "%20" => "+")
+function query_string(q::Union{AbstractVector,Tuple,AbstractSet})
+    isempty(q) && return ""
+    all(x -> x isa Pair || (x isa Tuple && length(x) == 2), q) || throw(ArgumentError("query must be a mapping or a sequence of pairs"))
+    plus_spaces(urlencode(Pair{Any,Any}[x isa Pair ? x : (x[1] => x[2]) for x in q]))
+end
+query_string(q) = throw(ArgumentError("query must be a mapping or a sequence of pairs, not $(typeof(q))"))

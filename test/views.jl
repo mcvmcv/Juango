@@ -2021,7 +2021,7 @@ end
     @test get_signed_cookie(tampered, "pref"; salt = "ui", default = "bad") == "bad"
 
     old_urls, old_mw = settings.ROOT_URLCONF, settings.MIDDLEWARE
-    blog = [path("", req -> HttpResponse(reverse_url("blog:index") * "|" * reverse_url("blog:index"; current_app = "blog")); name = "index")]
+    blog = [path("", req -> HttpResponse(reverse_url("blog148:index") * "|" * reverse_url("blog148:index"; current_app = "blog148")); name = "index")]
     plain(req) = HttpResponse("<p>ok</p>")
     js_form = ensure_csrf_cookie(plain)
     try
@@ -2032,8 +2032,8 @@ end
             path("h148/noslash/", no_append_slash(req -> HttpResponse("n"))), path("h148/slash/", req -> HttpResponse("s")),   # (it marks the function)
             path("h148/protected/", csrf_protect(req -> HttpResponse("posted"))),
             path("h148/secret/", sensitive_post_parameters(req -> error("boom148"), "card")),
-            path("b148/", include_urls(blog; app_name = "blog")),
-            path("n148/", include_urls(blog; app_name = "blog", namespace = "news"))]))
+            path("b148/", include_urls(blog; app_name = "blog148")),
+            path("n148/", include_urls(blog; app_name = "blog148", namespace = "news"))]))
         c = Client()
         @test !any(startswith("csrftoken="), get(c, "/h148/plain/").cookies)
         r = get(c, "/h148/js/")
@@ -2046,9 +2046,9 @@ end
         @test get(c, "/h148/slash").status == 301 && get(c, "/h148/noslash").status == 404     # no_append_slash
         # application namespaces: each instance reverses to itself; elsewhere "blog:" is the default instance
         @test text(get(c, "/b148/")) == "/b148/|/b148/" && text(get(c, "/n148/")) == "/n148/|/b148/"
-        @test reverse_url("blog:index") == "/b148/" && reverse_url("news:index") == "/n148/"
-        @test reverse_url("blog:index"; current_app = "news") == "/n148/"
-        @test Juango.resolve("/n148/").app_name == "blog" && Juango.resolve("/n148/").namespace == "news"
+        @test reverse_url("blog148:index") == "/b148/" && reverse_url("news:index") == "/n148/"
+        @test reverse_url("blog148:index"; current_app = "news") == "/n148/"
+        @test Juango.resolve("/n148/").app_name == "blog148" && Juango.resolve("/n148/").namespace == "news"
 
         # csrf_protect without the middleware
         configure!(MIDDLEWARE = filter(m -> m !== Juango.CsrfViewMiddleware, old_mw))

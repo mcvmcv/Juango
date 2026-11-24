@@ -72,7 +72,7 @@ function template_issues(; dirs = nothing)
                         reverse_url(u, (n.args isa Vector && !isempty(n.args) ? fill("1", length(n.args)) : String[])...;
                                     (Symbol(k) => "1" for (k, _) in n.kwargs)...)
                     catch e
-                        e isa NoReverseMatch && occursin("is not a valid view name", e.msg) &&
+                        e isa NoReverseMatch && occursin("is not a valid view function or pattern name", e.msg) &&
                             push!(out, ("templates.E102", name, "{% url '$u' %}: no URL pattern is named '$u'"))
                     end
                 elseif n isa ComponentNode

@@ -1881,7 +1881,7 @@ function urls(st::AdminSite = site)
         path("<slug:app>/<slug:model>/<str:id>/history/", s(history_view); name = "history"),
         path("<slug:app>/<slug:model>/<str:id>/password/", s(password_change_view); name = "password_change"),
         path("<slug:app>/<slug:model>/<str:id>/", s(object_redirect)),
-    ]); namespace = st.name)
+    ]); namespace = st.name, app_name = "admin")
 end
 
 

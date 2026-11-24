@@ -954,7 +954,17 @@ Converters: `str int slug path uuid`, plus `register_converter!`.
 An app mounted more than once gets an application namespace and an instance namespace per mount,
 as Django's `app_name`: `include_urls(blog_patterns; app_name = "blog", namespace = "news")`. Then
 `reverse_url("blog:post", 3)` and `{% url 'blog:post' 3 %}` give the instance the current request
-is in, or `current_app = "news"`, or the instance named like the app.
+is in, or `current_app = "news"`, or the instance named like the app, else the last one mounted.
+Namespaces nest (`"inc:testapp:post"`), each one resolved in turn, as Django's; a namespace mounted
+twice at one level is the first one.
+
+`reverse_url` reverses as Django's `reverse`: a `re_path`'s regex gives the URLs it can match (an
+optional group with or without it, `places?` as `place`, a character class as its first character),
+and a candidate is kept only if the whole pattern, includes and all, matches it. A name used by
+several patterns tries the last first, then the one the arguments fit; a pattern's extra kwargs
+(`re_path(...; name = "x", arg2 = 1)`) may be passed and must agree. It also takes the view itself
+(`reverse_url(article_detail; id = 3)`), `query` (a Dict, NamedTuple, pairs or a `QueryDict`) and
+`fragment`. A `re_path` with only unnamed groups gives them to `resolve(...).args`.
 
 `redirect(to)` and `resolve_url(to)` take a URL, a URL name (reversed with the arguments), or a model instance with `get_absolute_url`. As in Django, a name that doesn't reverse is a `NoReverseMatch`, unless it looks like a URL (it has a `/` or a `.`). `redirect(to; preserve_request = true)` keeps the method and body with a 307, or a 308 when permanent. Redirect URLs are percent-encoded to ASCII (`iri_to_uri`). `get_object_or_404` and `get_list_or_404` take a model, a queryset or a related manager, and say so if they're given anything else.
 
