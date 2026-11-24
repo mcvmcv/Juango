@@ -176,6 +176,8 @@ function select_related(@nospecialize(qs::QuerySet), paths...)
             end
             C = mti_child(M, s)                   # a multi-table child's link (place.restaurant)
             C === nothing || (M = C; continue)
+            g = find_generic(foreign_objects(M), s)          # a ForeignObject
+            g === nothing || (M = related_model(g); continue)
             r = reverse_one_to_one(M, s)          # the other side of a OneToOneField: at most one row
             r === nothing && throw(select_related_error(M, s, M === T ? qs : nothing))
             M = r[2]
@@ -219,6 +221,7 @@ end
 "Django's select_related() errors: the relations `M` offers (forward keys, reverse one-to-ones, filtered relations)."
 Base.@nospecializeinfer function select_related_error(@nospecialize(M::Type), s::Symbol, @nospecialize(qs))
     choices = String[string(f.name) for f in all_fields(M) if f.kind === :fk]
+    append!(choices, [string(g.name) for g in foreign_objects(M)])
     append!(choices, [string(child_accessor(C)) for C in child_models(M)])
     append!(choices, [string(rn) for (rn, _, rf) in reverse_relations(M) if rf.one_to_one])
     qs === nothing || append!(choices, [string(k) for (k, v) in qs.annotations if is_filtered_relation(v)])
@@ -614,6 +617,15 @@ function related_columns!(c::SQLCompiler, paths, deferred = Symbol[]; required =
                 left = true
                 alias = join!(c, alias, (alias, s, :child), modelmeta(C).table, "id", "id"; left = true)
                 M = C
+            elseif f === nothing && (g = find_generic(foreign_objects(M), s)) !== nothing
+                # a ForeignObject: LEFT JOIN on every part (any part may be NULL)
+                left = true
+                parts = fobj_parts(g)
+                a0 = alias
+                more = parts[2:end]
+                alias = join!(c, alias, (alias, s, :fobj), modelmeta(related_model(g)).table, parts[1][4], parts[1][2]; left = true,
+                              extra_on = isempty(more) ? nothing : (a -> fobj_on(more, a0, a)))
+                M = related_model(g)
             elseif f === nothing                  # reverse one-to-one: LEFT JOIN other.fk = this.id
                 _, R, rf = reverse_one_to_one(M, s)
                 left = !(i == 1 && s in required)
@@ -1100,6 +1112,8 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
                         rr = find_reverse(typeof(parent), rel)
                         rr === nothing || rr[3].kind !== :fk || ((getfield(r, :_cache)::Dict{Symbol,Any})[rr[3].name] = parent)
                     end
+                elseif pf === nothing && find_generic(foreign_objects(typeof(parent)), path[end]) !== nothing
+                    r === nothing || ((getfield(parent, :_cache)::Dict{Symbol,Any})[path[end]] = r)      # a ForeignObject's target
                 elseif pf === nothing
                     # a reverse one-to-one: remember that there's no row too, so the accessor doesn't query
                     (getfield(parent, :_cache)::Dict{Symbol,Any})[path[end]] = PrefetchedList(r === nothing ? Any[] : Any[r])
@@ -1278,6 +1292,10 @@ Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), na
     end
     mm = find_m2m(T, string(name))
     mm === nothing || return prefetch_m2m!(objs, mm[1], mm[2], mm[3], qs, to_attr)
+    g = find_generic(foreign_objects(T), name)
+    g === nothing || return prefetch_fobj!(objs, g, qs, to_attr)
+    r = find_reverse_fobj(T, name)
+    r === nothing || return prefetch_reverse_fobj!(objs, r[1], r[2], r[3], qs, to_attr)
     g = find_generic(generic_fks(T), name)
     g === nothing || return prefetch_generic_fk!(objs, g, qs)
     g = find_generic(generic_relations(T), name)
@@ -1313,6 +1331,47 @@ Base.@nospecializeinfer function prefetch_level!(@nospecialize(objs::Vector), na
     end
     for o in objs
         (getfield(o, :_cache)::Dict{Symbol,Any})[something(to_attr, rn)] = PrefetchedList(get(groups, target_value(rf, o), M[]))
+    end
+    rows
+end
+
+"""
+Prefetch a ForeignObject (forward): one query for the targets whose fields match any object's values, filtered on
+every one of those fields (as Django's), and no join. An object with a NULL part has none.
+"""
+Base.@nospecializeinfer function prefetch_fobj!(@nospecialize(objs::Vector), f::Field, @nospecialize(qs), to_attr)
+    parts = fobj_parts(f)
+    R = related_model(f)
+    keyof(o) = (k = Tuple(field_data(o, p[1]) for p in parts); any(isnothing, k) ? nothing : k)
+    keys_ = unique(filter(!isnothing, map(keyof, objs)))
+    rel = isempty(keys_) ? R[] :
+          fetch(filter(something(qs, base_objects(R)), Q(:AND, Any[Symbol(p[3], "__in") => unique([k[i] for k in keys_]) for (i, p) in enumerate(parts)], false)))
+    bykey = Dict(Tuple(field_data(r, p[3]) for p in parts) => r for r in rel)
+    for o in objs
+        k = keyof(o)
+        r = k === nothing ? nothing : get(bykey, k, nothing)
+        if to_attr !== nothing
+            (getfield(o, :_cache)::Dict{Symbol,Any})[to_attr] = r
+        elseif r !== nothing
+            (getfield(o, :_cache)::Dict{Symbol,Any})[f.name] = r
+        end
+    end
+    rel
+end
+
+"Prefetch the rows of `M` whose ForeignObject `f` points at each of `objs` (a reverse ForeignObject)."
+Base.@nospecializeinfer function prefetch_reverse_fobj!(@nospecialize(objs::Vector), rn::Symbol, @nospecialize(M::Type), f::Field, @nospecialize(qs), to_attr)
+    parts = fobj_parts(f)
+    keyof(o) = Tuple(field_data(o, p[3]) for p in parts)
+    keys_ = unique(filter(k -> !any(isnothing, k), map(keyof, objs)))
+    rows = isempty(keys_) ? M[] :
+           fetch(filter(something(qs, objects(M)), Q(:AND, Any[Symbol(p[1], "__in") => unique([k[i] for k in keys_]) for (i, p) in enumerate(parts)], false)))
+    groups = Dict{Any,Vector{M}}()
+    for r in rows
+        push!(get!(() -> M[], groups, Tuple(field_data(r, p[1]) for p in parts)), r)
+    end
+    for o in objs
+        (getfield(o, :_cache)::Dict{Symbol,Any})[something(to_attr, rn)] = PrefetchedList(get(groups, keyof(o), M[]))
     end
     rows
 end

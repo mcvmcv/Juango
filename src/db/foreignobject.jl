@@ -59,8 +59,15 @@ Base.@nospecializeinfer function compute_reverse_fobjs(@nospecialize(T::Type))
     end
     out
 end
-Base.@nospecializeinfer find_reverse_fobj(@nospecialize(T::Type), name) = (i = findfirst(r -> string(r[1]) == string(name), reverse_foreign_objects(T));
-                                    i === nothing ? nothing : reverse_foreign_objects(T)[i])
+"A reverse ForeignObject by its accessor name (`membership_set`) or, in lookups, its query name (`membership`)."
+Base.@nospecializeinfer function find_reverse_fobj(@nospecialize(T::Type), name)
+    rs = reverse_foreign_objects(T)
+    i = findfirst(r -> string(r[1]) == string(name), rs)
+    i === nothing && (i = findfirst(r -> string(fobj_query_name(r[2], r[3])) == string(name), rs))
+    i === nothing ? nothing : rs[i]
+end
+"A reverse ForeignObject's name in lookups: its related_name, else the model's name (Django's related_query_name)."
+fobj_query_name(@nospecialize(M), f::Field) = something(f.related_name, default_related_name(M), Symbol(lowercase(modelmeta(M).name)))
 
 Base.@nospecializeinfer function get_fobj(@nospecialize(m::Model), f::Field)
     parts = fobj_parts(f)

@@ -463,7 +463,8 @@ Base.@nospecializeinfer function find_m2m_query(@nospecialize(T::Type), name)
         f = r[2]
         q = r[3] ? string(r[1]) :
             string(something(f.related_query_name, f.related_name, default_related_name(f.model), Symbol(lowercase(modelmeta(f.model).name))))
-        (q == name || string(r[1]) == name) && return r
+        # (the accessor's name too, unless a related_query_name replaces it, as for reverse foreign keys)
+        (q == name || (string(r[1]) == name && (r[3] || f.related_query_name === nothing))) && return r
     end
     nothing
 end

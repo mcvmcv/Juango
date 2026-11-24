@@ -272,6 +272,11 @@ function lookup_choices(T)
     end
     foreach(C -> push!(names, string(child_accessor(C))), child_models(concrete_model(T)))
     foreach(g -> push!(names, string(g.name)), generic_relations(T))        # (GenericRelations: tags)
+    foreach(g -> push!(names, string(g.name)), foreign_objects(T))          # (ForeignObjects, both ways)
+    for (_, M, f) in reverse_foreign_objects(T)
+        n = string(fobj_query_name(M, f))
+        endswith(n, "+") || push!(names, n)
+    end
     sort!(collect(names))
 end
 lookup_error(T, fname) =
