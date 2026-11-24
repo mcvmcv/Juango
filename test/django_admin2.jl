@@ -1,4 +1,8 @@
-# More of Django's admin tests, ported (#227): admin_ordering.
+# More of Django's admin tests, ported (#227): admin_ordering, admin_utils (UtilsTests: display_for_field, display_for_value).
+#
+# Juango's boolean icons are its own ✔/✘/? spans, not Django's images. Not translated from admin_utils:
+# NestedObjectsTests (Django's NestedObjects collector), lookup_field, label_for_field and help_text_for_field (Python
+# attribute lookup), the password-hash display, flatten/flatten_fieldsets, quote and test_logentry.
 # julia --project=test test/django_admin2.jl   (see setup.jl)
 @isdefined(TEST_SETUP_DONE) || include("setup.jl")
 using Juango.Admin
@@ -53,8 +57,8 @@ dao_names(qs) = [x.name for x in collect(qs)]
         @test dao_names(Admin.admin_queryset(ma, req)) == ["Aerosmith", "Van Halen", "Radiohead"]
     end
     # test_dynamic_ordering
-    su = create(User; username = "admin", is_superuser = true)
-    other = create(User; username = "other")
+    su = create(User; username = "dao_admin", is_superuser = true)
+    other = create(User; username = "dao_other")
     dao_admin(DaoBand; get_ordering = r -> r.user.is_superuser ? ["rank"] : ["name"]) do ma
         req.user = su
         @test dao_names(Admin.admin_queryset(ma, req)) == ["Radiohead", "Van Halen", "Aerosmith"]
@@ -101,4 +105,57 @@ end
         end
     end
   end
+end
+
+# --- tests/admin_utils (UtilsTests) -----------------------------------------------------------------------------
+@testset "django admin_utils: UtilsTests" begin
+    E = "-empty-"
+    dff(v, f) = Admin.display_for_field(v, f, E)
+    dfv(v; kw...) = Admin.display_for_value(v, E; kw...)
+    # test_empty_value_display_for_field
+    for f in (CharField(max_length = 10), DateField(), DecimalField(max_digits = 10, decimal_places = 2), FloatField(), URLField(), JSONField(), TimeField())
+        for v in (nothing, "", Any[], Dict{String,Any}())
+            f.kind !== :json && v isa Union{AbstractVector,AbstractDict} && continue
+            @test dff(v, f) == E
+        end
+    end
+    # test_empty_value_database_default_display_for_field / test_empty_value_display_choices
+    @test dff(Juango.DB_DEFAULT, IntegerField()) == E
+    @test dff(nothing, CharField(max_length = 10, choices = [(nothing, "test_none")])) == "test_none"
+    # test_empty_value_display_booleanfield
+    for v in (nothing, Juango.DB_DEFAULT)
+        @test string(dff(v, BooleanField(null = true))) == "<span class=\"unknown\" title=\"None\">?</span>"
+    end
+    # test_json_display_for_field
+    @test dff(Dict("a" => Dict("b" => "c")), JSONField()) == "{\"a\": {\"b\": \"c\"}}"
+    @test dff(["a", "b"], JSONField()) == "[\"a\", \"b\"]"
+    @test dff("a", JSONField()) == "\"a\""
+    @test dff(Dict("a" => "你好 世界"), JSONField()) == "{\"a\": \"你好 世界\"}"
+    # test_url_display_for_field / test_url_display_for_field_invalid_url
+    @test string(dff("http://example.com", URLField())) == "<a href=\"http://example.com\">http://example.com</a>"
+    for v in ("javascript:alert(1)", "data:text/html,<script>alert(1)</script>")
+        @test dff(v, URLField()) == v
+    end
+    # test_number_formats_display_for_field / ..._with_thousand_separator_...
+    @test dff(12345.6789, FloatField()) == "12345.6789"
+    @test dff(Juango.Decimal("12345.6789"), DecimalField(max_digits = 10, decimal_places = 4)) == "12345.6789"
+    @test dff(12345, IntegerField()) == "12345"
+    override_settings(USE_THOUSAND_SEPARATOR = true) do
+        @test dff(12345.6789, FloatField()) == "12,345.6789"
+        @test dff(Juango.Decimal("12345.6789"), DecimalField(max_digits = 10, decimal_places = 4)) == "12,345.6789"
+        @test dff(12345, IntegerField()) == "12,345"
+    end
+    # test_display_for_field_password_name_not_user_model
+    @test dff("test", CharField(max_length = 200)) == "test"
+    # test_list_display_for_value / ..._boolean / ..._boolean_database_default / ..._empty / test_list_display_for_database_default
+    @test dfv([1, 2, 3]) == "1, 2, 3" && dfv([1, 2, "buckle", "my", "shoe"]) == "1, 2, buckle, my, shoe"
+    @test string(Admin.display_for_value(true, ""; boolean = true)) == "<span class=\"yes\" title=\"True\">✔</span>"
+    @test string(Admin.display_for_value(false, ""; boolean = true)) == "<span class=\"no\" title=\"False\">✘</span>"
+    @test Admin.display_for_value(true, "") == "True" && Admin.display_for_value(false, "") == "False"
+    @test string(Admin.display_for_value(Juango.DB_DEFAULT, ""; boolean = true)) == "<span class=\"unknown\" title=\"None\">?</span>"
+    @test Admin.display_for_value(Juango.DB_DEFAULT, "") == ""
+    @test all(v -> dfv(v) == E, (nothing, "", Any[], ())) && dfv(Juango.DB_DEFAULT) == E
+    # test_list_display_for_value_consecutive_whitespace
+    @test dfv("   ") == E && dfv("        cheeze") == "cheeze" && dfv("pizza       ") == "pizza" && dfv("       chicken        ") == "chicken"
+    @test string(dfv(SafeString("  <em>soy chicken</em>  "))) == "  <em>soy chicken</em>  "
 end

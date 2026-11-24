@@ -503,12 +503,16 @@ Base.@nospecializeinfer function raw_cell(ma::ModelAdmin, @nospecialize(obj), co
     val
 end
 Base.@nospecializeinfer function cell_value(ma::ModelAdmin, @nospecialize(obj), col)
-    v = raw_cell(ma, obj, col)
-    if v === nothing || v == ""
-        return col isa Display && col.empty_value !== nothing ? col.empty_value : option(ma, :empty_value_display, "-")
+    empty = col isa Display && col.empty_value !== nothing ? col.empty_value : option(ma, :empty_value_display, "-")
+    # a model field's value as Django's display_for_field (its choices, kind and decimal places)
+    f = col isa Union{Symbol,AbstractString} && col !== :__str__ ?
+        something(related_column_field(ma.model, col), findfield(modelmeta(ma.model), Symbol(col)), Some(nothing)) : nothing
+    if f isa Field && f.kind ∉ (:fk, :m2m)
+        v = related_column_field(ma.model, col) === nothing ? getproperty(obj, Symbol(col)) : related_column_value(obj, col)
+        return display_for_field(v, f, empty)
     end
-    col isa Display && col.boolean && return format_value(Bool(v))
-    format_value(v)
+    v = raw_cell(ma, obj, col)
+    display_for_value(v, empty; boolean = col isa Display && col.boolean)
 end
 
 "The ORDER BY a list_display column sorts by (`nothing`: not sortable): a field's name, or a display's `ordering`."
@@ -570,6 +574,61 @@ format_value(v::Date) = format_date(v, "N j, Y")
 format_value(v::Juango.TimeZones.ZonedDateTime) = format_date(v, "N j, Y, g:i a T")
 format_value(v::AbstractString) = isempty(v) ? "-" : v
 format_value(v) = v
+
+"A boolean as the admin shows it: ✔, ✘, or ? for unknown (Django's _boolean_icon)."
+boolean_icon(v) = v === true ? format_value(true) : v === false ? format_value(false) :
+                  SafeString("<span class=\"unknown\" title=\"None\">?</span>")
+"JSON as Python's json.dumps writes it (`\", \"` and `\": \"` between items), as Django's admin shows a JSONField."
+py_json(v::AbstractDict) = "{" * join((Juango.JSON.json(string(k)) * ": " * py_json(x) for (k, x) in v), ", ") * "}"
+py_json(v::Union{AbstractVector,Tuple}) = "[" * join((py_json(x) for x in v), ", ") * "]"
+py_json(v) = Juango.JSON.json(v)
+
+"""
+    display_for_value(value, empty_value_display; boolean = false)
+
+How the admin shows a value that isn't a model field's (Django's `admin.utils.display_for_value`): `empty_value_display`
+for nothing, `DB_DEFAULT` or blank text (text is shown stripped), a list joined with commas, numbers in the
+language's format, booleans as True/False (or as icons with `boolean`).
+"""
+function display_for_value(@nospecialize(v), empty; boolean::Bool = false)
+    boolean && return boolean_icon(v === Juango.DB_DEFAULT ? nothing : v)
+    (v === nothing || v === Juango.DB_DEFAULT) && return empty
+    v isa Union{AbstractVector,Tuple,AbstractDict} && isempty(v) && return empty          # (Django's EMPTY_VALUES)
+    v isa SafeString && return v
+    v isa Bool && return v ? "True" : "False"
+    v isa Union{Date,DateTime,Juango.TimeZones.ZonedDateTime} && return format_value(v)
+    v isa Real && return Juango.number_format(v)
+    v isa Union{AbstractVector,Tuple} && return join((Juango.display_string(x) for x in v), ", ")
+    v isa AbstractString && return (t = strip(v); isempty(t) ? empty : String(t))
+    v
+end
+
+"""
+    display_for_field(value, field, empty_value_display)
+
+How the admin shows a model field's value (Django's `admin.utils.display_for_field`): a choice's label (a choice
+for nothing too), a boolean's icon (? for unknown), a decimal with the field's decimal places, a URL as a link
+when it's a safe one, JSON as JSON, else as `display_for_value`.
+"""
+function display_for_field(@nospecialize(v), f::Field, empty)
+    if f.choices !== nothing
+        for c in Juango.field_choices(f)
+            isequal(c.first, v) && return string(c.second)
+        end
+        (v === nothing || v === Juango.DB_DEFAULT) && return empty
+        return string(v)
+    end
+    f.kind === :bool && return boolean_icon(v === Juango.DB_DEFAULT ? nothing : v)
+    (v === nothing || v === Juango.DB_DEFAULT || (v isa AbstractString && isempty(v))) && return empty
+    (v isa Union{AbstractVector,AbstractDict} && isempty(v)) && return empty          # (Django's empty_values)
+    f.kind === :json && return py_json(v)
+    f.kind === :decimal && f.decimal_places !== nothing && return Juango.number_format(v; decimals = f.decimal_places)
+    if f.kind === :url
+        u = string(v)
+        return occursin(r"^(https?|ftps?)://"i, u) ? SafeString("<a href=\"$(Juango.escape_html(u))\">$(Juango.escape_html(u))</a>") : u
+    end
+    display_for_value(v, empty)
+end
 
 function query_with(req::Request, changes::Pair...)
     q = copy(req.GET)
