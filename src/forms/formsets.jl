@@ -61,7 +61,8 @@ function management_count(fs::FormSet, key)
     v === nothing ? nothing : tryparse(Int, strip(string(v)))
 end
 
-initial_form_count(fs::FormSet) = fs.data === nothing ? max(length(fs.initial), length(fs.instances)) :
+# (a model formset's initial forms are its objects; its `initial` fills the extra forms, as Django's initial_extra)
+initial_form_count(fs::FormSet) = fs.data === nothing ? (fs.model !== nothing ? length(fs.instances) : length(fs.initial)) :
     something(management_count(fs, "INITIAL_FORMS"), 0)
 function total_form_count(fs::FormSet)
     if fs.data !== nothing
@@ -78,7 +79,8 @@ function build_forms!(fs::FormSet)
     n = total_form_count(fs)
     n0 = initial_form_count(fs)
     for i in 0:n-1
-        init = i < length(fs.initial) ? fs.initial[i+1] : Dict{Symbol,Any}()
+        j = fs.model === nothing ? i : i - n0         # (a model formset's initial: its extra forms')
+        init = 0 <= j < length(fs.initial) ? fs.initial[j+1] : Dict{Symbol,Any}()
         inst = instance_for(fs, i)
         f = make_row(fs, fs.data, "$(fs.prefix)-$i", init, inst)
         if f isa Form
@@ -125,7 +127,9 @@ function add_formset_fields!(fs::FormSet, f::Form, i)
     # a different value is an error, and the object gets the parent whatever is sent
     if fs.fk !== nothing
         filter!(x -> x.name !== fs.fk.name, f.fields)      # (a row form's own field for the key is replaced, as Django's)
-        pid = fs.parent === nothing || fs.parent.id === nothing ? "" : string(fs.parent.id)
+        # (the value the key stores: the parent's id, or its to_field value)
+        pv = fs.parent === nothing || fs.parent.id === nothing ? nothing : target_value(fs.fk, fs.parent)
+        pid = pv === nothing ? "" : string(pv)
         bad = gettext("The inline value did not match the parent instance.")
         ff = CharField(max_length = nothing, widget = :hidden, required = false, validators = Any[v -> (v == "" || v == pid) || bad])
         ff.name = fs.fk.name
@@ -427,10 +431,10 @@ function inlineformset_factory(P::Type, T::Type; fk = nothing, fields = nothing,
                     formfield_callback, error_messages)
     # (a multi-table child's inherited key: the child's own name, as Django's alternatebook_set)
     default_prefix = fkf.model === T ? string(reverse_name(fkf)) : lowercase(modelmeta(T).name) * "_set"
-    function (data = nothing; instance = nothing, prefix = default_prefix, queryset = nothing, save_as_new::Bool = false)
+    function (data = nothing; instance = nothing, prefix = default_prefix, queryset = nothing, save_as_new::Bool = false, initial = [])
         # (a queryset given is narrowed to the parent's objects too, as Django's)
         qs = instance === nothing || instance.id === nothing ? none(T) :
-             filter(something(queryset, objects(T)), Q(attname(fkf) => instance.id))
+             filter(something(queryset, objects(T)), Q(attname(fkf) => target_value(fkf, instance)))
         # save_as_new: every row is a new object for this parent (the admin's "save as new"); the data isn't changed
         if save_as_new
             qs = none(T)
@@ -445,7 +449,7 @@ function inlineformset_factory(P::Type, T::Type; fk = nothing, fields = nothing,
             end
         end
         new_formset(make;
-                    prefix = prefix, data = data, initial = [], instances = collect(qs), extra = extra, min_num = min_num,
+                    prefix = prefix, data = data, initial = collect(initial), instances = collect(qs), extra = extra, min_num = min_num,
                     max_num = max_num, validate_min = validate_min, validate_max = validate_max, can_delete = can_delete,
                     can_order = can_order, clean = clean, model = T, fk = fkf, parent = instance, edit_only, absolute_max,
                     can_delete_extra)

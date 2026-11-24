@@ -766,9 +766,6 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         push!(group, pk_select(c.base, T))
         append!(group, [qcol(a, pk_colname(M)) for (_, M, a) in related])
     end
-    for x in extra_group
-        x in group || push!(group, x)
-    end
     pre_ann = copy(sel)            # the select list without annotations (for a wrapping query)
     ann_sel, ann_ps = String[], Any[]
     hidden_anns = Set{String}()          # selected only for the wrapping query's conditions
@@ -822,6 +819,12 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
                 g in group || push!(group, g)
             end
         end
+        # the columns a non-aggregate annotation of a grouped object query reads (F(:publisher__name)), or a
+        # window's PARTITION BY and ORDER BY ones: grouped by too, as Django (PostgreSQL refuses them otherwise)
+        if grouped && columns === nothing && !idonly && !aggregating(v, qs.annotations) &&
+           (qs.values_fields === nothing || windowing(v, c.annotations))
+            append!(extra_group, group_cols(sql, query_aliases(c)))
+        end
         c.reuse_upto = 0
         push!(ann_sel, "$sql AS $(qname(string(k)))")
         append!(ann_ps, p)
@@ -857,6 +860,25 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
                                                  add_cols = distinct && columns === nothing && !idonly) :
                                     ("", String[], Any[])
     (columns === nothing && !idonly && !grouped) && append!(sel, extra)
+    if grouped
+        # As Django's get_group_by: the columns the query reads outside aggregates are grouped by too: those
+        # its HAVING conditions and annotations read (above), those it's ordered by, and a values() query's
+        # selected fields after values() following the aggregate. An object query groups by its primary key,
+        # so its own table's columns are already grouped (functionally).
+        aliases = query_aliases(c)
+        append!(extra_group, group_cols(o, aliases))
+        if qs.group_fields !== nothing && columns === nothing && !idonly
+            for x in pre_ann
+                m = match(r"^(.*) AS \S+$", x)
+                m === nothing || append!(extra_group, group_cols(m[1], aliases))
+            end
+        end
+        own = pk_select(c.base, T) in group ? qname(c.base) * "." : nothing
+        for x in extra_group
+            own !== nothing && startswith(x, own) && continue
+            x in group || push!(group, x)
+        end
+    end
     gps = grouped ? Any[x for g in unique(group) for x in get(group_ps, g, Any[])] : Any[]
     dkw = distinct ? "DISTINCT " : ""
     grouped && has_distinct_fields(qs) && throw(ErrorException("annotate() + distinct(fields) is not implemented."))
@@ -1325,7 +1347,10 @@ Base.@nospecializeinfer function count_here(@nospecialize(qs::QuerySet))
     T = model_of(qs)
     qs.cache === nothing || return length(qs.cache)
     qs.isnone && return 0
-    sql, ps = needs_wrapping(qs) ? select_sql(qs; ordered = false) : select_sql(qs; columns = pk_select(modelmeta(T).table, T), ordered = false)
+    # a grouped values() query keeps its ordering: the columns it's ordered by are grouped by too (so are its rows),
+    # as Django's count() preserves
+    ordered = qs.values_fields !== nothing && !isempty(qs.order) && any(p -> contains_aggregate(p.second), qs.annotations)
+    sql, ps = needs_wrapping(qs) ? select_sql(qs; ordered) : select_sql(qs; columns = pk_select(modelmeta(T).table, T), ordered = false)
     execute("SELECT COUNT(*) AS n FROM ($sql) AS juango_sub", ps)[1][:n]
 end
 Base.@nospecializeinfer Base.count(@nospecialize(T::Type{<:Model})) = count(objects(T))
@@ -1450,14 +1475,20 @@ Base.@nospecializeinfer function check_first_last_grouping(@nospecialize(qs::Que
     qs.group_fields === nothing || !(isempty(qs.order) || order_cleared(qs)) || any(in(("id", "pk")), qs.group_fields) ||
         throw(ArgumentError("Cannot use QuerySet.$what() on an unordered queryset performing aggregation. Add an ordering with order_by()."))
 end
-"First object (by the queryset's ordering, or by id), or `nothing`."
+"""
+    first(qs)
+
+First object (by the queryset's ordering, or by id), or `nothing`. Unlike Django, a queryset whose ordering was
+cleared with `order_by()` is still ordered by id here, so the result is always the same row (Django's has no
+ORDER BY then, and the database picks one) (#278).
+"""
 Base.@nospecializeinfer function Base.first(@nospecialize(qs::QuerySet))
     qs.cache === nothing || return isempty(qs.cache) ? nothing : qs.cache[1]
     check_first_last_grouping(qs, "first")
     v = fetch(chain(qs[1:1]; order = default_order(qs)))
     isempty(v) ? nothing : v[1]
 end
-"Last object, or `nothing`."
+"Last object (the reverse of `first`'s ordering, by id too after `order_by()`), or `nothing`."
 Base.@nospecializeinfer function Base.last(@nospecialize(qs::QuerySet))
     assert_unsliced(qs, "take last of")
     check_first_last_grouping(qs, "last")

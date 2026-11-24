@@ -490,8 +490,13 @@ Base.@nospecializeinfer function refresh!(@nospecialize(obj::Model); fields = no
     obj
 end
 
-"Create and save a new object."
-Base.@nospecializeinfer create(@nospecialize(T::Type{<:Model}); kw...) = save!(T(; kw...))
+"""
+    create(T; kw...)
+
+Create and save a new object, with an INSERT (`save!(...; force_insert = true)`, as Django's): with a primary key
+given that's already taken, an `IntegrityError`, not an overwritten row (#276).
+"""
+Base.@nospecializeinfer create(@nospecialize(T::Type{<:Model}); kw...) = save!(T(; kw...); force_insert = true)
 
 """
 What get_or_create/update_or_create create an object with, as Django's `_extract_model_params`: the
@@ -710,21 +715,54 @@ choices, range, length, validators) run. Throws `ValidationError` with the field
     clean_value(IntegerField(), "2")     # 2
     clean_value(IntegerField(), "a")     # ValidationError
 """
+tryparse_date(m) = (y = parse(Int, m[1]); mo = parse(Int, m[2]); d = parse(Int, m[3]);
+                    1 <= mo <= 12 && 1 <= d <= daysinmonth(y, mo) ? Date(y, mo, d) : nothing)
 function clean_value(f::Field, v)
     x = v
     if v isa AbstractString && !isempty(v)
         t = strip(v)
-        bad() = throw(ValidationError(Dict(something(f.name === :_ ? nothing : f.name, :value) =>
-                                           [field_message(f, "invalid", gettext("“%(value)s” value must be a number."), Dict("value" => v))])))
-        if f.kind in INT_KINDS
-            x = something(tryparse(Int, t), Some(nothing)); x === nothing && bad()
+        # Django's messages, by the field's type (Field.to_python's)
+        bad(msg, code = "invalid") = throw(ValidationError(Dict(something(f.name === :_ ? nothing : f.name, :value) =>
+                                           [field_message(f, code, gettext(msg), Dict("value" => v))])))
+        if f.kind in INT_KINDS || f.kind in (:auto, :bigauto, :smallauto)
+            x = something(tryparse(Int, t), Some(nothing)); x === nothing && bad("“%(value)s” value must be an integer.")
         elseif f.kind === :float
-            x = something(tryparse(Float64, t), Some(nothing)); x === nothing && bad()
+            x = something(tryparse(Float64, t), Some(nothing)); x === nothing && bad("“%(value)s” value must be a float.")
         elseif f.kind === :decimal
-            x = try Decimal(t) catch; bad() end
+            x = try Decimal(t) catch; bad("“%(value)s” value must be a decimal number.") end
         elseif f.kind === :bool
             l = lowercase(t)
-            x = l in ("true", "1", "t", "yes") ? true : l in ("false", "0", "f", "no") ? false : bad()
+            x = l in ("true", "1", "t", "yes") ? true : l in ("false", "0", "f", "no") ? false :
+                f.null && l == "none" ? nothing :
+                bad(f.null ? "“%(value)s” value must be either True, False, or None." : "“%(value)s” value must be either True or False.")
+        elseif f.kind === :date
+            m = match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", t)
+            m === nothing && bad("“%(value)s” value has an invalid date format. It must be in YYYY-MM-DD format.")
+            x = something(tryparse_date(m), Some(nothing))
+            x === nothing && bad("“%(value)s” value has the correct format (YYYY-MM-DD) but it is an invalid date.", "invalid_date")
+        elseif f.kind === :datetime
+            m = match(r"^(\d{4})-(\d{1,2})-(\d{1,2})[T ](\d{1,2}):(\d{1,2})(?::(\d{1,2})(?:\.(\d{1,6}))?)?\s*(Z|[+-]\d{2}(?::?\d{2})?)?$", t)
+            if m !== nothing
+                d = tryparse_date(m)
+                ok = d !== nothing && parse(Int, m[4]) < 24 && parse(Int, m[5]) < 60 && (m[6] === nothing || parse(Int, m[6]) < 60)
+                ok || bad("“%(value)s” value has the correct format (YYYY-MM-DD HH:MM[:ss[.uuuuuu]][TZ]) but it is an invalid date/time.",
+                          "invalid_datetime")
+                x = DateTime(d) + Hour(parse(Int, m[4])) + Minute(parse(Int, m[5])) + Second(something(tryparse(Int, something(m[6], "0")), 0)) +
+                    Millisecond(m[7] === nothing ? 0 : parse(Int, rpad(m[7], 6, '0')) ÷ 1000)
+            else
+                m = match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", t)
+                m === nothing && bad("“%(value)s” value has an invalid format. It must be in YYYY-MM-DD HH:MM[:ss[.uuuuuu]][TZ] format.")
+                d = tryparse_date(m)
+                d === nothing && bad("“%(value)s” value has the correct format (YYYY-MM-DD) but it is an invalid date.", "invalid_date")
+                x = DateTime(d)
+            end
+        elseif f.kind === :time
+            m = match(r"^(\d{1,2}):(\d{1,2})(?::(\d{1,2})(?:\.(\d{1,6}))?)?$", t)
+            m === nothing && bad("“%(value)s” value has an invalid format. It must be in HH:MM[:ss[.uuuuuu]] format.")
+            h, mi, se = parse(Int, m[1]), parse(Int, m[2]), something(tryparse(Int, something(m[3], "0")), 0)
+            (h < 24 && mi < 60 && se < 60) ||
+                bad("“%(value)s” value has the correct format (HH:MM[:ss[.uuuuuu]]) but it is an invalid time.", "invalid_time")
+            x = Time(h, mi, se)
         end
     end
     errs = validate_field(f, x)
@@ -792,6 +830,8 @@ Base.@nospecializeinfer function clean_fields(@nospecialize(obj::Model); exclude
         v = getproperty(obj, attname(f))
         !f.editable && (v === nothing || isempty(v)) && continue      # (a non-editable BinaryField: only its length)
         v === DB_DEFAULT && continue                  # the database supplies it
+        # a blank field left empty isn't validated, as Django's clean_fields (clean() may fill it)
+        f.blank && (v === nothing || ((v isa AbstractString || v isa AbstractVector || v isa AbstractDict || v isa Tuple) && isempty(v))) && continue
         # (the model's own messages, as Django's Field.validate: a form says "This field is required.")
         if v === nothing && !f.null
             errors[f.name] = [field_message(f, "null", gettext("This field cannot be null."))]
@@ -801,9 +841,26 @@ Base.@nospecializeinfer function clean_fields(@nospecialize(obj::Model); exclude
             continue
         end
         errs = validate_field(f, v)
+        isempty(errs) && f.kind === :fk && (e = fk_invalid(f, v)) !== nothing && push!(errs, e)
         isempty(errs) || (errors[f.name] = errs)
     end
     errors
+end
+
+"""
+A foreign key's value that no related row has (through the base manager, within its `limit_choices_to`): Django's
+`ForeignKey.validate` message for it, else `nothing`.
+"""
+function fk_invalid(f::Field, v)
+    R = related_model(f)
+    tf = something(fk_to_field(f), natural_pk(R) ? pk_fields(R)[1].name : :id)
+    qs = filter(base_objects(R), Q(tf => v))
+    l = f.form === nothing ? nothing : get(f.form, :limit_choices_to, nothing)
+    l isa Function && (l = l())
+    l === nothing || (qs = complex_filter(qs, l))
+    exists(qs) && return nothing
+    field_message(f, "invalid", gettext("%(model)s instance with %(field)s %(value)r is not a valid choice."),
+                  Dict("model" => string(modelmeta(R).verbose_name), "field" => string(tf), "value" => v, "pk" => v))
 end
 
 """
@@ -826,7 +883,9 @@ Base.@nospecializeinfer function validate_unique(@nospecialize(obj::Model); excl
     for f in all_fields(T)
         f.name in exclude && continue
         v = field_data(obj, attname(f))
-        (v === nothing || v === DB_DEFAULT) && continue
+        # a constant db_default is the value the row will get, so it's checked too (as Django; an expression isn't known yet)
+        v === DB_DEFAULT && (v = f.db_default isa Value ? f.db_default.value : f.db_default isa Expression ? nothing : f.db_default)
+        v === nothing && continue
         vname = uppercasefirst(string(modelmeta(something(f.model, T)).verbose_name))     # (the model with the field: a parent's)
         # (a natural primary key is unique too)
         if (f.unique || f.primary_key) && exists(others(filter(base_objects(f.model), Q(attname(f) => v))))
@@ -865,8 +924,13 @@ Constraints that use an excluded field are skipped.
 Base.@nospecializeinfer function validate_constraints(@nospecialize(obj::Model); exclude = Symbol[])
     T = typeof(obj)
     values = Dict{Symbol,Any}(f.name => field_data(obj, attname(f)) for f in all_fields(T) if !(f.name in exclude))
-    errs = constraint_errors(T, values, obj.id)
-    isempty(errs) ? Dict{Symbol,Vector{String}}() : Dict{Symbol,Vector{String}}(:__all__ => errs)
+    errors = Dict{Symbol,Vector{String}}()
+    for (msg, code, c) in constraint_violations(T, values, obj.id)
+        # a one-field unique constraint's error is that field's, as Django's
+        key = code == "unique" && c isa UniqueConstraint && length(c.fields) == 1 ? Symbol(c.fields[1]) : :__all__
+        push!(get!(errors, key, String[]), msg)
+    end
+    errors
 end
 
 """

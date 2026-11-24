@@ -551,6 +551,19 @@ end
 # --- context processors --------------------------------------------------------------------------
 
 cp_request(req) = Dict("request" => req)
+
+"`sql_queries` in a template: the queries run so far (`connection_queries()`), when the template reads it."
+struct SqlQueries end
+Base.length(::SqlQueries) = length(connection_queries())
+Base.iterate(::SqlQueries, s...) = iterate(connection_queries(), s...)
+"""
+Django's debug context processor (not on by default; add `cp_debug` to CONTEXT_PROCESSORS): with `DEBUG` on and the
+client's address in `INTERNAL_IPS`, `debug` (true) and `sql_queries` (the queries run so far, each `(sql, params, time)`).
+"""
+function cp_debug(req)
+    (settings.DEBUG === true && string(get(req.meta, :remote_addr, "")) in settings.INTERNAL_IPS) || return Dict{String,Any}()
+    Dict{String,Any}("debug" => true, "sql_queries" => SqlQueries())
+end
 # lazy, so templates that don't use `user`/`perms` don't load the user
 cp_auth(req) = Dict{String,Any}("user" => LazyValue(() -> something(req.user, AnonymousUser())),
                                 "perms" => LazyValue(() -> PermWrapper(something(req.user, AnonymousUser()))))

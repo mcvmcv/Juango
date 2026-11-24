@@ -133,6 +133,7 @@ both the HTTP server and the test `Client` call.
 """
 function handle_request(req::Request)
     delete!(task_local_storage(), :juango_template_error)    # a template failure noted for the debug page
+    reset_queries!()                                          # (connection_queries(): this request's, as Django's)
     has_receivers(request_started, :handler) && send(request_started, :handler; request = req)
     resp = try
         with_nplusone_tracking(() -> handle_request_inner(req))

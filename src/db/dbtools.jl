@@ -102,15 +102,76 @@ end
 
 # --- inspectdb ------------------------------------------------------------------------------------------
 
-"Tables of the current database (not Juango's migration records)."
-function introspect_tables()
+"Tables of the current database (not Juango's migration records), sorted; views too with `include_views`."
+function introspect_tables(; include_views::Bool = false)
     b = backend()
+    types = include_views ? "('BASE TABLE', 'VIEW')" : "('BASE TABLE')"
     rows = b isa PostgresBackend ?
-        execute("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'") :
+        execute("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type IN $types") :
         b isa MySQLBackend ?
-        execute("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'") :
-        execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+        execute("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type IN $types") :
+        execute("SELECT name FROM sqlite_master WHERE type IN ($(include_views ? "'table', 'view'" : "'table'")) AND name NOT LIKE 'sqlite_%'")
     sort([String(r[:name]) for r in rows if String(r[:name]) != "juango_migrations"])
+end
+
+"""
+    django_table_names(; only_existing = false) -> Vector{String}
+
+The tables of the installed models Juango manages, join tables too (Django's `introspection.django_table_names`),
+sorted; with `only_existing`, only those the database has.
+"""
+function django_table_names(; only_existing::Bool = false)
+    ts = sort(managed_tables())
+    only_existing || return ts
+    have = Set(introspect_tables())
+    [t for t in ts if t in have]
+end
+
+"The installed models whose tables are among `tables` (Django's `introspection.installed_models`)."
+installed_models(tables) = Set{Any}(T for T in all_models()
+                                    if !(T <: AutoThrough) && !modelmeta(T).proxy && model_in_use(T) && modelmeta(T).table in tables)
+
+"A table's primary key column (the first, for a composite key), or `nothing` (Django's `get_primary_key_column`)."
+function introspect_primary_key_column(table)
+    for c in values(introspect_constraints(table))
+        c.primary_key && !isempty(c.columns) && return c.columns[1]
+    end
+    nothing
+end
+
+"A table's foreign keys: column => `(referenced column, referenced table)` (Django's `get_relations`)."
+function introspect_relations(table)
+    Dict(c.columns[1] => (c.foreign_key[2], c.foreign_key[1]) for c in values(introspect_constraints(table))
+         if c.foreign_key !== nothing && length(c.columns) == 1)
+end
+
+"""
+    introspect_comments(table) -> (table = comment or nothing, columns = Dict(column => comment))
+
+The table's and its columns' comments (`Meta(db_table_comment)`, `db_comment`) in the database. SQLite keeps none.
+"""
+function introspect_comments(table)
+    b = backend()
+    cols = Dict{String,String}()
+    tc = nothing
+    if b isa PostgresBackend
+        for r in execute("SELECT a.attname AS c, col_description(a.attrelid, a.attnum) AS d FROM pg_attribute a " *
+                         "JOIN pg_class cl ON cl.oid = a.attrelid JOIN pg_namespace n ON n.oid = cl.relnamespace " *
+                         "WHERE cl.relname = ? AND n.nspname = current_schema() AND a.attnum > 0 AND NOT a.attisdropped", [table])
+            r[:d] === nothing || r[:d] === missing || (cols[String(r[:c])] = String(r[:d]))
+        end
+        rows = execute("SELECT obj_description(cl.oid, 'pg_class') AS d FROM pg_class cl JOIN pg_namespace n ON n.oid = cl.relnamespace " *
+                       "WHERE cl.relname = ? AND n.nspname = current_schema()", [table])
+        isempty(rows) || rows[1][:d] === nothing || rows[1][:d] === missing || (tc = String(rows[1][:d]))
+    elseif b isa MySQLBackend
+        for r in execute("SELECT column_name AS c, column_comment AS d FROM information_schema.columns " *
+                         "WHERE table_schema = DATABASE() AND table_name = ?", [table])
+            isempty(String(r[:d])) || (cols[String(r[:c])] = String(r[:d]))
+        end
+        rows = execute("SELECT table_comment AS d FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?", [table])
+        isempty(rows) || isempty(String(rows[1][:d])) || (tc = String(rows[1][:d]))
+    end
+    (table = tc, columns = cols)
 end
 
 "Columns of a table: `(name, type, max_length, null, pk, precision, scale)`."
@@ -118,7 +179,7 @@ function introspect_columns(table)
     b = backend()
     if b isa SQLiteBackend
         return [(name = String(r[:name]), type = lowercase(String(r[:type])), max_length = nothing,
-                 null = r[:notnull] == 0, pk = r[:pk] != 0, precision = nothing, scale = nothing)
+                 null = r[:notnull] == 0 && r[:pk] == 0, pk = r[:pk] != 0, precision = nothing, scale = nothing)   # (a key is never NULL)
                 for r in execute("PRAGMA table_info($(quote_name(b, table)))")]
     end
     schema = b isa PostgresBackend ? "current_schema()" : "DATABASE()"
@@ -160,9 +221,10 @@ end
 A table's constraints and indexes in the database, by name (Django's
 `connection.introspection.get_constraints`): each has `columns` (column names; an expression is
 `""`), `primary_key`, `unique`, `foreign_key` (`(table, column)` or `nothing`), `check`, `index`
-and `type` (the index method, e.g. "btree", or `nothing`). A primary key with no name of its own
+and `type` (the index method as Django names it: `"idx"` for a B-tree index, else e.g. "gin", "hash"; or `nothing`). A primary key with no name of its own
 (SQLite) is `"__primary__"`; SQLite's unnamed foreign keys are `"fk_<n>"`.
 """
+index_type(method) = (m = lowercase(method); m == "btree" ? "idx" : m)      # (Django's Index.suffix for a B-tree)
 function introspect_constraints(table)
     b = backend()
     out = Dict{String,NamedTuple{(:columns, :primary_key, :unique, :foreign_key, :check, :index, :type),
@@ -180,7 +242,7 @@ function introspect_constraints(table)
             if String(r[:origin]) == "pk"
                 out["__primary__"] = entry(cols; pk = true, unique = true); continue
             end
-            out[name] = entry(cols; unique = r[:unique] != 0, index = true, type = "btree")
+            out[name] = entry(cols; unique = r[:unique] != 0, index = true, type = "idx")
         end
         for r in execute("PRAGMA foreign_key_list($q)")
             name = "fk_$(r[:id])"
@@ -221,9 +283,9 @@ function introspect_constraints(table)
             name = String(r[:name])
             prev = get(out, name, nothing)
             if prev === nothing
-                out[name] = entry(splitcols(r[:cols]); pk = r[:pk] == true, unique = r[:uniq] == true, index = true, type = String(r[:method]))
+                out[name] = entry(splitcols(r[:cols]); pk = r[:pk] == true, unique = r[:uniq] == true, index = true, type = index_type(String(r[:method])))
             else                                       # the index behind a primary key or unique constraint
-                out[name] = merge(prev, (index = true, type = String(r[:method])))
+                out[name] = merge(prev, (index = true, type = index_type(String(r[:method]))))
             end
         end
     else
@@ -247,9 +309,9 @@ function introspect_constraints(table)
             col = r[:col] === nothing || r[:col] === missing ? "" : String(r[:col])
             prev = get(out, name, nothing)
             if name in keyed                           # the index behind a key constraint
-                out[name] = merge(prev, (index = true, type = lowercase(String(r[:method]))))
+                out[name] = merge(prev, (index = true, type = index_type(String(r[:method]))))
             elseif prev === nothing
-                out[name] = entry([col]; pk = name == "PRIMARY", unique = r[:nu] == 0, index = true, type = lowercase(String(r[:method])))
+                out[name] = entry([col]; pk = name == "PRIMARY", unique = r[:nu] == 0, index = true, type = index_type(String(r[:method])))
             else
                 out[name] = merge(prev, (columns = [prev.columns; col],))
             end

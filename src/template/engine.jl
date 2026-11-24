@@ -514,6 +514,8 @@ Base.show(io::IO, t::Template) = print(io, "<Template ", repr(t.name), ">")
 # --- rendering ------------------------------------------------------------------------
 
 render!(io::IO, n::TextNode, ::Context) = write(io, n.s)
+"`{{ x }}`'s value as written: localized (numbers, dates and times in the language's format) unless `{% localize off %}`."
+output_value(v) = v isa Union{Real,Dates.TimeType} && !(v isa Bool) && localize_output() ? localized_output(v) : v
 "`TEMPLATE_STRING_IF_INVALID`: what an unknown variable renders as (`%s` is its name), kept for speed."
 const STRING_IF_INVALID = Ref("")
 push!(SETTINGS_CHANGED_HOOKS, () -> (STRING_IF_INVALID[] = string(something(get(settings, :TEMPLATE_STRING_IF_INVALID, ""), ""))))
@@ -522,9 +524,7 @@ function render!(io::IO, n::VarNode, ctx::Context)
     if !isempty(inv) && n.fe.base isa Variable && resolve_var(n.fe.base, ctx) === UNDEF
         return write(io, replace(inv, "%s" => join(n.fe.base.parts, ".")))     # filters aren't applied, as in Django
     end
-    v = eval_fe(n.fe, ctx)
-    localize_output() && (v = localized_output(v))           # ({% localize on %})
-    write_value(io, v, ctx.autoescape)
+    write_value(io, output_value(eval_fe(n.fe, ctx)), ctx.autoescape)
 end
 function render_nodes(io::IO, nodes::Vector{Node}, ctx::Context)
     i = 0
@@ -775,7 +775,7 @@ end
 keep_safe(was_safe::Bool, v) = was_safe && v isa AbstractString ? SafeString(v) : v
 gen_node(n::VarNode) = quote
     if isempty($(GlobalRef(_M, :STRING_IF_INVALID))[])
-        $(GlobalRef(_M, :write_value))(io, $(gen_fe(n.fe)), ctx.autoescape)
+        $(GlobalRef(_M, :write_value))(io, $(GlobalRef(_M, :output_value))($(gen_fe(n.fe))), ctx.autoescape)
     else
         $(GlobalRef(_M, :render!))(io, $(QuoteNode(n)), ctx)
     end

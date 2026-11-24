@@ -79,7 +79,7 @@ const CSP = (SELF = "'self'", NONE = "'none'", NONCE = "<CSP_NONCE_SENTINEL>", U
              UNSAFE_HASHES = "'unsafe-hashes'", WASM_UNSAFE_EVAL = "'wasm-unsafe-eval'")
 
 "The request's CSP nonce (made on first use; only then does the header carry it)."
-csp_nonce(req::Request) = get!(() -> base64encode(rand(RandomDevice(), UInt8, 16)), req.meta, :csp_nonce)::String
+csp_nonce(req::Request) = get!(() -> b64url(rand(RandomDevice(), UInt8, 16)), req.meta, :csp_nonce)::String
 
 "`{{ csp_nonce }}` in templates: the nonce, made only if a template uses it."
 struct CspNonce

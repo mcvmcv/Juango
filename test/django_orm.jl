@@ -2453,9 +2453,13 @@ end
     @test get(DmChildNullableParent; id = ch.id).parent_id == par.id
     par2 = DmParent(name = "jeff"); tf = DmToFieldChild(parent = par2); save!(par2); save!(tf)
     @test get(DmToFieldChild; id = tf.id).parent_id == "jeff"
-    # test_relation_unsaved: an unsaved object's reverse relation has no rows (not those with a NULL key)
+    # test_relation_unsaved: an unsaved object's reverse relation can't be used (#274); the manager can be had
     create(DmChildNullableParent)
-    @test count(DmParent(name = "nobody").childnullableparent) == 0
+    th = DmParent(name = "nobody")
+    @test_throws ArgumentError("'DmParent' instance needs to have a primary key value before this relationship can be used.") count(th.childnullableparent)
+    @test Juango.model_of(th.childnullableparent) === DmChildNullableParent
+    save!(th)
+    @test assert_num_queries(() -> count(th.childnullableparent) == 0, 1)
     # test_*_after_prefetch: a change through a prefetched relation shows at once
     pf = create(DmParent; name = "pf"); n1 = create(DmChildNullableParent; parent = pf); n2 = create(DmChildNullableParent)
     loaded = get(prefetch_related(objects(DmParent), :childnullableparent); name = "pf")

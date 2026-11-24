@@ -66,12 +66,13 @@ end
 qcol(alias, col) = qname(alias) * "." * qname(col)
 
 "Join `table` (as a new alias) to `parent` on child.`childcol` = parent.`parentcol`; reuse an existing join for `key`."
-function join!(c::SQLCompiler, parent, key, table, childcol, parentcol; left::Bool, extra_on = nothing)
+function join!(c::SQLCompiler, parent, key, table, childcol, parentcol; left::Bool, extra_on = nothing, as_text::Bool = false)
     haskey(c.aliases, key) && return c.aliases[key]
     a = new_alias!(c)
     left = left || parent in c.leftjoined
     left && push!(c.leftjoined, a)
-    on = "$(qcol(a, childcol)) = $(qcol(parent, parentcol))" * (extra_on === nothing ? "" : " AND " * extra_on(a))
+    pref = as_text ? "CAST($(qcol(parent, parentcol)) AS $(cast_type(backend(), :text)))" : qcol(parent, parentcol)
+    on = "$(qcol(a, childcol)) = $pref" * (extra_on === nothing ? "" : " AND " * extra_on(a))
     push!(c.joins, " $(left ? "LEFT OUTER" : "INNER") JOIN $(qname(table)) $(qname(a)) ON $on")
     c.aliases[key] = a
 end
@@ -95,7 +96,7 @@ Base.@nospecializeinfer function fr_step!(c::SQLCompiler, alias, @nospecialize(M
         ctf, fkf = g.through
         ctcol, ctid = column(getfield_meta(R, ctf)), generic_ct(M, g).id::Integer
         return join!(c, alias, key, modelmeta(R).table, column(getfield_meta(R, fkf)), owner_pk_column(M); left = true,
-                     extra_on = x -> "$(qcol(x, ctcol)) = $ctid" * (on === nothing ? "" : " AND " * on(x, R))), R, true
+                     as_text = getfield_meta(R, fkf).kind in STRING_KINDS, extra_on = x -> "$(qcol(x, ctcol)) = $ctid" * (on === nothing ? "" : " AND " * on(x, R))), R, true
     end
     r = f === nothing ? find_reverse(M, seg) : nothing
     r === nothing && throw(lookup_error(M, seg))
@@ -238,9 +239,10 @@ end
 
 Base.@nospecializeinfer function find_reverse(@nospecialize(T::Type), name)
     for (rn, M, rf) in reverse_relations(T)
-        # (with a related_query_name, only that name works in lookups, as Django)
+        # (Django's query name: related_query_name, else related_name, else the model's name; with a related_name the
+        # model's name isn't one (#275). The accessor's name works too when there's no related_query_name.)
         ((rf.related_query_name === nothing && string(rn) == name) || !startswith(string(rn), "+") &&
-            string(something(rf.related_query_name, rf.related_name === nothing ? default_related_name(M) : nothing,
+            string(something(rf.related_query_name, rf.related_name === nothing ? default_related_name(M) : rn,
                              Symbol(lowercase(modelmeta(M).name)))) == name) && return (rn, M, rf)
     end
     nothing
@@ -312,6 +314,43 @@ end
 # tag, even when the related model has a field named exact (Django's #23940).
 const LK = "\x01"
 lk(lookup) = LK * lookup
+
+const AGG_CALL = r"^(?i:COUNT|SUM|AVG|MIN|MAX|STDDEV_[A-Z]+|STDDEV|VARIANCE|VAR_[A-Z]+|GROUP_CONCAT|STRING_AGG|ARRAY_AGG|JSONB?_AGG|JSON_GROUP_[A-Z]+|JSON_[A-Z]*AGG|BOOL_AND|BOOL_OR|BIT_AND|BIT_OR|BIT_XOR|EVERY|REGR_[A-Z]+|COVAR_[A-Z]+|CORR|PERCENTILE_[A-Z]+)\s*\("
+"""
+The table columns (`"alias"."col"`, of one of `aliases`) an SQL fragment reads outside aggregate calls (and their
+FILTER clauses) and subqueries: what a grouped query groups by too, as Django's `get_group_by_cols` (PostgreSQL
+refuses the others). A window's PARTITION BY and ORDER BY columns count; its aggregate's argument doesn't.
+"""
+function group_cols(sql::AbstractString, aliases)
+    buf = IOBuffer()
+    i, n = firstindex(sql), lastindex(sql)
+    skip_parens(j) = (depth = 0; while j <= n
+                          ch = sql[j]
+                          ch == '(' && (depth += 1)
+                          ch == ')' && (depth -= 1; depth == 0 && return nextind(sql, j))
+                          j = nextind(sql, j)
+                      end; j)
+    while i <= n
+        ch = sql[i]
+        prev = i == firstindex(sql) ? ' ' : sql[prevind(sql, i)]
+        if isletter(ch) && !(isletter(prev) || isdigit(prev) || prev in ('_', '"', '`', '.')) &&
+           (m = match(AGG_CALL, SubString(sql, i))) !== nothing
+            j = skip_parens(i + ncodeunits(m.match) - 1)
+            f = match(r"^\s*FILTER\s*\(", SubString(sql, min(j, n + 1)))
+            f === nothing || (j = skip_parens(j + ncodeunits(f.match) - 1))
+            i = j
+        elseif ch == '(' && startswith(lstrip(SubString(sql, nextind(sql, i))), r"(?i)SELECT\b")
+            i = skip_parens(i)
+        else
+            write(buf, ch); i = nextind(sql, i)
+        end
+    end
+    rest = String(take!(buf))
+    unique(String[m.match for m in eachmatch(r"([\"`][^\"`]+[\"`])\.[\"`][^\"`]+[\"`]", rest) if m[1] in aliases])
+end
+
+"The aliases of a compiler's own tables: its base table and its joins (not a subquery's)."
+query_aliases(c) = Set(vcat(qname(c.base), [m[1] for m in eachmatch(r" ([\"`][^\"`]+[\"`]) ON ", join(c.joins))]))
 
 # The key column of a GenericRelation's owner: `id`, or its own primary key's (Person.account).
 Base.@nospecializeinfer owner_pk_column(@nospecialize(T::Type)) = natural_pk(T) ? column(pk_fields(T)[1]) : "id"
@@ -475,7 +514,10 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             ctid = generic_ct(T, g).id::Integer
             mt = qname(modelmeta(getfield_meta(M, fkf).model).table)      # (the table holding the key: a child's parent's)
             opk = owner_pk_column(T)          # (an owner with its own key: Person.account)
-            cond(a) = "$(qcol(a, fkcol)) = $(qcol(alias, opk)) AND $(qcol(a, ctcol)) = $ctid"
+            # an object id kept as text is compared as text (PostgreSQL has no varchar = bigint; Django's #16055)
+            as_text = getfield_meta(M, fkf).kind in STRING_KINDS
+            opkref = as_text ? "CAST($(qcol(alias, opk)) AS $(cast_type(backend(), :text)))" : qcol(alias, opk)
+            cond(a) = "$(qcol(a, fkcol)) = $opkref AND $(qcol(a, ctcol)) = $ctid"
             if isempty(rest) && lookup == "isnull"
                 a = new_alias!(c)
                 ex = "EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(cond(a)))"
@@ -497,11 +539,11 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             Mf = getfield_meta(M, fkf).model
             if modelmeta(Mf).table != modelmeta(M).table
                 # the related model is a multi-table child: its key columns are in the parent's table
-                ap = join!(c, alias, scope_key(c, alias, g.name), modelmeta(Mf).table, fkcol, opk; left = true,
+                ap = join!(c, alias, scope_key(c, alias, g.name), modelmeta(Mf).table, fkcol, opk; left = true, as_text,
                            extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
                 a = join!(c, ap, (ap, :__child, M), modelmeta(M).table, "id", "id"; left = true)
             else
-                a = join!(c, alias, scope_key(c, alias, g.name), modelmeta(M).table, fkcol, opk; left = true,
+                a = join!(c, alias, scope_key(c, alias, g.name), modelmeta(M).table, fkcol, opk; left = true, as_text,
                           extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
             end
             c.distinct = true
@@ -839,19 +881,12 @@ Base.@nospecializeinfer function compile_q(c::SQLCompiler, alias, @nospecialize(
         # its own joins of multi-valued relations, as it had in its queryset
         q.connector === :SCOPES && c.scope !== :expr && (c.scope = (outer, i))
         if c.having && !(ch isa Q)
-            # in HAVING, a condition on a joined (multi-valued) relation's column that no aggregate reads
-            agg0 = c.uses_aggregate
-            c.uses_aggregate = false
+            # in HAVING, the columns a condition reads outside aggregates are grouped by (Django's get_group_by of
+            # the HAVING's columns): an ungrouped one would be any row's value, and PostgreSQL refuses it
             sql, ps = ch isa Expression ? compile_expr(c, ch) : compile_lookup(c, alias, T, Symbol(ch.first), ch.second, neg)
-            if !c.uses_aggregate
-                # a joined table's column (not a subquery's own alias): an ungrouped column in HAVING would be any
-                # row's value, so it's grouped by (Django's get_group_by of the HAVING's columns)
-                joined = Set(m[1] for m in eachmatch(r" ([\"`]j[0-9]+[\"`]) ON ", join(c.joins)))
-                for m in eachmatch(r"([\"`]j[0-9]+[\"`])\.[\"`][^\"`]+[\"`]", sql)
-                    m[1] in joined && !(m.match in c.having_cols) && push!(c.having_cols, m.match)
-                end
+            for g in group_cols(sql, query_aliases(c))
+                g in c.having_cols || push!(c.having_cols, g)
             end
-            c.uses_aggregate |= agg0
         else
             sql, ps = ch isa Q ? compile_q(c, alias, T, ch, neg) :
                       ch isa Expression ? compile_expr(c, ch) :

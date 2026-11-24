@@ -1595,7 +1595,7 @@ end
     @test occursin("\"starts\":\"06:30:00\"", js) && occursin("\"length\":\"08:30:00\"", js)
     back = only(Juango.deserialize(:json, js)).object
     @test back.starts == Dates.Time(6, 30) && back.length == Hour(8) + Minute(30)
-    @test render(Template("{{ s.starts }} {{ s.starts|time:\"H:i\" }} {{ s.length }}"), Dict("s" => s)) == "06:30:00 06:30 8:30:00"
+    @test render(Template("{{ s.starts }} {{ s.starts|time:\"H:i\" }} {{ s.length }}"), Dict("s" => s)) == "6:30 a.m. 06:30 8:30:00"     # (localized: TIME_FORMAT, #271)
 end
 
 @testset "integer sizes" begin
@@ -2189,7 +2189,7 @@ end
     # filter, then annotate: counts the filtered rows (Django's rule)
     a = only(collect(annotate(filter(Author; name = "Join Author", articles__published = true); n = Count(:articles))))
     @test a.n == 2
-    @test only(collect(annotate(filter(Author; name = "Join Author", article__published = true); n = Count(:article)))).n == 2
+    @test_throws Juango.LookupError collect(filter(Author; name = "Join Author", article__published = true))    # (a related_name replaces the model's name: #275)
     # with a further filter on the same relation in a later call, the annotation keeps the earlier join
     @test only(collect(annotate(filter(Author; name = "Join Author", articles__title__startswith = "j"); n = Count(:articles)))).n == 3
     # annotate, then filter: separate joins, so the count covers all of them (distinct, as Django's docs advise)

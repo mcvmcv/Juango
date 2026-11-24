@@ -395,13 +395,19 @@ Messages for the model's constraints that `values` (field name => value, a `Func
 `Dict`) would violate, for the object with `id` (`nothing` if unsaved). Constraints that use
 a field missing from `values` are skipped. Unique constraints are checked with a query.
 """
-Base.@nospecializeinfer function constraint_errors(@nospecialize(T::Type{<:Model}), values, id)
-    errs = String[]
-    for c in model_constraints(T)
-        r = constraint_error(T, c, values, id)
-        r === nothing || push!(errs, r[1])
+Base.@nospecializeinfer constraint_errors(@nospecialize(T::Type{<:Model}), values, id) = String[v[1] for v in constraint_violations(T, values, id)]
+"`(message, code, constraint)` of each constraint of `T` (and of its multi-table parents, as Django's) that `values` violate."
+Base.@nospecializeinfer function constraint_violations(@nospecialize(T::Type{<:Model}), values, id)
+    out = Tuple{String,Any,Constraint}[]
+    M = T
+    while M !== nothing
+        for c in model_constraints(M)
+            r = constraint_error(M, c, values, id)
+            r === nothing || push!(out, (r[1], r[2], c))
+        end
+        M = table_parent(M)
     end
-    errs
+    out
 end
 
 "`(message, code)` when `values` violate constraint `c` of `T`, else `nothing`."

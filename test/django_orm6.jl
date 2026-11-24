@@ -742,6 +742,26 @@ end
 end
 
 # --- tests/model_indexes ------------------------------------------------------------------------------------
+@model struct DmiBook
+    title = CharField(max_length = 50)
+    author = CharField(max_length = 50)
+    pages = IntegerField(db_column = "page_count")
+    isbn = CharField(max_length = 50)
+    barcode = CharField(max_length = 31)
+    Meta(table = "model_indexes_book", app_label = "model_indexes",
+         indexes = [Index(fields = ["title"]), Index(fields = ["isbn", "id"]), Index(fields = ["barcode"], name = "%(app_label)s_%(class)s_barcode_idx")])
+end
+@abstract_model struct DmiAbstractModel
+    name = CharField(max_length = 50)
+    shortcut = CharField(max_length = 3)
+    Meta(indexes = [Index(fields = ["name"]), Index(fields = ["shortcut"], name = "%(app_label)s_%(class)s_idx")])
+end
+@model struct DmiChildModel1 <: DmiAbstractModel
+    Meta(table = "model_indexes_childmodel1", app_label = "model_indexes")
+end
+@model struct DmiChildModel2 <: DmiAbstractModel
+    Meta(table = "model_indexes_childmodel2", app_label = "model_indexes")
+end
 @testset "django model_indexes: SimpleIndexesTests" begin
     # (test_suffix: Django's Index.suffix "idx"; Juango's index names end in _idx too)
     # test_repr
@@ -776,10 +796,20 @@ end
     @test_throws "Index.condition must be a Q instance." Index(condition = "invalid", name = "long_book_idx")
     @test_throws "Index.include must be a list or tuple." Index(name = "test_include", fields = ["field"], include = "other")
     @test_throws "A covering index must be named." Index(fields = ["field"], include = ["other"])
-    # test_name_auto_generation, test_name_set, test_abstract_children: Django names an unnamed index
-    # table[:11]_column[:7]_<md5 digest>_idx ("model_index_author_0f5565_idx"); Juango names it table_columns_idx.
-    # Changing that would rename the indexes of existing projects' migrations: question #281.
-    @test_broken false
+    # test_name_auto_generation, test_name_set, test_abstract_children: Django's names, with INDEX_NAMES = :django (new
+    # projects' setting); Juango's own, table_columns_idx, stay the default so existing migrations keep theirs (#281)
+    ixnames(T) = [ix.name for ix in Juango.table_state(T).indexes]
+    override_settings(INDEX_NAMES = :django) do
+        @test Juango.auto_index_name("model_indexes_book", ["author"], "idx") == "model_index_author_0f5565_idx"
+        @test Juango.auto_index_name("model_indexes_book", ["-author"], "idx") == "model_index_author_708765_idx"
+        @test Juango.auto_index_name("model_indexes_book", ["page_count"], "idx") == "model_index_page_co_69235a_idx"
+        @test_throws "Index too long for multiple database support. Is self.suffix longer than 3 characters?" Juango.auto_index_name("model_indexes_book", ["page_count"], "suff")
+        @test Juango.auto_index_name("\"t_quoted\"", ["name"], "idx") == "t_quoted_name_e4ed1b_idx"     # test_name_auto_generation_with_quoted_db_table
+        @test sort(ixnames(DmiBook)) == sort(["model_index_title_196f42_idx", "model_index_isbn_34f975_idx", "model_indexes_dmibook_barcode_idx"])   # (%(class)s: the Julia name)
+        @test ixnames(DmiChildModel1) == ["model_index_name_440998_idx", "model_indexes_dmichildmodel1_idx"]
+        @test ixnames(DmiChildModel2) == ["model_index_name_b6c374_idx", "model_indexes_dmichildmodel2_idx"]
+    end
+    @test "model_indexes_book_title_idx" in ixnames(DmiBook)
     # test_clone
     ix = Index(fields = ["title"])
     @test Index(fields = copy(ix.fields)) == ix          # (immutable: a copy is an equal one)

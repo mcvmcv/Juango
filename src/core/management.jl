@@ -875,6 +875,7 @@ function startproject(name::AbstractString; dir = pwd(), juango_path = pkgdir(@_
             USE_TZ = true,                                # aware datetimes, stored in UTC
             TIME_ZONE = "UTC",
             SITE_NAME = "$name",
+            INDEX_NAMES = :django,                        # unnamed Meta indexes named as Django names them
         )
         """,
         "models.jl" => """

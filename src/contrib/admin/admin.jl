@@ -13,7 +13,7 @@ using ..Juango
 import ..Juango: Model, Field, Request, modelmeta, attname, label, findfield, related_model, format_date,
                  SafeString, escape_html, render, NOTFOUND, tattr, urlencode, QueryDict, User, AbstractUser, LoginView,
                  make_password, set_unusable_password!, reverse_relations, Paginator, page, Http404,
-                 ProtectedError, RestrictedError, staff_member_required, message!, reverse_url, get_absolute_url, model_name,
+                 ProtectedError, RestrictedError, staff_member_required, message!, reverse_url, get_absolute_url, absolute_url, model_name,
                  HttpResponse, LogEntry, log_action!, ADDITION, CHANGE, DELETION, get_for_model, management_form
 using Dates
 
@@ -1505,7 +1505,7 @@ Base.@nospecializeinfer function view_on_site_url(ma::ModelAdmin, @nospecialize(
     v = option(ma, :view_on_site, true)
     v === false && return nothing
     v isa Function && return v(obj)
-    get_absolute_url(obj) === nothing && return nothing
+    absolute_url(obj) === nothing && return nothing
     reverse_url("admin:view_on_site"; content_type_id = Juango.get_for_model(typeof(obj)).id, object_id = admin_pk(obj))
 end
 "`admin/r/<content type>/<id>/`: to the object's `get_absolute_url` (Django's contenttypes shortcut)."
@@ -1517,7 +1517,7 @@ function view_on_site_view(req::Request; content_type_id, object_id)
     pk = Juango.parse_pk(T, admin_unquote(object_id))
     o = pk === nothing ? nothing : first(filter(objects(T); pk = pk))
     o === nothing && throw(Http404("Content type $content_type_id object $object_id doesn’t exist"))
-    url = get_absolute_url(o)
+    url = absolute_url(o)
     url === nothing && throw(Http404("$(modelmeta(T).verbose_name) objects don’t have a get_absolute_url() method"))
     Juango.HttpResponseRedirect(url)
 end

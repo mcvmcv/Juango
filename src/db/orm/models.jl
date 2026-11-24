@@ -262,6 +262,13 @@ Base.@nospecializeinfer function register_model!(@nospecialize(T::Type), fields:
         app = string(get(meta, :app_label, default_app_label(T)))
         meta = merge(meta, (constraints = Any[c isa Constraint ? constraint_for_model(c, app, nameof(T)) : c for c in meta.constraints],))
     end
+    # Meta(indexes = [...]) names with %(app_label)s and %(class)s (an abstract model's indexes), as Django's
+    if haskey(meta, :indexes) && any(ix -> ix isa Index && ix.name !== nothing && occursin("%(", ix.name), meta.indexes)
+        app = lowercase(string(get(meta, :app_label, default_app_label(T))))
+        meta = merge(meta, (indexes = Any[ix isa Index && ix.name !== nothing ?
+            Index((n === :name ? replace(ix.name, "%(app_label)s" => app, "%(class)s" => lowercase(string(nameof(T)))) : getfield(ix, n)
+                   for n in fieldnames(Index))...) : ix for ix in meta.indexes],))
+    end
     # code = CharField(max_length = 10, primary_key = true): the key is that field, as Django's (#221)
     pkfs = [f for f in fs if f.primary_key]
     if !isempty(pkfs)
@@ -408,7 +415,7 @@ reverse_name(fk::Field) = fk.related_name !== nothing ? fk.related_name :
 
 """
 The model's `Meta(default_related_name = "...")`, the reverse name of its relations that don't name
-one (Django's), with `%(class)s` and `%(app_label)s` filled in; `nothing` without it.
+one (Django's), with `%(class)s` (or `%(model_name)s`) and `%(app_label)s` filled in; `nothing` without it.
 """
 Base.@nospecializeinfer function default_related_name(@nospecialize(M))
     M isa Type || return nothing
@@ -416,7 +423,7 @@ Base.@nospecializeinfer function default_related_name(@nospecialize(M))
     m === nothing && return nothing
     d = get(m.extra, :default_related_name, nothing)
     d === nothing && return nothing
-    Symbol(replace(string(d), "%(class)s" => lowercase(m.name), "%(app_label)s" => lowercase(m.app)))
+    Symbol(replace(string(d), "%(class)s" => lowercase(m.name), "%(model_name)s" => lowercase(m.name), "%(app_label)s" => lowercase(m.app)))
 end
 
 "Many-to-many relations reachable from `T`: (name, field, forward::Bool)."
@@ -687,8 +694,11 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
     end
     for (rn, M, rf) in reverse_relations(T)
         rn === s || continue
-        # an unsaved object has no related rows (it used to match rows whose key is NULL); add! asks for a save
-        base = target_value(rf, m) === nothing ? none(M) : filter(objects(M), Q(attname(rf) => target_value(rf, m)))
+        # an unsaved object's related manager can't be queried, as Django's (4.1+) (#274); a key whose (to_field)
+        # value is still NULL has no related rows; add! asks for a value
+        base = !rf.one_to_one && getproperty(m, :pk) === nothing ?
+                   filter(objects(M), Q(:AND, Any[UnsavedRelation("'$(nameof(T))' instance needs to have a primary key value before this relationship can be used.")], false)) :
+               target_value(rf, m) === nothing ? none(M) : filter(objects(M), Q(attname(rf) => target_value(rf, m)))
         qs = chain(base; db = instance_db(m),
                    owner = rf.one_to_one ? nothing : ReverseFKOwner(rf, M, m, rn),
                    known = target_value(rf, m) === nothing ? nothing : Dict{Symbol,Dict{Any,Any}}(rf.name => Dict{Any,Any}(target_value(rf, m) => m)))
@@ -867,6 +877,23 @@ Override for your models to give them a canonical URL (used by generic views and
 the admin's "View on site" link). Available in templates as `obj.get_absolute_url`.
 """
 get_absolute_url(::Model) = nothing
+
+"""
+    absolute_url(obj)
+
+`obj`'s URL: `settings.ABSOLUTE_URL_OVERRIDES["app.model"](obj)` when that's set for its model (the label in
+lowercase, as Django's), else its `get_absolute_url` (`nothing` without one). What Juango's own code calls.
+"""
+function absolute_url(@nospecialize(x))
+    if x isa Model
+        ov = get(settings, :ABSOLUTE_URL_OVERRIDES, nothing)
+        if ov !== nothing && !isempty(ov)
+            f = get(ov, lowercase(model_label(typeof(x))), nothing)
+            f === nothing || return f(x)
+        end
+    end
+    applicable(get_absolute_url, x) ? get_absolute_url(x) : nothing
+end
 "`(field, next)` for `get_next_by_<field>` / `get_previous_by_<field>` on a non-null date field."
 Base.@nospecializeinfer function adjacent_field(@nospecialize(T), s::Symbol)
     str = string(s)
@@ -900,7 +927,7 @@ Base.@nospecializeinfer function get_display(@nospecialize(m::Model), name::Symb
 end
 
 Base.@nospecializeinfer function tattr(@nospecialize(m::Model), ::Val{:get_absolute_url})
-    u = get_absolute_url(m)
+    u = absolute_url(m)
     u === nothing ? NOTFOUND : u
 end
 Base.@nospecializeinfer tattr(@nospecialize(m::Model), ::Val{:verbose_name}) = modelmeta(typeof(m)).verbose_name

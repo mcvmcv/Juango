@@ -91,7 +91,7 @@ end
         ix = Index(Lower(:email); name = "n")
         @test ix.expressions == [("LOWER", "email")] && isempty(ix.columns)
         @test_throws ArgumentError Index(Lower(:email))                              # needs a name
-        @test_throws ArgumentError Index(:a, Lower(:b); name = "n")
+        @test Index(:a, Lower(:b); name = "n").expressions == [("", "a"), ("LOWER", "b")]     # (a name among expressions is an F(), as Django's)
         pg = Juango.PostgresBackend
         sqls = Juango.index_spec_sql(Juango.backend(), "t", Index(["a"]; name = "i", opclasses = ["varchar_pattern_ops"], include = ["b"], condition = Q(:AND, Any[:c => 1], false)))
         sql = mysql ? "" : only(sqls)

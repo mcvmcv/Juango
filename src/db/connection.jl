@@ -752,6 +752,24 @@ function execute_wrapper(f, wrapper)
     end
 end
 
+# Django's connection.queries: under DEBUG, the queries this task has run since its request started (the last 9000)
+const QUERIES_LOG_MAX = 9000
+const QueryLogEntry = NamedTuple{(:sql, :params, :time),Tuple{String,Vector{Any},String}}
+"""
+    connection_queries() -> Vector{(sql, params, time)}
+
+Under `DEBUG`, the queries run so far in this task (a request's, since it started), the last 9000, as Django's
+`connection.queries` (`time` is in seconds, as text). Empty when DEBUG is off. `reset_queries!()` empties it.
+"""
+connection_queries() = get(task_local_storage(), :juango_queries, QueryLogEntry[])::Vector{QueryLogEntry}
+reset_queries!() = (delete!(task_local_storage(), :juango_queries); nothing)
+function log_query!(sql, @nospecialize(params), seconds)
+    log = get!(() -> QueryLogEntry[], task_local_storage(), :juango_queries)::Vector{QueryLogEntry}
+    push!(log, (sql = String(sql), params = Any[p for p in params], time = string(round(seconds; digits = 3))))
+    length(log) > QUERIES_LOG_MAX && popfirst!(log)
+    nothing
+end
+
 Base.@nospecializeinfer function run_on(@nospecialize(f), b, conn, sql, @nospecialize(params))
     ws = get(task_local_storage(), :juango_execute_wrappers, nothing)
     ws === nothing || return run_wrapped(f, b, conn, sql, params, ws, 1)
@@ -760,9 +778,11 @@ Base.@nospecializeinfer function run_on(@nospecialize(f), b, conn, sql, @nospeci
     ps = Any[adapt_param(b, p) for p in params]
     logged = log_enabled("juango.db.backends", 10)
     rec = current_debug_record()
-    t0 = logged || rec !== nothing ? time() : 0.0
+    dbg = settings.DEBUG === true
+    t0 = logged || dbg || rec !== nothing ? time() : 0.0
     try
         r = f(b, conn, rewrite_placeholders(b, sql), ps)
+        dbg && log_query!(sql, params, time() - t0)
         logged && log!("juango.db.backends", :debug, "($(round((time() - t0) * 1000; digits = 3)) ms) $sql; args=$(repr(params))";
                        sql = sql, params = params, duration = time() - t0, alias = current_alias())
         rec === nothing || record_query!(rec, sql, params, time() - t0, nothing)

@@ -65,7 +65,7 @@ function sitemap_entries(req::Request, s::Sitemap, items, page::Int)
 end
 function get_absolute_url_or_error(item)
     item isa AbstractString && return item                   # a list of URLs or paths
-    u = applicable(get_absolute_url, item) ? get_absolute_url(item) : nothing
+    u = absolute_url(item)
     u === nothing && throw(ImproperlyConfigured("give the Sitemap a location, or define get_absolute_url for $(typeof(item))"))
     u
 end

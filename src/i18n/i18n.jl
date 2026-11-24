@@ -428,8 +428,13 @@ function translate_url(url::AbstractString, lang)
 end
 
 "Fill `%(name)s`/`%(name)d` placeholders: `interpolate(\"%(n)d items\", Dict(\"n\" => 3))`."
+# (%(name)r: the value's repr, as Python's)
 interpolate(s::AbstractString, vars) =
-    replace(s, r"%\((\w+)\)[sd]" => m -> string(get(vars, match(r"\((\w+)\)", m)[1], get(vars, Symbol(match(r"\((\w+)\)", m)[1]), ""))))
+    replace(s, r"%\((\w+)\)[sdr]" => function (m)
+        k = match(r"\((\w+)\)", m)[1]
+        v = get(vars, k, get(vars, Symbol(k), ""))
+        endswith(m, "r") ? repr(v) : string(v)
+    end)
 
 # --- formats -------------------------------------------------------------------------------------------------------
 
@@ -731,11 +736,12 @@ localize_input(value::Date, default = nothing) = Dates.format(value, strftime_da
 localize_input(value::Dates.Time, default = nothing) = Dates.format(value, strftime_dateformat(something(default, first(input_formats(:time)))))
 localize_input(value, default = nothing) = value
 
-"Whether template output is localized here: `{% localize on %}` (true), `off` (false), else Juango's default (false)."
-localize_output() = get(task_local_storage(), :juango_localize, false) === true
-"`{{ x }}` inside `{% localize on %}`: numbers and dates in the language's format."
+"Whether template output is localized here: `{% localize on %}` (true), `off` (false), else on, as Django 5's (#271)."
+localize_output() = get(task_local_storage(), :juango_localize, true) === true
+"`{{ x }}` in a template: numbers and dates in the language's format (DATE_FORMAT, DATETIME_FORMAT, TIME_FORMAT)."
 localized_output(x::Real) = x isa Bool ? x : number_format(x)
 localized_output(x::Union{Date,DateTime}) = localize(x)
+localized_output(x::Dates.Time) = format_date(x, get_format("TIME_FORMAT", get_language()))
 localized_output(x) = x
 
 # --- choosing the language for a request ------------------------------------------------------------------------------

@@ -23,7 +23,7 @@ import ..Juango: csv_field, lookup_value, render!, __html__, Node, Parser, Token
                  register_tag!, eval_fe, display_string, truthy, format_date, localtime, model_of, resolve_path,
                  SQLCompiler, modelmeta, label, Field, urlencode, MIME_TYPES, xlsx_bytes, Template, Model, QuerySet,
                  SafeString, HttpResponse, setheader!, content_disposition, get_template, render, objects, order_by,
-                 Paginator, get_page, concrete_fields, get_absolute_url, escape_html, QueryDict, TemplateSyntaxError
+                 Paginator, get_page, concrete_fields, get_absolute_url, absolute_url, escape_html, QueryDict, TemplateSyntaxError
 using Dates, TimeZones
 
 export Table, Column, BooleanColumn, DateColumn, DateTimeColumn, TemplateColumn, LinkColumn, CheckBoxColumn,
@@ -233,7 +233,7 @@ function cell_html(t::Table, @nospecialize(r), name::Symbol, c::Column)
         items = collect(v)
         isempty(items) && return escape_html(string(c.default))
         sep = escape_html(string(c.options[:separator]))
-        return join([c.options[:linkify_item] && (u = get_absolute_url(o)) !== nothing ?
+        return join([c.options[:linkify_item] && (u = absolute_url(o)) !== nothing ?
                      "<a href=\"" * escape_html(u) * "\">" * escape_html(string(o)) * "</a>" : escape_html(string(o)) for o in items], sep)
     end
     c.render === nothing || return (h = c.render(v, r); h isa SafeString ? h.s : escape_html(display_string(h)))
@@ -256,7 +256,7 @@ function cell_html(t::Table, @nospecialize(r), name::Symbol, c::Column)
     url = c.linkify === nothing || c.linkify === false ? nothing : c.linkify === true ? link_target(r, v) : c.linkify(r)
     url === nothing ? text : "<a href=\"" * escape_html(string(url)) * "\">" * text * "</a>"
 end
-link_target(@nospecialize(r), @nospecialize(v)) = r isa Model ? get_absolute_url(r) : v isa Model ? get_absolute_url(v) : nothing
+link_target(@nospecialize(r), @nospecialize(v)) = r isa Model ? absolute_url(r) : v isa Model ? absolute_url(v) : nothing
 
 const COLUMN_TEMPLATES = Dict{String,Template}()
 const COLUMN_TEMPLATES_LOCK = ReentrantLock()

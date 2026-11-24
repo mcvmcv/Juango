@@ -881,8 +881,16 @@ function model_form_clean!(f::Form)
     end
     f.instance === nothing && (f.instance = obj)
     names = Set(fld.name for fld in f.fields)
-    for (k, msgs) in model_clean_errors(obj), m in msgs
+    errs = model_clean_errors(obj)
+    for (k, msgs) in errs, m in msgs
         add_error!(f, k in names ? k : nothing, m)
+    end
+    # what clean() set (a default it filled in) is what save! writes, as Django's instance built before clean()
+    if isempty(errs)
+        for k in collect(keys(f.cleaned_data))
+            (k === :__all__ || (g = findfield(modelmeta(T), k)) === nothing || g.kind === :m2m) && continue
+            f.cleaned_data[k] = getproperty(obj, k)
+        end
     end
 end
 

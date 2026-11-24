@@ -69,7 +69,7 @@ URL is a `NoReverseMatch`, not a redirect to the misspelled name.
 """
 function resolve_url(to, args...; kwargs...)
     if to isa Model
-        u = get_absolute_url(to)
+        u = absolute_url(to)
         u === nothing && throw(ArgumentError("$(typeof(to)) does not define get_absolute_url"))
         return string(u)
     end
@@ -453,7 +453,7 @@ HOOK_DEFAULTS[:get_success_url] = function (v)
     url isa Function && return url(v.object)
     url === nothing || return format_success_url(string(url), v.object)
     # (as Django's: a deleted object's own URL is no place to go)
-    u = v.object === nothing || v.kind === :DeleteView ? nothing : get_absolute_url(v.object)
+    u = v.object === nothing || v.kind === :DeleteView ? nothing : absolute_url(v.object)
     u === nothing && throw(ImproperlyConfigured(v.object === nothing || v.kind === :DeleteView ? "No URL to redirect to. Provide a success_url." :
         "No URL to redirect to.  Either provide a url or define a get_absolute_url method on the Model."))
     u

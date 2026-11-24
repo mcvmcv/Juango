@@ -292,6 +292,11 @@ function output_of(k::Symbol)
     k === :json ? JSONField() : throw(ArgumentError("output: unknown kind :$k"))
 end
 compile_expr(c::SQLCompiler, e::RawSQL) = ("($(e.sql))", copy(e.params))
+"In the related manager of an unsaved object: any query made with it throws, as Django's (#274); the manager itself can be had."
+struct UnsavedRelation <: Expression
+    msg::String
+end
+compile_expr(c::SQLCompiler, e::UnsavedRelation) = throw(ArgumentError(e.msg))
 function compile_expr(c::SQLCompiler, e::ExpressionWrapper)
     sql, ps = compile_expr(c, e.expr)
     # a date or datetime parameter: PostgreSQL can't tell its type (EXTRACT(YEAR FROM $1) is ambiguous)

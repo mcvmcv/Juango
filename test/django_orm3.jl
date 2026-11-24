@@ -525,9 +525,8 @@ end
         end
         @test assert_num_queries(() -> count(car.drivers) == 0, 0)
     end
-    # test_unsaved: Car(make = "Ford").drivers raising "'Car' instance needs to have a primary key value before this
-    # relationship can be used." is #274 (Juango gives an empty queryset)
-    @test_broken try collect(DmnCar(make = "Ford").drivers); false catch e; e isa ArgumentError end
+    # test_unsaved (#274)
+    @test_throws ArgumentError("'DmnCar' instance needs to have a primary key value before this relationship can be used.") collect(DmnCar(make = "Ford").drivers)
 end
 
 # --- tests/reverse_lookup -----------------------------------------------------------------------------
@@ -543,9 +542,9 @@ end
     # test_reverse_by_related_name
     @test get(DrlPoll; poll_choice__name__exact = "This is the answer.").question == "What's the first question?"
     @test get(DrlPoll; related_choice__name__exact = "This is the answer.").question == "What's the second question?"
-    # test_reverse_field_name_disallowed: with a related_name, the model's name isn't a keyword (Juango accepts it, #275)
+    # test_reverse_field_name_disallowed: with a related_name, the model's name isn't a keyword (#275)
     e = try get(DrlPoll; drlchoice__name__exact = "This is the answer"); nothing catch e; e end
-    @test_broken e isa Juango.LookupError &&
+    @test e isa Juango.LookupError &&
           occursin("Choices are: creator, creator_id, id, poll_choice, question, related_choice", e.msg)
     e = try get(DrlPoll; nosuchname__name__exact = "x"); nothing catch e; e end                  # (the choices, as Django's)
     @test e isa Juango.LookupError && occursin("Choices are: creator, creator_id, id, poll_choice, question, related_choice", e.msg)
@@ -700,7 +699,9 @@ end
     end
     port_block() do                   # test_force_insert_false_with_existing_parent
         parent = create(C; name = "", value = 1)
-        @test_broken try nq(() -> create(S; id = parent.pk, name = "", value = 2), 2) catch; false end   # (create doesn't force an insert: #276)
+        @test nq(() -> create(S; id = parent.pk, name = "", value = 2), 2)            # (UPDATE the parent, INSERT the child: #276)
+        @test_throws IntegrityError atomic(() -> create(C; id = parent.pk, name = "", value = 3))   # (an INSERT: no overwrite)
+        @test refresh!(parent).value == 2
     end
     port_block() do                   # test_force_insert_parent
         @test nqi(() -> save!(S(id = 1, name = "", value = 1); force_insert = true), 3)

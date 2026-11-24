@@ -17,6 +17,10 @@ function default_settings()
         :DEBUG => true,
         :SECRET_KEY => "juango-insecure-change-me-in-production",
         :SECRET_KEY_FALLBACKS => String[],
+        # accept signed cookies made with the old, ambiguous salt (name * salt) (as Django's SIGNED_COOKIE_LEGACY_SALT_FALLBACK)
+        :SIGNED_COOKIE_LEGACY_SALT_FALLBACK => true,
+        # how an unnamed Meta index is named: :juango (table_columns_idx) or :django (startproject's; #281)
+        :INDEX_NAMES => :juango,
         :PREPEND_WWW => false,                     # CommonMiddleware: redirect example.com to www.example.com
         :DISALLOWED_USER_AGENTS => Any[],          # CommonMiddleware: regexes of User-Agents refused with 403
         :USE_X_FORWARDED_HOST => false,            # behind a proxy that sets X-Forwarded-Host (get_host)

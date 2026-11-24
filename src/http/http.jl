@@ -581,7 +581,10 @@ function delete_cookie!(r::HttpResponse, name; path = "/", domain = nothing, sam
                 samesite = samesite, secure = secure)
 end
 
-signed_cookie_salt(name, salt) = string("juango.signed_cookies.", name, salt)
+# The salt length goes first, so (name, salt) pairs can't collide: with the old salt, cookie "a" signed with salt
+# "bc" was also valid as cookie "ab" with salt "c" (Django's CVE-2026-6873 fix).
+signed_cookie_salt(name, salt) = string("juango.signed_cookies.v2:", length(string(salt)), ":", salt, name)
+signed_cookie_legacy_salt(name, salt) = string("juango.signed_cookies.", name, salt)
 
 """
     set_signed_cookie!(resp, name, value; salt = "", kwargs...)
@@ -609,7 +612,14 @@ function get_signed_cookie(req::Request, name; default = NO_COOKIE_DEFAULT, salt
         return default
     end
     try
-        v = unsign_value(raw; salt = signed_cookie_salt(name, salt))
+        v = try
+            unsign_value(raw; salt = signed_cookie_salt(name, salt))
+        catch e
+            # a cookie set before the salt changed (SIGNED_COOKIE_LEGACY_SALT_FALLBACK)
+            (e isa BadSignature && get(settings, :SIGNED_COOKIE_LEGACY_SALT_FALLBACK, false) === true) || rethrow()
+            unsign_value(raw; salt = signed_cookie_legacy_salt(name, salt))
+        end
+        max_age isa Dates.Period && (max_age = Dates.value(convert(Dates.Millisecond, max_age)) / 1000)
         i = findlast(':', v)
         i === nothing && throw(BadSignature("no timestamp"))
         ts = parse(Int, v[i+1:end]; base = 36)

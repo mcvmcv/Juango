@@ -307,17 +307,68 @@ db_default_value(v::Value) = v.value
 db_default_value(v::Expression) = throw(ArgumentError("db_default takes a value or Now()"))
 db_default_value(v) = v
 
+# MD5 (RFC 1321), for Django's index names (SHA.jl has none)
+const MD5_S = UInt32[7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+                     4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21]
+const MD5_K = UInt32[floor(UInt64, abs(sin(i + 1)) * 2.0^32) % UInt32 for i in 0:63]
+"The MD5 digest of `data`, as lowercase hex."
+function md5_hex(data::AbstractVector{UInt8})
+    msg = Vector{UInt8}(data)
+    bitlen = UInt64(length(msg)) * 8
+    push!(msg, 0x80)
+    while length(msg) % 64 != 56
+        push!(msg, 0x00)
+    end
+    append!(msg, reinterpret(UInt8, [htol(bitlen)]))
+    a0, b0, c0, d0 = 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476
+    for chunk in 0:64:length(msg)-1
+        M = [ltoh(reinterpret(UInt32, msg[chunk+4j+1:chunk+4j+4])[1]) for j in 0:15]
+        A, B, C, D = a0, b0, c0, d0
+        for i in 0:63
+            if i < 16
+                F, g = (B & C) | (~B & D), i
+            elseif i < 32
+                F, g = (D & B) | (~D & C), (5i + 1) % 16
+            elseif i < 48
+                F, g = B ⊻ C ⊻ D, (3i + 5) % 16
+            else
+                F, g = C ⊻ (B | ~D), (7i) % 16
+            end
+            F = F + A + MD5_K[i+1] + M[g+1]
+            A, D, C = D, C, B
+            B = B + bitrotate(F, MD5_S[i+1])
+        end
+        a0 += A; b0 += B; c0 += C; d0 += D
+    end
+    bytes2hex(reinterpret(UInt8, htol.([a0, b0, c0, d0])))
+end
+
+"""
+The name of an index declared without one: with `INDEX_NAMES = :django` (new projects' settings), Django's
+`<table[:11]>_<first column[:7]>_<md5 digest[:6]>_<suffix>` (`model_index_author_0f5565_idx`); else (the default, so
+existing projects' migrations keep their names) Juango's `<table>_<columns>_<suffix>` (#281).
+"""
+function auto_index_name(table::AbstractString, cols::Vector{String}, suffix::AbstractString)
+    get(settings, :INDEX_NAMES, :juango) === :django || return constraint_name(table, lstrip.(cols, '-')..., suffix)
+    t = strip(string(last(split(table, '.'))), '"')          # (Django's split_identifier: no schema, no quotes)
+    name = string(first(t, 11), "_", first(lstrip(cols[1], '-'), 7), "_",
+                  first(md5_hex(Vector{UInt8}(codeunits(join(vcat(t, cols, suffix))))), 6), "_", suffix)
+    length(name) > 30 && throw(ArgumentError("Index too long for multiple database support. Is self.suffix longer than 3 characters?"))
+    (name[1] == '_' || isdigit(name[1])) ? "D" * name[2:end] : name
+end
+
 "The snapshot `Table` for a model."
 Base.@nospecializeinfer function table_state(@nospecialize(T::Type))
     m = modelmeta(T)
-    col(n) = (f = findfield(m, Symbol(n)); f === nothing ? error("$(m.name): Meta names unknown field '$n'") : column(f))
+    col(n) = (f = findfield(m, Symbol(n)); f !== nothing ? column(f) : n == "id" && !natural_pk(T) ? "id" :
+              error("$(m.name): Meta names unknown field '$n'"))
     P = table_parent(T)
     root = isempty(ancestors(T)) ? T : last(ancestors(T))
     idx = Index[]
     for ix in get(m.extra, :indexes, Index[])
         # ("-field": that column descending)
         cols = [startswith(c, "-") ? "-" * col(c[2:end]) : col(c) for c in ix.columns]
-        push!(idx, Index(cols, something(ix.name, constraint_name(m.table, lstrip.(cols, '-')..., ix.method === :btree ? "idx" : string(ix.method))),
+        push!(idx, Index(cols, something(ix.name, auto_index_name(m.table, cols, ix.method === :btree ? "idx" : string(ix.method))),
                          ix.unique, ix.method, Tuple{String,String}[(f, col(x)) for (f, x) in ix.expressions],
                          ix.condition === nothing ? nothing : condition_to_columns(T, ix.condition),
                          String[col(c) for c in ix.include], ix.opclasses))

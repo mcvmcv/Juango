@@ -101,7 +101,7 @@ function (f::Feed)(req::Request; kw...)
         l = item_attr(f.item_link, item, nothing)
         l !== nothing && return l
         item isa AbstractString && return item
-        u = applicable(get_absolute_url, item) ? get_absolute_url(item) : nothing
+        u = absolute_url(item)
         u === nothing && throw(ImproperlyConfigured("Give your $(nameof(typeof(item))) class a get_absolute_url() method, or define an item_link in your Feed."))
         u
     end
