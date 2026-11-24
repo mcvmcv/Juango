@@ -44,7 +44,7 @@ end
 @model struct DinArticleReporter
     article = ForeignKey(DinArticle; on_delete = :CASCADE)
     reporter = ForeignKey(DinReporter; on_delete = :CASCADE)
-    Meta(table = "din_articlereporter", managed = false)
+    Meta(table = "din_articlereporter", managed = false, app_label = "introspection")   # (an app not installed: no dumpdata)
 end
 @model struct DinComment
     ref = UUIDField(unique = true)

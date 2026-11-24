@@ -388,25 +388,33 @@ function loaddata(names::AbstractString...; exclude = String[], ignorenonexisten
     n = 0
     excl = Set(lowercase.(string.(exclude)))
     loaded = Set{Any}()
+    mysql = backend() isa MySQLBackend
     try
         atomic() do
-            for name in names, f in find_fixture(name)
-                objs = deserialize(fixture_format(f), read(f, String); ignorenonexistent)
-                # (as Django's: a fixture with no objects is a warning, not an error)
-                isempty(objs) && @warn "No fixture data found for '$(first(splitext(basename(f))))'. (File format may be invalid.)"
-                for d in objs
-                    T = typeof(d.object)
-                    (lowercase(modelmeta(T).app) in excl || serial_label(T) in excl) && continue
-                    try
-                        save!(d)
-                    catch e
-                        e isa IntegrityError && !startswith(e.msg, "Problem installing") &&
-                            throw(IntegrityError("Problem installing fixture '$f': $(e.msg)"))
-                        rethrow()
+            # MySQL can't defer key checks to the commit: off while loading (forward references), then checked, as Django's
+            mysql && execute("SET FOREIGN_KEY_CHECKS = 0")
+            try
+                for name in names, f in find_fixture(name)
+                    objs = deserialize(fixture_format(f), read(f, String); ignorenonexistent)
+                    # (as Django's: a fixture with no objects is a warning, not an error)
+                    isempty(objs) && @warn "No fixture data found for '$(first(splitext(basename(f))))'. (File format may be invalid.)"
+                    for d in objs
+                        T = typeof(d.object)
+                        (lowercase(modelmeta(T).app) in excl || serial_label(T) in excl) && continue
+                        try
+                            save!(d)
+                        catch e
+                            e isa IntegrityError && !startswith(e.msg, "Problem installing") &&
+                                throw(IntegrityError("Problem installing fixture '$f': $(e.msg)"))
+                            rethrow()
+                        end
+                        push!(loaded, concrete_model(T)); foreach(A -> push!(loaded, A), ancestors(T))
+                        n += 1
                     end
-                    push!(loaded, concrete_model(T)); foreach(A -> push!(loaded, A), ancestors(T))
-                    n += 1
                 end
+                mysql && check_foreign_keys(collect(loaded))
+            finally
+                mysql && execute("SET FOREIGN_KEY_CHECKS = 1")
             end
             foreach(execute, sequence_reset_sql(; models = collect(loaded)))
         end
@@ -416,6 +424,24 @@ function loaddata(names::AbstractString...; exclude = String[], ignorenonexisten
         rethrow()
     end
     n
+end
+
+"""
+The first row of these models whose foreign key points at no row, as an `IntegrityError` with Django's
+check_constraints message (for MySQL, where loaddata turns the checks off).
+"""
+function check_foreign_keys(models)
+    for T in models, f in modelmeta(T).fields
+        f.kind === :fk || continue
+        R = related_model(f)
+        t, rt = modelmeta(T).table, modelmeta(R).table
+        col, rcol = column(f), target_column(f)
+        rows = execute("SELECT a.$(qname(pk_colname(T))) AS pk, a.$(qname(col)) AS v FROM $(qname(t)) a LEFT JOIN $(qname(rt)) b " *
+                       "ON b.$(qname(rcol)) = a.$(qname(col)) WHERE a.$(qname(col)) IS NOT NULL AND b.$(qname(rcol)) IS NULL LIMIT 1")
+        isempty(rows) && continue
+        throw(IntegrityError("The row in table '$t' with primary key '$(rows[1][:pk])' has an invalid foreign key: $t.$col contains a " *
+                             "value '$(rows[1][:v])' that does not have a corresponding value in $rt.$rcol."))
+    end
 end
 
 """
