@@ -113,6 +113,33 @@ Whether `T`'s primary key is one of its fields (`primary_key = true`, or a one-f
 a natural key, as Django's `CharField(primary_key=True)`. `obj.pk` is then that field's value (#221).
 """
 Base.@nospecializeinfer natural_pk(@nospecialize(T::Type)) = is_composite(T) && length(modelmeta(concrete_model(T)).extra[:pk].fields) == 1
+"A primary key of more than one field (`obj.pk` is a tuple)."
+Base.@nospecializeinfer multi_pk(@nospecialize(T::Type)) = is_composite(T) && !natural_pk(T)
+"""
+A composite key as its fields are now, as Django's `obj.pk`: a tuple, `nothing` in the parts not set (all unset:
+`nothing`). Changing a key field changes it.
+"""
+Base.@nospecializeinfer function live_pk(@nospecialize(m::Model))
+    data = (getfield(m, :_data)::Dict{Symbol,Any})
+    vals = Any[get(data, attname(f), nothing) for f in pk_fields(typeof(m))]
+    all(isnothing, vals) ? nothing : Tuple(vals)
+end
+"The object's key when it's set (a composite key: all its parts, as Django's `_is_pk_set`), else `nothing`."
+Base.@nospecializeinfer function set_pk(@nospecialize(m::Model))
+    multi_pk(typeof(m)) || return (getfield(m, :_data)::Dict{Symbol,Any})[:id]
+    k = live_pk(m)
+    k === nothing || any(isnothing, k) ? nothing : k
+end
+"`obj.pk = (a, b)` on a composite key: sets its fields (Django's messages for a value that isn't one)."
+Base.@nospecializeinfer function set_composite_pk!(@nospecialize(m::Model), v)
+    v isa Union{Tuple,AbstractVector} || throw(ArgumentError("'pk' must be a list or a tuple."))
+    fs = pk_fields(typeof(m))
+    length(v) == length(fs) || throw(ArgumentError("'pk' must have $(length(fs)) elements."))
+    for (f, x) in zip(fs, v)
+        setproperty!(m, attname(f), x)
+    end
+    v
+end
 "A key's parts as a vector: a composite key's tuple, or a natural key's one value."
 pk_parts(k) = k isa Tuple ? collect(Any, k) : Any[k]
 

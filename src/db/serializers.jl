@@ -56,7 +56,9 @@ Base.@nospecializeinfer function serialize_object(@nospecialize(obj::Model); fie
     d = JSON.Object{String,Any}("model" => serial_label(T))     # (ordered: model, pk, fields in the model's order, as Django)
     if !natural_primary || natural_key(obj) === nothing
         pk = obj.pk
-        d["pk"] = pk isa Tuple ? collect(pk) : pk isa UUID ? string(pk) : pk
+        # (a composite key: its parts, each as its field writes it: a UUID or datetime as text)
+        d["pk"] = multi_pk(T) ? (pk === nothing ? nothing : Any[serial_value(f, field_data(obj, attname(f))) for f in pk_fields(T)]) :
+                  pk isa Tuple ? collect(pk) : pk isa UUID ? string(pk) : pk
     end
     fs = JSON.Object{String,Any}()
     for f in all_fields(T)
@@ -147,8 +149,10 @@ function deserialize_one(d::AbstractDict; ignorenonexistent::Union{Nothing,Bool}
     m2m = Dict{Symbol,Vector{Any}}()
     for f in all_fields(T)
         f.generated === nothing || continue
-        haskey(fs, string(f.name)) || continue
-        v = fs[string(f.name)]
+        # (a key's field also by its attname, `"tenant_id": 1`, as Django reads it)
+        fk_ = haskey(fs, string(f.name)) ? string(f.name) : haskey(fs, string(attname(f))) ? string(attname(f)) : nothing
+        fk_ === nothing && continue
+        v = fs[fk_]
         data[attname(f)] = try
             if f.kind === :fk && v !== nothing
                 pk_value(related_model(f), check_key_value(related_model(f), f, resolve_ref(related_model(f), v)))
@@ -169,6 +173,23 @@ function deserialize_one(d::AbstractDict; ignorenonexistent::Union{Nothing,Bool}
         haskey(fs, string(f.name)) || continue
         through_model(f) <: AutoThrough || continue      # (its rows come as objects of the through model)
         m2m[f.name] = Any[resolve_ref(related_model(f), v) for v in fs[string(f.name)]]
+    end
+    # a composite key's parts from "pk" (as Django's): the fields not given, from it
+    pkv = get(d, "pk", nothing)
+    if multi_pk(T) && pkv !== nothing
+        fs_ = pk_fields(T)
+        pkv isa AbstractVector && length(pkv) == length(fs_) ||
+            throw(DeserializationError("($(serial_label(T)):pk=$(JSON.json(pkv))) a composite primary key needs $(length(fs_)) values"))
+        for (f, x) in zip(fs_, pkv)
+            haskey(data, attname(f)) && continue
+            data[attname(f)] = try
+                f.kind === :fk ? (x isa AbstractString ? parse_pk(related_model(f), x) : x) :
+                    (x isa AbstractString && f.kind in INT_KINDS ? parse(Int, x) : deserial_value(f, x))
+            catch e
+                e isa DeserializationError && rethrow()
+                throw(DeserializationError("$(sprint(showerror, e)): ($(serial_label(T)):pk=$(JSON.json(pkv))) field_value was '$x'"))
+            end
+        end
     end
     obj = T()
     od = (getfield(obj, :_data)::Dict{Symbol,Any})

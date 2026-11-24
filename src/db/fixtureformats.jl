@@ -399,7 +399,11 @@ function xml_dump(ds::AbstractVector{<:AbstractDict}, objs; indent = nothing)
         T = typeof(obj)
         nl(1)
         print(io, "<object model=\"", d["model"], '"')
-        haskey(d, "pk") && d["pk"] !== nothing && print(io, " pk=\"", xml_escape(d["pk"] isa AbstractVector ? JSON.json(d["pk"]) : string(d["pk"])), '"')
+        # (a composite key as Django writes it: pk='["1", "1"]')
+        haskey(d, "pk") && d["pk"] !== nothing && (d["pk"] isa AbstractVector ?
+            print(io, " pk='[", join(["\"" * replace(string(x), "&" => "&amp;", "<" => "&lt;", ">" => "&gt;", "'" => "&apos;", "\"" => "\\\"") * "\""
+                                      for x in d["pk"]], ", "), "]'") :
+            print(io, " pk=\"", xml_escape(string(d["pk"])), '"'))
         print(io, '>')
         fs = d["fields"]
         m2m = Set(f.name for f in modelmeta(concrete_model(T)).m2m)

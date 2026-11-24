@@ -374,6 +374,29 @@ Base.@nospecializeinfer function strip_parent_links(@nospecialize(T::Type), segs
     segs
 end
 
+# The right side of a composite key's comparison: a query's selected columns (its key, or values(...) with as many
+# columns as the key), the base query's own key (F(:pk)), or the outer query's (OuterRef(:pk)), as a row value.
+function composite_rhs(c::SQLCompiler, v, n::Int, lookup)
+    if v isa F
+        v.name == "pk" && multi_pk(c.T) || throw(ArgumentError("Composite field lookups only work with composite expressions."))
+        return pk_ref(c.base, c.T), Any[]
+    elseif v isa OuterRef
+        o = c.outer
+        o === nothing && throw(ArgumentError("OuterRef($(repr(v.name))) used outside a Subquery/Exists"))
+        v.name == "pk" && multi_pk(o.T) || throw(ArgumentError("Composite field lookups only work with composite expressions."))
+        sql = pk_ref(o.base, o.T)
+        o.outer_refs === nothing || push!(o.outer_refs, sql)
+        return sql, Any[]
+    end
+    qs = v::QuerySet
+    M = model_of(qs)
+    width(f) = (tf = values_tuple_fields(M, f); tf === nothing ? 1 : length(tf))
+    cnt = qs.values_fields === nothing ? (multi_pk(M) ? length(pk_fields(M)) : 1) : sum(width, qs.values_fields; init = 0)
+    cnt == n || throw(ArgumentError("The QuerySet value for the '$lookup' lookup must have $n selected fields (received $cnt)"))
+    sql, ps = qs.values_fields === nothing ? subquery_sql(c, qs; idonly = true) : subquery_sql(c, qs)
+    "($sql)", ps
+end
+
 "Compile one `field__path__lookup = value` against model `T` whose table is reachable as `alias`."
 Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nospecialize(value), negated::Bool)
     parts = strip_parent_links(T, split(string(key), "__"))
@@ -459,18 +482,47 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
         fs = pk_fields(T)
         # a natural key (#221): pk is its field, with any lookup
         length(fs) == 1 && return compile_lookup(c, alias, T, Symbol(fs[1].name, "__", lookup), value isa Model ? value.pk : value, negated)
-        part(tup) = (length(tup) == length(fs) || throw(ArgumentError("$(nameof(T)) has a $(length(fs))-part primary key; got $(repr(tup))"));
-                     Q(:AND, Any[f.name => v for (f, v) in zip(fs, tup)], false))
+        n = length(fs)
+        value isa Model && (value = value.pk)
+        lookup == "isnull" && return (truthy(value) ? sql_false(backend()) : sql_true(backend()), Any[])
+        lookup in ("exact", "in", "gt", "gte", "lt", "lte") ||
+            throw(LookupError("composite primary keys support the exact, in, gt, gte, lt, lte and isnull lookups, not '$lookup'"))
+        # the key against a query (pk__in = qs, pk = qs[1:1], Subquery), its own F(:pk), or an outer query's key
+        sub = value isa Subquery ? value.qs : value
+        if sub isa QuerySet || value isa F || value isa OuterRef
+            rsql, rps = composite_rhs(c, sub, n, lookup)
+            op = lookup == "in" ? "IN" : lookup == "exact" ? "=" : nothing
+            op === nothing && throw(NotSupportedError("\"$lookup\" cannot be used to target composite fields through subqueries on this backend"))
+            return "$(pk_ref(alias, T)) $op $rsql", rps          # (an exclude()'s NOT is the caller's)
+        end
+        value isa Expression && throw(ArgumentError("'$lookup' subquery lookup of 'pk' only supports OuterRef and QuerySet objects (received '$(nameof(typeof(value)))')"))
+        function part(tup, each = false)
+            tup isa Union{Tuple,AbstractVector} || throw(ArgumentError(each ? "'in' lookup of 'pk' must be a collection of tuples or lists" :
+                                                                       "'$lookup' lookup of 'pk' must be a tuple or a list"))
+            length(tup) == n || throw(ArgumentError(each ? "'in' lookup of 'pk' must have $n elements each" : "'$lookup' lookup of 'pk' must have $n elements"))
+            collect(Any, tup)
+        end
         if lookup == "exact"
             value === nothing && return (sql_false(backend()), Any[])
-            return compile_q(c, alias, T, part(value), negated)
+            vals = part(value)
+            return compile_q(c, alias, T, Q(:AND, Any[f.name => v for (f, v) in zip(fs, vals)], false), negated)
         elseif lookup == "in"
-            isempty(value) && return (sql_false(backend()), Any[])
-            return compile_q(c, alias, T, Q(:OR, Any[part(t) for t in value], false), negated)
-        elseif lookup == "isnull"
-            return (truthy(value) ? sql_false(backend()) : sql_true(backend()), Any[])
+            value isa Union{Tuple,AbstractVector,AbstractSet} || throw(ArgumentError("'in' lookup of 'pk' must be a tuple or a list"))
+            # (a key with a part missing matches nothing, as Django's)
+            keys_ = [part(t isa Model ? t.pk : t, true) for t in value]
+            filter!(k -> !any(isnothing, k), keys_)
+            isempty(keys_) && return (sql_false(backend()), Any[])     # (excluded: NOT of it, every row)
+            return compile_q(c, alias, T, Q(:OR, Any[Q(:AND, Any[f.name => v for (f, v) in zip(fs, k)], false) for k in keys_], false), negated)
         end
-        throw(LookupError("composite primary keys support the pk, pk__in and pk__isnull lookups, not '$lookup'"))
+        # gt/gte/lt/lte: tuple order, (a, b) > (x, y) as a > x OR (a = x AND b > y) (Django's fallback, on every backend)
+        vals = part(value)
+        strict = lookup in ("gt", "lt") ? lookup : lookup == "gte" ? "gt" : "lt"
+        q = Q(:AND, Any[Symbol(fs[n].name, "__", lookup) => vals[n]], false)
+        for i in n-1:-1:1
+            q = Q(:OR, Any[Q(:AND, Any[Symbol(fs[i].name, "__", strict) => vals[i]], false),
+                           Q(:AND, Any[fs[i].name => vals[i], q], false)], false)
+        end
+        return compile_q(c, alias, T, q, negated)
     elseif fname == "id"
         isempty(rest) || throw(LookupError("'id' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
         col = qcol(alias, "id")

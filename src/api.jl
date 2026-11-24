@@ -146,7 +146,7 @@ public uuid4, FieldFile, FileSystemStorage, InMemoryStorage, storages, default_s
        get_for_model, get_for_id, get_for_models, clear_contenttype_cache!, content_type_name, app_labeled_name, GenericPrefetch, model_class, natural_key, get_by_natural_key, manager, default_queryset,
        DatabaseBackend, register_backend!, execute, db_for_read, db_for_write, allow_migrate, allow_relation
 # migrations and database tools
-public showmigrations, sqlmigrate, squashmigrations, optimizemigration, flush!, inspectdb, introspect_tables, introspect_columns, introspect_constraints, introspect_relations, introspect_primary_key_column, introspect_comments, django_table_names, installed_models, dbshell_cmd,
+public showmigrations, sqlmigrate, squashmigrations, optimizemigration, flush!, inspectdb, introspect_tables, introspect_columns, introspect_constraints, introspect_relations, introspect_primary_key_column, introspect_primary_key_columns, introspect_comments, django_table_names, installed_models, dbshell_cmd,
        serialize, deserialize, dumpdata, loaddata, load_fixtures
 # forms
 public management_form, empty_form, deleted_forms, ordered_forms, clean_form

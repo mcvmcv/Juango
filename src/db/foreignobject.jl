@@ -108,6 +108,12 @@ function compile_fobj_lookup(c::SQLCompiler, alias, g::Field, M::Type, rest, loo
     if isempty(rest) && lookup == "isnull" && !reverse
         sql = join(["$(qcol(alias, p[2])) IS NULL" for p in parts], " OR ")
         return (truthy(value) ? "($sql)" : "NOT ($sql)", Any[])
+    elseif isempty(rest) && lookup == "isnull" && !truthy(value) && !negated
+        # comments__isnull = false: joined, a row per referrer, as Django's
+        p1, more = parts[1], parts[2:end]
+        a = join!(c, alias, key, modelmeta(M).table, p1[2], p1[4]; left = true,
+                  extra_on = isempty(more) ? nothing : (x -> fobj_on(more, x, alias)))
+        return ("$(qcol(a, p1[2])) IS NOT NULL", Any[])
     elseif isempty(rest) && lookup == "isnull"
         a = new_alias!(c)
         ex = "EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(on(a)))"
@@ -127,7 +133,7 @@ function compile_fobj_lookup(c::SQLCompiler, alias, g::Field, M::Type, rest, loo
     more = parts[2:end]
     extra = isempty(more) ? nothing : (a -> reverse ? fobj_on(more, a, alias) : fobj_on(more, alias, a))
     a = join!(c, alias, key, modelmeta(M).table, childcol, parentcol; left = true, extra_on = extra)
-    reverse && (c.distinct = true)
+    # (back from the target, one row per matching referrer, as Django's join: filter(User; comments__num__gt = 2) repeats a user)
     compile_lookup(c, a, M, subkey, value, negated)
 end
 

@@ -33,7 +33,8 @@ Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, 
         key = d[:id] === nothing && is_composite(T) ? composite_pk(T, d) : d[:id]
         key === nothing && throw(ArgumentError("Cannot force an update in save() with no primary key."))
         d[:id] === nothing && (d[:id] = key; keyed = true)
-        update_fields === nothing && (update_fields = [attname(f) for f in all_fields(T) if haskey(d, attname(f)) && f.generated === nothing])
+        update_fields === nothing && (update_fields = [attname(f) for f in all_fields(T) if haskey(d, attname(f)) && f.generated === nothing &&
+                                                       !(multi_pk(T) && any(g -> g === f, pk_fields(T)))])
     end
     only = update_fields === nothing ? nothing : update_field_set(T, update_fields)
     only !== nothing && isempty(only) && return obj
@@ -159,6 +160,9 @@ Base.@nospecializeinfer function update_field_set(@nospecialize(T::Type), names)
         s = Symbol(n)
         f = findfirst(f -> f.name === s || attname(f) === s, all_fields(T))
         f === nothing && throw(ArgumentError("$(nameof(T)) has no field '$s' (in update_fields)"))
+        # a composite key's parts aren't updated (the row is found by them), as Django's message
+        multi_pk(T) && any(g -> g === all_fields(T)[f], pk_fields(T)) &&
+            throw(ArgumentError("The following fields do not exist in this model, are m2m fields, primary keys, or are non-concrete fields: $s"))
         push!(out, attname(all_fields(T)[f]))
     end
     out
@@ -375,8 +379,10 @@ end
 
 "UPDATE some columns of one table's row for `save!(...; update_fields)`; the row must exist."
 Base.@nospecializeinfer function update_columns!(@nospecialize(M::Type), data, only::Set{Symbol})
+    keyparts = is_composite(M) ? pk_fields(M) : Field[]          # (the row is found by a composite key's parts: not SET)
     fields = [f for f in modelmeta(M).fields if attname(f) in only && haskey(data, attname(f)) &&     # (not deferred)
-                                               f.generated === nothing && data[attname(f)] !== DB_DEFAULT]
+                                               f.generated === nothing && data[attname(f)] !== DB_DEFAULT &&
+                                               !any(g -> g === f, keyparts)]
     isempty(fields) && return
     phs, vals = write_values(M, fields, data, false)
     sets = join(["$(qname(column(f))) = $ph" for (f, ph) in zip(fields, phs)], ", ")
@@ -409,6 +415,7 @@ Base.@nospecializeinfer function save_table!(@nospecialize(M::Type), data, root:
     dbd = [f for f in meta.fields if f.generated === nothing && get(data, attname(f), nothing) === DB_DEFAULT]
     function upd()
         ufs = vcat(fields, dbd)
+        is_composite(M) && (ufs = [f for f in ufs if !any(g -> g === f, pk_fields(M))])   # (the key is the WHERE)
         d = isempty(dbd) ? data : merge(data, Dict{Symbol,Any}(attname(f) => f.db_default for f in dbd))
         w = write_values(M, ufs, d, false)
         (join(["$(qname(column(f))) = $ph" for (f, ph) in zip(ufs, w[1])], ", "), w[2])
@@ -421,7 +428,8 @@ Base.@nospecializeinfer function save_table!(@nospecialize(M::Type), data, root:
         if data[:id] !== nothing          # loaded or saved before: UPDATE, else (no such row) INSERT
             cond = join([qname(column(f)) * " = ?" for f in pk_fields(M)], " AND ")
             sets, vals = upd()
-            n = execute_changes("UPDATE $tbl SET $sets WHERE $cond", vcat(vals, pk_parts(key)))
+            n = isempty(sets) ? length(execute("SELECT 1 FROM $tbl WHERE $cond", pk_parts(key))) :   # (nothing but the key)
+                execute_changes("UPDATE $tbl SET $sets WHERE $cond", vcat(vals, pk_parts(key)))
             n > 0 && (data[:id] = key; return false)
         end
         phs, vals = ins()
@@ -458,8 +466,9 @@ end
 "Delete the object (and cascade to related objects)."
 Base.@nospecializeinfer function Base.delete!(@nospecialize(obj::Model); db = nothing)
     T = typeof(obj)
-    id = obj.id
-    id === nothing && error("cannot delete an unsaved $(T)")
+    id = set_pk(obj)
+    # (as Django's ValueError; a composite key needs all its parts)
+    id === nothing && throw(ArgumentError("$(nameof(T)) object can't be deleted because its $(multi_pk(T) ? "pk" : "id") attribute is set to None."))
     # nothing to cascade to: one DELETE, no transaction (Django's fast delete)
     with_db(() -> fast_deletable(T) ? delete_ids!(T, [id]) :
                   Base.ScopedValues.with(() -> atomic(() -> delete_rows!(T, [id]); savepoint = false), DELETE_ORIGIN => obj),
@@ -899,7 +908,9 @@ Base.@nospecializeinfer function validate_unique(@nospecialize(obj::Model); excl
                                                  unique_together_message = nothing)
     T = typeof(obj)
     errors = Dict{Symbol,Vector{String}}()
-    others(q) = obj.id === nothing ? q : filter(q, !Q(id = obj.id))
+    # the row itself is left out when the object is saved and its key complete (Django: not adding, pk set)
+    self_ = (getfield(obj, :_data)::Dict{Symbol,Any})[:id] === nothing ? nothing : set_pk(obj)
+    others(q) = self_ === nothing ? q : filter(q, !Q(pk = self_))
     msgf(f) = message_fields !== nothing && haskey(message_fields, f.name) ? message_fields[f.name] : f
     for f in all_fields(T)
         f.name in exclude && continue
@@ -930,7 +941,7 @@ Base.@nospecializeinfer function validate_unique(@nospecialize(obj::Model); excl
         end
     end
     values = Dict{Symbol,Any}(f.name => field_data(obj, attname(f)) for f in all_fields(T) if !(f.name in exclude))
-    errs = unique_together_errors(T, values, obj.id; message = unique_together_message)
+    errs = unique_together_errors(T, values, self_; message = unique_together_message)
     isempty(errs) || append!(get!(errors, :__all__, String[]), errs)
     errors
 end
@@ -968,12 +979,13 @@ Base.@nospecializeinfer function adjacent_by(@nospecialize(obj::Model), field::S
     T = typeof(obj)
     f = getfield_meta(T, field)
     f.kind in (:date, :datetime) || throw(ArgumentError("get_next_by: $field isn't a date or datetime field"))
-    obj.id === nothing && throw(ArgumentError("get_next_by: $T is not saved"))
+    k = set_pk(obj)
+    k === nothing && throw(ArgumentError("get_next/get_previous cannot be used on unsaved objects."))
     v = field_data(obj, attname(f))
     v === nothing && throw(ArgumentError("get_next_by: $field is NULL"))
     op = next ? "gt" : "lt"
-    q = Q(Symbol(field, "__", op) => v) | Q(:AND, Any[field => v, Symbol("id__", op) => obj.id], false)
-    qs = filter(filter(base_objects(T), q); kw...) |> order_by(next ? string(field) : "-" * string(field), next ? "id" : "-id")
+    q = Q(Symbol(field, "__", op) => v) | Q(:AND, Any[field => v, Symbol("pk__", op) => k], false)
+    qs = filter(filter(base_objects(T), q); kw...) |> order_by(next ? string(field) : "-" * string(field), next ? "pk" : "-pk")
     o = with_db(() -> first(qs), instance_db(obj))            # (on the object's database)
     o === nothing && throw(DoesNotExist(T, "$(next ? "next" : "previous") by $field"))
     o
@@ -983,12 +995,15 @@ end
 Base.@nospecializeinfer function unique_together_errors(@nospecialize(T::Type{<:Model}), values, id; message = nothing)
     errs = String[]
     # a multi-table child is checked against its parents' sets too (in their tables), as Django
-    for M in unique!(Any[concrete_model(T); ancestors(T)]), u in modelmeta(M).unique_together
+    # (a composite primary key's fields are unique together too, as Django checks them)
+    sets(M) = multi_pk(M) && table_parent(M) === nothing ?
+        vcat(modelmeta(M).unique_together, [Symbol[g.name for g in pk_fields(M)]]) : modelmeta(M).unique_together
+    for M in unique!(Any[concrete_model(T); ancestors(T)]), u in unique(sets(M))
         all(n -> haskey(values, n), u) || continue
         vals = [values[n] isa Model ? values[n].id : values[n] for n in u]
         any(isnothing, vals) && continue
         qs = filter(base_objects(M), Q(:AND, Any[n => v for (n, v) in zip(u, vals)], false))
-        id === nothing || (qs = filter(qs, !Q(id = id)))
+        id === nothing || (qs = filter(qs, !Q(pk = id)))
         if exists(qs)
             mname, labels = uppercasefirst(string(modelmeta(M).verbose_name)), join([label(findfield(modelmeta(M), n)) for n in u], " and ")
             push!(errs, interpolate(something(message, gettext("%(model_name)s with this %(field_labels)s already exists.")),

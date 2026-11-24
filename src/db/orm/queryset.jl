@@ -482,6 +482,9 @@ function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true,
     length(order) == 1 && order[1] isa NoOrder && return "", String[], Any[]
     isempty(order) && meta_ordering && (order = modelmeta(T).ordering)
     isempty(order) && return "", String[], Any[]
+    # F(:pk) of a composite key (Desc(F(:pk))): its fields, as "pk" is
+    multi_pk(T) && (order = Any[o isa OrderBy && o.expr isa F && o.expr.name == "pk" ? (o.descending ? "-pk" : "pk") :
+                                o isa F && o.name == "pk" ? "pk" : o for o in order])
     # order_by("author") and Meta(ordering = ["-note"]): the related model's ordering, as Django
     # "-pubdate_alias__year": a transform of an annotation or alias
     order = Any[o isa AbstractString && !haskey(c.annotations, Symbol(lstrip(o, '-'))) &&
@@ -747,6 +750,15 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
                 is_filtered_relation(a) || aggregating(a, qs.annotations) || push!(group, qname(string(f)))
                 continue
             end
+            tf = values_tuple_fields(T, f)
+            if tf !== nothing                              # a composite key or ForeignObject: its columns, a tuple when read
+                for (i, g) in enumerate(tf)
+                    col = qcol(c.base, column(g))
+                    push!(sel, "$col AS $(qname(cpk_part_name(f, i)))")
+                    push!(group, col)
+                end
+                continue
+            end
             c.reuse_upto = length(qs.where)               # a value read through a filtered relation uses its join
             col, _ = resolve_path(c, c.base, T, f)
             c.reuse_upto = 0
@@ -759,6 +771,8 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
                 if haskey(c.annotations, Symbol(f))
                     a = c.annotations[Symbol(f)]
                     is_filtered_relation(a) || aggregating(a, qs.annotations) || push!(group, qname(f))
+                elseif (tf = values_tuple_fields(T, f)) !== nothing     # a composite key or ForeignObject: its columns
+                    append!(group, [qcol(c.base, column(g)) for g in tf])
                 else
                     c.reuse_upto = length(qs.where)    # the filter's join, as the SELECT uses it (#225)
                     push!(group, first(resolve_path(c, c.base, T, f)))
@@ -1190,6 +1204,7 @@ Base.@nospecializeinfer function fetch_values(@nospecialize(qs::QuerySet))
     anns = qs.combinator === nothing ? qs.annotations : first(qs.combinator[2]).annotations
     convs = Dict{Symbol,Any}()
     for f in qs.values_fields
+        values_tuple_fields(T, f) === nothing || continue
         (haskey(c.annotations, Symbol(f)) || any(p -> p.first === Symbol(f), anns)) && continue
         rc = SQLCompiler(T)
         merge!(rc.annotations, c.annotations)          # (a path through a FilteredRelation)
@@ -1202,6 +1217,13 @@ Base.@nospecializeinfer function fetch_values(@nospecialize(qs::QuerySet))
         d = Dict{Symbol,Any}()
         for f in qs.values_fields
             k = Symbol(f)
+            tf = values_tuple_fields(T, f)
+            if tf !== nothing
+                vs = Any[from_db(g, get(r, Symbol(cpk_part_name(f, i)), nothing)) for (i, g) in enumerate(tf)]
+                # (a ForeignObject pointing nowhere: nothing, as Django's None)
+                d[k] = f != "pk" && all(isnothing, vs) ? nothing : Tuple(vs)
+                continue
+            end
             v = get(r, k, nothing)
             d[k] = haskey(convs, k) ? from_db(convs[k], v) : v
         end
@@ -1211,6 +1233,19 @@ Base.@nospecializeinfer function fetch_values(@nospecialize(qs::QuerySet))
         push!(out, d)
     end
     shape_values(qs, out)
+end
+"The name the `i`th column of a values() tuple field (`pk`, a ForeignObject) is selected under."
+cpk_part_name(f, i) = "juango_$(f)_$i"
+"""
+The fields a values() entry reads as a tuple: a composite key's parts (`"pk"`), or a ForeignObject's
+fields (`"user"`); `nothing` for any other entry.
+"""
+Base.@nospecializeinfer function values_tuple_fields(@nospecialize(T::Type), f::AbstractString)
+    f == "pk" && return multi_pk(T) ? pk_fields(T) : nothing
+    occursin("__", f) && return nothing
+    i = findfirst(g -> string(g.name) == f, foreign_objects(T))
+    i === nothing && return nothing
+    Field[all_fields(T)[findfirst(g -> attname(g) === p[1], all_fields(T))] for p in fobj_parts(foreign_objects(T)[i])]
 end
 "values() rows as values_list gives them: tuples, named tuples or plain values."
 Base.@nospecializeinfer function shape_values(@nospecialize(qs::QuerySet), rows::Vector{Dict{Symbol,Any}})
@@ -1539,14 +1574,19 @@ Base.@nospecializeinfer function totally_ordered(@nospecialize(qs::QuerySet))
 end
 tattr(qs::QuerySet, ::Val{:totally_ordered}) = totally_ordered(qs)
 
-Base.@nospecializeinfer default_order(@nospecialize(qs::QuerySet)) =
-    order_cleared(qs) ? Any["id"] :
-    isempty(qs.order) ? (isempty(modelmeta(model_of(qs)).ordering) ? Any["id"] : modelmeta(model_of(qs)).ordering) : qs.order
+Base.@nospecializeinfer function default_order(@nospecialize(qs::QuerySet))
+    k = multi_pk(model_of(qs)) ? "pk" : "id"
+    order_cleared(qs) ? Any[k] :
+    isempty(qs.order) ? (isempty(modelmeta(model_of(qs)).ordering) ? Any[k] : modelmeta(model_of(qs)).ordering) : qs.order
+end
 
 # values(...) |> annotate(aggregate) grouped by fields other than the key, and not ordered: ordering it by id
 # would change the groups, so first()/last() refuse it, as Django's
 Base.@nospecializeinfer function check_first_last_grouping(@nospecialize(qs::QuerySet), what)
+    T = model_of(qs)
+    # (a composite key's fields all among the groups is the key too, as Django)
     qs.group_fields === nothing || !(isempty(qs.order) || order_cleared(qs)) || any(in(("id", "pk")), qs.group_fields) ||
+        (multi_pk(T) && all(g -> string(g.name) in qs.group_fields || string(attname(g)) in qs.group_fields, pk_fields(T))) ||
         throw(ArgumentError("Cannot use QuerySet.$what() on an unordered queryset performing aggregation. Add an ordering with order_by()."))
 end
 """
@@ -1632,6 +1672,7 @@ function deferrable_names(T, fields)
     for f in fields
         f === nothing && throw(ArgumentError("Cannot pass nothing as an argument to only()."))
         n = Symbol(f)
+        n === :pk && multi_pk(T) && (append!(out, [g.name for g in pk_fields(T)]); continue)   # (a composite key: its fields)
         n === :pk && (n = :id)
         i = findfirst(g -> g.kind === :fk && attname(g) === n, all_fields(T))
         i === nothing || (n = all_fields(T)[i].name)
@@ -1760,7 +1801,7 @@ Base.@nospecializeinfer function in_bulk(@nospecialize(qs::QuerySet), keys = not
         (f !== nothing && (f.unique || unique_by_constraint(T, field_name))) ||
             throw(ArgumentError("in_bulk's field_name must be a unique field, not '$field_name'"))
     end
-    field_name === :pk && (field_name = :id)
+    field_name in (:pk, :id) && (field_name = multi_pk(T) ? :pk : :id)     # (a composite key: its tuples)
     q = keys === nothing ? qs : filter(qs; Symbol(field_name, "__in") => collect(keys))
     qs.values_fields === nothing || return in_bulk_values(q, keys, field_name)
     keys !== nothing && isempty(keys) && return Dict{Any,T}()

@@ -532,6 +532,8 @@ Base.@nospecializeinfer function construct(@nospecialize(T::Type{<:Model}); kwar
     obj = T(Dict{Symbol,Any}(:id => nothing), Dict{Symbol,Any}())
     data = (getfield(obj, :_data)::Dict{Symbol,Any})
     kw = Dict{Symbol,Any}(kwargs)
+    # (a composite key's parts are set after the fields, so pk = (...) wins over them given either way, as Django's)
+    cpk = multi_pk(T) && haskey(kw, :pk) ? pop!(kw, :pk) : NOTFOUND
     haskey(kw, :pk) && (kw[natural_pk(T) ? pk_fields(T)[1].name : :id] = pop!(kw, :pk))     # (a natural key's field)
     haskey(kw, :id) && (data[:id] = pop!(kw, :id))
     for f in all_fields(T)
@@ -546,6 +548,7 @@ Base.@nospecializeinfer function construct(@nospecialize(T::Type{<:Model}); kwar
     for g in generic_fks(T)
         haskey(kw, g.name) && set_generic!(obj, g, pop!(kw, g.name))
     end
+    cpk === NOTFOUND || set_composite_pk!(obj, cpk)
     for g in foreign_objects(T)
         haskey(kw, g.name) && set_fobj!(obj, g, pop!(kw, g.name))
     end
@@ -647,7 +650,7 @@ function Base.getproperty(m::Model, s::Symbol)        # small: compiled per mode
 end
 Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symbol)
     data = (getfield(m, :_data)::Dict{Symbol,Any})
-    s === :pk && return data[:id]
+    s === :pk && return multi_pk(typeof(m)) ? live_pk(m) : data[:id]
     s in (:_data, :_cache) && return getfield(m, s)
     T = typeof(m)
     any(f -> attname(f) === s, all_fields(T)) && return field_data(m, s)
@@ -760,7 +763,8 @@ Base.@nospecializeinfer router_prevents(@nospecialize(v::Model)) =
 
 Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::Symbol, @nospecialize(v))
     data = (getfield(m, :_data)::Dict{Symbol,Any})
-    # (pk = ... on a model with a natural primary key sets that field, as Django)
+    # (pk = ... on a model with a natural primary key sets that field, as Django; a composite key, its fields)
+    s === :pk && multi_pk(typeof(m)) && return set_composite_pk!(m, v)
     s === :pk && (s = natural_pk(typeof(m)) ? pk_fields(typeof(m))[1].name : :id)
     g = find_generic(generic_fks(typeof(m)), s)
     g === nothing || return set_generic!(m, g, v)
@@ -873,9 +877,14 @@ Base.@nospecializeinfer function property_list(@nospecialize(T))
     names
 end
 
-# (a proxy and its concrete model are equal for the same key, as Django; a multi-table parent and child aren't)
-Base.@nospecializeinfer Base.:(==)(@nospecialize(a::Model), @nospecialize(b::Model)) =
-    concrete_model(typeof(a)) === concrete_model(typeof(b)) && a.id !== nothing && a.id == b.id
+# (a proxy and its concrete model are equal for the same key, as Django; a multi-table parent and child aren't; an
+# object without a key, or a composite key with a part missing, equals only itself)
+Base.@nospecializeinfer function Base.:(==)(@nospecialize(a::Model), @nospecialize(b::Model))
+    a === b && return true
+    concrete_model(typeof(a)) === concrete_model(typeof(b)) || return false
+    k = set_pk(a)
+    k !== nothing && k == set_pk(b)
+end
 """
     copy(obj)
 
@@ -888,7 +897,7 @@ Base.@nospecializeinfer function Base.copy(@nospecialize(m::Model))
     db === nothing || ((getfield(c, :_cache)::Dict{Symbol,Any})[:__db] = db)
     c
 end
-Base.@nospecializeinfer Base.hash(@nospecialize(m::Model), h::UInt) = m.id === nothing ? objectid(m) ⊻ h : hash((concrete_model(typeof(m)), m.id), h)
+Base.@nospecializeinfer Base.hash(@nospecialize(m::Model), h::UInt) = (k = set_pk(m); k === nothing ? objectid(m) ⊻ h : hash((concrete_model(typeof(m)), k), h))
 Base.show(io::IO, m::Model) = print(io, nameof(typeof(m)), " object (", something(m.id, "unsaved"), ")")
 function Base.show(io::IO, ::MIME"text/plain", m::Model)
     print(io, "<", nameof(typeof(m)), ": ")

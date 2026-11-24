@@ -704,6 +704,22 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
             last_ && return qcol(alias, "id"), nothing
             continue
         end
+        # through a ForeignObject (forward, or back from its target): LEFT JOIN on every part
+        gi = findfirst(g -> string(g.name) == s, foreign_objects(T))
+        rv = gi === nothing ? find_reverse_fobj(T, s) : nothing
+        if gi !== nothing || rv !== nothing
+            fo = gi !== nothing ? foreign_objects(T)[gi] : rv[3]
+            M = gi !== nothing ? related_model(fo) : rv[2]
+            parts = fobj_parts(fo)
+            prev, p1, more = alias, parts[1], parts[2:end]
+            childcol, parentcol = gi === nothing ? (p1[2], p1[4]) : (p1[4], p1[2])
+            extra = isempty(more) ? nothing : (a -> gi === nothing ? fobj_on(more, a, prev) : fobj_on(more, prev, a))
+            alias = join!(c, alias, expr_key(c, alias, Symbol(s)), modelmeta(M).table, childcol, parentcol; left = true, extra_on = extra)
+            T = M
+            # (a composite key isn't one column: its first part stands for the row, as COUNT reads it)
+            last_ && return multi_pk(T) ? (qcol(alias, column(pk_fields(T)[1])), nothing) : resolve_path(c, alias, T, "id")
+            continue
+        end
         rel = find_reverse(T, s)
         rel === nothing && throw(lookup_error(T, s))
         rn, M, rf = rel
@@ -748,9 +764,15 @@ function compile_expr(c::SQLCompiler, e::F)
         end
         return "($sql)", ps
     end
+    # a composite key isn't one value (as Django's): composite lookups and ordering take it apart
+    e.name == "pk" && multi_pk(c.T) && throw(ArgumentError("CompositePrimaryKey cannot be used as a lookup value."))
     col, _ = resolve_path(c, c.base, c.T, e.name)
     col, Any[]
 end
+# F(:pk) of a composite key inside another expression: refused with Django's message
+cpk_arg(c::SQLCompiler, @nospecialize(a)) = a isa F && a.name == "pk" && multi_pk(c.T)
+cpk_refuse(c::SQLCompiler, @nospecialize(e), label) =
+    throw(ArgumentError("$label expression does not support composite primary keys."))
 
 function compile_expr(c::SQLCompiler, e::OuterRef)
     c.outer === nothing && throw(ArgumentError("OuterRef($(repr(e.name))) used outside a Subquery/Exists"))
@@ -762,6 +784,7 @@ function compile_expr(c::SQLCompiler, e::OuterRef)
 end
 
 function compile_expr(c::SQLCompiler, e::CombinedExpression)
+    (cpk_arg(c, e.lhs) || cpk_arg(c, e.rhs)) && cpk_refuse(c, e, "CombinedExpression")
     a, pa = compile_expr(c, e.lhs)
     b, pb = compile_expr(c, e.rhs)
     if e.op in ("+", "-")
@@ -857,6 +880,7 @@ datetime_add_sql(::DatabaseBackend, op, a, d) = "($a $op $d)"
 datetime_diff_sql(::DatabaseBackend, ka, a, kb, b) = ka === :date && kb === :date ? "(($a - $b) * INTERVAL '1 day')" : "($a - $b)"
 
 function compile_expr(c::SQLCompiler, e::Func)
+    any(a -> cpk_arg(c, a), e.args) && cpk_refuse(c, e, uppercasefirst(string(e.name)))
     b = backend()
     parts = [compile_expr(c, a) for a in e.args if a isa Expression]
     sqls, ps = first.(parts), reduce(vcat, last.(parts); init = Any[])
@@ -913,6 +937,14 @@ function expr_condition(c::SQLCompiler, q::Q)
 end
 
 function compile_expr(c::SQLCompiler, e::Aggregate)
+    e.arg !== nothing && cpk_arg(c, e.arg) && cpk_refuse(c, e, uppercasefirst(lowercase(e.func)))
+    # Count(:comments; distinct = true) of rows with a composite key: no one column to count distinct, as Django
+    if e.distinct && e.arg isa F && !occursin("__", e.arg.name)
+        rv = find_reverse_fobj(c.T, e.arg.name)
+        gi = findfirst(g -> string(g.name) == e.arg.name, foreign_objects(c.T))
+        M = rv !== nothing ? rv[2] : gi !== nothing ? related_model(foreign_objects(c.T)[gi]) : nothing
+        M !== nothing && multi_pk(M) && throw(NotSupportedError("COUNT(DISTINCT) doesn't support composite primary keys"))
+    end
     arg, ps = e.arg === nothing ? ("*", Any[]) : compile_expr(c, e.arg)
     if e.filter !== nothing
         cond, cps = expr_condition(c, e.filter)
@@ -1197,7 +1229,7 @@ function Base.values(@nospecialize(qs::QuerySet), fields::Union{Symbol,AbstractS
         return chain(qs; combinator = (op, Any[values(p, fields...) for p in parts], keep_all),
                      values_fields = String[string(f) for f in fields], values_mode = :dict)
     end
-    fs = isempty(fields) ? vcat(["id"], [string(attname(f)) for f in all_fields(T)],                  # values(): the annotations too
+    fs = isempty(fields) ? vcat(multi_pk(T) ? String[] : ["id"], [string(attname(f)) for f in all_fields(T)],                  # values(): the annotations too
                                 [string(p.first) for p in qs.annotations if !is_filtered_relation(p.second) && !(p.first in qs.aliases)]) :
          String[string(f) for f in fields]
     # an alias can't be selected: annotate() promotes it (as Django); an annotation's transform is one of its own
@@ -1262,7 +1294,8 @@ Base.@nospecializeinfer function values_list_of(@nospecialize(qs::QuerySet), fie
         end
     end
     flat && isempty(fields) && (fields = Any[:id])      # as Django: the first field, the primary key (#213)
-    fs = isempty(fields) ? Any[:id; [attname(f) for f in all_fields(T)];          # the annotations too, as Django
+    flat && isempty(fields) && multi_pk(T) && (fields = Any[:pk])
+    fs = isempty(fields) ? Any[(multi_pk(T) ? Symbol[] : [:id]); [attname(f) for f in all_fields(T)];          # the annotations too, as Django
                                [p.first for p in qs.annotations if !is_filtered_relation(p.second) && !(p.first in qs.aliases)]] : fields
     vq = values(qs, fs...)
     length(vq.values_fields) == length(fs) || error("values_list: asked for $(length(fs)) fields, got $(length(vq.values_fields))")

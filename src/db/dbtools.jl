@@ -139,6 +139,14 @@ function introspect_primary_key_column(table)
     nothing
 end
 
+"A table's primary key columns, in the key's order (Django's `get_primary_key_columns`); empty without one."
+function introspect_primary_key_columns(table)
+    for c in values(introspect_constraints(table))
+        c.primary_key && !isempty(c.columns) && return collect(String, c.columns)
+    end
+    String[]
+end
+
 "A table's foreign keys: column => `(referenced column, referenced table)` (Django's `get_relations`)."
 function introspect_relations(table)
     Dict(c.columns[1] => (c.foreign_key[2], c.foreign_key[1]) for c in values(introspect_constraints(table))
