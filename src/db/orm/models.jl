@@ -765,6 +765,16 @@ Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::S
             delete!((getfield(m, :_cache)::Dict{Symbol,Any}), s)
         elseif v isa Model
             check_related_assignment(f, typeof(m), v)
+            # an object of another database: refused here, as Django's descriptor does (unless a router allows it);
+            # an unsaved object without one takes the related object's (Django's db_for_write instance hint)
+            if instance_db(m) === nothing && getfield(m, :_data)[:id] === nothing && !is_composite(typeof(m))
+                instance_db(v) === nothing || db_pinned() || ((getfield(m, :_cache)::Dict{Symbol,Any})[:__db] = instance_db(v))
+            else
+                let a = something(instance_db(m), "default"), b = something(instance_db(v), "default")
+                    a == b || ask_routers(allow_relation, v, m) === true ||
+                        throw(ArgumentError("Cannot assign \"<$(nameof(typeof(v))): $(string(v))>\": the current database router prevents this relation."))
+                end
+            end
             f.one_to_one && ((getfield(v, :_cache)::Dict{Symbol,Any})[reverse_name(f)] = PrefetchedList(Any[m]))
             # an unsaved object's key isn't known yet (a to_field may hold a value it will change): taken at save
             data[attname(f)] = (getfield(v, :_data)::Dict{Symbol,Any})[:id] === nothing ? nothing : target_value(f, v)

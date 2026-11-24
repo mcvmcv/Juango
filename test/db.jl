@@ -217,8 +217,7 @@ Juango.allow_migrate(::TopicsElsewhere, db, app; model = nothing) = app == "auth
         # relating objects of two databases is refused
         mine = create(Author; name = "Local One")
         far = get(using_db(Article, "other"); id = art.id)
-        far.author = mine
-        @test_throws ArgumentError save!(far)
+        @test_throws ArgumentError (far.author = mine)                        # (at once, as Django's descriptor)
         # transactions are per database
         @test_throws ErrorException atomic(db = "other") do
             create(Author; name = "Rolled"); error("undo")

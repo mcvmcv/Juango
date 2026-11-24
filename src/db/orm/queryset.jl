@@ -1101,6 +1101,7 @@ Base.@nospecializeinfer function fetch_here(@nospecialize(qs::QuerySet))
                 end
                 parent === nothing && continue
                 r = from_prefixed_row(M, row, alias * "__")
+                r === nothing || set_instance_db!(r)            # (it belongs to the database it was read from)
                 pf = findfield(modelmeta(typeof(parent)), path[end])
                 if length(path) == 1 && is_filtered_relation(ann_get(qs.annotations, path[1]))
                     # a FilteredRelation's object (or nothing): obj.name, and the start of longer paths

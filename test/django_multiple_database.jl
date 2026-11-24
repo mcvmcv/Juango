@@ -117,4 +117,79 @@ dmd_titles(qs) = collect(values_list(qs, :title; flat = true))
     @test_throws ArgumentError(msg) atomic(() -> add!(dive.authors, marty); db = "other")
     @test_throws ArgumentError(msg) atomic(() -> set!(dive.authors, [mark, marty]); db = "other")
   end
+  dmd_block() do
+    B, P = DmdBook, DmdPerson
+    names(qs) = collect(values_list(qs, :name; flat = true))
+    # test_foreign_key_separation
+    pro = create(B; title = "Pro Django", published = Date(2008, 12, 16))
+    george = create(P; name = "George Vilches")
+    dive = using_db(() -> create(B; title = "Dive into Python", published = Date(2009, 5, 4)), "other")
+    chris = using_db(() -> create(P; name = "Chris Mills"), "other")
+    pro.editor = george; save!(pro)
+    dive.editor = chris; save!(dive)
+    @test get(using_db(B, "default"); title = "Pro Django").editor.name == "George Vilches"
+    @test get(using_db(B, "other"); title = "Dive into Python").editor.name == "Chris Mills"
+    @test names(filter(using_db(P, "default"); edited__title = "Pro Django")) == ["George Vilches"]
+    @test isempty(names(filter(using_db(P, "other"); edited__title = "Pro Django")))
+    @test isempty(names(filter(using_db(P, "default"); edited__title = "Dive into Python")))
+    @test names(filter(using_db(P, "other"); edited__title = "Dive into Python")) == ["Chris Mills"]
+    chris = get(using_db(P, "other"); name = "Chris Mills")
+    @test dmd_titles(chris.edited) == ["Dive into Python"]
+    # test_foreign_key_reverse_operations
+    html5 = using_db(() -> create(B; title = "Dive into HTML5", published = Date(2010, 3, 15)), "other")
+    ed(t) = names(filter(using_db(P, "other"); edited__title = t))
+    @test isempty(ed("Dive into HTML5"))
+    add!(chris.edited, html5)
+    @test ed("Dive into HTML5") == ["Chris Mills"] && ed("Dive into Python") == ["Chris Mills"]
+    remove!(chris.edited, html5)
+    @test isempty(ed("Dive into HTML5")) && ed("Dive into Python") == ["Chris Mills"]
+    clear!(chris.edited)
+    @test isempty(ed("Dive into HTML5")) && isempty(ed("Dive into Python"))
+    create(chris.edited; title = "Dive into Water", published = Date(2010, 3, 15))
+    @test ed("Dive into Water") == ["Chris Mills"] && isempty(ed("Dive into HTML5"))
+    @test count(using_db(objects(B), "other")) == 3 && count(objects(B)) == 1     # (made on chris's database)
+    # test_foreign_key_cross_database_protection
+    marty = create(P; name = "Marty Alchin")
+    msg = "Cannot assign \"<DmdPerson: Marty Alchin>\": the current database router prevents this relation."
+    @test_throws ArgumentError(msg) (dive.editor = marty)
+    @test_throws ArgumentError(msg) atomic(() -> set!(marty.edited, [pro, dive]))
+    @test_throws ArgumentError(msg) atomic(() -> add!(marty.edited, dive))
+  end
+  dmd_block() do
+    B, P = DmdBook, DmdPerson
+    # test_foreign_key_deletion: the cascade runs on the right database
+    mark = using_db(() -> create(P; name = "Mark Pilgrim"), "other")
+    using_db(() -> create(DmdPet; name = "Fido", owner = mark), "other")
+    cnt(T, d) = count(using_db(objects(T), d))
+    @test (cnt(P, "default"), cnt(DmdPet, "default"), cnt(P, "other"), cnt(DmdPet, "other")) == (0, 0, 1, 1)
+    delete!(mark; db = "other")
+    @test (cnt(P, "default"), cnt(DmdPet, "default"), cnt(P, "other"), cnt(DmdPet, "other")) == (0, 0, 0, 0)
+    # test_foreign_key_validation: the key's row is looked for on the object's database
+    mickey = using_db(() -> create(P; name = "Mickey"), "other")
+    pluto = using_db(() -> create(DmdPet; name = "Pluto", owner = mickey), "other")
+    @test isempty(full_clean(pluto))
+    # test_ordering: get_next_by_* stays on the object's database
+    create(B; title = "Pro Django", published = Date(2008, 12, 16))
+    dive = using_db(() -> create(B; title = "Dive into Python", published = Date(2009, 5, 4)), "other")
+    learn = using_db(() -> create(B; title = "Learning Python", published = Date(2008, 7, 16)), "other")
+    @test get_next_by(learn, :published).title == "Dive into Python"
+    @test get_previous_by(dive, :published).title == "Learning Python"
+    # test_raw
+    @test [x.pk for x in collect(raw(B, "SELECT id FROM dmd_book WHERE title = 'Dive into Python'"; db = "other"))] == [dive.pk]
+    # test_select_related: the related object remembers its database
+    m2 = using_db(() -> create(P; name = "Mark Pilgrim"), "other")
+    using_db(() -> create(B; title = "Dive into HTML5", published = Date(2009, 5, 4), editor = m2), "other")
+    book = get(select_related(using_db(B, "other"), :editor); title = "Dive into HTML5")
+    @test Juango.instance_db(book.editor) == "other"
+    # test_subquery: a queryset of another database isn't a subquery
+    sub = filter(using_db(P, "other"); name = "fff")
+    @test_throws ArgumentError("Subqueries aren't allowed across different databases. Force the inner query to be evaluated using `list(inner_query)`.") collect(filter(B; editor__in = sub))
+    # test_related_manager: create and get_or_create through the relation, on its database
+    mark = get(using_db(P, "other"); name = "Mark Pilgrim")
+    create(mark.dmdbook_set; title = "Dive into Python 2", published = Date(2009, 5, 4))
+    get_or_create(mark.dmdbook_set; title = "Dive into Python 2", published = Date(2009, 5, 4))
+    create(mark.edited; title = "Dive into Water", published = Date(2009, 5, 4))
+    get_or_create(mark.edited; title = "Dive into Water", published = Date(2009, 5, 4))
+    @test count(filter(using_db(B, "other"); title__in = ["Dive into Python 2", "Dive into Water"])) == 2
+  end
 end

@@ -846,7 +846,7 @@ Base.@nospecializeinfer function clean_fields(@nospecialize(obj::Model); exclude
             continue
         end
         errs = validate_field(f, v)
-        isempty(errs) && f.kind === :fk && (e = fk_invalid(f, v)) !== nothing && push!(errs, e)
+        isempty(errs) && f.kind === :fk && (e = with_db(() -> fk_invalid(f, v), instance_db(obj))) !== nothing && push!(errs, e)
         isempty(errs) || (errors[f.name] = errs)
     end
     errors
@@ -958,7 +958,7 @@ Base.@nospecializeinfer function adjacent_by(@nospecialize(obj::Model), field::S
     op = next ? "gt" : "lt"
     q = Q(Symbol(field, "__", op) => v) | Q(:AND, Any[field => v, Symbol("id__", op) => obj.id], false)
     qs = filter(filter(base_objects(T), q); kw...) |> order_by(next ? string(field) : "-" * string(field), next ? "id" : "-id")
-    o = first(qs)
+    o = with_db(() -> first(qs), instance_db(obj))            # (on the object's database)
     o === nothing && throw(DoesNotExist(T, "$(next ? "next" : "previous") by $field"))
     o
 end
