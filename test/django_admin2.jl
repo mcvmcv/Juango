@@ -159,3 +159,39 @@ end
     @test dfv("   ") == E && dfv("        cheeze") == "cheeze" && dfv("pizza       ") == "pizza" && dfv("       chicken        ") == "chicken"
     @test string(dfv(SafeString("  <em>soy chicken</em>  "))) == "  <em>soy chicken</em>  "
 end
+
+# --- tests/admin_filters: test_fk_with_to_field (the rest is in django_admin.jl) ---------------------------------
+@model struct DafDepartment
+    code = CharField(max_length = 4, unique = true)
+    description = CharField(max_length = 50, blank = true, null = true)
+    Meta(table = "daf_department")
+end
+Base.string(d::DafDepartment) = something(d.description, "")
+@model struct DafEmployee
+    department = ForeignKey(DafDepartment; on_delete = :CASCADE, to_field = :code)
+    name = CharField(max_length = 100)
+    Meta(table = "daf_employee")
+end
+redirect_stdout(devnull) do
+    Juango.sync_models!(Any[DafDepartment, DafEmployee]); append!(PORT_MODELS, Any[DafDepartment, DafEmployee])
+end
+
+@testset "django admin_filters: test_fk_with_to_field" begin
+  port_block() do
+    dev = create(DafDepartment; code = "DEV", description = "Development")
+    design = create(DafDepartment; code = "DSN", description = "Design")
+    john = create(DafEmployee; name = "John Blue", department = dev)
+    jack = create(DafEmployee; name = "Jack Red", department = design)
+    dao_admin(DafEmployee; list_display = [:name, :department], list_filter = [:department]) do ma
+        # the parameter names the key's target field, and its values are codes
+        spec = only(Admin.filter_specs(Request("GET", "/"), ma))
+        @test spec["title"] == "Department"                        # (Juango capitalizes the heading)
+        @test [c["label"] for c in spec["choices"]] == ["All", "Development", "Design"]
+        @test spec["choices"][2]["url"] == "?department__code__exact=DEV" && spec["choices"][3]["url"] == "?department__code__exact=DSN"
+        req = Request("GET", "/?department__code__exact=DEV")
+        fl = only(Admin.list_filters(req, ma))
+        @test [e.name for e in collect(fl.apply(objects(DafEmployee), Dict("department__code__exact" => "DEV")))] == ["John Blue"]
+        @test only(Admin.filter_specs(req, ma))["choices"][2]["selected"]
+    end
+  end
+end

@@ -756,7 +756,9 @@ Base.@nospecializeinfer function field_list_filter(req, ma::ModelAdmin, path::St
     isnull_apply(qs, vals) = haskey(vals, P("isnull")) ?
         (b = isnull_value(vals[P("isnull")]); b === nothing ? throw(BadFilterValue(P("isnull"))) : filter(qs, Q(sym(P("isnull")) => b))) : qs
     if rel !== nothing                                  # RelatedFieldListFilter / RelatedOnlyFieldListFilter
-        key = P("id__exact")
+        # (a key to another field than the id filters on it: department__code__exact, as Django's target_field)
+        tf = kind === :field && f.kind === :fk ? Juango.fk_to_field(f) : nothing
+        key = tf === nothing ? P("id__exact") : P(string(tf) * "__exact")
         objs = if mode === :related_only
             ids = unique(x for x in values_list(admin_queryset(ma, req), sym(P("id")); flat = true) if x !== nothing)
             collect(filter(objects(rel); id__in = collect(Any, ids)))
@@ -764,14 +766,14 @@ Base.@nospecializeinfer function field_list_filter(req, ma::ModelAdmin, path::St
             collect(objects(rel))
         end
         relma = get(current_site().registry, admin_key(rel), nothing)
-        ords = relma !== nothing && !isempty(relma.ordering) ? relma.ordering : String[]
+        ords = relma !== nothing ? ordering(relma, req) : Any[]
         isempty(ords) || (objs = collect(order_by(filter(objects(rel); id__in = Any[o.id for o in objs]), ords...)))
-        ch = [choice(string(o), key => Juango.pk_string(o)) for o in objs]
+        ch = [choice(string(o), key => (tf === nothing ? Juango.pk_string(o) : string(Juango.target_value(f, o)))) for o in objs]
         nullable && push!(ch, choice(empty_label, P("isnull") => "True"))
         return (title = title, params = [key, P("isnull")], choices = ch,
                 apply = (qs, vals) -> begin
                     if haskey(vals, key)
-                        v = Juango.parse_pk(rel, vals[key])
+                        v = tf === nothing ? Juango.parse_pk(rel, vals[key]) : filter_value(Juango.getfield_meta(rel, tf), vals[key])
                         v === nothing && throw(BadFilterValue(key))
                         qs = filter(qs, Q(sym(key) => v))
                     end
