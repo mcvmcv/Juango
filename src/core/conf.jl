@@ -17,7 +17,7 @@ function default_settings()
         :DEBUG => true,
         :SECRET_KEY => "juango-insecure-change-me-in-production",
         :SECRET_KEY_FALLBACKS => String[],
-        # accept signed cookies made with the old, ambiguous salt (name * salt) (as Django's SIGNED_COOKIE_LEGACY_SALT_FALLBACK)
+        # accept signed cookies made with the old, ambiguous salt (name * salt) (as Django's SIGNED_COOKIE_LEGACY_SALT_FALLBACK; its default is #282)
         :SIGNED_COOKIE_LEGACY_SALT_FALLBACK => true,
         # how an unnamed Meta index is named: :juango (table_columns_idx) or :django (startproject's; #281)
         :INDEX_NAMES => :juango,

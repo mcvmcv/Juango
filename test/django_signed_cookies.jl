@@ -36,7 +36,7 @@ dsc_signed(value, saltstr; age = 0) =
         @test_throws Juango.SignatureExpired get_signed_cookie(req, "a"; salt = "bc", max_age = 10)
     end
     # test_legacy_salt_namespace_not_accepted: SIGNED_COOKIE_LEGACY_SALT_FALLBACK is false by default in Django;
-    # Juango's default is true for now, so cookies already set stay valid
+    # Juango's default is true for now, so cookies already set stay valid (question #282)
     req = dsc_req("a" => dsc_signed("hello", Juango.signed_cookie_legacy_salt("a", "bc")))
     @test_broken (try get_signed_cookie(req, "a"; salt = "bc"); false catch e; e isa Juango.BadSignature end)
     override_settings(SIGNED_COOKIE_LEGACY_SALT_FALLBACK = false) do
