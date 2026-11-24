@@ -302,7 +302,7 @@ end
     d = Date(2026, 11, 15)                                            # a Sunday
     @test tr("{{ d.year }}/{{ d.month }}/{{ d.day }} {{ d.weekday }} {{ d.isoweekday }}", Dict("d" => d)) == "2026/11/15 6 7"
     dt = DateTime(2026, 11, 15, 9, 5, 7, 250)
-    @test tr("{{ t.hour }}:{{ t.minute }}:{{ t.second }} {{ t.microsecond }} {{ t.date }} {{ t.nope }}", Dict("t" => dt)) == "9:5:7 250000 2026-11-15 "
+    @test tr("{{ t.hour }}:{{ t.minute }}:{{ t.second }} {{ t.microsecond }} {{ t.date }} {{ t.nope }}", Dict("t" => dt)) == "9:5:7 250000 Nov. 15, 2026 "      # (a date is localized: #271)
     @test tr("{{ t.hour }}h{{ t.minute }}", Dict("t" => Dates.Time(14, 30))) == "14h30"
     override_settings(USE_TZ = true, TIME_ZONE = "Pacific/Auckland") do      # UTC+13: shown, and taken apart, in local time
         z = Juango.TimeZones.ZonedDateTime(DateTime(2026, 11, 15, 12, 0), Juango.UTC_TZ)

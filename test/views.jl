@@ -2324,7 +2324,7 @@ const FINDER151_FILE = Ref("")
             d = Juango.localdate()
             y, w = Dates.year(d - Day(dayofweek(d) - 1) + Day(3)), Dates.week(d)
             @test occursin("wk151", text(get(Client(), "/wk/$y/$w/")))
-            @test text(get(Client(), "/today151/")) == "$d:wk151"
+            @test text(get(Client(), "/today151/")) == "$(Juango.localize(d)):wk151"         # (localized: #271)
         finally
             configure!(ROOT_URLCONF = old)
             rm(joinpath(TPL, "article_archive_week.html"); force = true); rm(joinpath(TPL, "article_archive_day.html"); force = true)

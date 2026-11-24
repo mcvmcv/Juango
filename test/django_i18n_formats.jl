@@ -66,7 +66,8 @@
 
     with_language("de") do                                                                # test_localize_templatetag_and_filter
         ctx = Dict{String,Any}("n" => n, "f" => f, "dt" => dt, "d" => d)
-        @test t("{% load l10n %}{{ f }}", ctx) == "99999.999"                             # (Juango's default: not localized, #271)
+        @test t("{% load l10n %}{{ f }}", ctx) == "99999,999"                             # (localized by default, as Django 5's: #271)
+        @test t("{% load l10n %}{% localize off %}{{ f }}{% endlocalize %} {{ f|unlocalize }}", ctx) == "99999.999 99999.999"
         @test t("{% load l10n %}{{ f|localize }}", ctx) == "99999,999"
         @test t("{% load l10n %}{% localize on %}{{ f }}{% endlocalize %}", ctx) == "99999,999"
         @test t("{% load l10n %}{% localize %}{{ f }} {{ d }}{% endlocalize %}", ctx) == "99999,999 31. Dezember 2009"
