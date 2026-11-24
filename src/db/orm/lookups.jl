@@ -24,6 +24,16 @@ Q(p::Pair) = Q(:AND, Any[Symbol(p.first) => p.second], false)
 Q(q::Q) = Q(:AND, Any[q], false)
 # conditional expressions too, as Django's Q(Exact(F("x"), 1), Value(true), y = 2)
 Q(a::Union{Q,Expression}, rest::Union{Q,Expression}...; kw...) = Q(:AND, Any[a, rest..., (k => v for (k, v) in kw)...], false)
+# Django's repr: (AND: ('pages__gt', 400)), (NOT (AND: ...))
+py_repr(x::AbstractString) = "'" * x * "'"
+py_repr(x::Bool) = x ? "True" : "False"
+py_repr(::Nothing) = "None"
+py_repr(x) = repr(x)
+function Base.show(io::IO, q::Q)
+    kids = join((ch isa Pair ? "('$(ch.first)', $(py_repr(ch.second)))" : sprint(show, ch) for ch in q.children), ", ")
+    s = "($(q.connector): $kids)"
+    print(io, q.negated ? "(NOT $s)" : s)
+end
 Base.:|(a::Q, b::Q) = Q(:OR, Any[a, b], false)
 Base.:&(a::Q, b::Q) = Q(:AND, Any[a, b], false)
 Base.:!(a::Q) = Q(a.connector, a.children, !a.negated)

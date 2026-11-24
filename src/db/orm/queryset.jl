@@ -101,7 +101,9 @@ Base.@nospecializeinfer objects(@nospecialize(T::Type{<:Model})) = default_query
 Every row of the table, ignoring `default_queryset`. Foreign-key access, cascading
 deletes and uniqueness checks use this, like Django's base manager.
 """
-Base.@nospecializeinfer base_objects(@nospecialize(T::Type{<:Model})) = QuerySet{T}(Q[], String[], nothing, 0, false)
+Base.@nospecializeinfer base_objects(@nospecialize(T::Type{<:Model})) =
+    isabstracttype(T) ? throw(ArgumentError("Manager isn't available; $(nameof(T)) is abstract")) :     # (Django's message)
+    QuerySet{T}(Q[], String[], nothing, 0, false)
 
 """
     default_queryset(::Type{Model})
@@ -670,6 +672,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     # WHERE, HAVING for conditions on aggregate annotations, or an outer WHERE for window ones
     wparts, wps, hparts, hps, oparts, ops = String[], Any[], String[], Any[], String[], Any[]
     qual_set = Set{Symbol}()
+    extra_group = String[]           # columns HAVING conditions read (grouped by)
     if qs.isnone
         push!(wparts, sql_false(backend()))
     else
@@ -686,7 +689,14 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
                 c.qualify = nothing
                 push!(oparts, sql); append!(ops, p)
             elseif c.uses_aggregate
+                c.having = true
+                sql, p = try
+                    compile_q(c, c.base, T, q, false)
+                finally
+                    c.having = false
+                end
                 push!(hparts, sql); append!(hps, p)
+                append!(extra_group, c.having_cols); empty!(c.having_cols)
             else
                 push!(wparts, sql); append!(wps, p)
             end
@@ -700,6 +710,7 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
     group_ps = Dict{String,Vector{Any}}()     # the parameters of a GROUP BY entry that has some
     if idonly
         push!(sel, pk_select(c.base, T))
+        push!(group, pk_select(c.base, T))         # (a HAVING on an aggregate annotation needs the grouping)
     elseif columns !== nothing
         push!(sel, columns)
     elseif qs.values_fields !== nothing
@@ -755,6 +766,9 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         push!(group, pk_select(c.base, T))
         append!(group, [qcol(a, pk_colname(M)) for (_, M, a) in related])
     end
+    for x in extra_group
+        x in group || push!(group, x)
+    end
     pre_ann = copy(sel)            # the select list without annotations (for a wrapping query)
     ann_sel, ann_ps = String[], Any[]
     hidden_anns = Set{String}()          # selected only for the wrapping query's conditions
@@ -780,7 +794,12 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         # Django), so Count(:book) after filter(book__shelf = 1) counts the books on that shelf
         c.reuse_upto = get(qs.annotated_after, k, 0)
         c.outer_refs = String[]
-        sql, p = compile_expr(c, v)
+        push!(c.compiling, k)
+        sql, p = try
+            compile_expr(c, v)
+        finally
+            pop!(c.compiling)
+        end
         # a subquery annotation that reads the outer query (OuterRef(:book__name), across joins) is grouped by,
         # as Django does: PostgreSQL refuses the joined table's columns in it otherwise (#219). By its value,
         # not the columns it reads: those would split an object's group by each related row.
@@ -862,12 +881,23 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
             push!(qual_sel, "$s_ AS $(qname(string(k)))"); append!(qual_ps, p_)
         end
         outer_sel = idonly ? pk_select(c.base, T) : columns !== nothing ? columns : "*"
+        # the model's columns the outer query reads: all of them, or, from a grouped query (where PostgreSQL
+        # refuses ungrouped columns), those named, grouped by too
+        base_sel = [qname(c.base) * ".*"]
+        if grouped
+            pre = qname(c.base) * "."
+            base_sel = unique([m.match for m in eachmatch(Regex("\\Q$(pre)\\E[\"`][^\"`]+[\"`]"),
+                                                         join(vcat(oparts, outer_sel, o), " "))])
+            for x in base_sel
+                x in group || push!(group, x)
+            end
+        end
         if columns !== nothing || idonly
-            inner_sel = vcat([qname(c.base) * ".*"], ann_sel, qual_sel)
+            inner_sel = vcat(base_sel, ann_sel, qual_sel)
         elseif qs.values_fields !== nothing
             # values(): the model's columns too (conditions may read them), the values under other names
             vals = [match(r"^(.*) AS (\S+)$", x) for x in pre_ann]
-            inner_sel = vcat([qname(c.base) * ".*"], ["$(m[1]) AS $(qname("__v_" * strip(m[2], ['"', '`'])))" for m in vals],
+            inner_sel = vcat(base_sel, ["$(m[1]) AS $(qname("__v_" * strip(m[2], ['"', '`'])))" for m in vals],
                              ann_sel, qual_sel)
             outer_sel = join(vcat(["$(qname("__v_" * strip(m[2], ['"', '`']))) AS $(m[2])" for m in vals],
                                   [m[1] for m in (match(r" AS (\S+)$", x) for x in ann_sel) if !(m[1] in hidden_anns)]), ", ")

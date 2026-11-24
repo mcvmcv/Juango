@@ -849,7 +849,7 @@ end
         shop = create(Site; domain = "shop.example.org", name = "Shop")
         override_settings(SITE_ID = nothing) do
             @test get_current_site(req).id == shop.id
-            @test_throws Juango.ImproperlyConfigured get_current_site(Request("GET", "/"; headers = Dict("host" => "nope.example")))
+            @test_throws Juango.DoesNotExist get_current_site(Request("GET", "/"; headers = Dict("host" => "nope.example")))
         end
         # sitemaps and feeds use the site's domain
         r = Juango.sitemap_view(Dict("static" => Sitemap(items = () -> ["/about/"])))(Request("GET", "/sitemap.xml"; headers = Dict("host" => "testserver")))

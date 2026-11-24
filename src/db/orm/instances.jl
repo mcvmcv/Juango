@@ -831,7 +831,7 @@ Base.@nospecializeinfer function validate_unique(@nospecialize(obj::Model); excl
         # (a natural primary key is unique too)
         if (f.unique || f.primary_key) && exists(others(filter(base_objects(f.model), Q(attname(f) => v))))
             push!(get!(errors, f.name, String[]), field_message(msgf(f), "unique", gettext("%(model_name)s with this %(field_label)s already exists."),
-                Dict("model_name" => vname, "field_label" => label(f), "model" => vname, "field" => label(f))))
+                Dict("model_name" => vname, "field_label" => uppercasefirst(label(f)), "model" => vname, "field" => uppercasefirst(label(f)))))
         end
         if f.unique_for !== nothing
             kind, dname = f.unique_for

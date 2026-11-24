@@ -1839,7 +1839,7 @@ end
     # test_flat_values_list, test_duplicate_values_list
     @test tr(() -> collect(values_list(values_list(objects(DqNumber), :num), :num; flat = true))) == [72]
     @test tr(() -> get(values_list(objects(DqNumber), :num, :num))) == (72, 72)
-    @test_broken tr(() -> get(values_list(objects(DqNumber), F(:num), F(:num)))) == (72, 72)   # values_list of expressions
+    @test tr(() -> get(values_list(objects(DqNumber), F(:num), F(:num)))) == (72, 72)
     # test_field_error_values_list
     @test tr(() -> collect(values_list(objects(DqTag), :name__foo))) isa Exception
     # test_named_values_list_flat

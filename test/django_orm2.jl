@@ -992,7 +992,7 @@ end
     catch
         false
     end
-    @test_broken try
+    @test try
         p = filter(select_related(annotate(filter(DkrTournament; id = t2.id); style = FilteredRelation("dkrpool__another_style")), :style); style__isnull = false)
         get(p).style.another_pool == p3
     catch

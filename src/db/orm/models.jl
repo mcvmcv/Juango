@@ -734,6 +734,8 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
     nb === nothing || return adjacent_by(m, nb[1], nb[2])                  # obj.get_next_by_created
     r = tattr(m, Val(s))
     r === NOTFOUND || return r
+    rg = find_reverse_generic(T, s)          # link.targets (a GenericRelation's related_query_name): its owners
+    rg === nothing || return filter(objects(rg[1]), Q(rg[2].name => m))
     throw(ArgumentError("$(T) has no attribute '$s'"))
 end
 

@@ -413,7 +413,7 @@ frame_bound(n, unbounded) = n === nothing ? "UNBOUNDED $unbounded" : n == 0 ? "C
 function frame_sql(b::DatabaseBackend, f::WindowFrame)
     s = "$(f.kind) BETWEEN $(frame_bound(f.start, "PRECEDING")) AND $(frame_bound(f.stop, "FOLLOWING"))"
     if f.exclusion !== nothing
-        b isa MySQLBackend && throw(ArgumentError("MySQL and MariaDB don't support window frame exclusion"))
+        b isa MySQLBackend && throw(NotSupportedError("This backend does not support window frame exclusions."))
         s *= " EXCLUDE " * uppercase(replace(string(f.exclusion), "_" => " "))
     end
     s
@@ -507,7 +507,9 @@ end
 order_term_sql(::DatabaseBackend, sql, ps, desc, nf) =
     sql * (desc ? " DESC" : " ASC") * (nf === nothing ? "" : nf ? " NULLS FIRST" : " NULLS LAST"), ps
 # MySQL/MariaDB have no NULLS FIRST/LAST: order by whether it's NULL first, as Django does
-order_term_sql(::MySQLBackend, sql, ps, desc, nf) = nf === nothing ? (sql * (desc ? " DESC" : " ASC"), ps) :
+# MySQL sorts NULL first ascending and last descending: only the other two need the IS NULL term (which MariaDB
+# refuses on an aggregate annotation's alias)
+order_term_sql(::MySQLBackend, sql, ps, desc, nf) = nf === nothing || nf != desc ? (sql * (desc ? " DESC" : " ASC"), ps) :
     ("($sql) IS NULL " * (nf ? "DESC" : "ASC") * ", " * sql * (desc ? " DESC" : " ASC"), vcat(ps, ps))
 
 # --- analysis -------------------------------------------------------------------------------
@@ -620,7 +622,7 @@ end
 
 "Resolve a field path for expressions: returns (SQL column, Field or nothing)."
 Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospecialize(T::Type), path::AbstractString)
-    segs = String.(split(path, "__"))
+    segs = strip_parent_links(T, String.(split(path, "__")))
     for (oa, op, ta, TM) in Iterators.reverse(c.fr_override)      # (in a FilteredRelation's condition: its join)
         (alias == oa && length(segs) >= length(op) && segs[1:length(op)] == op) || continue
         rem = segs[length(op)+1:end]
@@ -669,7 +671,7 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
             M = related_model(g)
             ctf, fkf = g.through
             ctcol, ctid = column(getfield_meta(M, ctf)), generic_ct(T, g).id::Integer
-            alias = join!(c, alias, expr_key(c, alias, g.name), modelmeta(M).table, column(getfield_meta(M, fkf)), "id";
+            alias = join!(c, alias, expr_key(c, alias, g.name), modelmeta(M).table, column(getfield_meta(M, fkf)), owner_pk_column(T);
                           left = true, extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
             T = M
             last_ && return qcol(alias, "id"), nothing
@@ -722,7 +724,9 @@ function compile_expr(c::SQLCompiler, e::F)
         sql, ps = compile_expr(c, at)
         return "($sql)", ps
     end
-    if !occursin("__", e.name) && haskey(c.annotations, Symbol(e.name)) && !is_filtered_relation(c.annotations[Symbol(e.name)])
+    # (an annotation's own name may have __ in it: Count(:book) is book__count)
+    if haskey(c.annotations, Symbol(e.name)) && !is_filtered_relation(c.annotations[Symbol(e.name)]) &&
+       !(Symbol(e.name) in c.compiling)
         a = c.annotations[Symbol(e.name)]
         if c.scope isa Int && c.scope > 0 && (c.qualify !== nothing || windowing(a, c.annotations))
             # in a filter: windows can't go in WHERE, so the query is wrapped and this reads the column
@@ -731,7 +735,12 @@ function compile_expr(c::SQLCompiler, e::F)
             return qname(e.name), Any[]
         end
         contains_aggregate(a) && (c.uses_aggregate = true)
-        sql, ps = compile_expr(c, a)
+        push!(c.compiling, Symbol(e.name))
+        sql, ps = try
+            compile_expr(c, a)
+        finally
+            pop!(c.compiling)
+        end
         return "($sql)", ps
     end
     col, _ = resolve_path(c, c.base, c.T, e.name)
@@ -979,9 +988,14 @@ function subquery_sql(c::SQLCompiler, qs::QuerySet; columns = nothing, idonly = 
         sql, ps, _, _ = build_select(qs; outer = c)
         return "SELECT $(qname("id")) FROM ($sql) AS juango_sub", ps
     end
+    if columns === nothing && !idonly && qs.values_fields !== nothing && !wrap_distinct
+        # annotations values() doesn't name: as alias()es, not selected (ordered by their expressions, as Django);
+        # not through a wrapping query, whose derived table couldn't read an OuterRef on MariaDB
+        extra = Symbol[p.first for p in qs.annotations if !is_filtered_relation(p.second) && !(string(p.first) in qs.values_fields)]
+        isempty(extra) || (qs = chain(qs; aliases = unique(vcat(qs.aliases, extra))))
+    end
     sql, ps, _, _ = build_select(qs; columns = columns, outer = c, idonly = idonly)
-    if columns === nothing && !idonly && qs.values_fields !== nothing &&
-       (wrap_distinct || any(p -> !is_filtered_relation(p.second) && !(string(p.first) in qs.values_fields), qs.annotations))
+    if columns === nothing && !idonly && qs.values_fields !== nothing && wrap_distinct
         sql = "SELECT " * join([qname(f) for f in qs.values_fields], ", ") * " FROM ($sql) AS juango_sub"
     end
     sql, ps
@@ -1031,6 +1045,14 @@ function compile_expr(c::SQLCompiler, e::Window)
         c.uses_window = true
         return qname(string(k)), Any[]
     end
+    if backend() isa MySQLBackend && e.expr isa WindowFunc && e.expr.name in ("LAG", "LEAD") && length(e.expr.args) == 3
+        # MariaDB's LAG/LEAD take no default: use it where the row offset rows away is outside the partition
+        f = e.expr
+        probe = Window(WindowFunc(f.name, Any[Value(1), f.args[2]]), e.partition_by, e.order_by, e.frame)
+        val = Window(WindowFunc(f.name, f.args[1:2]), e.partition_by, e.order_by, e.frame)
+        (ps_, pp), (vs, vp), (ds, dp) = compile_expr(c, probe), compile_expr(c, val), compile_expr(c, f.args[3])
+        return "CASE WHEN $ps_ IS NULL THEN $ds ELSE $vs END", vcat(pp, dp, vp)
+    end
     sql, ps = compile_expr(c, e.expr)
     over = String[]
     if !isempty(e.partition_by)
@@ -1065,14 +1087,22 @@ and order by annotations like fields: `filter(qs; n_posts__gt = 1)`, `order_by(q
 Base.@nospecializeinfer function annotate(@nospecialize(qs::QuerySet); kw...)
     T = model_of(qs)
     anns = copy(qs.annotations)
+    names = qs.values_fields === nothing ? Set{String}(lookup_choices(T)) : Set{String}()
     for (k, v) in kw
-        (findfield(modelmeta(T), k) !== nothing || k in (:id, :pk)) &&
-            throw(ArgumentError("annotation '$k' conflicts with a field of $T"))
+        # as Django: a field's name or attname, a relation's (reverse ones too); not on a values() query
+        (string(k) in names || k === :pk) && throw(ArgumentError("The annotation '$k' conflicts with a field on the model."))
         v isa FilteredRelation && validate_filtered_relation(T, k, v, Dict{Symbol,Any}(anns))
         check_alias_name(k)
         # an annotation or alias of that name is replaced; F(k) in the new one means the old one (as Django)
         i = findlast(p -> p.first === k, anns)
         e = ref(v)
+        if e isa Aggregate          # an aggregate of an aggregate annotation: Django's FieldError
+            for r in all_refs(e)
+                j = findlast(p -> string(p.first) == r, anns)
+                j === nothing || !aggregating(anns[j].second, anns) ||
+                    throw(LookupError("Cannot compute $(titlecase(lowercase(e.func)))('$r'): '$r' is an aggregate"))
+            end
+        end
         i === nothing || (e = subst_ref(e, string(k), anns[i].second))
         filter!(p -> p.first !== k, anns)
         push!(anns, k => e)
@@ -1128,6 +1158,13 @@ Base.@nospecializeinfer function alias(@nospecialize(qs::QuerySet); kw...)
         check_alias_name(k)
         i = findlast(p -> p.first === k, anns)
         e = ref(v)
+        if e isa Aggregate          # an aggregate of an aggregate annotation: Django's FieldError
+            for r in all_refs(e)
+                j = findlast(p -> string(p.first) == r, anns)
+                j === nothing || !aggregating(anns[j].second, anns) ||
+                    throw(LookupError("Cannot compute $(titlecase(lowercase(e.func)))('$r'): '$r' is an aggregate"))
+            end
+        end
         i === nothing || (e = subst_ref(e, string(k), anns[i].second))
         filter!(p -> p.first !== k, anns)
         push!(anns, k => e); after[k] = length(qs.where)
@@ -1401,6 +1438,9 @@ Base.@nospecializeinfer function aggregate_here(@nospecialize(qs::QuerySet); kw.
             throw(ArgumentError("aggregate: cannot compute $k over '$r': '$r' is an aggregate of the same call"))
     end
     any(p -> any(in(anames), all_refs(p.second)), kw) && return aggregate_over(qs, anames; kw...)
+    # over distinct values() rows: over those rows, as a subquery (as Django), not the objects they came from
+    qs.values_fields !== nothing && qs.distinct_fields !== nothing && isempty(qs.distinct_fields) &&
+        return aggregate_over(qs, anames; kw...)
     plain = !isempty(qs.where) && qs.limit === nothing && qs.offset == 0 && qs.distinct_fields === nothing &&
             qs.combinator === nothing && isempty(qs.annotations) && qs.values_fields === nothing && !qs.isnone
     rel = plain ? [k for (k, v) in kw if aggregates_relation(T, ref(v))] : Symbol[]
@@ -1429,6 +1469,10 @@ end
 "Aggregates over a queryset's annotations: `SELECT agg FROM (the query) AS table`, the annotations its columns (#204)."
 Base.@nospecializeinfer function aggregate_over(@nospecialize(qs::QuerySet), anames; kw...)
     T = model_of(qs)
+    if qs.values_fields !== nothing           # values(annotate(qs; c = ...), "pk"): the annotations read are selected too
+        used = [r for (_, v) in kw for r in all_refs(v) if r in anames && !(r in qs.values_fields)]
+        isempty(used) || (qs = chain(qs; values_fields = unique(vcat(qs.values_fields, used))))
+    end
     inner, ips = select_sql(qs; ordered = !(qs.limit === nothing && qs.offset == 0))
     c = SQLCompiler(T)                     # the subquery is named like the table, so the model's columns resolve too
     for n in anames
@@ -1453,6 +1497,8 @@ all_refs(@nospecialize(e)) = (out = String[]; walk_refs!(out, e); out)
 walk_refs!(out, e::F) = push!(out, e.name)
 walk_refs!(out, e::Union{Expression,When,OrderBy}) = (for f in fieldnames(typeof(e)); walk_refs!(out, getfield(e, f)); end)
 walk_refs!(out, v::AbstractVector) = foreach(x -> walk_refs!(out, x), v)
+walk_refs!(out, q::Q) = foreach(x -> walk_refs!(out, x), q.children)          # When(c__gt = 1): c, and the value's refs
+walk_refs!(out, p::Pair) = (push!(out, first(split(string(p.first), "__"))); walk_refs!(out, p.second))
 walk_refs!(out, @nospecialize(x)) = nothing
 
 "An aggregate's value over no rows (a count's 0, a default, Coalesce of those), or NOTFOUND when it needs the database."
@@ -1482,8 +1528,13 @@ end
 default_alias(e) = throw(ArgumentError("Complex aggregates require an alias: give $(repr(e)) a name (name = ...)"))
 aggregate(qs::QuerySet, a::Expression, more::Expression...; kw...) =
     aggregate(qs; (default_alias(x) => x for x in (a, more...))..., kw...)
-annotate(qs::QuerySet, a::Expression, more::Expression...; kw...) =
-    annotate(qs; (default_alias(x) => x for x in (a, more...))..., kw...)
+function annotate(qs::QuerySet, a::Expression, more::Expression...; kw...)
+    pos = [default_alias(x) => x for x in (a, more...)]
+    for (k, _) in pos
+        haskey(kw, k) && throw(ArgumentError("The named annotation '$k' conflicts with the default name for another annotation."))
+    end
+    annotate(qs; pos..., kw...)
+end
 
 function aggregate(qs::QuerySet, func::Symbol, field::Symbol)
     func in (:count, :sum, :avg, :min, :max) || throw(ArgumentError("unknown aggregate $func"))

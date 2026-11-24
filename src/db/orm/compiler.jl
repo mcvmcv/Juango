@@ -34,12 +34,16 @@ mutable struct SQLCompiler
     fr_override::Vector{Any}    # compiling a FilteredRelation's condition: (alias, relation path, its join's alias, model)
     fr_models::Dict{Any,Any}    # FilteredRelation join key => its model
     qualify::Union{Nothing,Set{Symbol}}   # recompiling a condition on a window for the wrapping query: the annotations it reads
+    having::Bool                # compiling a HAVING condition
+    having_cols::Vector{String} # the joined columns its non-aggregate conditions read: grouped by too, as Django
+    compiling::Vector{Symbol}   # the annotations being compiled: in its own expression, a name is the field (values(...);
+                                # friends = Count("friends"))
 end
 Base.@nospecializeinfer function SQLCompiler(@nospecialize(T::Type); outer = nothing)
     table = modelmeta(T).table
     counter = outer === nothing ? Ref(0) : outer.counter
     c = SQLCompiler(T, table, table, String[], Dict{Any,String}(), Set{String}(), counter, false, 0,
-                    Dict{Symbol,Any}(), false, outer, false, Any[], 0, nothing, Set{Symbol}(), false, Any[], Dict{Any,Any}(), nothing)
+                    Dict{Symbol,Any}(), false, outer, false, Any[], 0, nothing, Set{Symbol}(), false, Any[], Dict{Any,Any}(), nothing, false, String[], Symbol[])
     outer === nothing || (c.base = new_alias!(c))   # subqueries alias their table: no clash with the outer one
     c
 end
@@ -90,7 +94,7 @@ Base.@nospecializeinfer function fr_step!(c::SQLCompiler, alias, @nospecialize(M
         R = related_model(g)
         ctf, fkf = g.through
         ctcol, ctid = column(getfield_meta(R, ctf)), generic_ct(M, g).id::Integer
-        return join!(c, alias, key, modelmeta(R).table, column(getfield_meta(R, fkf)), "id"; left = true,
+        return join!(c, alias, key, modelmeta(R).table, column(getfield_meta(R, fkf)), owner_pk_column(M); left = true,
                      extra_on = x -> "$(qcol(x, ctcol)) = $ctid" * (on === nothing ? "" : " AND " * on(x, R))), R, true
     end
     r = f === nothing ? find_reverse(M, seg) : nothing
@@ -265,6 +269,7 @@ function lookup_choices(T)
                                       Symbol(lowercase(modelmeta(M).name)))))
     end
     foreach(C -> push!(names, string(child_accessor(C))), child_models(concrete_model(T)))
+    foreach(g -> push!(names, string(g.name)), generic_relations(T))        # (GenericRelations: tags)
     sort!(collect(names))
 end
 lookup_error(T, fname) =
@@ -303,16 +308,43 @@ Base.@nospecializeinfer function ends_in_lookup(@nospecialize(T::Type), parts)
     R === nothing || findfield(modelmeta(R), Symbol(parts[end])) === nothing
 end
 
+# Marks the lookup of a key compiled again (`rest__lookup` of a relation): `tag__exact` is the lookup exact on the
+# tag, even when the related model has a field named exact (Django's #23940).
+const LK = "\x01"
+lk(lookup) = LK * lookup
+
+# The key column of a GenericRelation's owner: `id`, or its own primary key's (Person.account).
+Base.@nospecializeinfer owner_pk_column(@nospecialize(T::Type)) = natural_pk(T) ? column(pk_fields(T)[1]) : "id"
+
+"""
+A path from a multi-table child through its parent links (`darbook_ptr__pages` from HardbackBook): the child has
+its parents' fields, so the links drop out (as Django's join to the parent).
+"""
+Base.@nospecializeinfer function strip_parent_links(@nospecialize(T::Type), segs::Vector)
+    M = concrete_model(T)
+    while length(segs) > 1 && table_parent(M) !== nothing && segs[1] == string(parent_accessor(M)) &&
+          findfield(modelmeta(M), Symbol(segs[1])) === nothing
+        segs = segs[2:end]
+        M = table_parent(M)
+    end
+    segs
+end
+
 "Compile one `field__path__lookup = value` against model `T` whose table is reachable as `alias`."
 Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecialize(T::Type), key, @nospecialize(value), negated::Bool)
-    parts = split(string(key), "__")
+    parts = strip_parent_links(T, split(string(key), "__"))
     lookup = "exact"
-    ends_in_lookup(T, parts) && (lookup = String(pop!(parts)))
+    if startswith(parts[end], LK)           # a key built here (lk): its last part is the lookup, not a field so named
+        lookup = String(chop(parts[end]; head = 1, tail = 0)); pop!(parts)
+        key = replace(string(key), LK => "")
+    elseif ends_in_lookup(T, parts)
+        lookup = String(pop!(parts))
+    end
     # in a FilteredRelation's condition, its relation's path is its join
     for (oa, op, ta, TM) in Iterators.reverse(c.fr_override)
         (alias == oa && length(parts) >= length(op) && parts[1:length(op)] == op) || continue
         rem = String.(parts[length(op)+1:end])
-        return compile_lookup(c, ta, TM, join(vcat(isempty(rem) ? ["id"] : rem, [lookup]), "__"), value, negated)
+        return compile_lookup(c, ta, TM, join(vcat(isempty(rem) ? ["id"] : rem, [lk(lookup)]), "__"), value, negated)
     end
     # inside an aggregate's filter or a Case condition, ~Q(store__name = "x") is a condition on the joined
     # row (Django's FILTER (WHERE NOT ...)), not exclude()'s "no related row matches" subquery
@@ -350,7 +382,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
     colps = Any[]
     kind = nothing                     # the compared value's field kind, for custom lookups
     if alias == c.base && is_filtered_relation(get(c.annotations, Symbol(fname), nothing))
-        subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
+        subkey = join(vcat(isempty(rest) ? ["id"] : rest, lk(lookup)), "__")
         if negated
             # exclude(): no row of the base model with a matching row through the filtered relation (EXISTS
             # here: the caller negates it)
@@ -408,7 +440,8 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             if isempty(rest) && lookup == "isnull"
                 return compile_lookup(c, alias, T, string(step1, "__isnull"), value, negated)
             end
-            return compile_lookup(c, alias, T, join(vcat([string(step1), string(step2)], rest, [lookup]), "__"), value, negated)
+            return compile_lookup(c, alias, T, join(vcat([string(step1), string(step2)], rest, [lk(lookup)]), "__"),
+                                  value, negated)
         end
         if f === nothing && (C = findfirst(C -> string(child_accessor(C)) == fname, child_models(T))) !== nothing
             # place -> restaurant (multi-table child): one-to-one join on id
@@ -419,7 +452,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                 ex = "EXISTS (SELECT 1 FROM $ct $(qname(a)) WHERE $(qcol(a, "id")) = $(qcol(alias, "id")))"
                 return (truthy(value) ? "NOT " * ex : ex, Any[])
             end
-            subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
+            subkey = join(vcat(isempty(rest) ? ["id"] : rest, lk(lookup)), "__")
             if negated
                 a = new_alias!(c)
                 sql, ps = compile_lookup(c, a, Cm, subkey, value, negated)
@@ -441,26 +474,34 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             ctcol, fkcol = column(getfield_meta(M, ctf)), column(getfield_meta(M, fkf))
             ctid = generic_ct(T, g).id::Integer
             mt = qname(modelmeta(getfield_meta(M, fkf).model).table)      # (the table holding the key: a child's parent's)
-            cond(a) = "$(qcol(a, fkcol)) = $(qcol(alias, "id")) AND $(qcol(a, ctcol)) = $ctid"
+            opk = owner_pk_column(T)          # (an owner with its own key: Person.account)
+            cond(a) = "$(qcol(a, fkcol)) = $(qcol(alias, opk)) AND $(qcol(a, ctcol)) = $ctid"
             if isempty(rest) && lookup == "isnull"
                 a = new_alias!(c)
                 ex = "EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(cond(a)))"
                 return (truthy(value) ? "NOT " * ex : ex, Any[])
             end
-            subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
+            subkey = join(vcat(isempty(rest) ? ["id"] : rest, lk(lookup)), "__")
             if negated
                 a = new_alias!(c)
                 sql, ps = compile_lookup(c, a, M, subkey, value, negated)
-                return ("EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(cond(a)) AND $sql)", ps)
+                ex = "EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(cond(a)) AND $sql)"
+                # exclude(a__flag = nothing): with no related row the path is NULL, so the row matches (and is
+                # excluded), as through Django's LEFT JOIN
+                if (lookup == "isnull" && value === true) || (lookup == "exact" && value === nothing)
+                    b = new_alias!(c)
+                    ex = "(NOT EXISTS (SELECT 1 FROM $mt $(qname(b)) WHERE $(cond(b))) OR $ex)"
+                end
+                return (ex, ps)
             end
             Mf = getfield_meta(M, fkf).model
             if modelmeta(Mf).table != modelmeta(M).table
                 # the related model is a multi-table child: its key columns are in the parent's table
-                ap = join!(c, alias, scope_key(c, alias, g.name), modelmeta(Mf).table, fkcol, "id"; left = true,
+                ap = join!(c, alias, scope_key(c, alias, g.name), modelmeta(Mf).table, fkcol, opk; left = true,
                            extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
                 a = join!(c, ap, (ap, :__child, M), modelmeta(M).table, "id", "id"; left = true)
             else
-                a = join!(c, alias, scope_key(c, alias, g.name), modelmeta(M).table, fkcol, "id"; left = true,
+                a = join!(c, alias, scope_key(c, alias, g.name), modelmeta(M).table, fkcol, opk; left = true,
                           extra_on = a -> "$(qcol(a, ctcol)) = $ctid")
             end
             c.distinct = true
@@ -482,11 +523,11 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                 ex = "EXISTS (SELECT 1 FROM $ot $(qname(a)) WHERE $(rgcond(a)))"
                 return (truthy(value) ? "NOT " * ex : ex, Any[])
             end
-            subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
+            subkey = join(vcat(isempty(rest) ? ["id"] : rest, lk(lookup)), "__")
             a = new_alias!(c)
             sql, ps = compile_lookup(c, a, O, subkey, value, negated)
             ex = "EXISTS (SELECT 1 FROM $ot $(qname(a)) WHERE $(rgcond(a)) AND $sql)"
-            return (negated ? "NOT " * ex : ex, ps)
+            return (ex, ps)                    # (negated: the caller adds the NOT, as for reverse foreign keys)
         end
         if f !== nothing && modelmeta(f.model).table != modelmeta(T).table
             # a field inherited from a multi-table parent: look it up on the parent's table
@@ -506,7 +547,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                 ex = "EXISTS (SELECT 1 FROM $mt $(qname(a)) WHERE $(qcol(a, column(rf))) = $(qcol(alias, target_column(rf))))"
                 return (truthy(value) ? "NOT " * ex : ex, Any[])
             end
-            subkey = join(vcat(isempty(rest) ? ["id"] : rest, lookup), "__")
+            subkey = join(vcat(isempty(rest) ? ["id"] : rest, lk(lookup)), "__")
             if negated
                 a = new_alias!(c)
                 sql, ps = compile_lookup(c, a, M, subkey, value, negated)
@@ -554,7 +595,7 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
                 tf !== nothing && tf.kind === :fk && (f = tf)
             else
                 R = related_model(f)
-                subkey = join(vcat(rest, lookup), "__")
+                subkey = join(vcat(rest, lk(lookup)), "__")
                 if negated
                     a = new_alias!(c)
                     sql, ps = compile_lookup(c, a, R, subkey, value, negated)
@@ -797,9 +838,25 @@ Base.@nospecializeinfer function compile_q(c::SQLCompiler, alias, @nospecialize(
         # :SCOPES (the where clauses of a queryset combined with |): each child is one filter() call, with
         # its own joins of multi-valued relations, as it had in its queryset
         q.connector === :SCOPES && c.scope !== :expr && (c.scope = (outer, i))
-        sql, ps = ch isa Q ? compile_q(c, alias, T, ch, neg) :
-                  ch isa Expression ? compile_expr(c, ch) :
-                  compile_lookup(c, alias, T, Symbol(ch.first), ch.second, neg)
+        if c.having && !(ch isa Q)
+            # in HAVING, a condition on a joined (multi-valued) relation's column that no aggregate reads
+            agg0 = c.uses_aggregate
+            c.uses_aggregate = false
+            sql, ps = ch isa Expression ? compile_expr(c, ch) : compile_lookup(c, alias, T, Symbol(ch.first), ch.second, neg)
+            if !c.uses_aggregate
+                # a joined table's column (not a subquery's own alias): an ungrouped column in HAVING would be any
+                # row's value, so it's grouped by (Django's get_group_by of the HAVING's columns)
+                joined = Set(m[1] for m in eachmatch(r" ([\"`]j[0-9]+[\"`]) ON ", join(c.joins)))
+                for m in eachmatch(r"([\"`]j[0-9]+[\"`])\.[\"`][^\"`]+[\"`]", sql)
+                    m[1] in joined && !(m.match in c.having_cols) && push!(c.having_cols, m.match)
+                end
+            end
+            c.uses_aggregate |= agg0
+        else
+            sql, ps = ch isa Q ? compile_q(c, alias, T, ch, neg) :
+                      ch isa Expression ? compile_expr(c, ch) :
+                      compile_lookup(c, alias, T, Symbol(ch.first), ch.second, neg)
+        end
         push!(parts, sql)
         append!(params, ps)
     end

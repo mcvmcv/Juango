@@ -2,7 +2,7 @@
 
 "The tables Juango manages (models in use, their join tables), without the migration records."
 managed_tables() = unique([modelmeta(T).table for T in all_models()
-                           if !modelmeta(T).proxy && model_in_use(T) && get(modelmeta(T).extra, :managed, true) !== false])
+                           if !modelmeta(T).proxy && model_in_use(T) && is_managed(T)])
 
 """
     flush_sql(; reset_sequences = true) -> Vector{String}

@@ -128,9 +128,22 @@ struct Index
     include::Vector{String}
     opclasses::Vector{String}
 end
-function Index(cols...; name = nothing, unique = false, method = :btree, condition = nothing, include = String[],
+function Index(cols...; fields = nothing, name = nothing, unique = false, method = :btree, condition = nothing, include = nothing,
                opclasses = String[], expressions = Tuple{String,String}[])
-    items = length(cols) == 1 && cols[1] isa AbstractVector ? cols[1] : cols
+    islist(x) = x isa AbstractVector || x isa Tuple
+    # Django's checks, in Django's order and words
+    !isempty(opclasses) && name === nothing && throw(ArgumentError("An index must be named to use opclasses."))
+    condition === nothing || condition isa Q || throw(ArgumentError("Index.condition must be a Q instance."))
+    condition !== nothing && name === nothing && throw(ArgumentError("An index must be named to use condition."))
+    fields === nothing || islist(fields) || throw(ArgumentError("Index.fields must be a list or tuple."))
+    islist(opclasses) || throw(ArgumentError("Index.opclasses must be a list or tuple."))
+    items = fields !== nothing ? collect(Any, fields) : length(cols) == 1 && cols[1] isa AbstractVector ? collect(Any, cols[1]) : collect(Any, cols)
+    # positional expressions (Lower(:title), F(:x)): with one of them, plain names are F()s too, as Django's
+    positional_exprs = fields === nothing && any(c -> c isa Func || c isa F, items)
+    fields !== nothing && !isempty(cols) && throw(ArgumentError("Index.fields and expressions are mutually exclusive."))
+    isempty(items) && isempty(expressions) && throw(ArgumentError("At least one field or expression is required to define an index."))
+    fields !== nothing && any(c -> !(c isa AbstractString || c isa Symbol), items) &&
+        throw(ArgumentError("Index.fields must contain only strings with field names."))
     columns = String[]
     exprs = Tuple{String,String}[(string(a), string(b)) for (a, b) in expressions]
     for c in items
@@ -140,16 +153,36 @@ function Index(cols...; name = nothing, unique = false, method = :btree, conditi
             push!(exprs, (uppercase(string(c.name)), c.args[1].name))
         elseif c isa F
             push!(exprs, ("", c.name))
+        elseif positional_exprs
+            push!(exprs, ("", string(c)))
         else
             push!(columns, string(c))
         end
     end
-    isempty(columns) || isempty(exprs) || throw(ArgumentError("Index: give either fields or expressions, not both"))
-    isempty(exprs) || name !== nothing || throw(ArgumentError("Index: an index on expressions needs a name"))
+    isempty(columns) || isempty(exprs) || throw(ArgumentError("Index.fields and expressions are mutually exclusive."))
+    isempty(exprs) || name !== nothing || throw(ArgumentError("An index must be named to use expressions."))
+    isempty(exprs) || isempty(opclasses) ||
+        throw(ArgumentError("Index.opclasses cannot be used with expressions. Use OpClass() instead."))
     isempty(opclasses) || length(opclasses) == length(columns) ||
-        throw(ArgumentError("Index: give one operator class per field"))
+        throw(ArgumentError("Index.fields and Index.opclasses must have the same number of elements."))
+    include === nothing || name !== nothing || isempty(include) || throw(ArgumentError("A covering index must be named."))
+    include === nothing || islist(include) || throw(ArgumentError("Index.include must be a list or tuple."))
     Index(columns, name === nothing ? nothing : string(name), unique, Symbol(method), exprs, condition,
-          String[string(c) for c in include], String[string(c) for c in opclasses])
+          String[string(c) for c in something(include, String[])], String[string(c) for c in opclasses])
+end
+# (Django's index.fields)
+Base.getproperty(i::Index, s::Symbol) = s === :fields ? getfield(i, :columns) : getfield(i, s)
+function Base.show(io::IO, i::Index)
+    pyl(xs, open = "[", close = "]") = open * join(("'$x'" for x in xs), ", ") * (close == ")" && length(xs) == 1 ? "," : "") * close
+    print(io, "<Index:")
+    isempty(i.columns) || print(io, " fields=", pyl(i.columns))
+    isempty(i.expressions) ||
+        print(io, " expressions=(", join((f == "" ? "F($x)" : "$(titlecase(lowercase(f)))(F($x))" for (f, x) in i.expressions), ", "), ")")
+    i.name === nothing || print(io, " name='", i.name, "'")
+    i.condition === nothing || print(io, " condition=", i.condition)
+    isempty(i.include) || print(io, " include=", pyl(i.include, "(", ")"))
+    isempty(i.opclasses) || print(io, " opclasses=", pyl(i.opclasses))
+    print(io, ">")
 end
 GinIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :gin, kw...)
 "PostgreSQL GiST index (ranges, geometry, trigram `gist_trgm_ops`, exclusion constraints); other databases skip it."
@@ -309,6 +342,8 @@ end
 models_state(models = all_models()) = SchemaState(modelmeta(T).table => table_state(T) for T in models if !modelmeta(T).proxy && is_managed(T))
 "Whether migrations create and change the model's table (`Meta(managed = false)` says no)."
 is_managed(T) = get(modelmeta(T).extra, :managed, true) !== false
+# an automatic join table is managed when either side is (Django's: none between two unmanaged models)
+is_managed(T::Type{<:AutoThrough}) = any(f -> f.kind === :fk && is_managed(related_model(f)), modelmeta(T).fields)
 
 # --- DDL --------------------------------------------------------------------------------------
 

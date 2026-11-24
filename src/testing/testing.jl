@@ -224,7 +224,10 @@ The response redirects to `url` with `status` (`http://testserver/x/` and `/x/` 
 `client`, the target is fetched too and must answer `target_status`. For a response from
 `get(c, url; follow = true)`, the redirect chain is checked: its first step's status and its last URL.
 """
-function assert_redirects(r::HttpResponse, url::AbstractString; status = 302, target_status = 200, client = nothing, msg_prefix = "")
+function assert_redirects(r::HttpResponse, url::AbstractString; status = 302, target_status = 200, client = nothing, msg_prefix = "",
+                          status_code = nothing, target_status_code = nothing)
+    status = something(status_code, status)                       # (Django's names too)
+    target_status = something(target_status_code, target_status)
     p = prefix(msg_prefix)
     chain = redirect_chain(r)
     if !isempty(chain)

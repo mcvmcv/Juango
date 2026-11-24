@@ -225,6 +225,17 @@ end
 
 joinns(a, b) = a === nothing ? b : b === nothing ? a : a * ":" * b
 
+# _resolve in a language, without a closure (a closure that recurses into _resolve made inference of the whole
+# request path explode: #279)
+function _resolve_in(lang, patterns, p, kwargs, ns, prefix, app)
+    old = get(task_local_storage(), :juango_language, nothing)
+    activate!(lang)
+    try
+        _resolve(patterns, p, kwargs, ns, prefix, app)
+    finally
+        old === nothing ? deactivate!() : activate!(old)
+    end
+end
 function _resolve(patterns, p::AbstractString, kwargs, ns, prefix, app = nothing)
     for pat in patterns
         if pat isa URLPattern
@@ -255,10 +266,10 @@ function _resolve(patterns, p::AbstractString, kwargs, ns, prefix, app = nothing
             m = match(r"^([A-Za-z]{2}(?:-[A-Za-z0-9]+)?)/", p)
             # (translated routes under the prefix are read in the prefix's language, as LocaleMiddleware activates it)
             if m !== nothing && lowercase(m[1]) in supported_codes() && (pat.prefix_default || lowercase(m[1]) != default_language())
-                r = with_language(() -> _resolve(pat.patterns, p[ncodeunits(m.match)+1:end], kwargs, ns, prefix * m.match, app), lowercase(m[1]))
+                r = _resolve_in(lowercase(m[1]), pat.patterns, p[ncodeunits(m.match)+1:end], kwargs, ns, prefix * m.match, app)
                 r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, lowercase(m[1]), r.app_name)
             elseif !pat.prefix_default
-                r = with_language(() -> _resolve(pat.patterns, p, kwargs, ns, prefix, app), default_language())
+                r = _resolve_in(default_language(), pat.patterns, p, kwargs, ns, prefix, app)
                 r === nothing || return ResolverMatch(r.view, r.kwargs, r.url_name, r.namespace, r.route, default_language(), r.app_name)
             end
         end

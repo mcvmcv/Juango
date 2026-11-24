@@ -147,46 +147,89 @@ Base.show(io::IO, c::Choice) = print(io, c.name, " (", repr(c.value), " => ", re
     @choices Name begin
         MEMBER = value, label
         OTHER = value                  # label from the name
+        __empty__ = label              # optional: a blank choice (value `nothing`) listed first
     end
 
 An enumeration of choices (Django's `TextChoices` / `IntegerChoices`): a constant `Name` whose
 members are `Name.MEMBER` (a `Choice`), with `Name.choices` (value => label), `Name.values`,
-`Name.labels`, `Name.members` and `Name.label(value)`. Pass it to a field as `choices = Name`.
+`Name.labels`, `Name.names`, `Name.members` and `Name.label(value)`; `Name["MEMBER"]` and `Name(value)`
+find a member, and `value in Name` checks one. Pass it to a field as `choices = Name`. Values must be
+distinct. `IntegerChoices("Name", "A B C")` / `TextChoices("Name", "A B C")` make one at run time.
 """
 macro choices(name, block)
     name isa Symbol || error("@choices expects a name: @choices Status begin ... end")
     items = Expr[]
+    empty = nothing
     for ex in block.args
         ex isa LineNumberNode && continue
         (ex isa Expr && ex.head === :(=) && ex.args[1] isa Symbol) || error("@choices: each line is `NAME = value` or `NAME = value, label`")
         m, rhs = ex.args[1], ex.args[2]
+        m === :__empty__ && (empty = esc(rhs); continue)
+        rhs isa Expr && rhs.head === :tuple && length(rhs.args) > 2 &&
+            error("@choices $name: $m = $rhs: give a value and a label, not $(length(rhs.args)) items")
         value, label = rhs isa Expr && rhs.head === :tuple ? (rhs.args[1], rhs.args[2]) :
                        (rhs, titlecase(replace(lowercase(string(m)), "_" => " ")))
         push!(items, :($(GlobalRef(@__MODULE__, :Choice))($(QuoteNode(m)), $(esc(value)), $(esc(label)))))
     end
-    :(Base.@__doc__ const $(esc(name)) = $(GlobalRef(@__MODULE__, :ChoiceSet))($(QuoteNode(name)), Choice[$(items...)]))
+    :(Base.@__doc__ const $(esc(name)) = $(GlobalRef(@__MODULE__, :ChoiceSet))($(QuoteNode(name)), Choice[$(items...)], $(something(empty, :nothing))))
 end
 
-"The enumeration `@choices` defines: members by name, plus `choices`, `values`, `labels`, `members`, `label(v)`."
+"The enumeration `@choices` defines: members by name, plus `choices`, `values`, `labels`, `names`, `members`, `label(v)`."
 struct ChoiceSet
     name::Symbol
     members::Vector{Choice}
+    empty::Any                      # the blank choice's label (Django's __empty__), or nothing
+    function ChoiceSet(name::Symbol, members::Vector{Choice}, empty = nothing)
+        for (i, m) in enumerate(members)        # as Python's enum: one member per value
+            j = findfirst(x -> isequal(x.value, m.value), members)
+            j < i && throw(ArgumentError("duplicate values found in <enum '$name'>: $(m.name) -> $(members[j].name)"))
+            m.name in (:choices, :labels, :names, :values, :members, :name, :empty) &&
+                throw(ArgumentError("$name: '$(m.name)' can't name a member (it's a property of the choices)"))
+        end
+        new(name, members, empty)
+    end
 end
 function Base.getproperty(cs::ChoiceSet, s::Symbol)
-    s in (:name, :members) && return getfield(cs, s)
-    ms = getfield(cs, :members)
-    s === :choices && return Pair{Any,Any}[m.value => m.label for m in ms]
-    s === :values && return [m.value for m in ms]
-    s === :labels && return Any[m.label for m in ms]
-    s === :label && return v -> choice_label(cs.choices, v)
+    s in (:name, :members, :empty) && return getfield(cs, s)
+    ms, e = getfield(cs, :members), getfield(cs, :empty)
+    s === :choices && return Pair{Any,Any}[(e === nothing ? () : (nothing => e,))..., (m.value => m.label for m in ms)...]
+    s === :values && return Any[(e === nothing ? () : (nothing,))..., (m.value for m in ms)...]
+    s === :labels && return Any[(e === nothing ? () : (e,))..., (m.label for m in ms)...]
+    s === :names && return String[(e === nothing ? () : ("__empty__",))..., (string(m.name) for m in ms)...]
     i = findfirst(m -> m.name === s, ms)
-    i === nothing && throw(ArgumentError("$(getfield(cs, :name)) has no member $s"))
-    ms[i]
+    i === nothing || return ms[i]                       # (a member may be called `label`)
+    s === :label && return v -> choice_label(cs.choices, v)
+    throw(ArgumentError("$(getfield(cs, :name)) has no member $s"))
 end
-Base.propertynames(cs::ChoiceSet) = (:name, :members, :choices, :values, :labels, :label, (m.name for m in getfield(cs, :members))...)
+"A member by name (`Suit[\"DIAMOND\"]`)."
+function Base.getindex(cs::ChoiceSet, n::Union{AbstractString,Symbol})
+    i = findfirst(m -> m.name === Symbol(n), getfield(cs, :members))
+    i === nothing && throw(KeyError(n))
+    getfield(cs, :members)[i]
+end
+"The member with this value (`Suit(1)`)."
+function (cs::ChoiceSet)(v)
+    i = findfirst(m -> isequal(m.value, v isa Choice ? v.value : v), getfield(cs, :members))
+    i === nothing && throw(ArgumentError("$(repr(v)) is not a valid $(getfield(cs, :name))"))
+    getfield(cs, :members)[i]
+end
+Base.in(v, cs::ChoiceSet) = any(m -> isequal(m.value, v isa Choice ? v.value : v), getfield(cs, :members))
+Base.propertynames(cs::ChoiceSet) = (:name, :members, :choices, :values, :labels, :names, :label, (m.name for m in getfield(cs, :members))...)
 Base.iterate(cs::ChoiceSet, i = 1) = i > length(getfield(cs, :members)) ? nothing : (getfield(cs, :members)[i], i + 1)
 Base.length(cs::ChoiceSet) = length(getfield(cs, :members))
 Base.show(io::IO, cs::ChoiceSet) = print(io, getfield(cs, :name), "(", join(string.(m.name for m in getfield(cs, :members)), ", "), ")")
+
+"""
+    IntegerChoices("Place", "FIRST SECOND THIRD")
+    TextChoices("Medal", "GOLD SILVER BRONZE")
+
+Choices made at run time (Django's functional API): integer values from 1, or the names as the values;
+the labels from the names.
+"""
+IntegerChoices(name, names::AbstractString) =
+    ChoiceSet(Symbol(name), Choice[Choice(Symbol(n), i, titlecase(replace(lowercase(n), "_" => " "))) for (i, n) in enumerate(split(names))])
+TextChoices(name, names::AbstractString) =
+    ChoiceSet(Symbol(name), Choice[Choice(Symbol(n), String(n), titlecase(replace(lowercase(n), "_" => " "))) for n in split(names)])
 
 "A choice's label (`v` itself when it isn't one of the choices)."
 function choice_label(cs, v)

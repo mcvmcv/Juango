@@ -359,7 +359,7 @@ const DEW_ROW5 = r -> (r.name, r.salary, r.department, r.hire_date)    # + the a
             qs = order_by(annotate(E; sum = Window(Sum(:salary); order_by = Asc(:salary), partition_by = "department",
                                                    frame = ValueRange(stop = 2, exclusion = :current_row))), "department", "salary")
             @test occursin("RANGE BETWEEN UNBOUNDED PRECEDING AND 2 FOLLOWING EXCLUDE CURRENT ROW", dew_sql(qs))
-            @test dew_rows(r -> (DEW_ROW5(r)..., r.sum), qs) == dew_exp("range_exclude_current")
+            @test dew_same(dew_rows(r -> (DEW_ROW5(r)..., r.sum), qs), dew_exp("range_exclude_current"))   # Jones and Jenson tie
         end
         # test_range_unbound
         qs = order_by(annotate(E; sum = Window(Sum(:salary); partition_by = "age", order_by = [Asc(:age)],
@@ -438,10 +438,10 @@ const DEW_ROW5 = r -> (r.name, r.salary, r.department, r.hire_date)    # + the a
         # test_unsupported_range_frame_start/end: Django's only_supports_unbounded_with_preceding_and_following is
         # Oracle-only; not tested
         # test_invalid_filter
-        qi = annotate(E; window = Window(Rank()), past_dept_cnt = Count(:past_departments))
+        qi = annotate(E; window = Window(Rank(); partition_by = "department", order_by = "department"), past_dept_cnt = Count(:past_departments))
         # Django refuses these (NotImplementedError: "Heterogeneous disjunctive predicates against window functions are
         # not implemented when performing conditional aggregation."); Juango filters the whole condition outside the
-        # wrapped (grouped) query, so they work: every rank is 1 (no ordering), 4 of the 12 are in Accounting
+        # wrapped (grouped) query, so they work: every rank is 1 (MariaDB wants an ordering, so a tied one), 4 of the 12 are in Accounting
         @test length(collect(filter(qi, Q(window = 1) | Q(department = "Accounting")))) == 12
         @test length(collect(exclude(qi; window = 1, department = "Accounting"))) == 8
     end

@@ -368,6 +368,15 @@ Base.@nospecializeinfer function getattr_other(@nospecialize(obj), part::Abstrac
     (obj isa Pair && part in ("first", "key")) && return obj.first
     (obj isa Pair && part in ("second", "value")) && return obj.second
     (obj isa Union{AbstractVector,Tuple,AbstractString} && part in ("length", "count")) && return length(obj)
+    if obj isa QuerySet                     # {{ author.books.all.0 }}: a related manager's all, count and rows, as Django's
+        part == "all" && return obj
+        part == "count" && return count(obj)
+        if idx > 0
+            idx == 1 && return something(first(obj), UNDEF)
+            rows = collect(obj)
+            return idx <= length(rows) ? rows[idx] : UNDEF
+        end
+    end
     if !(obj isa AbstractDict) && hasproperty(obj, sym)
         return getproperty(obj, sym)
     end

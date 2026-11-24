@@ -456,7 +456,7 @@ end
     @test values_list(order_by(filter(pubrel; pub__isnull = false), "pub__views"), :name; flat = true) == ["Ex B", "Ex A"]
     viewed = annotate(exa; who = FilteredRelation(:author; condition = Q(author__name = "Ex A")))
     @test titles(filter(viewed; who__isnull = false)) == ["ex-1", "ex-2"]
-    @test_throws ArgumentError collect(annotate(exau; x = FilteredRelation(:articles; condition = Q(published = true))) |> filter(x__id = 1))
+    @test_throws Juango.LookupError collect(annotate(exau; x = FilteredRelation(:articles; condition = Q(published = true))) |> filter(x__id = 1))
     @test_throws ArgumentError collect(annotate(exau; x = FilteredRelation(:articles; condition = Q(articles__author__name = "y"))) |> filter(x__id = 1))
 
     # --- custom lookups and transforms ------------------------------------------------------------

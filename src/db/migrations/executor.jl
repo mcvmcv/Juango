@@ -267,7 +267,7 @@ end
 function builtin_post_migrate(label; database, kw...)
     label == "contenttypes" && Juango.migrate_allowed(database, "contenttypes") && Juango.update_contenttypes!()
     label == "auth" && Juango.migrate_allowed(database, "auth") && Juango.update_permissions!()
-    label == "sites" && Juango.migrate_allowed(database, "sites") && Juango.create_default_site!()
+    label == "sites" && Juango.migrate_allowed(database, "sites") && Juango.create_default_site!(; verbosity = something(get(kw, :verbosity, nothing), 1))
     nothing
 end
 Juango.connect!(Juango.post_migrate, builtin_post_migrate; dispatch_uid = :juango_builtin_post_migrate)
