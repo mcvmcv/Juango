@@ -459,10 +459,15 @@ Base.@nospecializeinfer function Base.delete!(@nospecialize(obj::Model); db = no
     obj
 end
 
-"Reload field values from the database."
-Base.@nospecializeinfer function refresh!(@nospecialize(obj::Model); fields = nothing)
+"""
+    refresh!(obj; fields = nothing, db = nothing)
+
+Reload field values from the database: the object's own (where it was loaded from or saved to), or `db`'s, which
+it then belongs to (Django's `refresh_from_db(using=...)`).
+"""
+Base.@nospecializeinfer function refresh!(@nospecialize(obj::Model); fields = nothing, db = nothing)
     T = typeof(obj)
-    db = instance_db(obj)
+    db = something(db, Some(instance_db(obj)))
     if fields !== nothing                     # only these fields (Django's refresh_from_db(fields=...))
         names = Symbol.(collect(fields))
         any(n -> occursin("__", string(n)), names) &&

@@ -92,7 +92,31 @@ Add objects (or ids) to a many-to-many relation. Already related objects are ski
 inserted together, as Django's `bulk_create`: `m2m_changed` is sent (`:pre_add`, `:post_add`), not
 `pre_save`/`post_save` for each row.
 """
+# `<Book: Dive into Python>`, as Django's messages show an object
+obj_repr(@nospecialize(x)) = "<$(nameof(typeof(x))): $(string(x))>"
+"""
+Refuse to relate objects of two databases (unless a router's allow_relation permits it), as Django's related
+managers: `Cannot add "<Book: ...>": instance is on database "default", value is on database "other"`, and for a
+reverse foreign key `Cannot assign "<Person: ...>": the current database router prevents this relation.`
+"""
+function check_relation_dbs(qs::QuerySet, objs, verb)
+    owner = qs.owner
+    owner isa Union{M2MOwner,ReverseFKOwner} || return
+    inst = owner.instance
+    me = something(instance_db(inst), "default")
+    for x in objs
+        x isa Model || continue
+        d = something(instance_db(x), "default")
+        d == me && continue
+        ask_routers(allow_relation, inst, x) === true && continue
+        owner isa ReverseFKOwner ?
+            throw(ArgumentError("Cannot assign \"$(obj_repr(inst))\": the current database router prevents this relation.")) :
+            throw(ArgumentError("Cannot $verb \"$(obj_repr(x))\": instance is on database \"$me\", value is on database \"$d\""))
+    end
+end
+
 function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}(), bulk::Bool = true)
+    check_relation_dbs(qs, objs, "add")
     # (on the database the owner came from: an object of another database relates there)
     in_db(qs, true) do
         qs.owner isa ReverseFKOwner && return rev_add!(qs, objs...; bulk = bulk)
@@ -178,6 +202,7 @@ function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}(), bulk::B
         # "'int' object is not iterable", before any link is touched
         objs isa Union{Number,AbstractString,Symbol,Model,Nothing} &&
             throw(ArgumentError("set!(relation, objs): objs must be a collection of objects or keys, not $(repr(objs)); use set!(rel, [x])"))
+        check_relation_dbs(qs, objs, "add")
         qs.owner isa ReverseFKOwner && return rev_set!(qs, objs; bulk = bulk, clear = clear)
         qs.owner isa GenericOwner && return gen_set!(qs, objs; bulk = bulk, clear = clear)
         o = m2m_owner(qs)
