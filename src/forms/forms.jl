@@ -1434,6 +1434,8 @@ called each time), as Django's.
 """
 function choices_queryset(fld::Field)
     qs = objects(related_model(fld))
+    o = fld.form === nothing ? nothing : get(fld.form, :choices_ordering, nothing)      # (an admin's ordering)
+    o === nothing || (qs = order_by(qs, o...))
     l = fld.form === nothing ? nothing : get(fld.form, :limit_choices_to, nothing)
     l === nothing && return qs
     l isa Function && (l = l())

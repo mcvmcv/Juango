@@ -41,11 +41,11 @@ to_action(a::AdminAction) = a
 to_action(f::Function) = action(f)
 
 """
-    TabularInline(Model; fields=nothing, extra=1, can_delete=true, fk=nothing, max_num=1000)
+    TabularInline(Model; fields=nothing, extra=1, can_delete=true, fk=nothing, max_num=1000, ordering=[])
     StackedInline(...)
 
 Edit related objects on the parent's change page: a table row per object, or a stacked
-form per object.
+form per object. `ordering` orders the inline's objects (else the model's Meta.ordering), as Django's.
 """
 struct InlineAdmin
     model::Any
@@ -55,10 +55,16 @@ struct InlineAdmin
     fk::Union{Nothing,Symbol}
     max_num::Int
     style::Symbol
+    ordering::Vector{Any}
 end
-Base.@nospecializeinfer TabularInline(@nospecialize(T); fields = nothing, extra = 1, can_delete = true, fk = nothing, max_num = 1000) =
-    InlineAdmin(T, fields === nothing ? nothing : Symbol.(fields), extra, can_delete, fk === nothing ? nothing : Symbol(fk), max_num, :tabular)
-StackedInline(T; kw...) = (i = TabularInline(T; kw...); InlineAdmin(i.model, i.fields, i.extra, i.can_delete, i.fk, i.max_num, :stacked))
+"An admin ordering: field names as strings (\"-rank\"), expressions (`Desc(F(:rank))`) as they are."
+admin_ordering_terms(xs) = Any[x isa Union{AbstractString,Symbol} ? string(x) : x for x in xs]
+Base.@nospecializeinfer TabularInline(@nospecialize(T); fields = nothing, extra = 1, can_delete = true, fk = nothing, max_num = 1000, ordering = ()) =
+    InlineAdmin(T, fields === nothing ? nothing : Symbol.(fields), extra, can_delete, fk === nothing ? nothing : Symbol(fk), max_num, :tabular,
+                admin_ordering_terms(ordering))
+StackedInline(T; kw...) = (i = TabularInline(T; kw...); InlineAdmin(i.model, i.fields, i.extra, i.can_delete, i.fk, i.max_num, :stacked, i.ordering))
+"An inline's objects (Django's `InlineModelAdmin.get_queryset`): the model's, by the inline's ordering when it has one."
+inline_queryset(ia::InlineAdmin, req = nothing) = isempty(ia.ordering) ? objects(ia.model) : order_by(objects(ia.model), ia.ordering...)
 
 """
 Options for one model in the admin (see [`register!`](@ref)).
@@ -69,7 +75,7 @@ mutable struct ModelAdmin
     list_display::Vector{Any}
     search_fields::Vector{Symbol}
     list_filter::Vector{Any}             # field names, :field => :empty / :related_only, or ListFilter(...)
-    ordering::Vector{String}
+    ordering::Vector{Any}                # field names ("-rank") and expressions (Desc(F(:rank)))
     fields::Union{Nothing,Vector{Symbol}}
     exclude::Vector{Symbol}
     list_per_page::Int
@@ -173,8 +179,15 @@ AdminSite(name::AbstractString = "admin"; site_header = nothing, site_title = no
           has_permission = nothing, urls = Any[], registry = Dict{String,ModelAdmin}(), order = String[]) =
     AdminSite(String(name), registry, order, site_header, site_title, index_title, has_permission, collect(Any, urls))
 
-"The objects this admin shows: `objects(Model)` or the `queryset` option."
-admin_queryset(ma::ModelAdmin, req) = ma.queryset === nothing ? objects(ma.model) : ma.queryset(req)
+"""
+What the admin lists and edits (Django's `ModelAdmin.get_queryset`): the `queryset` option's, else the model's,
+ordered by the admin's ordering (`ordering`, or `get_ordering(req)`) when it has one.
+"""
+function admin_queryset(ma::ModelAdmin, req)
+    qs = ma.queryset === nothing ? objects(ma.model) : ma.queryset(req)
+    ords = ordering(ma, req)
+    isempty(ords) ? qs : order_by(qs, ords...)
+end
 
 const REGISTRY = Dict{String,ModelAdmin}()
 const ORDER = String[]
@@ -272,7 +285,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
     end
     site.registry[key] = ModelAdmin(T, slug, collect(Any, list_display), Symbol.(search_fields),
                                 Any[x isa Union{AbstractString,Symbol} ? Symbol(x) : x for x in list_filter],
-                                String.(string.(ordering)), fields === nothing ? nothing : Symbol.(fields),
+                                admin_ordering_terms(ordering), fields === nothing ? nothing : Symbol.(fields),
                                 Symbol.(exclude), list_per_page, Symbol.(password_fields), queryset, acts,
                                 collect(InlineAdmin, inlines), Symbol.(readonly_fields),
                                 Pair{String,Vector{Symbol}}[string(k) => Symbol.(collect(v)) for (k, v) in fieldsets],
@@ -349,7 +362,7 @@ list_display(ma::ModelAdmin, req) = ma.get_list_display === nothing ? ma.list_di
 list_filter(ma::ModelAdmin, req) = ma.get_list_filter === nothing ? ma.list_filter :
     Any[x isa Union{AbstractString,Symbol} ? Symbol(x) : x for x in ma.get_list_filter(req)]
 search_fields(ma::ModelAdmin, req) = ma.get_search_fields === nothing ? ma.search_fields : Symbol.(collect(ma.get_search_fields(req)))
-ordering(ma::ModelAdmin, req) = ma.get_ordering === nothing ? ma.ordering : String.(string.(collect(ma.get_ordering(req))))
+ordering(ma::ModelAdmin, req) = ma.get_ordering === nothing ? ma.ordering : admin_ordering_terms(collect(ma.get_ordering(req)))
 Base.@nospecializeinfer readonly_fields(ma::ModelAdmin, req, @nospecialize(obj)) = ma.get_readonly_fields === nothing ? ma.readonly_fields : Symbol.(collect(ma.get_readonly_fields(req, obj)))
 
 opts(ma::ModelAdmin) = (m = modelmeta(ma.model);
@@ -1260,7 +1273,7 @@ Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecial
         FS = inlineformset_factory(ma.model, M; fk = ia.fk, fields = ia.fields,
                                    extra = can_model(req, M, :add) ? ia.extra : 0,
                                    can_delete = ia.can_delete && can_model(req, M, :delete), max_num = ia.max_num)
-        fs = FS(data; instance = obj)
+        fs = isempty(ia.ordering) ? FS(data; instance = obj) : FS(data; instance = obj, queryset = inline_queryset(ia, req))
         push!(out, (ia, fs))
     end
     out
@@ -1297,13 +1310,21 @@ function configure_widgets!(ma::ModelAdmin, form, req = nothing)
         # formfield_for_*: the admin's hook may replace the field (keeping its name)
         hook = f.kind === :fk ? option(ma, :formfield_for_foreignkey) : f.kind === :m2m ? option(ma, :formfield_for_manytomany) :
                f.choices !== nothing ? option(ma, :formfield_for_choice_field) : nothing
+        replaced = false
         if hook !== nothing && req !== nothing
             g = hook(req, f)
             if g !== nothing && g !== f
                 g = deepcopy(g)
                 g.name = f.name
                 form.fields[i] = f = g
+                replaced = true
             end
+        end
+        # a related model's choices in its own admin's ordering, when it has one (Django's get_field_queryset);
+        # a field the hook gave keeps its queryset
+        if !replaced && f.kind in (:fk, :m2m) && (relma = get(current_site().registry, admin_key(Juango.related_model(f)), nothing)) !== nothing
+            ords = ordering(relma, req)
+            isempty(ords) || (form.fields[i] = f = (g = deepcopy(f); g.form = merge(something(g.form, Dict{Symbol,Any}()), Dict{Symbol,Any}(:choices_ordering => ords)); g))
         end
         for (k, v) in get(overrides, f.kind, Dict{Symbol,Any}())
             setproperty!(f, Symbol(k), v)
