@@ -64,14 +64,38 @@ function dispatch(req::Request)
     try
         rm = req.resolver_match
         rm === nothing && throw(Http404("No URL pattern matches '$(req.path)'"))
-        call = () -> (r = rm.view(req; rm.kwargs...);
+        hooks = middleware_hooks()
+        # process_view hooks, in MIDDLEWARE order: the first response one returns stands for the view's (Django's)
+        early = nothing
+        for mw in hooks.view
+            r = process_view(mw, req, rm.view, rm.kwargs)
+            r === nothing || (early = to_response(r); break)
+        end
+        call = early !== nothing ? (() -> early) :
+               () -> (r = rm.view(req; rm.kwargs...);
                       r === nothing && error("The view $(view_qualname(rm.view)) didn't return an HttpResponse object. It returned nothing instead.");
                       to_response(r))
-        for alias in atomic_request_aliases(rm.view)          # ATOMIC_REQUESTS: the view in a transaction
-            inner = call
-            call = () -> atomic(inner; db = alias)
+        if early === nothing
+            for alias in atomic_request_aliases(rm.view)          # ATOMIC_REQUESTS: the view in a transaction
+                inner = call
+                call = () -> atomic(inner; db = alias)
+            end
         end
-        run = () -> (resp = call(); resp.deferred === nothing ? resp : render_template_response!(req, resp))
+        # an exception from the view or its template's rendering goes to the process_exception hooks (innermost
+        # first); the first response one returns is the response, else the exception becomes the error page
+        render = () -> (resp = call(); resp.deferred === nothing ? resp : render_template_response!(req, resp))
+        run = isempty(hooks.exception) ? render : () -> try
+            render()
+        catch e
+            r = nothing
+            for mw in hooks.exception
+                r = process_exception(mw, req, e)
+                r === nothing || break
+            end
+            r === nothing && rethrow()
+            r = to_response(r)
+            r.deferred === nothing ? r : render_template_response!(req, r)
+        end
         # in an include with an app_name, reverse_url("app:...") and {% url %} stay in this instance
         rm.app_name === nothing || rm.namespace === nothing ? run() :
             Base.ScopedValues.with(run, CURRENT_APP => (rm.app_name => rm.namespace))
@@ -89,11 +113,47 @@ name: `Juango.process_template_response(::typeof(MyMiddleware), req, resp) = (re
 """
 function process_template_response end
 
+"""
+    process_view(middleware, req, view, kwargs) -> response or nothing
+
+Define a method for your middleware function to run just before the view, as Django's hook of the same name:
+`nothing` goes on to the view (and the next middleware's hook), a response is used instead of calling it.
+`Juango.process_view(::typeof(MyMiddleware), req, view, kwargs) = req.user.is_authenticated ? nothing : redirect_to_login(req)`.
+"""
+function process_view end
+
+"""
+    process_exception(middleware, req, exception) -> response or nothing
+
+Define a method for your middleware function to handle an exception the view (or its template's rendering) throws,
+as Django's hook: the hooks run innermost first, and the first response one returns is the response; with none,
+the exception becomes the usual error page.
+"""
+function process_exception end
+
+"The middleware with process_view, process_exception and process_template_response methods, worked out once per MIDDLEWARE setting."
+function middleware_hooks()
+    mws = settings.MIDDLEWARE
+    c = HOOKS_CACHE[]
+    c !== nothing && c[1] === mws && return c[2]
+    h = (view = Any[mw for mw in mws if hasmethod(process_view, Tuple{typeof(mw),Request,Any,Any})],
+         exception = Any[mw for mw in Iterators.reverse(mws) if hasmethod(process_exception, Tuple{typeof(mw),Request,Any})],
+         template = Any[mw for mw in Iterators.reverse(mws) if hasmethod(process_template_response, Tuple{typeof(mw),Request,HttpResponse})])
+    HOOKS_CACHE[] = (mws, h)
+    h
+end
+const HOOKS_CACHE = Ref{Any}(nothing)
+push!(SETTINGS_CHANGED_HOOKS, () -> (HOOKS_CACHE[] = nothing))
+"A middleware's name for messages: `Main.MyMiddleware`."
+mw_name(mw) = mw isa Function ? view_qualname(mw) : string(mw)
+
 "Run the middleware's template response hooks (innermost first), then render the template."
 function render_template_response!(req, resp::HttpResponse)
-    for mw in Iterators.reverse(settings.MIDDLEWARE)
-        hasmethod(process_template_response, Tuple{typeof(mw),Request,HttpResponse}) &&
-            (resp = process_template_response(mw, req, resp))
+    for mw in middleware_hooks().template
+        r = process_template_response(mw, req, resp)
+        r isa HttpResponse ||
+            throw(ArgumentError("$(mw_name(mw)).process_template_response didn't return an HttpResponse object. It returned $(repr(r)) instead."))
+        resp = r
     end
     render_response!(resp)
 end
@@ -109,15 +169,26 @@ function build_handler()
             mw(h)
         catch e
             e isa MiddlewareNotUsed || rethrow()
-            continue                                         # (the factory left itself out, as Django's)
+            # (the factory left itself out, as Django's; logged in DEBUG)
+            settings.DEBUG && log!("juango.request", :debug, isempty(e.msg) ? "MiddlewareNotUsed: '$(mw_name(mw))'" :
+                                                                           "MiddlewareNotUsed('$(mw_name(mw))'): $(e.msg)")
+            continue
         end
         inner === nothing && throw(ImproperlyConfigured("Middleware factory $mw returned None."))
-        h = inner
+        # an exception from a middleware becomes its response right there, so the middleware around it see a
+        # response (Django's convert_exception_to_response around each one)
+        h = convert_exception_to_response(inner)
     end
     HANDLER_CACHE[] = (mws, h)
     h
 end
 const HANDLER_CACHE = Ref{Any}(nothing)
+"A handler whose exceptions are turned into responses (the error pages), as Django wraps each middleware."
+convert_exception_to_response(h) = req -> try
+    h(req)
+catch e
+    response_for_exception(req, e, catch_backtrace())
+end
 "Thrown by a middleware factory to leave itself out of the chain (Django's `MiddlewareNotUsed`), e.g. when a setting turns it off."
 struct MiddlewareNotUsed <: Exception
     msg::String
