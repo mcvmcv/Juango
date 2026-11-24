@@ -1,0 +1,18 @@
+[
+    {
+        "pk": 1,
+        "model": "multiple_database.dmdpet",
+        "fields": {
+            "name": "Mr Bigglesworth",
+            "owner": 1
+        }
+    },
+    {
+        "pk": 2,
+        "model": "multiple_database.dmdpet",
+        "fields": {
+            "name": "Spot",
+            "owner": 2
+        }
+    }
+]

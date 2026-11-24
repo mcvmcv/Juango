@@ -240,9 +240,14 @@ Base.@nospecializeinfer function set_generic!(@nospecialize(m::Model), f::Field,
         delete!((getfield(m, :_cache)::Dict{Symbol,Any}), f.name)
     else
         # an unsaved object may be assigned (as Django); saving refuses it unless it's been saved by then
+        cache = (getfield(m, :_cache)::Dict{Symbol,Any})
+        # one without a database takes the related object's (through the routers, as Django's content type assignment)
+        if instance_db(m) === nothing && data[:id] === nothing && instance_db(v) !== nothing && !db_pinned()
+            cache[:__db] = hinted_write_db(m, v)
+        end
         data[Symbol(ctf, :_id)] = generic_ct(typeof(v), f).id
         data[fkf] = v.id === nothing ? nothing : getfield_meta(typeof(m), fkf).kind in STRING_KINDS ? string(v.id) : v.id   # (a text key column)
-        (getfield(m, :_cache)::Dict{Symbol,Any})[f.name] = v
+        cache[f.name] = v
     end
     v
 end

@@ -496,10 +496,18 @@ leave the decision to the next router (and finally to "default"):
 
     configure!(DATABASES = Dict("default" => "postgresql://...", "replica" => "postgresql://..."),
                DATABASE_ROUTERS = [PrimaryReplica()])
+
+A router that needs the object at hand (Django's hints) defines the three-argument form instead:
+`hints` is a NamedTuple, `(instance = obj,)` when an object is saved, deleted, or related to another,
+else empty. With no router's answer, an object's operations stay on the database it came from.
+
+    Juango.db_for_write(::Sharding, T, hints) = haskey(hints, :instance) ? shard_of(hints.instance) : nothing
 """
 db_for_read(router, model) = nothing
+db_for_read(router, model, hints) = db_for_read(router, model)
 "See `db_for_read`."
 db_for_write(router, model) = nothing
+db_for_write(router, model, hints) = db_for_write(router, model)
 "Whether objects `a` and `b` may be related (`nothing`: no opinion). See `db_for_read`."
 allow_relation(router, a, b) = nothing
 "Whether migrations of `app_label` (or `model`) run on database `db` (`nothing`: no opinion). See `db_for_read`."
@@ -513,8 +521,13 @@ function ask_routers(f, args...; kw...)
     end
     nothing
 end
-route_read(T) = string(something(ask_routers(db_for_read, T), "default"))
-route_write(T) = string(something(ask_routers(db_for_write, T), "default"))
+"The routers' database for reading (`route_read`) or writing (`route_write`) model `T`; `instance`: the object at hand (Django's hint), whose database is the fallback."
+route_read(T; instance = nothing) = route_with(db_for_read, T, instance)
+route_write(T; instance = nothing) = route_with(db_for_write, T, instance)
+function route_with(f, T, instance)
+    hints = instance === nothing ? (;) : (instance = instance,)
+    string(something(ask_routers(f, T, hints), instance === nothing ? nothing : instance_db(instance), "default"))
+end
 migrate_allowed(db, app; model = nothing) = something(ask_routers(allow_migrate, db, app; model = model), true)
 
 """

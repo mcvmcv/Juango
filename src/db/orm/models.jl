@@ -750,6 +750,14 @@ Base.@nospecializeinfer function model_property(@nospecialize(m::Model), s::Symb
     throw(ArgumentError("$(T) has no attribute '$s'"))
 end
 
+# The database an unsaved object takes when related to `v`: the routers' write database told `v` (Django's
+# instance hint), else `v`'s.
+Base.@nospecializeinfer hinted_write_db(@nospecialize(m::Model), @nospecialize(v::Model)) =
+    isempty(routers()) ? instance_db(v) : route_write(typeof(m); instance = v)
+
+Base.@nospecializeinfer router_prevents(@nospecialize(v::Model)) =
+    ArgumentError("Cannot assign \"<$(nameof(typeof(v))): $(string(v))>\": the current database router prevents this relation.")
+
 Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::Symbol, @nospecialize(v))
     data = (getfield(m, :_data)::Dict{Symbol,Any})
     # (pk = ... on a model with a natural primary key sets that field, as Django)
@@ -766,13 +774,15 @@ Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::S
         elseif v isa Model
             check_related_assignment(f, typeof(m), v)
             # an object of another database: refused here, as Django's descriptor does (unless a router allows it);
-            # an unsaved object without one takes the related object's (Django's db_for_write instance hint)
+            # an unsaved object without one takes the related object's (Django's db_for_write instance hint). A router's
+            # allow_relation = false refuses any pair, unsaved objects and one database's too, as Django's.
             if instance_db(m) === nothing && getfield(m, :_data)[:id] === nothing && !is_composite(typeof(m))
-                instance_db(v) === nothing || db_pinned() || ((getfield(m, :_cache)::Dict{Symbol,Any})[:__db] = instance_db(v))
+                instance_db(v) === nothing || db_pinned() || ((getfield(m, :_cache)::Dict{Symbol,Any})[:__db] = hinted_write_db(m, v))
+                isempty(routers()) || ask_routers(allow_relation, v, m) !== false || throw(router_prevents(v))
             else
                 let a = something(instance_db(m), "default"), b = something(instance_db(v), "default")
-                    a == b || ask_routers(allow_relation, v, m) === true ||
-                        throw(ArgumentError("Cannot assign \"<$(nameof(typeof(v))): $(string(v))>\": the current database router prevents this relation."))
+                    ok = isempty(routers()) ? nothing : ask_routers(allow_relation, v, m)
+                    ok === true || (ok === nothing && a == b) || throw(router_prevents(v))
                 end
             end
             f.one_to_one && ((getfield(v, :_cache)::Dict{Symbol,Any})[reverse_name(f)] = PrefetchedList(Any[m]))
@@ -801,7 +811,7 @@ Base.@nospecializeinfer function Base.setproperty!(@nospecialize(m::Model), s::S
                 # an unsaved object without a database takes the other's (Django's instance hint), then the link is
                 # checked as a forward assignment
                 if instance_db(m) === nothing && getfield(m, :_data)[:id] === nothing && instance_db(v) !== nothing && !db_pinned()
-                    cache[:__db] = instance_db(v)
+                    cache[:__db] = hinted_write_db(m, v)
                 end
                 setproperty!(v, rf.name, m)
                 cache[s] = PrefetchedList(Any[v])

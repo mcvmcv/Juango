@@ -3,16 +3,19 @@
 #
 # The "other" database is an SQLite file next to the default one (any backend). Juango's errors for objects of
 # two databases are ArgumentErrors; the messages are compared where Juango's say the same thing.
-# Juango's routers get the model, not Django's hints (instance=...). Not translated: test_refresh_router_instance_hint
-# (Mock), db_manager, the signal and fixture classes (later), and the pickling test.
+# Juango's routers get Django's instance hint in their three-argument form. Not translated: test_refresh_router_instance_hint
+# (Mock), db_manager (using_db), str(qs.query), MigrateTestCase
+# (migrate --database with routers is in db.jl), RouterModelArgumentTestCase (models are types), and the pickling test. Signals carry Django's `using` as `database`.
 @isdefined(TEST_SETUP_DONE) || include("setup.jl")
 using Dates
 
 @model struct DmdPerson
     name = CharField(max_length = 100, unique = true)
-    Meta(table = "dmd_person", ordering = [:name])
+    Meta(table = "dmd_person", app_label = "multiple_database", ordering = [:name])
 end
 Base.string(p::DmdPerson) = p.name
+Juango.natural_key(p::DmdPerson) = (p.name,)
+Juango.get_by_natural_key(::Type{DmdPerson}, name) = get(DmdPerson; name = name)
 @model struct DmdReview
     source = CharField(max_length = 100)
     content_type = ForeignKey(Juango.ContentType; on_delete = :CASCADE)
@@ -27,13 +30,13 @@ end
     authors = ManyToManyField(DmdPerson)
     editor = ForeignKey(DmdPerson; on_delete = :SET_NULL, null = true, related_name = :edited)
     pages = IntegerField(default = 100)
-    Meta(table = "dmd_book", ordering = [:title])
+    Meta(table = "dmd_book", app_label = "multiple_database", ordering = [:title])
 end
 Base.string(b::DmdBook) = b.title
 @model struct DmdPet
     name = CharField(max_length = 100)
     owner = ForeignKey(DmdPerson; on_delete = :CASCADE)
-    Meta(table = "dmd_pet", ordering = [:name])
+    Meta(table = "dmd_pet", app_label = "multiple_database", ordering = [:name])
 end
 @model struct DmdAccount
     username = CharField(max_length = 150, unique = true)
@@ -275,6 +278,8 @@ end
 "Vaguely like primary/replica: reads from other, writes to default (the databases don't propagate changes)."
 struct DmdTestRouter end
 Juango.db_for_read(::DmdTestRouter, T) = "other"
+# (Django's: told an object, reads stay on its database)
+Juango.db_for_read(::DmdTestRouter, T, hints) = haskey(hints, :instance) ? something(Juango.instance_db(hints.instance), "other") : "other"
 Juango.db_for_write(::DmdTestRouter, T) = "default"
 Juango.allow_relation(::DmdTestRouter, a, b) = true
 Juango.allow_migrate(::DmdTestRouter, db, app; model = nothing) = true
@@ -337,6 +342,341 @@ Juango.db_for_write(::DmdWriteRouter, T) = "writer"
         @test count(objects(B)) == 1                                                           # (the read database)
         delete!(filter(B; pages__gt = 150))                                                    # (on the write database)
         @test count(using_db(objects(B), "default")) == 1 && count(using_db(objects(B), "other")) == 1
+    end
+  end
+end
+
+@testset "django multiple_database: RouterTestCase (cross-database protection)" begin
+  dmd_block() do
+    B, P, R = DmdBook, DmdPerson, DmdReview
+    db(x) = Juango.instance_db(x)
+    T = through(B, :authors)
+    override_settings(DATABASE_ROUTERS = Any[DmdTestRouter()]) do
+        # test_foreign_key_cross_database_protection: allowed, and the object is saved on the write database
+        pro = using_db(() -> create(B; title = "Pro Django", published = Date(2008, 12, 16)), "default")
+        marty = using_db(() -> create(P; name = "Marty Alchin"), "default")
+        dive = using_db(() -> create(B; title = "Dive into Python", published = Date(2009, 5, 4)), "other")
+        mark = using_db(() -> create(P; name = "Mark Pilgrim"), "other")
+        dive.editor = marty
+        @test (db(marty), db(pro), db(dive), db(mark)) == ("default", "default", "other", "other")
+        save!(dive)
+        @test db(dive) == "default"
+        delete!(get(using_db(B, "default"); title = "Dive into Python"))
+        dive = get(using_db(B, "other"); title = "Dive into Python")
+        @test db(dive) == "other"
+        set!(marty.edited, [pro, dive]; bulk = false)
+        @test (db(marty), db(pro), db(dive), db(mark)) == ("default", "default", "default", "other")
+        delete!(get(using_db(B, "default"); title = "Dive into Python"))
+        dive = get(using_db(B, "other"); title = "Dive into Python")
+        add!(marty.edited, dive; bulk = false)
+        @test (db(marty), db(pro), db(dive), db(mark)) == ("default", "default", "default", "other")
+        delete!(get(using_db(B, "default"); title = "Dive into Python"))
+        dive = get(using_db(B, "other"); title = "Dive into Python")
+        # an unsaved object takes the routers' write database for the related object
+        chris = P(name = "Chris Mills")
+        html5 = B(title = "Dive into HTML5", published = Date(2010, 3, 15))
+        @test db(chris) === nothing && db(html5) === nothing
+        save!(chris)
+        dive.editor = chris
+        html5.editor = mark
+        @test (db(dive), db(mark), db(chris), db(html5)) == ("other", "other", "default", "default")
+        water = B(title = "Dive into Water", published = Date(2001, 1, 1), editor = mark)
+        @test db(water) == "default"
+        save!(mark; db = "default")
+        save!(mark; db = "other")
+        @test db(mark) == "other"
+        # created through a relation: on the write database, even from an object of the read one
+        cheesecake = create(mark.edited; title = "Dive into Cheesecake", published = Date(2010, 3, 15))
+        @test db(cheesecake) == "default"
+        cheesecake, created = get_or_create(mark.edited; title = "Dive into Cheesecake", published = Date(2010, 3, 15))
+        @test db(cheesecake) == "default" && !created
+        puddles, created = get_or_create(mark.edited; title = "Dive into Puddles", published = Date(2010, 3, 15))
+        @test db(puddles) == "default" && created
+    end
+  end
+  dmd_block() do
+    B, P, R = DmdBook, DmdPerson, DmdReview
+    db(x) = Juango.instance_db(x)
+    T = through(B, :authors)
+    override_settings(DATABASE_ROUTERS = Any[DmdTestRouter()]) do
+        # test_m2m_cross_database_protection: the join rows go to the write database
+        pro = using_db(() -> create(B; id = 1, title = "Pro Django", published = Date(2008, 12, 16)), "other")
+        marty = using_db(() -> create(P; id = 1, name = "Marty Alchin"), "other")
+        dive = using_db(() -> create(B; id = 2, title = "Dive into Python", published = Date(2009, 5, 4)), "default")
+        mark = using_db(() -> create(P; id = 2, name = "Mark Pilgrim"), "default")
+        save!(pro; db = "default"); save!(marty; db = "default"); save!(dive; db = "other"); save!(mark; db = "other")
+        @test count(using_db(objects(B), "default")) == 2 && count(using_db(objects(B), "other")) == 2
+        @test count(using_db(objects(P), "default")) == 2 && count(using_db(objects(P), "other")) == 2
+        nrows(d) = count(using_db(objects(T), d))
+        states() = (db(marty), db(pro), db(dive), db(mark))
+        set!(marty.dmdbook_set, [pro, dive])
+        @test states() == ("default", "default", "other", "other")
+        @test nrows("default") == 2 && nrows("other") == 0
+        delete!(using_db(objects(T), "default"))
+        add!(marty.dmdbook_set, dive)
+        @test states() == ("default", "default", "other", "other")
+        @test nrows("default") == 1 && nrows("other") == 0
+        delete!(using_db(objects(T), "default"))
+        set!(dive.authors, [mark, marty])
+        @test states() == ("default", "default", "other", "other")
+        @test nrows("default") == 2 && nrows("other") == 0
+        delete!(using_db(objects(T), "default"))
+        add!(dive.authors, marty)
+        @test states() == ("default", "default", "other", "other")
+        @test nrows("default") == 1 && nrows("other") == 0
+        alice = create(dive.authors; name = "Alice", id = 3)
+        @test db(alice) == "default"
+        alice, created = get_or_create(dive.authors; name = "Alice")
+        @test db(alice) == "default"
+        bob, created = get_or_create(dive.authors; name = "Bob", defaults = Dict(:id => 4))
+        @test db(bob) == "default"
+    end
+  end
+  dmd_block() do
+    B, P, R = DmdBook, DmdPerson, DmdReview
+    db(x) = Juango.instance_db(x)
+    override_settings(DATABASE_ROUTERS = Any[DmdTestRouter()]) do
+        # test_o2o_cross_database_protection
+        alice = using_db(() -> create(DmdAccount; username = "alice"), "default")
+        bob = using_db(() -> create(DmdAccount; username = "bob"), "other")
+        alice_profile = create(DmdProfile; account = alice, flavor = "chocolate")
+        bob.dmdprofile = alice_profile
+        @test (db(alice), db(alice_profile), db(bob)) == ("default", "default", "other")
+        save!(bob)
+        @test db(bob) == "default"
+    end
+  end
+  dmd_block() do
+    B, P, R = DmdBook, DmdPerson, DmdReview
+    db(x) = Juango.instance_db(x)
+    override_settings(DATABASE_ROUTERS = Any[DmdTestRouter()]) do
+        # test_generic_key_cross_database_protection
+        pro = using_db(() -> create(B; title = "Pro Django", published = Date(2008, 12, 16)), "default")
+        review1 = using_db(() -> create(R; source = "Python Monthly", content_object = pro), "default")
+        dive = using_db(() -> create(B; title = "Dive into Python", published = Date(2009, 5, 4)), "other")
+        review2 = using_db(() -> create(R; source = "Python Weekly", content_object = dive), "other")
+        review1.content_object = dive
+        @test (db(pro), db(review1), db(dive), db(review2)) == ("default", "default", "other", "other")
+        save!(dive)
+        @test db(review1) == "default" && db(dive) == "default"
+        delete!(get(using_db(B, "default"); title = "Dive into Python"))
+        dive = get(using_db(B, "other"); title = "Dive into Python")
+        @test db(dive) == "other"
+        add!(dive.reviews, review1)
+        @test (db(pro), db(review1), db(dive), db(review2)) == ("default", "default", "other", "other")
+        save!(dive)
+        @test db(dive) == "default"
+        delete!(get(using_db(B, "default"); title = "Dive into Python"))
+        review3 = R(source = "Python Daily")
+        @test db(review3) === nothing
+        review3.content_object = dive
+        @test db(review3) == "default"
+        dive = get(using_db(B, "other"); title = "Dive into Python")
+        nyt = create(dive.reviews; source = "New York Times", content_object = dive)
+        @test db(nyt) == "default"
+    end
+  end
+  dmd_block() do
+    B, P, R = DmdBook, DmdPerson, DmdReview
+    override_settings(DATABASE_ROUTERS = Any[DmdTestRouter()]) do
+        # test_m2m_managers, test_foreign_key_managers, test_generic_key_managers (Django's db_manager: using_db)
+        pro = using_db(() -> create(B; title = "Pro Django", published = Date(2008, 12, 16)), "other")
+        marty = using_db(() -> create(P; name = "Marty Alchin"), "other")
+        using_db(() -> create(R; source = "Python Monthly", content_object = pro), "other")
+        for rel in (pro.authors, marty.dmdbook_set, marty.edited, pro.reviews)
+            @test rel.db == "other" && using_db(rel, "default").db == "default"
+        end
+        # test_generic_key_subquery
+        book = create(B; title = "Pro Django", published = Date(2008, 12, 16))
+        @test isempty(collect(filter(R; pk__in = book.reviews)))
+        # test_generic_relation_queryset_uses_instance_database
+        @test book.reviews.db == "default"
+        # test_subquery: the subquery follows the outer query to the read database
+        mark = using_db(() -> create(P; name = "Mark Pilgrim"), "other")
+        using_db(() -> create(B; title = "Dive into Python", published = Date(2009, 5, 4), editor = mark), "other")
+        qs = filter(B; editor__in = filter(P; name = "Mark Pilgrim"))
+        @test dmd_titles(qs) == ["Dive into Python"]
+        # test_deferred_models
+        mark_def = using_db(() -> create(P; name = "Mark Pilgrim"), "default")
+        orig_b = get(using_db(B, "other"); title = "Dive into Python")
+        b = get(only(using_db(B, "other"), :title); pk = orig_b.pk)
+        @test b.published == Date(2009, 5, 4)
+        b = get(only(using_db(B, "other"), :title); pk = orig_b.pk)
+        b.editor = mark_def
+        save!(b; db = "default")
+        @test get(using_db(B, "default"); pk = b.pk).published == Date(2009, 5, 4)
+    end
+  end
+end
+
+"Pets on other only, everything else on default; an opinion on migrations only."
+struct DmdAntiPetRouter end
+Juango.allow_migrate(::DmdAntiPetRouter, db, app; model = nothing) = db == "other" ? model === DmdPet : model !== DmdPet
+"Every write to other."
+struct DmdWriteToOtherRouter end
+Juango.db_for_write(::DmdWriteToOtherRouter, T) = "other"
+
+@testset "django multiple_database: AuthTestCase, FixtureTestCase, SignalTests" begin
+  dmd_block() do
+    B, P = DmdBook, DmdPerson
+    using_db(() -> redirect_stdout(() -> Juango.sync_models!(Any[Juango.Permission, Juango.Group, through(Juango.Group, :permissions), User, through(User, :groups), through(User, :user_permissions)]), devnull), "other")
+    try
+        override_settings(DATABASE_ROUTERS = Any[DmdAuthRouter()]) do
+            # test_auth_manager: created on the router's write database, unless one is named
+            create_user("dmd_alice"; email = "alice@example.com")
+            using_db(() -> create_user("dmd_bob"; email = "bob@example.com"), "default")
+            alice = get(using_db(User, "other"); username = "dmd_alice")
+            @test alice.username == "dmd_alice" && Juango.instance_db(alice) == "other"
+            @test_throws Juango.DoesNotExist get(using_db(User, "default"); username = "dmd_alice")
+            bob = get(using_db(User, "default"); username = "dmd_bob")
+            @test Juango.instance_db(bob) == "default"
+            @test_throws Juango.DoesNotExist get(using_db(User, "other"); username = "dmd_bob")
+            @test count(filter(using_db(User, "default"); username__startswith = "dmd_")) == 1
+            @test count(filter(using_db(User, "other"); username__startswith = "dmd_")) == 1
+            # test_dumpdata: allow_migrate keeps auth off default's dump
+            out = IOBuffer()
+            call_command("dumpdata", "auth.user", "--format=json", "--database=default"; stdout = out)
+            @test strip(String(take!(out))) == "[]"
+            call_command("dumpdata", "auth.user", "--format=json", "--database=other"; stdout = out)
+            @test occursin("\"email\":\"alice@example.com\"", String(take!(out)))
+        end
+    finally
+        using_db(() -> execute("DELETE FROM auth_user WHERE username LIKE 'dmd_%'"), "other")      # (no admin log there)
+        delete!(filter(User; username__startswith = "dmd_"))
+    end
+    # FixtureTestCase: each database gets the common fixture and its own (name.<database>.json)
+    override_settings(FIXTURE_DIRS = [joinpath(@__DIR__, "fixtures_multiple_database")]) do
+        for d in ("default", "other")                           # (Django's setUpClass: before the router)
+            loaddata("multidb-common", "multidb"; database = d)
+        end
+    end
+    override_settings(DATABASE_ROUTERS = Any[DmdAntiPetRouter()],
+                      FIXTURE_DIRS = [joinpath(@__DIR__, "fixtures_multiple_database")]) do
+        # test_fixture_loading
+        @test get(B; title = "Pro Django") isa B && get(using_db(B, "default"); title = "Pro Django") isa B
+        @test_throws Juango.DoesNotExist get(using_db(B, "other"); title = "Pro Django")
+        @test get(using_db(B, "other"); title = "Dive into Python") isa B
+        @test_throws Juango.DoesNotExist get(B; title = "Dive into Python")
+        @test_throws Juango.DoesNotExist get(using_db(B, "default"); title = "Dive into Python")
+        for d in ("default", "other")
+            @test get(using_db(B, d); title = "The Definitive Guide to Django") isa B
+        end
+        @test collect(values_list(get(using_db(B, "other"); title = "Dive into Python").authors, :name; flat = true)) == ["Mark Pilgrim"]
+        # test_pseudo_empty_fixtures: objects the router keeps off the database aren't an error
+        out = IOBuffer()
+        call_command("loaddata", "pets"; stdout = out)
+        @test strip(String(take!(out))) == "Installed 0 object(s) (of 2) from 1 fixture(s)"
+        @test count(objects(DmdPet)) == 0
+    end
+    delete!(objects(B)); delete!(objects(P))
+    # SignalTests: the signals name the database (Django's using, Juango's `database`)
+    heard = Dict{Symbol,Any}()
+    rec(name) = (sender; database = nothing, kw...) -> (heard[name] = database)
+    recs = [(sig, rec(n)) for (sig, n) in ((pre_save, :pre_save), (post_save, :post_save), (pre_delete, :pre_delete), (post_delete, :post_delete))]
+    foreach(((sig, r),) -> connect!(sig, r; sender = P), recs)
+    mrec = rec(:m2m)
+    connect!(m2m_changed, mrec)
+    try
+        # test_database_arg_save_and_delete
+        p = create(P; name = "Darth Vader")
+        save!(p)
+        @test heard[:pre_save] == "default" && heard[:post_save] == "default"
+        delete!(p)
+        @test heard[:pre_delete] == "default" && heard[:post_delete] == "default"
+        save!(p; db = "other")
+        @test heard[:pre_save] == "other" && heard[:post_save] == "other"
+        delete!(p; db = "other")
+        @test heard[:pre_delete] == "other" && heard[:post_delete] == "other"
+        # test_database_arg_m2m
+        b = create(B; title = "Pro Django", published = Date(2008, 12, 16))
+        p = create(P; name = "Marty Alchin")
+        using_db(() -> create(B; id = b.id, title = b.title, published = b.published), "other")
+        using_db(() -> create(P; id = p.id, name = p.name), "other")
+        to_other(f) = override_settings(f, DATABASE_ROUTERS = Any[DmdWriteToOtherRouter()])
+        add!(b.authors, p);                      @test heard[:m2m] == "default"
+        to_other(() -> add!(b.authors, p));      @test heard[:m2m] == "other"
+        remove!(b.authors, p);                   @test heard[:m2m] == "default"
+        to_other(() -> remove!(b.authors, p));   @test heard[:m2m] == "other"
+        add!(p.dmdbook_set, b);                  @test heard[:m2m] == "default"
+        to_other(() -> add!(p.dmdbook_set, b));  @test heard[:m2m] == "other"
+        clear!(b.authors);                       @test heard[:m2m] == "default"
+        to_other(() -> clear!(b.authors));       @test heard[:m2m] == "other"
+    finally
+        foreach(((sig, r),) -> disconnect!(sig, r; sender = P), recs)
+        disconnect!(m2m_changed, mrec)
+    end
+  end
+end
+
+"Raised by DmdWriteCheckRouter: what it was asked."
+struct DmdRouterUsed <: Exception
+    model::Any
+    hints::Any
+end
+struct DmdWriteCheckRouter end
+Juango.db_for_write(::DmdWriteCheckRouter, T, hints) = throw(DmdRouterUsed(T, hints))
+"Django's AttributeErrorRouter: every read and write routing fails."
+struct DmdFailingRouter end
+struct DmdRouterFailed <: Exception end
+Juango.db_for_read(::DmdFailingRouter, T) = throw(DmdRouterFailed())
+Juango.db_for_write(::DmdFailingRouter, T) = throw(DmdRouterFailed())
+struct DmdNoRelationRouter end
+Juango.allow_relation(::DmdNoRelationRouter, a, b) = false
+
+@testset "django multiple_database: RouteForWriteTestCase, RouterAttributeErrorTestCase, RelationAssignmentTests" begin
+  dmd_block() do
+    B, P, Pet = DmdBook, DmdPerson, DmdPet
+    # RouteForWriteTestCase: writes ask db_for_write, told the object (Django's hints = {"instance": ...})
+    function used(f)
+        try
+            override_settings(f, DATABASE_ROUTERS = Any[DmdWriteCheckRouter()])
+        catch e
+            e isa DmdRouterUsed && return e
+            rethrow()
+        end
+        nothing
+    end
+    owner = create(P; name = "Someone")
+    pet = create(Pet; name = "fido", owner = owner)
+    e = used(() -> delete!(pet.owner))                                          # test_fk_delete
+    @test e isa DmdRouterUsed && e.model === P && e.hints.instance === owner
+    e = used(() -> delete!(owner.dmdpet_set))                                   # test_reverse_fk_delete
+    @test e isa DmdRouterUsed && e.model === Pet && e.hints.instance === owner
+    e = used(() -> get_or_create(owner.dmdpet_set; name = "fido"))              # test_reverse_fk_get_or_create
+    @test e isa DmdRouterUsed && e.model === Pet && e.hints.instance === owner
+    e = used(() -> update!(owner.dmdpet_set; name = "max"))                     # test_reverse_fk_update
+    @test e isa DmdRouterUsed && e.model === Pet && e.hints.instance === owner
+    auth = create(P; name = "Someone else")
+    book = create(B; title = "Pro Django", published = Date(2008, 12, 16))
+    e = used(() -> add!(book.authors, auth))                                    # test_m2m_add
+    @test e isa DmdRouterUsed && e.model === through(B, :authors) && e.hints.instance === book
+    add!(book.authors, auth)
+    e = used(() -> update!(auth.dmdbook_set; title = "Different"))
+    @test e isa DmdRouterUsed && e.model === B && e.hints.instance === auth
+    @test get(B; id = book.id).title == "Pro Django" && count(objects(Pet)) == 1
+    delete!(objects(Pet)); delete!(objects(B)); delete!(objects(P))
+    # RouterAttributeErrorTestCase: a router's error comes through
+    failing(f) = override_settings(f, DATABASE_ROUTERS = Any[DmdFailingRouter()])
+    b = create(B; title = "Pro Django", published = Date(2008, 12, 16))
+    @test_throws DmdRouterFailed failing(() -> get(B; pk = b.pk))                # test_attribute_error_read
+    dive = B(); dive.title = "Dive into Python"; dive.published = Date(2009, 5, 4)
+    @test_throws DmdRouterFailed failing(() -> save!(dive))                     # test_attribute_error_save
+    p = create(P; name = "Marty Alchin")
+    set!(b.authors, [p]); b.editor = p
+    @test_throws DmdRouterFailed failing(() -> delete!(b))                      # test_attribute_error_delete
+    delete!(objects(B)); delete!(objects(P))
+    b = create(B; title = "Pro Django", published = Date(2008, 12, 16))
+    p = create(P; name = "Marty Alchin")
+    @test_throws DmdRouterFailed failing(() -> set!(b.authors, [p]))            # test_attribute_error_m2m
+    @test isempty(collect(b.authors))
+    # RelationAssignmentTests: allow_relation is asked about unsaved objects too
+    override_settings(DATABASE_ROUTERS = Any[DmdNoRelationRouter()]) do
+        person = P(name = "Someone"); pet = Pet()
+        e = try; pet.owner = person; nothing; catch err; err; end               # test_foreign_key_relation
+        @test e isa ArgumentError && occursin("the current database router prevents this relation", e.msg)
+        account = DmdAccount(username = "Someone"); profile = DmdProfile()
+        e = try; account.dmdprofile = profile; nothing; catch err; err; end     # test_reverse_one_to_one_relation
+        @test e isa ArgumentError && occursin("the current database router prevents this relation", e.msg)
     end
   end
 end

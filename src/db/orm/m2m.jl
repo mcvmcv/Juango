@@ -77,7 +77,7 @@ function m2m_signal(o, action, ids)
     inst = o.instance isa Model ? o.instance : get(base_objects(owner); id = o.id)   # (the object itself, as Django sends it)
     pks = ids === nothing ? nothing : Set(ids)
     m2m && send(m2m_changed, o.through; action = action, instance = inst, model = related_model(o.other), pk_set = pks, reverse = !o.forward,
-                raw = SAVE_RAW[])                             # (raw: loading a fixture, as Django's set_base(raw = true))
+                raw = SAVE_RAW[], database = current_alias())                             # (raw: loading a fixture, as Django's set_base(raw = true))
     pw && send(pre_write, o.through; action = :m2m, via = action, ids = nothing, fields = nothing, instances = nothing,
                instance = inst, model = related_model(o.other), pk_set = pks)
     w && send(post_write, o.through; action = :m2m, via = action, ids = nothing, fields = nothing, instances = nothing,
@@ -94,6 +94,19 @@ inserted together, as Django's `bulk_create`: `m2m_changed` is sent (`:pre_add`,
 """
 # `<Book: Dive into Python>`, as Django's messages show an object
 obj_repr(@nospecialize(x)) = "<$(nameof(typeof(x))): $(string(x))>"
+# Run `f` on the database a relation's change goes to: with routers, theirs told the owner (Django's instance hint;
+# the join model's for a many-to-many), falling back to the owner's database; else the relation's own.
+function in_rel_write_db(f, qs::QuerySet)
+    o = qs.owner
+    (o === nothing || isempty(routers()) || db_pinned()) && return in_db(f, qs, true)
+    T = o isa M2MOwner ? o.through : model_of(qs)
+    with_db(f, route_write(T; instance = o.instance))
+end
+
+# The relation's queryset on the current database when routers chose it (in_rel_write_db), as Django's related
+# get_or_create looks on the write database.
+rel_here(qs::QuerySet) = isempty(routers()) ? qs : chain(qs; db = current_alias(), owner = qs.owner)
+
 """
 Refuse to relate objects of two databases (unless a router's allow_relation permits it), as Django's related
 managers: `Cannot add "<Book: ...>": instance is on database "default", value is on database "other"`, and for a
@@ -118,7 +131,7 @@ end
 function add!(qs::QuerySet, objs...; through_defaults = Dict{Symbol,Any}(), bulk::Bool = true)
     check_relation_dbs(qs, objs, "add")
     # (on the database the owner came from: an object of another database relates there)
-    in_db(qs, true) do
+    in_rel_write_db(qs) do
         qs.owner isa ReverseFKOwner && return rev_add!(qs, objs...; bulk = bulk)
         qs.owner isa GenericOwner && return gen_add!(qs, objs...; bulk = bulk)
         o = m2m_owner(qs)
@@ -156,7 +169,7 @@ end
 "Remove objects (or ids) from a many-to-many relation."
 function remove!(qs::QuerySet, objs...; bulk::Bool = true)
     # (on the database the owner came from: an object of another database relates there)
-    in_db(qs, true) do
+    in_rel_write_db(qs) do
         qs.owner isa ReverseFKOwner && return rev_remove!(qs, objs...; bulk = bulk)
         qs.owner isa GenericOwner && return gen_remove!(qs, objs...; bulk = bulk)
         o = m2m_owner(qs)
@@ -176,7 +189,7 @@ end
 "Remove every object from a many-to-many relation."
 function clear!(qs::QuerySet; bulk::Bool = true)
     # (on the database the owner came from: an object of another database relates there)
-    in_db(qs, true) do
+    in_rel_write_db(qs) do
         qs.owner isa ReverseFKOwner && return rev_clear!(qs; bulk = bulk)
         qs.owner isa GenericOwner && return gen_clear!(qs; bulk = bulk)
         o = m2m_owner(qs)
@@ -197,7 +210,7 @@ link is removed and the new ones added (Django's `set(clear=True)`).
 """
 function set!(qs::QuerySet, objs; through_defaults = Dict{Symbol,Any}(), bulk::Bool = true, clear::Bool = false)
     # (on the database the owner came from: an object of another database relates there)
-    in_db(qs, true) do
+    in_rel_write_db(qs) do
         # a lone value is a mistake, not a one-item list (Julia iterates a number or a string): Django's
         # "'int' object is not iterable", before any link is touched
         objs isa Union{Number,AbstractString,Symbol,Model,Nothing} &&
@@ -296,7 +309,7 @@ function rev_clear!(qs::QuerySet; bulk::Bool = true)
     rev_key(o)
     rev_nullable(o, "clear!")
     # the rows this relation's queryset sees (its manager's, as Django: clear!(book.readers(manager = :boring)))
-    rel = chain(qs; owner = nothing, cache = nothing)
+    rel = chain(rel_here(qs); owner = nothing, cache = nothing)
     bulk ? update!(rel; attname(o.fk) => nothing) :
         atomic(() -> foreach(x -> (setproperty!(x, o.fk.name, nothing); save!(x; update_fields = [o.fk.name])), fetch(rel)); savepoint = false)
     rev_changed!(o)
@@ -335,7 +348,7 @@ A new object in a relation (Django's `RelatedManager.create`).
 """
 function create(qs::QuerySet; through_defaults = Dict{Symbol,Any}(), kw...)
     # (on the database the owner came from: an object of another database relates there)
-    in_db(qs, true) do
+    in_rel_write_db(qs) do
         if qs.owner isa ReverseFKOwner
             o = qs.owner::ReverseFKOwner
             rev_key(o)
@@ -346,7 +359,7 @@ function create(qs::QuerySet; through_defaults = Dict{Symbol,Any}(), kw...)
             return gen_create(qs; kw...)
         elseif qs.owner isa M2MOwner
             obj = create(model_of(qs); kw...)
-            add!(qs, obj; through_defaults = through_defaults)
+            add!(rel_here(qs), obj; through_defaults = through_defaults)
             return obj   # (add! dropped the prefetched rows)
         end
         throw(ArgumentError("create(qs; ...) needs a relation such as reporter.article or post.tags; use create(Model; ...)"))
@@ -361,23 +374,23 @@ Through a relation: the object is looked for among the related ones; one made is
 """
 function get_or_create(qs::QuerySet; defaults = Dict{Symbol,Any}(), through_defaults = Dict{Symbol,Any}(), kw...)
     # (on the database the owner came from: an object of another database relates there)
-    in_db(qs, true) do
+    in_rel_write_db(qs) do
         qs.owner isa Union{M2MOwner,ReverseFKOwner,GenericOwner} || throw(ArgumentError("get_or_create(qs; ...) needs a relation such as group.members; use get_or_create(Model; ...)"))
         atomic() do
-            o = first(filter(qs; kw...))
+            o = first(filter(rel_here(qs); kw...))
             o === nothing || return (o, false)
             ps = create_params(model_of(qs), kw, defaults)
-            (create(qs; through_defaults = through_defaults, ps...), true)
+            (create(rel_here(qs); through_defaults = through_defaults, ps...), true)
         end
     end
 end
 function update_or_create(qs::QuerySet; defaults = Dict{Symbol,Any}(), create_defaults = nothing, through_defaults = Dict{Symbol,Any}(), kw...)
     # (on the database the owner came from: an object of another database relates there)
-    in_db(qs, true) do
+    in_rel_write_db(qs) do
         qs.owner isa Union{M2MOwner,ReverseFKOwner,GenericOwner} || throw(ArgumentError("update_or_create(qs; ...) needs a relation such as group.members; use update_or_create(Model; ...)"))
         atomic() do
-            o = first(filter(qs; kw...))
-            o === nothing && return (create(qs; through_defaults = through_defaults,
+            o = first(filter(rel_here(qs); kw...))
+            o === nothing && return (create(rel_here(qs); through_defaults = through_defaults,
                                             create_params(model_of(qs), kw, something(create_defaults, defaults))...), true)
             for (k, v) in create_params(model_of(qs), (;), defaults)
                 setproperty!(o, k, v)

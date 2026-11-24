@@ -37,10 +37,15 @@ Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, 
     end
     only = update_fields === nothing ? nothing : update_field_set(T, update_fields)
     only !== nothing && isempty(only) && return obj
+    alias = write_db(obj, db)
     # an object loaded with only()/defer() saves the fields it has (loaded or set since), as Django's
-    # save(update_fields = <loaded fields>): tables with none of them aren't written
+    # save(update_fields = <loaded fields>): tables with none of them aren't written. Saved to another database, it
+    # loads the rest (from its own) and writes them all, as Django's.
     if only === nothing && (getfield(obj, :_data)::Dict{Symbol,Any})[:id] !== nothing && !is_composite(T)
         data_ = getfield(obj, :_data)::Dict{Symbol,Any}
+        if instance_db(obj) !== nothing && something(alias, current_alias()) != instance_db(obj)
+            foreach(f -> haskey(data_, attname(f)) || getproperty(obj, attname(f)), all_fields(T))
+        end
         if any(f -> !haskey(data_, attname(f)), all_fields(T))
             only = Set{Symbol}(attname(f) for f in all_fields(T) if haskey(data_, attname(f)))
             isempty(only) && return obj
@@ -51,7 +56,6 @@ Base.@nospecializeinfer function save!(@nospecialize(obj::Model); db = nothing, 
     end
     only !== nothing && (getfield(obj, :_data)::Dict{Symbol,Any})[:id] === nothing &&
         throw(ArgumentError("save!(::$(nameof(T)); update_fields) needs an object that's already saved"))
-    alias = write_db(obj, db)
     with_db(alias) do
         check_relations_db(obj)
         number_in_order!(obj)
@@ -160,8 +164,13 @@ Base.@nospecializeinfer function update_field_set(@nospecialize(T::Type), names)
     out
 end
 
-"Where to write an object: `db`, else the enclosing `using_db` block, else where it came from, else the routers."
-Base.@nospecializeinfer write_db(@nospecialize(obj::Model), db) = db !== nothing ? db : db_pinned() ? nothing : something(instance_db(obj), routed_db(typeof(obj), true), Some(nothing))
+# Where to write an object: `db`, else the enclosing `using_db` block, else the routers (told the object, as Django's
+# instance hint), else where it came from.
+Base.@nospecializeinfer function write_db(@nospecialize(obj::Model), db)
+    db !== nothing && return db
+    db_pinned() && return nothing
+    isempty(routers()) ? instance_db(obj) : route_write(typeof(obj); instance = obj)
+end
 
 "Refuse to save an object whose related objects (already loaded) live in another database."
 Base.@nospecializeinfer function check_relations_db(@nospecialize(obj::Model))
@@ -241,7 +250,7 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
         end
     end
     created = data[:id] === nothing
-    has_receivers(pre_save, T) && send(pre_save, T; instance = obj, created = created, update_fields = only, raw = SAVE_RAW[])
+    has_receivers(pre_save, T) && send(pre_save, T; instance = obj, created = created, update_fields = only, raw = SAVE_RAW[], database = current_alias())
     has_receivers(pre_write, T) && send(pre_write, T; action = created ? :insert : :update, via = :save, ids = Any[data[:id]],
                                         fields = only === nothing ? nothing : collect(only), instances = [obj])
     store_uploaded_files!(obj, data)
@@ -280,7 +289,7 @@ Base.@nospecializeinfer function save_here!(@nospecialize(obj::Model), only::Uni
     end
     refresh_computed!(obj)
     refresh_expression_fields!(obj, exprs)
-    has_receivers(post_save, T) && send(post_save, T; instance = obj, created = created, update_fields = only, raw = SAVE_RAW[])
+    has_receivers(post_save, T) && send(post_save, T; instance = obj, created = created, update_fields = only, raw = SAVE_RAW[], database = current_alias())
     has_receivers(post_write, T) && send(post_write, T; action = created ? :insert : :update, via = :save, ids = Any[obj.pk],
                                          fields = only === nothing ? nothing : collect(only), instances = [obj])
     obj

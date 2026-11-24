@@ -564,7 +564,7 @@ Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector
     end
     signal = has_receivers(pre_delete, T) || has_receivers(post_delete, T)
     doomed = signal ? fetch(filter(base_objects(T); id__in = ids)) : T[]
-    foreach(o -> send(pre_delete, T; instance = o, origin = DELETE_ORIGIN[]), doomed)
+    foreach(o -> send(pre_delete, T; instance = o, origin = DELETE_ORIGIN[], database = current_alias()), doomed)
     isempty(ids) || !has_receivers(pre_write, T) ||
         send(pre_write, T; action = :delete, via = :delete, ids = collect(Any, ids), fields = nothing, instances = nothing)
     n = 0
@@ -572,7 +572,7 @@ Base.@nospecializeinfer function delete_ids!(@nospecialize(T::Type), ids::Vector
         n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE $(qname(natural_pk(T) ? column(pk_fields(T)[1]) : "id")) IN (" *
                              join(fill("?", length(chunk)), ",") * ")", collect(chunk))
     end
-    foreach(o -> send(post_delete, T; instance = o, origin = DELETE_ORIGIN[]), doomed)
+    foreach(o -> send(post_delete, T; instance = o, origin = DELETE_ORIGIN[], database = current_alias()), doomed)
     n > 0 && has_receivers(post_write, T) && send(post_write, T; action = :delete, via = :delete, ids = collect(Any, ids), fields = nothing, instances = nothing)
     P = table_parent(T)
     P === nothing || delete_ids!(P, ids)     # the parent rows these rows extend
@@ -586,7 +586,7 @@ Base.@nospecializeinfer row_keys(@nospecialize(qs::QuerySet)) = is_composite(mod
 Base.@nospecializeinfer function delete_composite!(@nospecialize(T::Type), keys::Vector)
     signal = has_receivers(pre_delete, T) || has_receivers(post_delete, T)
     doomed = signal ? fetch(filter(base_objects(T); pk__in = keys)) : T[]
-    foreach(o -> send(pre_delete, T; instance = o, origin = DELETE_ORIGIN[]), doomed)
+    foreach(o -> send(pre_delete, T; instance = o, origin = DELETE_ORIGIN[], database = current_alias()), doomed)
     isempty(keys) || !has_receivers(pre_write, T) ||
         send(pre_write, T; action = :delete, via = :delete, ids = collect(Any, keys), fields = nothing, instances = nothing)
     cond = join([qname(column(f)) * " = ?" for f in pk_fields(T)], " AND ")
@@ -594,7 +594,7 @@ Base.@nospecializeinfer function delete_composite!(@nospecialize(T::Type), keys:
     for k in keys
         n += execute_changes("DELETE FROM $(qname(modelmeta(T).table)) WHERE $cond", pk_parts(k))
     end
-    foreach(o -> send(post_delete, T; instance = o, origin = DELETE_ORIGIN[]), doomed)
+    foreach(o -> send(post_delete, T; instance = o, origin = DELETE_ORIGIN[], database = current_alias()), doomed)
     n > 0 && has_receivers(post_write, T) && send(post_write, T; action = :delete, via = :delete, ids = collect(Any, keys), fields = nothing, instances = nothing)
     n
 end

@@ -191,6 +191,16 @@ Read objects written by `serialize` (or Django's `dumpdata`). Nothing is saved u
 call `save!` on each.
 """
 function deserialize(format::Symbol, data::AbstractString; ignorenonexistent::Union{Nothing,Bool} = nothing)
+    out = DeserializedObject[]
+    for d in serial_items(format, data; ignorenonexistent)
+        o = deserialize_one(d; ignorenonexistent)
+        o === nothing || push!(out, o)
+    end
+    out
+end
+# The objects' dicts of a fixture (deserialize_one makes each an object: loaddata saves each before reading the next,
+# so a natural key may name an object earlier in the file, as Django's lazy deserializer)
+function serial_items(format::Symbol, data::AbstractString; ignorenonexistent::Union{Nothing,Bool} = nothing)
     items = try
             format === :json ? JSON.parse(data) :
             format === :jsonl ? [JSON.parse(l) for l in split(data, '\n') if !isempty(strip(l))] :
@@ -203,12 +213,7 @@ function deserialize(format::Symbol, data::AbstractString; ignorenonexistent::Un
         throw(DeserializationError("not valid $format: $(sprint(showerror, e))"))
     end
     items isa AbstractVector || throw(DeserializationError("a fixture is a list of objects"))
-    out = DeserializedObject[]
-    for d in items
-        o = deserialize_one(d; ignorenonexistent)
-        o === nothing || push!(out, o)
-    end
-    out
+    items
 end
 
 """
@@ -227,10 +232,10 @@ function save!(d::DeserializedObject)
     else
         heard = has_receivers(pre_save, T) || has_receivers(post_save, T)
         created = heard && !is_composite(T) && !exists(filter(base_objects(T); id = data[:id]))
-        heard && send(pre_save, T; instance = obj, created = created, update_fields = nothing, raw = true)
+        heard && send(pre_save, T; instance = obj, created = created, update_fields = nothing, raw = true, database = current_alias())
         chain_ = reverse(vcat([concrete_model(T)], ancestors(T)))
         foreach(M -> save_table!(M, data, M === chain_[1], false), chain_)
-        heard && send(post_save, T; instance = obj, created = created, update_fields = nothing, raw = true)
+        heard && send(post_save, T; instance = obj, created = created, update_fields = nothing, raw = true, database = current_alias())
     end
     for (name, ids) in d.m2m
         set!(getproperty(obj, name), ids)
@@ -330,8 +335,11 @@ Serialize every object of the given apps or `\"app.Model\"`s (all apps when none
 referenced models first. With `output`, also writes the file. `primary_keys` (one model only)
 dumps just those objects (Django's `--pks`).
 """
-function dumpdata(labels::AbstractString...; format = :json, indent = nothing, exclude = String[],
-                  natural_foreign = false, natural_primary = false, output = nothing, primary_keys = nothing)
+function dumpdata(labels::AbstractString...; database = nothing, kw...)
+    with_db(() -> dumpdata_here(labels...; kw...), database)
+end
+function dumpdata_here(labels::AbstractString...; format = :json, indent = nothing, exclude = String[],
+                       natural_foreign = false, natural_primary = false, output = nothing, primary_keys = nothing)
     primary_keys === nothing || (length(labels) == 1 && occursin('.', labels[1])) ||
         throw(ArgumentError("You can only use primary_keys with one model (\"app.Model\")"))
     models = isempty(labels) ?
@@ -339,6 +347,9 @@ function dumpdata(labels::AbstractString...; format = :json, indent = nothing, e
         unique(vcat([dump_models(l) for l in labels]...))
     excl = Set(string.(exclude))
     filter!(T -> !(modelmeta(T).app in excl || model_label(T) in excl || serial_label(T) in excl), models)
+    # (only the models the routers keep on this database, as Django's allow_migrate_model)
+    db = current_alias()
+    filter!(T -> migrate_allowed(db, modelmeta(T).app; model = T), models)
     objs = Any[]
     for T in dependency_order(models)
         qs = order_by(base_objects(T), "pk")
@@ -353,12 +364,14 @@ end
 "Where `loaddata` looks for fixture files: FIXTURE_DIRS, then each installed app's `fixtures/`."
 fixture_dirs() = vcat(String[abspath(string(d)) for d in get(settings, :FIXTURE_DIRS, String[])], app_dirs("fixtures"))
 
-function find_fixture(name::AbstractString)
+function find_fixture(name::AbstractString, db::AbstractString = current_alias())
     isfile(name) && return [abspath(name)]
     exts = (".json", ".jsonl", ".yaml", ".yml", ".xml")
     found = String[]
+    # name.json, or name.<database>.json for the database loaded into only (Django's database-specific fixtures)
+    cands = any(e -> endswith(name, e), exts) ? [name] : vcat([name * e for e in exts], [name * "." * db * e for e in exts])
     for dir in fixture_dirs()
-        here = [joinpath(dir, c) for c in (any(e -> endswith(name, e), exts) ? [name] : [name * e for e in exts]) if isfile(joinpath(dir, c))]
+        here = [joinpath(dir, c) for c in cands if isfile(joinpath(dir, c))]
         # one name in two formats in one directory: ambiguous (Django's CommandError)
         length(here) > 1 && throw(ArgumentError("Multiple fixtures named '$name' in '$dir'. Aborting."))
         append!(found, here)
@@ -383,9 +396,18 @@ fixture names that don't exist (Django's `--ignorenonexistent`), `false` refuses
 skipped and an unknown model refused. Objects with a primary key replace the row with
 that key. `exclude` skips apps or `"app.Model"`s (Django's `--exclude`). On PostgreSQL the id sequences of
 the models loaded move past the loaded ids, so new objects don't collide with them.
+`database` loads into that database (else the current one), with `name.<database>.json` files too, and only
+the objects of models the routers' `allow_migrate` keeps there (Django's `--database`).
 """
-function loaddata(names::AbstractString...; exclude = String[], ignorenonexistent::Union{Nothing,Bool} = nothing)
-    n = 0
+loaddata(names::AbstractString...; kw...) = loaddata_counts(names...; kw...)[1]
+
+# loaddata's (objects loaded, objects in the fixtures, fixture files)
+function loaddata_counts(names::AbstractString...; database = nothing, kw...)
+    with_db(() -> loaddata_here(names...; kw...), database)
+end
+function loaddata_here(names::AbstractString...; exclude = String[], ignorenonexistent::Union{Nothing,Bool} = nothing)
+    n = total = files = 0
+    db = current_alias()
     excl = Set(lowercase.(string.(exclude)))
     loaded = Set{Any}()
     mysql = backend() isa MySQLBackend
@@ -394,13 +416,18 @@ function loaddata(names::AbstractString...; exclude = String[], ignorenonexisten
             # MySQL can't defer key checks to the commit: off while loading (forward references), then checked, as Django's
             mysql && execute("SET FOREIGN_KEY_CHECKS = 0")
             try
-                for name in names, f in find_fixture(name)
-                    objs = deserialize(fixture_format(f), read(f, String); ignorenonexistent)
-                    # (as Django's: a fixture with no objects is a warning, not an error)
-                    isempty(objs) && @warn "No fixture data found for '$(first(splitext(basename(f))))'. (File format may be invalid.)"
-                    for d in objs
+                for name in names, f in find_fixture(name, db)
+                    files += 1
+                    items = serial_items(fixture_format(f), read(f, String); ignorenonexistent)
+                    here = 0
+                    for item in items
+                        d = deserialize_one(item; ignorenonexistent)
+                        d === nothing && continue
+                        here += 1
                         T = typeof(d.object)
                         (lowercase(modelmeta(T).app) in excl || serial_label(T) in excl) && continue
+                        total += 1
+                        migrate_allowed(db, modelmeta(T).app; model = T) || continue
                         try
                             save!(d)
                         catch e
@@ -411,6 +438,8 @@ function loaddata(names::AbstractString...; exclude = String[], ignorenonexisten
                         push!(loaded, concrete_model(T)); foreach(A -> push!(loaded, A), ancestors(T))
                         n += 1
                     end
+                    # (as Django's: a fixture with no objects is a warning, not an error)
+                    here == 0 && @warn "No fixture data found for '$(first(splitext(basename(f))))'. (File format may be invalid.)"
                 end
                 mysql && check_foreign_keys(collect(loaded))
             finally
@@ -423,7 +452,7 @@ function loaddata(names::AbstractString...; exclude = String[], ignorenonexisten
         e isa IntegrityError && !startswith(e.msg, "Problem installing") && throw(IntegrityError("Problem installing fixtures: $(e.msg)"))
         rethrow()
     end
-    n
+    (n, total, files)
 end
 
 """

@@ -76,8 +76,22 @@ using_db(qs::QuerySet, alias) = chain(qs; db = string(alias))
 Base.@nospecializeinfer using_db(@nospecialize(T::Type{<:Model}), alias) = using_db(objects(T), alias)
 using_db(alias::Union{AbstractString,Symbol}) = qs -> using_db(qs, alias)
 
-"The database a queryset runs on (`nothing`: the current one)."
-Base.@nospecializeinfer query_db(@nospecialize(qs::QuerySet), write::Bool = false) = qs.db !== nothing ? qs.db : routed_db(model_of(qs), write)
+# The database a queryset runs on (`nothing`: the current one). A relation's queryset (reporter.article) is on its
+# owner's database, unless routers decide, told the owner (Django's instance hint, whose fallback is that database).
+Base.@nospecializeinfer function query_db(@nospecialize(qs::QuerySet), write::Bool = false)
+    qs.db === nothing && return routed_db(model_of(qs), write)
+    (isempty(routers()) || db_pinned()) && return qs.db
+    inst = rel_instance(qs)
+    inst === nothing && return qs.db
+    write ? route_write(model_of(qs); instance = inst) : route_read(model_of(qs); instance = inst)
+end
+# The object whose relation this queryset is, while it's on that object's database (not another one named by using_db)
+function rel_instance(@nospecialize(qs::QuerySet))
+    o = qs.owner
+    (o === nothing || !hasproperty(o, :instance)) && return nothing
+    inst = o.instance
+    inst isa Model && instance_db(inst) == qs.db ? inst : nothing
+end
 "Run `f()` on the queryset's database."
 Base.@nospecializeinfer in_db(f, @nospecialize(qs::QuerySet), write::Bool = false) = with_db(f, query_db(qs, write))
 

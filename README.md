@@ -890,7 +890,13 @@ Juango.allow_migrate(::PrimaryReplica, db, app_label; model = nothing) = db == "
 configure!(DATABASE_ROUTERS = [PrimaryReplica()])
 ```
 
-An explicit database (`using_db`, `db = ...`) beats a `using_db` block, which beats the object's own database, which beats the routers. Where `allow_migrate` says no, `migrate` records an app's migrations without running them.
+A router that needs the object at hand defines the three-argument form, as Django's hints: `hints` is `(instance = obj,)` when an object is saved or deleted, when an unsaved object is related to a saved one, and for a relation's queryset (`post.comments`: the post), else empty:
+
+```julia
+Juango.db_for_write(::Sharding, T, hints) = haskey(hints, :instance) ? shard_of(hints.instance) : nothing
+```
+
+An explicit database (`using_db`, `db = ...`) beats a `using_db` block, which beats the routers, which beat the object's own database: with a router, `save!` of an object read from the replica writes to the router's database, as Django's. Without one, objects stay on their database, and relations use their object's. `allow_relation` is asked for every relation assigned (`false` refuses it, even between unsaved objects); with no opinion, objects of two databases are refused. Where `allow_migrate` says no, `migrate` records an app's migrations without running them, and `loaddata`/`dumpdata(database = ...)` skip that model's objects (`name.<database>.json` fixtures load into that database only). The model signals name the database as `database` (Django's `using`).
 
 #### PostgreSQL
 

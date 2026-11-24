@@ -983,8 +983,9 @@ model's Meta.ordering would otherwise add columns under DISTINCT (#186). A `valu
 query selects only its named columns, even when it has other annotations (they still filter).
 """
 function subquery_sql(c::SQLCompiler, qs::QuerySet; columns = nothing, idonly = false)
-    # a queryset of another database can't be a subquery here (Django's message)
-    qs.db === nothing || qs.db == current_alias() ||
+    # a queryset of another database can't be a subquery here (Django's message); a relation's queryset that routers
+    # place (its owner's database only a hint, as Django's) follows the outer query
+    qs.db === nothing || qs.db == current_alias() || (!isempty(routers()) && rel_instance(qs) !== nothing) ||
         throw(ArgumentError("Subqueries aren't allowed across different databases. Force the inner query to be evaluated using `list(inner_query)`."))
     unsliced = qs.limit === nothing && qs.offset == 0
     keep_order = !unsliced || (qs.distinct_fields !== nothing && !isempty(qs.distinct_fields))

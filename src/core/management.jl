@@ -481,15 +481,15 @@ function cmd_makemigrations(args)
     paths
 end
 
-# dumpdata [app[.Model] ...] [--indent N] [--format json|jsonl|yaml|xml] [--exclude a,b] [--natural-foreign] [--natural-primary] [--output FILE]
+# dumpdata [app[.Model] ...] [--indent N] [--format json|jsonl|yaml|xml] [--exclude a,b] [--natural-foreign] [--natural-primary] [--output FILE] [--database DB]
 function cmd_dumpdata(args)
     pos, flags = parse_flags(args)
     ind = get(flags, "indent", nothing)
     s = dumpdata(pos...; format = haskey(flags, "format") ? Symbol(flags["format"]) : haskey(flags, "output") ? fixture_format(flags["output"]) : :json, indent = ind === nothing ? nothing : parse(Int, ind),
                  exclude = haskey(flags, "exclude") ? split(flags["exclude"], ',') : String[],
                  natural_foreign = haskey(flags, "natural-foreign"), natural_primary = haskey(flags, "natural-primary"),
-                 output = get(flags, "output", nothing))
-    haskey(flags, "output") || print(s)
+                 output = get(flags, "output", nothing), database = get(flags, "database", nothing))
+    haskey(flags, "output") || print(cmd_stdout(), s)
 end
 
 # flush [--noinput]
@@ -618,12 +618,12 @@ function print_coverage(lcov::AbstractString; io = stdout, root = pwd())
     println(io, "(the full report is coverage/lcov.info: open it with an LCOV viewer, or `genhtml coverage/lcov.info -o coverage/html`)")
 end
 
-# loaddata fixture [fixture ...]
+# loaddata fixture [fixture ...] [--database DB]
 function cmd_loaddata(args)
-    pos, _ = parse_flags(args)
+    pos, flags = parse_flags(args)
     isempty(pos) && error("usage: loaddata <fixture> [fixture ...]")
-    n = loaddata(pos...)
-    println("Installed $n object(s) from $(length(pos)) fixture(s)")
+    n, total, files = loaddata_counts(pos...; database = get(flags, "database", nothing))
+    println(cmd_stdout(), n == total ? "Installed $n object(s) from $files fixture(s)" : "Installed $n object(s) (of $total) from $files fixture(s)")
 end
 
 # optimizemigration app name [--check]
@@ -705,8 +705,8 @@ for (n, h, f) in (
     ("dbshell", "Open the database's command-line client", _ -> run(dbshell_cmd())),
     ("inspectdb", "Write models for existing tables: inspectdb [table ...]", args -> print(inspectdb(isempty(first(parse_flags(args))) ? nothing : first(parse_flags(args))))),
     ("test", "Run the project's tests against a throwaway test database: test [--keepdb] [--failfast] [--reverse] [--shuffle[=SEED]] [-k PATTERN] [file ...]", cmd_test),
-    ("dumpdata", "Write the database's objects as a fixture: dumpdata [app[.Model] ...] [--format json|jsonl|yaml|xml] [--indent N] [--output FILE]", cmd_dumpdata),
-    ("loaddata", "Load fixtures: loaddata <name or file> ...", cmd_loaddata),
+    ("dumpdata", "Write the database's objects as a fixture: dumpdata [app[.Model] ...] [--format json|jsonl|yaml|xml] [--indent N] [--output FILE] [--database DB]", cmd_dumpdata),
+    ("loaddata", "Load fixtures: loaddata <name or file> ... [--database DB]", cmd_loaddata),
     ("squashmigrations", "Combine migrations into one: squashmigrations <app> [start] <stop> [--name NAME]", cmd_squashmigrations),
     ("createsuperuser", "Create an admin user (--username, --email, --password, --noinput)", cmd_createsuperuser),
     ("showurls", "List all URL patterns", cmd_showurls),

@@ -100,16 +100,16 @@ function send_robust(sig::Signal, sender; kw...)
     out
 end
 
-"Before `save!` writes an object: `instance`, `created` (no id yet)."
+"Before `save!` writes an object: `instance`, `created` (no id yet), `database` (the alias written to; Django's `using`)."
 const pre_save = Signal("pre_save")
-"After `save!`: `instance`, `created`."
+"After `save!`: `instance`, `created`, `database`."
 const post_save = Signal("post_save")
 """
 Before an object is deleted (also for cascaded deletes): `instance`, and `origin`: the object or
-queryset whose `delete!` started the deletion.
+queryset whose `delete!` started the deletion, and `database` (the alias; Django's `using`).
 """
 const pre_delete = Signal("pre_delete")
-"After an object is deleted: `instance`, `origin` (as `pre_delete`)."
+"After an object is deleted: `instance`, `origin`, `database` (as `pre_delete`)."
 const post_delete = Signal("post_delete")
 """
 After every write to a model's table, bulk ones included, which Django's signals miss: the one
@@ -135,7 +135,7 @@ const pre_write = Signal("pre_write")
 """
 A many-to-many relation changed: sender is the join model; `action` is `:pre_add`,
 `:post_add`, `:pre_remove`, `:post_remove`, `:pre_clear` or `:post_clear`; `instance`,
-`model` (the other side), `pk_set`, `reverse`.
+`model` (the other side), `pk_set`, `reverse`, `database` (the alias; Django's `using`).
 """
 const m2m_changed = Signal("m2m_changed")
 """
