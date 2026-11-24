@@ -1,10 +1,10 @@
-# Django's multiple_database tests, ported (#227): QueryTestCase (part).
+# Django's multiple_database tests, ported (#227): QueryTestCase (part) and RouterTestCase (part).
 # julia --project=test test/django_multiple_database.jl   (see setup.jl)
 #
 # The "other" database is an SQLite file next to the default one (any backend). Juango's errors for objects of
 # two databases are ArgumentErrors; the messages are compared where Juango's say the same thing.
-# Not translated: test_refresh_router_instance_hint (Mock), test_db_selection's db_manager, the
-# router, signal and fixture classes (later), and the pickling test.
+# Juango's routers get the model, not Django's hints (instance=...). Not translated: test_refresh_router_instance_hint
+# (Mock), db_manager, the signal and fixture classes (later), and the pickling test.
 @isdefined(TEST_SETUP_DONE) || include("setup.jl")
 using Dates
 
@@ -191,5 +191,75 @@ dmd_titles(qs) = collect(values_list(qs, :title; flat = true))
     create(mark.edited; title = "Dive into Water", published = Date(2009, 5, 4))
     get_or_create(mark.edited; title = "Dive into Water", published = Date(2009, 5, 4))
     @test count(filter(using_db(B, "other"); title__in = ["Dive into Python 2", "Dive into Water"])) == 2
+  end
+end
+
+# --- routers.py ---------------------------------------------------------------------------------------------------
+"Vaguely like primary/replica: reads from other, writes to default (the databases don't propagate changes)."
+struct DmdTestRouter end
+Juango.db_for_read(::DmdTestRouter, T) = "other"
+Juango.db_for_write(::DmdTestRouter, T) = "default"
+Juango.allow_relation(::DmdTestRouter, a, b) = true
+Juango.allow_migrate(::DmdTestRouter, db, app; model = nothing) = true
+"Every operation on auth's models: reads from default, writes to other, migrations only on other."
+struct DmdAuthRouter end
+Juango.db_for_read(::DmdAuthRouter, T) = Juango.modelmeta(T).app == "auth" ? "default" : nothing
+Juango.db_for_write(::DmdAuthRouter, T) = Juango.modelmeta(T).app == "auth" ? "other" : nothing
+Juango.allow_relation(::DmdAuthRouter, a, b) = Juango.modelmeta(typeof(a)).app == "auth" || Juango.modelmeta(typeof(b)).app == "auth" || nothing
+Juango.allow_migrate(::DmdAuthRouter, db, app; model = nothing) = app == "auth" ? db == "other" : nothing
+"An opinion on writes only."
+struct DmdWriteRouter end
+Juango.db_for_write(::DmdWriteRouter, T) = "writer"
+
+@testset "django multiple_database: RouterTestCase" begin
+  dmd_block() do
+    B, P = DmdBook, DmdPerson
+    app(T) = Juango.modelmeta(T).app
+    override_settings(DATABASE_ROUTERS = Any[DmdTestRouter()]) do
+        # test_migrate_selection
+        for d in ("default", "other"), T in (User, B)
+            @test Juango.migrate_allowed(d, app(T); model = T)
+        end
+        override_settings(DATABASE_ROUTERS = Any[DmdTestRouter(), DmdAuthRouter()]) do      # (TestRouter answers first)
+            @test Juango.migrate_allowed("default", app(User); model = User) && Juango.migrate_allowed("other", app(User); model = User)
+        end
+        override_settings(DATABASE_ROUTERS = Any[DmdAuthRouter(), DmdTestRouter()]) do
+            @test !Juango.migrate_allowed("default", app(User); model = User) && Juango.migrate_allowed("default", app(B); model = B)
+            @test Juango.migrate_allowed("other", app(User); model = User) && Juango.migrate_allowed("other", app(B); model = B)
+        end
+        # test_partial_router
+        dive = using_db(() -> create(B; title = "Dive into Python", published = Date(2009, 5, 4)), "other")
+        @test Juango.route_read(User) == "other" && Juango.route_read(B) == "other"
+        @test Juango.route_write(User) == "default" && Juango.route_write(B) == "default"
+        @test Juango.ask_routers(Juango.allow_relation, dive, dive) === true
+        override_settings(DATABASE_ROUTERS = Any[DmdWriteRouter(), DmdAuthRouter(), DmdTestRouter()]) do
+            @test Juango.route_read(User) == "default" && Juango.route_read(B) == "other"
+            @test Juango.route_write(User) == "writer" && Juango.route_write(B) == "writer"
+            @test !Juango.migrate_allowed("default", app(User); model = User) && Juango.migrate_allowed("default", app(B); model = B)
+        end
+        delete!(using_db(objects(B), "other"))
+        # test_db_selection / test_database_routing: reads go to other, writes (update, delete, get_or_create's get) to default
+        marty = using_db(() -> create(P; name = "Marty Alchin"), "default")
+        pro = using_db(() -> create(B; title = "Pro Django", published = Date(2008, 12, 16), editor = marty), "default")
+        set!(pro.authors, [marty])
+        using_db(() -> create(B; title = "Dive into Python", published = Date(2009, 5, 4)), "other")
+        update!(filter(B; title = "Pro Django"); pages = 200)
+        @test_throws Juango.DoesNotExist get(B; title = "Pro Django")                     # (read on other)
+        pro = get(using_db(B, "default"); title = "Pro Django")
+        @test pro.pages == 200
+        update!(filter(using_db(B, "other"); title = "Dive into Python"); pages = 300)
+        @test get(B; title = "Dive into Python").pages == 300
+        # related objects stay on the object's database, whatever the router says
+        @test collect(values_list(pro.authors, :name; flat = true)) == ["Marty Alchin"] && pro.editor.name == "Marty Alchin"
+        # get_or_create looks on the write database
+        book, created = get_or_create(B; title = "Pro Django")
+        @test !created
+        book, created = get_or_create(B; title = "Dive Into Python", defaults = Dict(:published => Date(2009, 5, 4)))
+        @test created
+        @test count(using_db(objects(B), "default")) == 2 && count(using_db(objects(B), "other")) == 1
+        @test count(objects(B)) == 1                                                           # (the read database)
+        delete!(filter(B; pages__gt = 150))                                                    # (on the write database)
+        @test count(using_db(objects(B), "default")) == 1 && count(using_db(objects(B), "other")) == 1
+    end
   end
 end

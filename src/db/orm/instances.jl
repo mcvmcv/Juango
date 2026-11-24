@@ -543,7 +543,11 @@ function create_or_find(make, find)
 end
 
 "`(obj, created::Bool)` — fetch by lookups or create with lookups + `defaults`."
-Base.@nospecializeinfer function get_or_create(@nospecialize(T::Type{<:Model}); defaults = Dict{Symbol,Any}(), kw...)
+# (both look on the write database, as Django's: a router's read database may not have the row yet)
+Base.@nospecializeinfer function get_or_create(@nospecialize(T::Type{<:Model}); kw...)
+    with_db(() -> get_or_create_here(T; kw...), routed_db(T, true))
+end
+Base.@nospecializeinfer function get_or_create_here(@nospecialize(T::Type{<:Model}); defaults = Dict{Symbol,Any}(), kw...)
     atomic() do
         o = first(filter(objects(T); kw...))
         o === nothing || return (o, false)
@@ -553,7 +557,10 @@ Base.@nospecializeinfer function get_or_create(@nospecialize(T::Type{<:Model}); 
 end
 
 "`(obj, created::Bool)` — update the object matching lookups with `defaults`, or create it."
-Base.@nospecializeinfer function update_or_create(@nospecialize(T::Type{<:Model}); defaults = Dict{Symbol,Any}(), create_defaults = nothing, kw...)
+Base.@nospecializeinfer function update_or_create(@nospecialize(T::Type{<:Model}); kw...)
+    with_db(() -> update_or_create_here(T; kw...), routed_db(T, true))
+end
+Base.@nospecializeinfer function update_or_create_here(@nospecialize(T::Type{<:Model}); defaults = Dict{Symbol,Any}(), create_defaults = nothing, kw...)
     atomic() do
         o = first(filter(objects(T); kw...))
         # create_defaults (Django 5.0): what a new object gets instead of defaults
