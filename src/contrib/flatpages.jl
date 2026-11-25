@@ -41,7 +41,7 @@ function get_absolute_url(p::FlatPage)
             e isa NoReverseMatch || rethrow()
         end
     end
-    iri_to_uri(p.url)
+    iri_to_uri(rstrip(get_script_prefix(), '/') * p.url)        # (under the script prefix, as Django's)
 end
 
 const FLATPAGES_APP = App("flatpages"; name = "juango.flatpages", verbose_name = "Flat Pages", ready = function ()
@@ -71,7 +71,7 @@ function render_flatpage(req::Request, url::AbstractString)
 end
 
 "The flat page view: `path(\"pages/<path:url>\", flatpage)` looks up `/<url>`."
-flatpage(req::Request; url = req.path, kw...) = (require_app("flatpages", "the flatpage view"); render_flatpage(req, url))
+flatpage(req::Request; url = req.path_info, kw...) = (require_app("flatpages", "the flatpage view"); render_flatpage(req, url))
 
 "URL patterns serving flat pages under a prefix: `path(\"pages/\", flatpage_urls())` serves `/pages/about/` from the page with url `/about/`."
 flatpage_urls() = include_urls([path("<path:url>", flatpage; name = "flatpage")])   # urls.jl may load before INSTALLED_APPS is set
@@ -85,7 +85,7 @@ function FlatpageFallbackMiddleware(get_response)
         resp = get_response(req)
         resp.status == 404 || return resp
         try
-            return render_flatpage(req, req.path)
+            return render_flatpage(req, req.path_info)
         catch e
             e isa Http404 || (settings.DEBUG && rethrow())
             return resp

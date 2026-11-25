@@ -300,6 +300,8 @@ function Base.getproperty(r::Request, s::Symbol)
     s === :htmx && return htmx_details(r)                 # contrib/htmx.jl
     s === :site && return get(getfield(r, :meta), :site, nothing)       # CurrentSiteMiddleware
     s === :urlconf && return get(getfield(r, :meta), :urlconf, nothing)  # a URLconf for this request (Django's request.urlconf)
+    s === :script_name && return request_script_name(r)
+    s === :path_info && return path_info(r)
     if s === :user
         u = getfield(r, :user)
         u isa LazyUser || return u
@@ -309,7 +311,34 @@ function Base.getproperty(r::Request, s::Symbol)
     end
     getfield(r, s)
 end
-Base.propertynames(r::Request, private::Bool = false) = (fieldnames(Request)..., :FILES, :htmx, :site, :urlconf)
+Base.propertynames(r::Request, private::Bool = false) = (fieldnames(Request)..., :FILES, :htmx, :site, :urlconf, :script_name, :path_info)
+
+"The sub-path the site is served under: FORCE_SCRIPT_NAME without its trailing slash (\"\" for none), as Django's get_script_name."
+script_name_setting() = (s = get(settings, :FORCE_SCRIPT_NAME, nothing); s === nothing ? "" : String(rstrip(string(s), '/')))
+request_script_name(r::Request) = get(getfield(r, :meta), :script_name, script_name_setting())
+"""
+    req.path_info
+
+The part of the path URLs are resolved against: `req.path` without the script name (FORCE_SCRIPT_NAME),
+as Django's. `req.path` is the whole path, for redirects and links.
+"""
+function path_info(r::Request)
+    p = getfield(r, :path)
+    s = request_script_name(r)
+    isempty(s) && return p
+    startswith(p, s) && (ncodeunits(p) == ncodeunits(s) || codeunit(p, ncodeunits(s) + 1) == UInt8('/')) || return p
+    rest = p[ncodeunits(s)+1:end]
+    isempty(rest) ? "/" : rest
+end
+"Give the request its script name: a path a proxy passed on without it gets it back, so `req.path` is the whole path."
+function apply_script_name!(r::Request)
+    s = script_name_setting()
+    getfield(r, :meta)[:script_name] = s
+    isempty(s) && return r
+    p = getfield(r, :path)
+    startswith(p, s) && (ncodeunits(p) == ncodeunits(s) || codeunit(p, ncodeunits(s) + 1) == UInt8('/')) || setfield!(r, :path, s * p)
+    r
+end
 Base.setproperty!(r::Request, s::Symbol, v) =
     s === :urlconf ? (getfield(r, :meta)[:urlconf] = v) : setfield!(r, s, convert(fieldtype(Request, s), v))
 

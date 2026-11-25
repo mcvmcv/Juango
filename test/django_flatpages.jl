@@ -126,5 +126,5 @@
         Juango.execute("DELETE FROM " * Juango.qname("juango_flatpage"))
     end
     # not translated: FlatPage.sites and the per-site lookups (#270), the CSRF tests (the view is a plain
-    # view in Juango too), the script prefix (Juango has no FORCE_SCRIPT_NAME)
+    # view in Juango too); the script prefix is in django_script_prefix.jl
 end

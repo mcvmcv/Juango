@@ -68,10 +68,10 @@ function dispatch(req::Request)
         if uc !== nothing
             r = URLCONF_REF[]
             r === nothing || (r[] = uc)
-            req.resolver_match = resolve(req.path, uc)
+            req.resolver_match = resolve(req.path_info, uc)
         end
         rm = req.resolver_match
-        rm === nothing && throw(Http404("No URL pattern matches '$(req.path)'"))
+        rm === nothing && throw(Http404("No URL pattern matches '$(req.path_info)'"))
         hooks = middleware_hooks()
         # process_view hooks, in MIDDLEWARE order: the first response one returns stands for the view's (Django's)
         early = nothing
@@ -211,6 +211,7 @@ Run a request through URL resolution, middleware and the view. This is what
 both the HTTP server and the test `Client` call.
 """
 function handle_request(req::Request)
+    apply_script_name!(req)
     delete!(task_local_storage(), :juango_template_error)    # a template failure noted for the debug page
     reset_queries!()                                          # (connection_queries(): this request's, as Django's)
     has_receivers(request_started, :handler) && send(request_started, :handler; request = req)
@@ -242,7 +243,7 @@ function handle_request_inner(req::Request)
         # in DEBUG, uploads are served as they are, unless a URL pattern of the project's takes the path
         # (protected_media(), a login check): its route wins, as Django's opt-in static() lets it (#226)
         if settings.DEBUG && !isempty(string(settings.MEDIA_ROOT)) && startswith(req.path, settings.MEDIA_URL) &&
-           resolve(req.path) === nothing
+           resolve(req.path_info) === nothing
             return serve_media(req)
         end
         if (settings.DEBUG || LIVE_SERVER_STATIC[]) && startswith(req.path, settings.STATIC_URL) && !isempty(static_dirs())
@@ -256,7 +257,7 @@ function handle_request_inner(req::Request)
         too_many_fields(req) && throw(BadRequest("The number of GET/POST parameters exceeded DATA_UPLOAD_MAX_NUMBER_FIELDS."))
         host_allowed(req) || (log!("juango.security.DisallowedHost", :warning, "Invalid HTTP_HOST header: '$(get_host(req))'"; request = req);
                               throw(BadRequest("Invalid HTTP_HOST header: '$(get_host(req))'. You may need to add it to ALLOWED_HOSTS.")))
-        req.resolver_match = resolve(req.path)
+        req.resolver_match = resolve(req.path_info)
         req.resolver_match === nothing || req.resolver_match.language === nothing ||
             (req.meta[:language_prefix] = req.resolver_match.language)
         resp = Base.ScopedValues.with(URLCONF_REF => Ref{Any}(nothing)) do

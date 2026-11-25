@@ -27,7 +27,7 @@ export Request, HttpResponse, JsonResponse, HttpResponseRedirect, HttpResponsePe
        set_expiry!, get_expiry_age, get_expiry_date, get_expire_at_browser_close, set_test_cookie!, test_cookie_worked, delete_test_cookie!
 export EventStreamResponse, sse_event, websocket, ws_send, ws_receive, ws_close, ws_isopen
 # urls
-export path, re_path, include_urls, reverse_url, reverse_lazy, resolve
+export path, re_path, include_urls, reverse_url, reverse_lazy, resolve, get_script_prefix, set_script_prefix, override_script_prefix
 # templates
 export Template, render_to_string, get_template, mark_safe, SafeString, escape_html, format_html, format_html_join, tattr, tattr!, instance_cache,
        register_filter!, register_tag!, TagLibrary, simple_tag!, inclusion_tag!, tag!, TemplateSyntaxError

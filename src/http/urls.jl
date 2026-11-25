@@ -842,6 +842,8 @@ function reverse_url(name, args...; urlconf = current_urlconf(), query = nothing
         occursin(entry_check(e), url) || continue                         # (the whole pattern matches it)
         url = join(path_quote.(split(url, '/')), '/')
         startswith(url, "//") && (url = "/%2F" * url[3:end])            # (not a scheme-relative URL: Django's escape_leading_slashes)
+        sp = get_script_prefix()
+        sp == "/" || (url = join(path_quote.(split(String(rstrip(sp, '/')), '/')), '/') * url)     # (under the script prefix)
         q = query_string(query)
         isempty(q) || (url *= "?" * q)
         fragment === nothing || (url *= "#" * fragment)
@@ -852,6 +854,27 @@ function reverse_url(name, args...; urlconf = current_urlconf(), query = nothing
              !isempty(kw) ? "keyword arguments '{" * join(["'$k': $(url_repr(v))" for (k, v) in kw], ", ") * "}'" : "no arguments"
     throw(NoReverseMatch("Reverse for '$shown_name' with $argmsg not found. $(length(tried)) pattern(s) tried: [" *
                          join(map(url_repr, tried), ", ") * "]"))
+end
+# --- the script prefix (Django's get_script_prefix / set_script_prefix) ---------------------------------------
+const SCRIPT_PREFIX = Ref{Union{Nothing,String}}(nothing)
+"""
+    get_script_prefix() -> String
+
+What reversed URLs start with: "/" for a site at the root, "/app/" under FORCE_SCRIPT_NAME = "/app" (or
+what `set_script_prefix` set), as Django's.
+"""
+get_script_prefix() = (p = SCRIPT_PREFIX[]; p !== nothing ? p : (s = script_name_setting(); s * "/"))
+"Set the script prefix (a trailing slash is added); `nothing` goes back to FORCE_SCRIPT_NAME's."
+set_script_prefix(p) = (SCRIPT_PREFIX[] = p === nothing ? nothing : (endswith(string(p), "/") ? string(p) : string(p) * "/"); nothing)
+"Run `f()` with the script prefix `prefix`, then put the previous one back (Django's override_script_prefix)."
+function override_script_prefix(f, prefix)
+    old = SCRIPT_PREFIX[]
+    set_script_prefix(prefix)
+    try
+        f()
+    finally
+        SCRIPT_PREFIX[] = old
+    end
 end
 "A reverse's query string: a Dict, NamedTuple, pairs or QueryDict (empty or nothing: none), as Django's."
 query_string(::Nothing) = ""

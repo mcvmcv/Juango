@@ -136,6 +136,6 @@ end
         issues = override_settings(Juango.settings_issues; (name => "foo",)...)
         @test any(x -> x[3] == "settings.E002" && occursin("$name must be a list", x[2]), issues)
     end
-    # not translated: MediaURLStaticURLPrefixTest (Juango has no script prefix, #292), TestComplexSettingOverride
+    # (MediaURLStaticURLPrefixTest is in django_script_prefix.jl.) Not translated: TestComplexSettingOverride
     # (Django warns when overriding ROOT_URLCONF-like settings in a decorator), the transaction test-case decorators
 end

@@ -200,7 +200,7 @@ function request(rf::RequestFactory, method::AbstractString, path::AbstractStrin
     req.user = AnonymousUser()
     req.session = Session()
     req.meta[:dont_enforce_csrf] = true
-    req.resolver_match = resolve(req.path)
+    req.resolver_match = resolve(req.path_info)
     req
 end
 Base.get(rf::RequestFactory, path::AbstractString; kw...) = request(rf, "GET", path; kw...)

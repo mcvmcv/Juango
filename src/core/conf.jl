@@ -32,6 +32,7 @@ function default_settings()
         :STATIC_ROOT => "",
         :TEMPLATE_DIRS => String[],
         :STATIC_URL => "/static/",
+        :FORCE_SCRIPT_NAME => nothing,                       # the sub-path the site is served under ("/app"), as Django's
         :STATIC_DIRS => String[],
         :EMAIL_BACKEND => :smtp,
         :EMAIL_HOST => "localhost",
@@ -370,6 +371,9 @@ function Base.getproperty(::SettingsProxy, k::Symbol)
     v = get(SETTINGS, k, NO_SETTING)
     # (as Django's: an empty SECRET_KEY is refused where it's read)
     k === :SECRET_KEY && v isa AbstractString && isempty(v) && throw(ImproperlyConfigured("The SECRET_KEY setting must not be empty."))
+    # a relative STATIC_URL or MEDIA_URL ("static/") is under the script prefix (Django's _add_script_prefix)
+    (k === :STATIC_URL || k === :MEDIA_URL) && v isa AbstractString && !isempty(v) && !startswith(v, "/") && !occursin("://", v) &&
+        return get_script_prefix() * v
     v === NO_SETTING || return v
     isempty(SETTINGS) && (merge!(SETTINGS, default_settings()); return getproperty(settings, k))
     d = get(DECLARED_SETTINGS, k, NO_SETTING)

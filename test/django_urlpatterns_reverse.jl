@@ -3,8 +3,8 @@
 # ReverseLazyTest, ReverseShortcutTests.
 # julia --project=test test/django_urlpatterns_reverse.jl   (see setup.jl)
 #
-# re_path's extra kwargs are keyword arguments here (Django's positional dict). Left out: override_script_prefix
-# (Juango has no script prefix), reversing by a dotted view path, ResolverMatch's repr, captured_kwargs and
+# re_path's extra kwargs are keyword arguments here (Django's positional dict). (override_script_prefix: django_script_prefix.jl.)
+# Left out: reversing by a dotted view path, ResolverMatch's repr, captured_kwargs and
 # extra_kwargs (its kwargs are merged), include()'s tuple forms and its refusal of a namespace without an app_name
 # (Juango's include_urls takes either), lazy reversing in settings, and Python-only details (pickling, partials).
 @isdefined(TEST_SETUP_DONE) || include("setup.jl")

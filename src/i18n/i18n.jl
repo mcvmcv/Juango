@@ -846,11 +846,11 @@ function LocaleMiddleware(get_response)
         prefixed = get(req.meta, :language_prefix, nothing) !== nothing
         if resp.status == 404 && !prefixed && uses_i18n_patterns()
             # (the language's prefix, and a missing slash under APPEND_SLASH, as Django's)
-            target = "/" * lang * req.path
+            target = "/" * lang * req.path_info
             ok = resolve(target) !== nothing
             !ok && settings.APPEND_SLASH && !endswith(target, "/") && resolve(target * "/") !== nothing && (target *= "/"; ok = true)
-            if ok
-                resp = HttpResponseRedirect(target * (isempty(req.query_string) ? "" : "?" * req.query_string))
+            if ok           # (under the script prefix, as Django's)
+                resp = HttpResponseRedirect(rstrip(get_script_prefix(), '/') * target * (isempty(req.query_string) ? "" : "?" * req.query_string))
                 patch_vary_headers!(resp, ("Accept-Language", "Cookie"))      # (the language came from these)
                 return resp
             end
