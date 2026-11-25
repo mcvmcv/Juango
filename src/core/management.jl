@@ -1070,7 +1070,16 @@ function collectstatic(; clear = false, verbose = false)
         cp(src, dst; force = true)
         verbose && println("  ", rel)
     end
-    manifest_storage() && post_process_manifest!(root, [replace(r, '\\' => '/') for r in seen])
+    if manifest_storage()
+        try
+            post_process_manifest!(root, [replace(r, '\\' => '/') for r in seen])
+        catch e
+            # (as Django's collectstatic: which files, then the error as the command's)
+            e isa PostProcessError || e isa MissingStaticReference || rethrow()
+            println(cmd_stderr(), "Post-processing '", e isa PostProcessError ? e.paths : e.name, "' failed!\n")
+            throw(CommandError(e.msg))
+        end
+    end
     get(SETTINGS, :STATIC_COMPRESS, true) === true && compress_static!(root)      # .gz copies for SERVE_STATIC (or nginx gzip_static)
     length(seen)
 end

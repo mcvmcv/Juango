@@ -28,53 +28,116 @@ function static_manifest()
     paths
 end
 
-"The name `{% static %}` serves for a path: hashed under manifest storage (unless DEBUG)."
+"The name `{% static %}` serves for a path: hashed under manifest storage (unless DEBUG); a directory (\"path/\") as it is."
 function stored_static_name(p::AbstractString)
     (manifest_storage() && !settings.DEBUG) || return p
     clean = first(split(p, r"[?#]"))
+    endswith(clean, "/") && return p
     suffix = p[ncodeunits(clean)+1:end]
     h = get(static_manifest(), clean, nothing)
-    h === nothing && throw(ImproperlyConfigured("missing staticfiles manifest entry for '$clean' (run collectstatic)"))
+    h === nothing && throw(ImproperlyConfigured("Missing staticfiles manifest entry for '$clean'"))
     h * suffix
 end
 
 hashed_name(name, content) = (parts = splitext(name); parts[1] * "." * bytes2hex(sha256(content))[1:12] * parts[2])
 
-const CSS_URL_RE = r"""(url\(\s*(['"]?)\s*)([^'")\s]+)(\s*\2\s*\))|(@import\s*(['"]))([^'"]+)(['"])"""
+# The references post-processing rewrites (Django's HashedFilesMixin.patterns): CSS url() (written back as
+# url("...")), @import "..." (as @import url("...")) and source maps, JS source maps; each skips what's inside a
+# comment or a string (Django's ignored blocks).
+const CSS_IGNORED_RE = r"/\*.*?\*/|\\.|'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\""s
+const JS_IGNORED_RE = r"/\*.*?\*/|//[^\n]*|\\.|'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\"|`(?:[^`\\]|\\.)*`"s
+const STATIC_PATTERNS = Dict(
+    ".css" => [(r"""(?<matched>url\((?<quote>['"]{0,1})\s*(?<url>.*?)\k<quote>\))"""i, "url(\"%s\")", CSS_IGNORED_RE),
+               (r"""(?<matched>@import\s*["']\s*(?<url>.*?)["'])"""i, "@import url(\"%s\")", CSS_IGNORED_RE),
+               (r"(?m)^(?<matched>/\*#[ \t](?-i:sourceMappingURL)=(?<url>.*?)[ \t]*\*/)$"i, "/*# sourceMappingURL=%s */", CSS_IGNORED_RE)],
+    ".js" => [(r"(?m)^(?<matched>//# (?-i:sourceMappingURL)=(?<url>.*?))[ \t]*$"i, "//# sourceMappingURL=%s", JS_IGNORED_RE)])
+adjustable(name) = haskey(STATIC_PATTERNS, lowercase(splitext(name)[2]))
 
-"Rewrite a CSS file's references to other static files with their hashed names."
-function rewrite_css(content::String, name::String, hashed::Dict{String,String})
-    dir = dirname(name)
-    replace(content, CSS_URL_RE => function (m)
-        mm = match(CSS_URL_RE, m)
-        pre, ref, post = mm[1] !== nothing ? (mm[1], mm[3], mm[4]) : (mm[5], mm[7], mm[8])
-        (startswith(ref, "data:") || startswith(ref, "#") || occursin(r"^[a-z]+:|^//"i, ref)) && return m
-        target, frag = (i = findfirst(r"[?#]", ref); i === nothing ? (ref, "") : (ref[1:first(i)-1], ref[first(i):end]))
-        abs_ = startswith(target, "/") ? lstrip(replace(target, settings.STATIC_URL => "/"; count = 1), '/') :
-                                          normpath(joinpath(dir, target))
-        abs_ = replace(abs_, '\\' => '/')
-        h = get(hashed, abs_, nothing)
-        h === nothing && return m
-        newref = startswith(target, "/") ? settings.STATIC_URL * h : relpath(h, isempty(dir) ? "." : dir)
-        pre * replace(newref, '\\' => '/') * frag * post
-    end)
+"A reference post-processing couldn't follow: the file isn't among the collected ones."
+struct MissingStaticReference <: Exception
+    name::String
+    msg::String
 end
+Base.showerror(io::IO, e::MissingStaticReference) = print(io, e.msg)
 
-"Add hashed copies of the collected files in `root` and write the manifest (called by `collectstatic`)."
+"""
+Rewrite a file's references to other static files with their hashed names, as Django's url_converter: the
+path as written with the last part hashed, the fragment kept; URLs, data: and other schemes, #fragments, and
+absolute paths outside STATIC_URL are left alone. `lookup(target)` gives a collected file's hashed name, or
+`nothing` when there's no such file.
+"""
+function rewrite_static(content::String, name::String, lookup; strict::Bool = false)
+    ext = lowercase(splitext(name)[2])
+    dir = dirname(name)
+    for (rx, template, ignored) in get(STATIC_PATTERNS, ext, Any[])
+        blocks = [(m.offset, m.offset + ncodeunits(m.match)) for m in eachmatch(ignored, content)]
+        in_block(pos) = any(b -> b[1] < pos < b[2], blocks)
+        out = IOBuffer()
+        last = 1
+        for m in eachmatch(rx, content)
+            matched, url = m[:matched], m[:url]
+            print(out, SubString(content, last, prevind(content, m.offset)))
+            last = m.offset + ncodeunits(m.match)
+            keep() = print(out, m.match)
+            if in_block(m.offset) || occursin(r"^[a-z]+:"i, url) || startswith(url, "//") || startswith(url, "#") ||
+               (startswith(url, "/") && !startswith(url, settings.STATIC_URL))
+                keep(); continue
+            end
+            i = findfirst('#', url)
+            url_path, fragment = i === nothing ? (url, "") : (url[1:prevind(url, i)], url[nextind(url, i):end])
+            isempty(url_path) && (keep(); continue)
+            qi = findfirst('?', url_path)
+            path_only, query = qi === nothing ? (url_path, "") : (url_path[1:prevind(url_path, qi)], url_path[qi:end])
+            query == "?" && occursin("?#", url) && (query = "")        # ("font.eot?#iefix": the ?# is put back below)
+            target = startswith(path_only, "/") ? path_only[ncodeunits(settings.STATIC_URL)+1:end] :
+                     replace(normpath(joinpath(isempty(dir) ? "." : dir, URIs.unescapeuri(path_only))), '\\' => '/')
+            h = lookup(target)
+            if h === nothing
+                strict && throw(MissingStaticReference(name, "The file '$target' could not be found ('$name' contains this reference '$matched')."))
+                @warn "collectstatic: '$name' refers to '$target', which isn't a static file; left as it is."
+                keep(); continue
+            end
+            parts = split(path_only, '/')
+            parts[end] = basename(h)
+            t = join(parts, '/') * query
+            isempty(fragment) || (t *= (occursin("?#", url) ? "?#" : "#") * fragment)
+            print(out, replace(m.match, matched => replace(template, "%s" => t)))
+        end
+        print(out, SubString(content, last))
+        content = String(take!(out))
+    end
+    content
+end
+"Kept for callers of the CSS-only version: CSS references rewritten from a name => hashed name map."
+rewrite_css(content::String, name::String, hashed::Dict{String,String}) = rewrite_static(content, name, t -> get(hashed, t, nothing))
+
+"""
+Add hashed copies of the collected files in `root` and write the manifest (called by `collectstatic`), as
+Django's ManifestStaticFilesStorage: other files are hashed as they are; CSS and JS have their references
+rewritten first, in passes until the names settle (`STATICFILES_MAX_POST_PROCESS_PASSES`, 5: more is an
+error, a reference loop). `STATICFILES_STRICT_REFERENCES = true` makes a reference to a missing file an
+error, as Django's; by default it's left as it is, with a warning.
+"""
 function post_process_manifest!(root::AbstractString, names::Vector{String})
     hashed = Dict{String,String}()
-    css = sort([n for n in names if endswith(lowercase(n), ".css")])
+    strict = get(settings, :STATICFILES_STRICT_REFERENCES, false) === true
+    adj = sort([n for n in names if adjustable(n)])
+    nameset = Set(names)
     for n in names
-        endswith(lowercase(n), ".css") && continue
+        adjustable(n) && continue
         h = hashed_name(n, read(joinpath(root, n)))
         cp(joinpath(root, n), joinpath(root, h); force = true)
         hashed[n] = h
     end
-    # CSS refers to other files (CSS too): rewrite and hash until the names settle
-    for _ in 1:5
+    # (a file not hashed yet: its name from what it holds now; the next pass corrects it)
+    lookup(t) = haskey(hashed, t) ? hashed[t] : t in nameset || isfile(joinpath(root, t)) ? hashed_name(t, read(joinpath(root, t))) : nothing
+    settled = false
+    unresolved = String[]
+    for _ in 1:get(settings, :STATICFILES_MAX_POST_PROCESS_PASSES, 5)
         changed = false
-        for n in css
-            content = rewrite_css(read(joinpath(root, n), String), n, hashed)
+        unresolved = String[]
+        for n in adj
+            content = rewrite_static(read(joinpath(root, n), String), n, lookup; strict = strict)
             h = hashed_name(n, codeunits(content))
             if get(hashed, n, nothing) != h
                 old = get(hashed, n, nothing)
@@ -82,14 +145,22 @@ function post_process_manifest!(root::AbstractString, names::Vector{String})
                 write(joinpath(root, h), content)
                 hashed[n] = h
                 changed = true
+                push!(unresolved, n)
             end
         end
-        changed || break
+        changed || (settled = true; break)
     end
+    settled || throw(PostProcessError(join(sort(unresolved), ", "), "Max post-process passes exceeded."))
     write(joinpath(root, MANIFEST_NAME), JSON.json(Dict("paths" => hashed, "version" => "1.1")))
     MANIFEST_CACHE[] = nothing
     hashed
 end
+"A failure post-processing these files (Django's \"Post-processing '...' failed!\")."
+struct PostProcessError <: Exception
+    paths::String
+    msg::String
+end
+Base.showerror(io::IO, e::PostProcessError) = print(io, e.msg)
 
 # --- serving STATIC_ROOT in production (WhiteNoise built in) -----------------------------------------
 #

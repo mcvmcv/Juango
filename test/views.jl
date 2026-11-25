@@ -888,7 +888,7 @@ end
         @test haskey(paths, "juango/htmx.min.js")
         @test occursin(r"^img/logo\.[0-9a-f]{12}\.png$", logo) && isfile(joinpath(root, logo)) && isfile(joinpath(root, "img", "logo.png"))
         css = read(joinpath(root, site), String)
-        @test occursin("url(\"../" * logo * "\")", css) && occursin("@import \"" * basename(base) * "\"", css)
+        @test occursin("url(\"../" * logo * "\")", css) && occursin("@import url(\"" * basename(base) * "\")", css)
         @test occursin("url(data:image/png;base64,AAA)", css)                 # left alone
         override_settings(DEBUG = false) do
             @test Juango.static_url("css/site.css") == "/static/" * site

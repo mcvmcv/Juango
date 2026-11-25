@@ -32,7 +32,9 @@ function default_settings()
         :STATIC_ROOT => "",
         :TEMPLATE_DIRS => String[],
         :STATIC_URL => "/static/",
-        :FORCE_SCRIPT_NAME => nothing,                       # the sub-path the site is served under ("/app"), as Django's
+        :FORCE_SCRIPT_NAME => nothing,
+        :STATICFILES_STRICT_REFERENCES => false,             # collectstatic: a CSS/JS reference to a missing file is an error (Django's behaviour, #293)
+        :STATICFILES_MAX_POST_PROCESS_PASSES => 5,                       # the sub-path the site is served under ("/app"), as Django's
         :STATIC_DIRS => String[],
         :EMAIL_BACKEND => :smtp,
         :EMAIL_HOST => "localhost",
