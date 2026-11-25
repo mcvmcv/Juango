@@ -544,11 +544,11 @@ function login_required(view; login_url = nothing, redirect_field_name = "next")
 end
 
 "Like `login_required`, but also requires `is_staff`."
-function staff_member_required(view; login_url = nothing)
+function staff_member_required(view; login_url = nothing, redirect_field_name = "next")
     w = function (req; kw...)
         u = req.user
         (is_authenticated(u) && u.is_staff && u.is_active) ||
-            return redirect_to_login(req, something(login_url, reverse_url("admin:login")))
+            return redirect_to_login(req, something(login_url, reverse_url("admin:login")); redirect_field_name = redirect_field_name)
         view(req; kw...)
     end
     propagate_flags!(w, view)

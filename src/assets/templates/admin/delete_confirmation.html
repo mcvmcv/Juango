@@ -1,15 +1,15 @@
 {% extends "admin/base.html" %}
-{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a> › <a href="{% url 'admin:app_list' app=opts.app_label %}">{{ opts.app_name }}</a> › <a href="{% url 'admin:changelist' app=opts.app_label model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › <a href="{% url 'admin:change' app=opts.app_label model=opts.slug id=object.admin_pk %}">{{ object }}</a> › Delete</div>{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a> › <a href="{% url 'admin:app_list' app=opts.app_label %}">{{ opts.app_name }}</a> › <a href="{% url 'admin:changelist' app=opts.app_label model=opts.slug %}">{{ opts.verbose_name_plural|capfirst }}</a> › <a href="{% url 'admin:change' app=opts.app_label model=opts.slug id=object.admin_pk %}">{{ object_display }}</a> › Delete</div>{% endblock %}
 {% block content %}
 <h1 class="page">{{ title }}</h1>
 {% if perms_lacking %}
-<p>Deleting the {{ opts.verbose_name }} “{{ object }}” would result in deleting related objects, but your account doesn't have permission to delete the following types of objects:</p>
+<p>Deleting the {{ opts.verbose_name }} “{{ object_display }}” would result in deleting related objects, but your account doesn't have permission to delete the following types of objects:</p>
 <ul>{% for obj in perms_lacking %}<li>{{ obj }}</li>{% endfor %}</ul>
 {% elif protected %}
-<p>Deleting the {{ opts.verbose_name }} “{{ object }}” would require deleting the following protected related objects:</p>
+<p>Deleting the {{ opts.verbose_name }} “{{ object_display }}” would require deleting the following protected related objects:</p>
 <ul>{% for obj in protected %}<li>{{ obj }}</li>{% endfor %}</ul>
 {% else %}
-<p>Are you sure you want to delete the {{ opts.verbose_name }} “{{ object }}”? All of the following related items will be deleted:</p>
+<p>Are you sure you want to delete the {{ opts.verbose_name }} “{{ object_display }}”? All of the following related items will be deleted:</p>
 <h2>{% translate "Summary" %}</h2>
 <ul>{% for item in model_count %}<li>{{ item.first|capfirst }}: {{ item.second }}</li>{% endfor %}</ul>
 <h2>{% translate "Objects" %}</h2>

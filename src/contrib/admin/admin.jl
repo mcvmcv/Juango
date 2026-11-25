@@ -274,6 +274,8 @@ Expose a model in the admin.
 * `raw_id_fields` / `autocomplete_fields`: foreign keys as an id box / a search box, for big tables
   (autocomplete needs the related model registered with `search_fields`).
 * `list_editable`: fields edited directly in the change list.
+* `get_search_results = (req, queryset, term) -> (queryset, may_have_duplicates)`: a search of your own
+  (Django's get_search_results); `Admin.search_results(Model, queryset, search_fields, term)` is the default one.
 * `date_hierarchy`: a date field to drill down by year, month and day.
 * `actions`: functions `(admin, req, queryset) -> ...` or `Admin.action(...)`; "Delete selected"
   is built in (`delete_action=false` removes it). `Admin.export_csv` is ready to add.
@@ -335,7 +337,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    get_fieldsets = nothing, get_inlines = nothing, get_exclude = nothing, get_prepopulated_fields = nothing,
                    list_max_show_all = 200, preserve_filters = true, password_change_page = false, show_facets = :allow,
                    filter_horizontal = Symbol[], filter_vertical = Symbol[], import_export = nothing, view_on_site = true,
-                   lookup_allowed = nothing)
+                   lookup_allowed = nothing, get_search_results = nothing)
     modelmeta(T)  # validates T is a model
     slug = model_name(T)
     key = admin_key(T)
@@ -376,7 +378,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                                                  :filter_horizontal => Symbol.(collect(filter_horizontal)),
                                                  :filter_vertical => Symbol.(collect(filter_vertical)),
                                                  :view_on_site => view_on_site,
-                                                 :lookup_allowed => lookup_allowed,
+                                                 :lookup_allowed => lookup_allowed, :get_search_results => get_search_results,
                                                  :import_export => import_export === true ? Juango.ModelResource(T) : import_export), modelmeta(T).app)
     filter!(!=(key), site.order)
     push!(site.order, key)
@@ -1215,7 +1217,7 @@ Base.@nospecializeinfer function search_results(@nospecialize(T::Type), qs, sear
     (isempty(search_fields) || isempty(term)) && return qs, false
     lookups = [search_lookup(T, string(f)) for f in search_fields]
     terms = Q[]
-    for bit in Juango.split_contents(term)
+    for bit in search_words(term)
         if length(bit) >= 2 && bit[1] in ('"', '\'') && bit[end] == bit[1]
             bit = replace(bit[2:end-1], "\\" * bit[1] => string(bit[1]), "\\\\" => "\\")
         end
@@ -1230,6 +1232,10 @@ Base.@nospecializeinfer function search_results(@nospecialize(T::Type), qs, sear
     qs = isempty(terms) ? qs : filter(qs, reduce(&, terms))
     qs, any(((lk, _),) -> search_spawns_duplicates(T, lk), lookups)
 end
+
+"A search term's words, as Django's smart_split: a quoted phrase (with \\-escaped quotes) is one word, with what touches it."
+const SMART_SPLIT_RE = r"""((?:[^\s'"]*(?:(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')[^\s'"]*)+)|\S+)"""
+search_words(term) = String[m.match for m in eachmatch(SMART_SPLIT_RE, term)]
 
 is_lookup_name(s) = s in Juango.LOOKUPS || haskey(Juango.CUSTOM_LOOKUPS, s)
 
@@ -1315,7 +1321,10 @@ function changelist(req::Request; app, model)
     qs = admin_queryset(ma, req)
     q = strip(get(req.GET, "q", ""))
     sfields = search_fields(ma, req)
-    qs, dups = search_results(T, qs, sfields, q)
+    # (a pluggable search, Django's get_search_results: (req, queryset, term) -> (queryset, may_have_duplicates);
+    # Admin.search_results(T, qs, search_fields, term) is the default)
+    gsr = option(ma, :get_search_results)
+    qs, dups = gsr === nothing ? search_results(T, qs, sfields, q) : gsr(req, qs, q)
     searched = qs
     filters = list_filters(req, ma)
     used = Set{String}()
@@ -1375,17 +1384,28 @@ function changelist(req::Request; app, model)
     editable = !popup && !isempty(ma.list_editable) && can(req, ma, :change)     # (a popup picks a row: no editing, no actions)
     fs = nothing
     if editable
-        FS = modelformset_factory(T; fields = ma.list_editable, extra = 0)
+        FS = modelformset_factory(T; fields = ma.list_editable, extra = 0, edit_only = true)
         fs = FS(req.method == "POST" ? req.POST : nothing; queryset = objs)
         if req.method == "POST" && haskey(req.POST, "_save")
             if is_valid(fs)
+                sm, sr = option(ma, :save_model), option(ma, :save_related)
                 for (i, f) in enumerate(fs.forms)
                     ch = changed_fields(f)
                     isempty(ch) && continue
-                    save!(f)
+                    # (a row that isn't one of the listed objects would add one: refused, as Django's)
+                    f.instance === nothing && throw(Juango.BadRequest("list_editable does not allow adding."))
+                    can(req, ma, :change, f.instance) || continue        # (an object the user may not change, per object)
+                    # (the admin's save_model and save_related hooks, as Django's changelist_view)
+                    if sm === nothing && sr === nothing
+                        save!(f)
+                    else
+                        o = save!(f; commit = false)
+                        sm === nothing ? save!(o) : sm(req, o, f, true)
+                        sr === nothing ? Juango.save_m2m!(f) : sr(req, f, Any[], true)
+                    end
                     log_action!(req.user, f.instance, CHANGE, "Changed " * join([lowercase(label(x)) for x in f.fields if x.name in ch], ", ") * ".")
                 end
-                n = count(f -> !isempty(changed_fields(f)), fs.forms)
+                n = count(f -> !isempty(changed_fields(f)) && f.instance !== nothing && can(req, ma, :change, f.instance), fs.forms)
                 message!(req, :success, "$n $(n == 1 ? meta.verbose_name : meta.verbose_name_plural) $(n == 1 ? "was" : "were") changed successfully.")
                 return Juango.HttpResponseRedirect(back)
             end
@@ -1396,21 +1416,28 @@ function changelist(req::Request; app, model)
     links = option(ma, :list_display_links)
     linked(i, c) = links === nothing ? i == 1 : any(l -> l == c || (c isa Symbol && string(l) == string(c)), links)
     rows = Any[]
+    # (each object's form: by its instance, as a posted form set may have fewer rows than the page)
+    form_of(o) = forms === nothing ? nothing :
+        (j = findfirst(f -> f.instance !== nothing && Juango.pk_string(f.instance) == Juango.pk_string(o), forms); j === nothing ? nothing : forms[j])
     for (k, o) in enumerate(objs)
         cells = Any[]
+        fo = form_of(o)
         for (i, c) in enumerate(cols)
-            if fs !== nothing && c isa Symbol && c in ma.list_editable
-                bf = forms[k][c]
-                errs = get(forms[k].errors, c, String[])
+            if fo !== nothing && c isa Symbol && c in ma.list_editable && can(req, ma, :change, o)
+                bf = fo[c]
+                errs = get(fo.errors, c, String[])
                 push!(cells, (value = SafeString((isempty(errs) ? "" : Juango.errors_html(errs)) * Juango.widget_html(bf)), link = false))
             else
                 push!(cells, (value = cell_value(ma, o, c), link = linked(i, c)))
             end
         end
-        hidden = fs === nothing ? "" : Juango.widget_html(forms[k][:id])
+        hidden = fo === nothing ? "" : Juango.widget_html(fo[:id])
         pk = Juango.pk_string(o)
         # a NamedTuple, not a Dict: the template reads row.id, row.cells ..., and this is per row
-        push!(rows, (id = pk, cells = cells, hidden = SafeString(hidden), url = reverse_url("admin:change"; app = ma.app, model = ma.slug, id = admin_quote(pk)) * back_q,
+        # (a row's errors that aren't a field's, unique_together: on a row of their own above it, as Django's)
+        nonfield = fo === nothing ? "" : Juango.errors_html(get(fo.errors, :__all__, String[]); class = "nonfield")
+        push!(rows, (id = pk, cells = cells, hidden = SafeString(hidden), nonfield = SafeString(nonfield), ncols = length(cells) + 1,
+                     url = reverse_url("admin:change"; app = ma.app, model = ma.slug, id = admin_quote(pk)) * back_q,
                      popup_value = popup ? popup_value(o, to_field) : nothing))
     end
     sf = option(ma, :show_facets, :allow)
@@ -1856,17 +1883,23 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         popup && return popup_response(req, adding ? Dict("value" => popup_value(o, to_field), "obj" => string(o)) :
                                                      Dict("action" => "change", "value" => old_value, "obj" => string(o),
                                                           "new_value" => popup_value(o, to_field)))
-        verb = adding ? "added" : "changed"
-        if haskey(req.POST, "_continue") || save_as_new || custom_add
-            message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may edit it again below.")
-            return Juango.HttpResponseRedirect(reverse_url("admin:change"; app = ma.app, model = ma.slug, id = admin_pk(o)) * keep_filters(req))
+        # (the object linked: to its change page after adding, if the user may change it; to this page after changing, as Django's)
+        obj_url = reverse_url("admin:change"; app = ma.app, model = ma.slug, id = admin_pk(o))
+        shown = escape_html(isempty(string(o)) ? "-" : string(o))
+        objlink = adding && !can(req, ma, :change, o) ? shown :
+                  "<a href=\"" * escape_html(adding ? obj_url : Juango.iri_to_uri(req.path)) * "\">" * shown * "</a>"
+        msg(t; more = "") = SafeString(interpolate(gettext(t), Dict("model" => escape_html(meta.verbose_name), "object" => objlink)) *
+                                       (isempty(more) ? "" : " " * escape_html(interpolate(gettext(more), Dict("model" => meta.verbose_name)))))
+        added_or_changed = adding ? "The %(model)s “%(object)s” was added successfully." : "The %(model)s “%(object)s” was changed successfully."
+        # (an add form of its own, the user admin's, goes on to the change page unless "Save and add another", as Django's UserAdmin)
+        if haskey(req.POST, "_continue") || save_as_new || (custom_add && !haskey(req.POST, "_addanother"))
+            message!(req, :success, msg(added_or_changed; more = !adding || can(req, ma, :change, o) ? "You may edit it again below." : ""))
+            return Juango.HttpResponseRedirect(obj_url * keep_filters(req))
         elseif haskey(req.POST, "_addanother")
-            message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may add another $(meta.verbose_name) below.")
-            return Juango.HttpResponseRedirect(reverse_url("admin:add"; app = ma.app, model = ma.slug))
+            message!(req, :success, msg(added_or_changed; more = "You may add another %(model)s below."))
+            return Juango.HttpResponseRedirect(reverse_url("admin:add"; app = ma.app, model = ma.slug) * keep_filters(req))
         end
-        message!(req, :success, interpolate(adding ? gettext("The %(model)s “%(object)s” was added successfully.") :
-                                                     gettext("The %(model)s “%(object)s” was changed successfully."),
-                                            Dict("model" => meta.verbose_name, "object" => o)))
+        message!(req, :success, msg(added_or_changed))
         # (to the change list if the user may see it, else the index, as Django's)
         can_view(req, ma) || can(req, ma, :change) || return Juango.HttpResponseRedirect(reverse_url("admin:index"))
         return Juango.HttpResponseRedirect(changelist_url(ma, req))
@@ -1880,7 +1913,7 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
                        for (k, v) in (h = option(ma, :get_prepopulated_fields); h === nothing ? ma.prepopulated_fields : h(req, obj))] : Any[]
     merge!(ctx, Dict{String,Any}(
         "editable" => editable, "can_delete" => !adding && can(req, ma, :delete, obj), "can_add" => can(req, ma, :add),
-        "opts" => opts(ma), "form" => form, "object" => obj, "adding" => adding, "readonly" => auto_readonly,
+        "opts" => opts(ma), "form" => form, "object" => obj, "object_display" => obj === nothing ? "" : object_display(obj), "adding" => adding, "readonly" => auto_readonly,
         "groups" => custom_add ? [Dict{String,Any}("name" => "", "rows" => [Dict{String,Any}("readonly" => false, "field" => form[f.name]) for f in form.fields])] :
                     form_groups(ma, form, obj, editable; locked = locked, readonly = ro,
                                 fieldsets = admin_fieldsets(ma, req, obj)),
@@ -1922,7 +1955,7 @@ function password_change_view(req::Request; app, model, id)
         return Juango.HttpResponseRedirect(reverse_url("admin:change"; app = ma.app, model = ma.slug, id = admin_pk(obj)))
     end
     ctx = base_context(req, interpolate(gettext("Change password: %(username)s"), Dict("username" => string(obj))))
-    merge!(ctx, Dict{String,Any}("opts" => opts(ma), "form" => form, "object" => obj))
+    merge!(ctx, Dict{String,Any}("opts" => opts(ma), "form" => form, "object" => obj, "object_display" => object_display(obj)))
     render(req, "admin/change_password.html", ctx)
 end
 
@@ -1955,6 +1988,8 @@ const UNQUOTE_RE = Regex("_(" * join(sort([hex2(c) for c in QUOTE_CHARS]), "|") 
 "The primary key from an admin URL (Django's `unquote`)."
 admin_unquote(s::AbstractString) = replace(s, UNQUOTE_RE => m -> string(Char(parse(UInt8, m[2:end]; base = 16))))
 admin_pk(@nospecialize(o)) = admin_quote(Juango.pk_string(o))
+"An object as the admin names it: its string, or \"-\" when that's only whitespace (Django's display_for_value)."
+object_display(@nospecialize(o)) = (t = strip(string(o)); isempty(t) ? "-" : String(t))
 Juango.tattr(@nospecialize(m::Model), ::Val{:admin_pk}) = admin_pk(m)
 
 """
@@ -2021,7 +2056,7 @@ function delete_view(req::Request; app, model, id)
     title = isempty(d.perms_needed) && isempty(d.protected) ? gettext("Are you sure?") :
             interpolate(gettext("Cannot delete %(name)s"), Dict("name" => meta.verbose_name))
     ctx = base_context(req, title)
-    merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "deleted_objects" => d.html,
+    merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "object_display" => object_display(obj), "deleted_objects" => d.html,
                                  "model_count" => d.model_count, "perms_lacking" => d.perms_needed, "protected" => d.protected,
                                  "to_field" => to_field))
     render(req, "admin/delete_confirmation.html", ctx)
@@ -2049,8 +2084,8 @@ Base.@nospecializeinfer function get_deleted_objects(req, @nospecialize(obj))
         name = uppercasefirst(m.verbose_name)
         ma !== nothing && !can(req, ma, :delete, o) && push!(perms, m.verbose_name)
         link = ma === nothing ? nothing : (try reverse_url("admin:change"; app = ma.app, model = ma.slug, id = admin_pk(o)) catch; nothing end)
-        link === nothing ? string(name, ": ", Juango.escape_html(string(o))) :
-                           string(name, ": <a href=\"", link, "\">", Juango.escape_html(string(o)), "</a>")
+        link === nothing ? string(name, ": ", Juango.escape_html(object_display(o))) :
+                           string(name, ": <a href=\"", link, "\">", Juango.escape_html(object_display(o)), "</a>")
     end
     function walk(o)
         T = Juango.concrete_model(typeof(o))
@@ -2094,7 +2129,7 @@ function history_view(req::Request; app, model, id)
     entries = collect(select_related(order_by(filter(LogEntry; content_type = get_for_model(ma.model), object_id = admin_pk(obj)),
                                               "action_time", "id"), :user))
     ctx = base_context(req, interpolate(gettext("Change history: %(object)s"), Dict("object" => obj)))
-    merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "entries" => entries))
+    merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "object_display" => object_display(obj), "entries" => entries))
     render(req, "admin/object_history.html", ctx)
 end
 

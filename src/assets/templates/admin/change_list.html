@@ -36,6 +36,7 @@
         <thead><tr><th style="width:24px"><input type="checkbox" onclick="document.querySelectorAll('.action-select').forEach(c=>c.checked=this.checked)" aria-label="Select all"></th>{% for h in headers %}<th{% if h.sorted %} class="sorted {{ h.sorted }}"{% endif %}>{% if h.url %}<a href="{{ h.url }}">{{ h.label }}</a>{% if h.sorted %} <span class="sort-mark" title="{{ h.priority }}">{% if h.sorted == "asc" %}▲{% else %}▼{% endif %}</span>{% endif %}{% else %}{{ h.label }}{% endif %}</th>{% endfor %}</tr></thead>
         <tbody>
         {% for row in rows %}
+          {% if row.nonfield %}<tr><td colspan="{{ row.ncols }}">{{ row.nonfield }}</td></tr>{% endif %}
           <tr>
             <td>{% if actions %}<input type="checkbox" class="action-select" name="_selected_action" value="{{ row.id }}" aria-label="Select row">{% endif %}{{ row.hidden }}</td>
             {% for cell in row.cells %}{% if cell.link %}<th><a href="{{ row.url }}"{% if is_popup %} data-popup-opener="{{ row.popup_value }}"{% endif %}>{{ cell.value }}</a></th>{% else %}<td>{{ cell.value }}</td>{% endif %}{% endfor %}
