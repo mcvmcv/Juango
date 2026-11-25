@@ -128,7 +128,7 @@ register_command!(o -> nothing, "specific_system_checks"; requires_system_checks
     t = out_of(io -> call_command("dance", "--help"; stdout = io))
     @test occursin("usage: manage.jl dance", t) && occursin("Dance around like a madman.", t) && occursin("-s, --style STYLE", t) && occursin("--skip-checks", t)
     # an old-style command takes words only
-    @test_throws "Unknown option(s) for check command: verbosity" call_command("check"; verbosity = 2)
+    @test_throws "Unknown option(s) for migrate command: verbosity" call_command("migrate"; verbosity = 2)
     # not translated: OutputWrapper, @no_translations, find_command and eggs, subparsers (not supported), create_parser's
     # kwargs, requires_migrations_checks, the colour handling of Python 3.14's argparse, CommandRunTests (scripts)
 end

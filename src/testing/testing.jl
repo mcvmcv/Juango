@@ -128,8 +128,8 @@ function override_settings(f; kw...)
     for (k, _) in kw
         haskey(SETTINGS, k) ? (saved[k] = SETTINGS[k]) : push!(missing_, k)
     end
-    configure!(; kw...)
     try
+        configure!(; kw...)        # (inside: settings refused halfway are put back too)
         f()
     finally
         foreach(k -> delete!(SETTINGS, k), missing_)

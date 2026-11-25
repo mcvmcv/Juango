@@ -156,6 +156,7 @@ include("contrib/auth/swapuser.jl")
 include("core/management.jl")
 include("core/command_args.jl")
 include("core/model_checks.jl")
+include("core/system_checks.jl")
 include("core/build.jl")
 
 include("api.jl")           # exports, public names, Juango.Testing / GIS / Postgres

@@ -161,7 +161,6 @@ extra `kwargs`.
 """
 function path(route::AbstractString, view; name = nothing, kwargs...)
     check_view(view)
-    startswith(route, "/") && @warn "URL route '$route' starts with '/'; routes should be relative (e.g. \"posts/\")."
     rx, params = compile_route(route; endpoint = true)
     URLPattern(String(route), rx, params, view, name === nothing ? nothing : string(name),
                Dict{Symbol,Any}(kwargs))

@@ -159,29 +159,87 @@ function deploy_issues()
     [m.msg for m in deploy_checks()]
 end
 
-"The deployment checks as CheckMessages, with Django's ids (`check --deploy`)."
+const REFERRER_POLICY_VALUES = Set(["no-referrer", "no-referrer-when-downgrade", "origin", "origin-when-cross-origin", "same-origin",
+                                    "strict-origin", "strict-origin-when-cross-origin", "unsafe-url"])
+const CROSS_ORIGIN_OPENER_POLICY_VALUES = Set(["same-origin", "same-origin-allow-popups", "unsafe-none"])
+"A secret key long and varied enough (Django's: 50 characters, 5 different ones, not the default or django-insecure-)."
+strong_secret_key(k) = k isa AbstractString && k != default_settings()[:SECRET_KEY] && length(k) >= 50 && length(Set(k)) >= 5 &&
+                       !startswith(k, "django-insecure-")
+
+"""
+The deployment checks as CheckMessages, with Django's ids and conditions (`check --deploy`): the HTTPS,
+HSTS, nosniff, referrer and opener policy checks only when SecurityMiddleware (which sends those headers,
+and X-Frame-Options) is in MIDDLEWARE; the session cookie checks when sessions are used; the CSRF
+cookie's when CsrfViewMiddleware is used with a cookie.
+"""
 function deploy_checks()
     s = settings
     out = CheckMessage[]
-    w(id, msg) = push!(out, CheckMessage(:warning, msg; id = id))
-    s.DEBUG && w("security.W018", "DEBUG is true: error pages show code and settings. Set DEBUG = false in production.")
-    (s.SECRET_KEY == default_settings()[:SECRET_KEY] || length(s.SECRET_KEY) < 50 || length(Set(s.SECRET_KEY)) < 5) &&
-        w("security.W009", "SECRET_KEY is the default, or shorter than 50 characters or with fewer than 5 different ones. Generate a long random key.")
-    all(h -> h in ("localhost", "127.0.0.1", "[::1]"), s.ALLOWED_HOSTS) &&
-        w("security.W020", "ALLOWED_HOSTS has only local addresses: set it to the site's domain names.")
+    w(id, msg; level = :warning, hint = nothing) = push!(out, CheckMessage(level, msg; id = id, hint = hint))
     mws = s.MIDDLEWARE
-    SecurityMiddleware in mws || w("security.W001", "SecurityMiddleware isn't in MIDDLEWARE: the security headers and HTTPS settings do nothing.")
-    s.SECURE_HSTS_SECONDS == 0 &&
-        w("security.W004", "SECURE_HSTS_SECONDS is 0. Once the whole site is on HTTPS, set it (for instance to 31536000) so browsers refuse plain HTTP.")
-    s.SECURE_HSTS_SECONDS > 0 && !s.SECURE_HSTS_INCLUDE_SUBDOMAINS &&
-        w("security.W005", "SECURE_HSTS_INCLUDE_SUBDOMAINS is false: subdomains can still be reached over plain HTTP.")
-    s.SECURE_SSL_REDIRECT || w("security.W008", "SECURE_SSL_REDIRECT is false: plain-HTTP requests aren't redirected to HTTPS (unless your proxy does it).")
-    s.SESSION_COOKIE_SECURE || w("security.W012", "SESSION_COOKIE_SECURE is false: the session cookie can be sent over plain HTTP.")
-    s.CSRF_COOKIE_SECURE || w("security.W016", "CSRF_COOKIE_SECURE is false: the CSRF cookie can be sent over plain HTTP.")
-    s.X_FRAME_OPTIONS == "DENY" || w("security.W019", "X_FRAME_OPTIONS isn't DENY: pages can be framed by other sites unless they need to be.")
+    sec = SecurityMiddleware in mws
+    s.DEBUG && w("security.W018", "You should not have DEBUG set to true in deployment.")
+    strong_secret_key(s.SECRET_KEY) ||
+        w("security.W009", "Your SECRET_KEY has less than 50 characters, less than 5 unique characters, or is the default. Please generate a long and random value, otherwise many of Juango's security-critical features will be vulnerable to attack.")
+    for (i, k) in enumerate(something(get(s, :SECRET_KEY_FALLBACKS, String[]), String[]))
+        strong_secret_key(k) ||
+            w("security.W025", "Your SECRET_KEY_FALLBACKS[$(i-1)] has less than 50 characters, less than 5 unique characters, or is the default. Please generate a long and random value, otherwise many of Juango's security-critical features will be vulnerable to attack.")
+    end
+    all(h -> h in ("localhost", "127.0.0.1", "[::1]"), s.ALLOWED_HOSTS) &&
+        w("security.W020", "ALLOWED_HOSTS has only local addresses (or none): set it to the site's domain names.")
+    sec || w("security.W001", "You do not have SecurityMiddleware in your MIDDLEWARE so the SECURE_HSTS_SECONDS, SECURE_CONTENT_TYPE_NOSNIFF, SECURE_REFERRER_POLICY, SECURE_CROSS_ORIGIN_OPENER_POLICY, X_FRAME_OPTIONS and SECURE_SSL_REDIRECT settings will have no effect.")
+    if sec
+        s.X_FRAME_OPTIONS === nothing &&
+            w("security.W002", "X_FRAME_OPTIONS is nothing, so your pages will not be served with an 'x-frame-options' header. Unless there is a good reason for your site to be served in a frame, you should consider enabling this header to help prevent clickjacking attacks.")
+        s.X_FRAME_OPTIONS === nothing || s.X_FRAME_OPTIONS == "DENY" ||
+            w("security.W019", "X_FRAME_OPTIONS is not set to 'DENY'. Unless there is a good reason for your site to serve other parts of itself in a frame, you should change it to 'DENY'.")
+        hsts = something(s.SECURE_HSTS_SECONDS, 0)
+        hsts == 0 &&
+            w("security.W004", "You have not set a value for the SECURE_HSTS_SECONDS setting. If your entire site is served only over SSL, you may want to consider setting a value and enabling HTTP Strict Transport Security. Be sure to read the documentation first; enabling HSTS carelessly can cause serious, irreversible problems.")
+        hsts > 0 && s.SECURE_HSTS_INCLUDE_SUBDOMAINS !== true &&
+            w("security.W005", "You have not set the SECURE_HSTS_INCLUDE_SUBDOMAINS setting to true. Without this, your site is potentially vulnerable to attack via an insecure connection to a subdomain. Only set this to true if you are certain that all subdomains of your domain should be served exclusively via SSL.")
+        hsts > 0 && s.SECURE_HSTS_PRELOAD !== true &&
+            w("security.W021", "You have not set the SECURE_HSTS_PRELOAD setting to true. Without this, your site cannot be submitted to the browser preload list.")
+        s.SECURE_CONTENT_TYPE_NOSNIFF === true ||
+            w("security.W006", "Your SECURE_CONTENT_TYPE_NOSNIFF setting is not set to true, so your pages will not be served with an 'X-Content-Type-Options: nosniff' header. You should consider enabling this header to prevent the browser from identifying content types incorrectly.")
+        s.SECURE_SSL_REDIRECT === true ||
+            w("security.W008", "Your SECURE_SSL_REDIRECT setting is not set to true. Unless your site should be available over both SSL and non-SSL connections, you may want to either set this setting true or configure a load balancer or reverse-proxy server to redirect all connections to HTTPS.")
+        rp = s.SECURE_REFERRER_POLICY
+        if rp === nothing
+            w("security.W022", "You have not set the SECURE_REFERRER_POLICY setting. Without this, your site will not send a Referrer-Policy header. You should consider enabling this header to protect user privacy.")
+        else
+            vals = rp isa AbstractString ? Set(strip.(split(rp, ','))) : Set(string.(collect(rp)))
+            vals ⊆ REFERRER_POLICY_VALUES ||
+                w("security.E023", "You have set the SECURE_REFERRER_POLICY setting to an invalid value."; level = :error,
+                  hint = "Valid values are: $(join(sort!(collect(REFERRER_POLICY_VALUES)), ", ")).")
+        end
+        coop = s.SECURE_CROSS_ORIGIN_OPENER_POLICY
+        coop === nothing || coop in CROSS_ORIGIN_OPENER_POLICY_VALUES ||
+            w("security.E024", "You have set the SECURE_CROSS_ORIGIN_OPENER_POLICY setting to an invalid value."; level = :error,
+              hint = "Valid values are: $(join(sort!(collect(CROSS_ORIGIN_OPENER_POLICY_VALUES)), ", ")).")
+    end
+    # the session cookie (Django's W010-W015): by the sessions app, the middleware, or both
+    session_app = is_installed("sessions")
+    session_mw = SessionMiddleware in mws
+    for (setting, ids, why) in ((:SESSION_COOKIE_SECURE, ("W010", "W011", "W012"),
+                                 "Using a secure-only session cookie makes it more difficult for network traffic sniffers to hijack user sessions."),
+                                (:SESSION_COOKIE_HTTPONLY, ("W013", "W014", "W015"),
+                                 "Using an HttpOnly session cookie makes it more difficult for cross-site scripting attacks to hijack user sessions."))
+        get(s, setting, false) === true && continue
+        if session_app && session_mw
+            w("security." * ids[3], "$setting is not set to true. $why")
+        elseif session_app
+            w("security." * ids[1], "You have the sessions app in your INSTALLED_APPS, but you have not set $setting to true. $why")
+        elseif session_mw
+            w("security." * ids[2], "You have SessionMiddleware in your MIDDLEWARE, but you have not set $setting to true. $why")
+        end
+    end
     ContentSecurityPolicyMiddleware in mws || isempty(s.SECURE_CSP) ||
         w("security.W026", "SECURE_CSP is set but ContentSecurityPolicyMiddleware isn't in MIDDLEWARE.")
-    CsrfViewMiddleware in mws || w("security.W003", "CsrfViewMiddleware isn't in MIDDLEWARE: forms and other unsafe requests aren't protected against cross-site request forgery.")
+    csrf = CsrfViewMiddleware in mws
+    csrf || w("security.W003", "You don't appear to be using Juango's built-in cross-site request forgery protection via the middleware (CsrfViewMiddleware is not in your MIDDLEWARE). Enabling the middleware is the safest approach to ensure you don't leave any holes.")
+    csrf && !s.CSRF_USE_SESSIONS && s.CSRF_COOKIE_SECURE !== true &&
+        w("security.W016", "You have CsrfViewMiddleware in your MIDDLEWARE, but you have not set CSRF_COOKIE_SECURE to true. Using a secure-only CSRF cookie makes it more difficult for network traffic sniffers to steal the CSRF token.")
     "*" in s.ALLOWED_HOSTS && w("juango.W101", "ALLOWED_HOSTS contains \"*\": any Host header is accepted, so links built from it (password reset emails, absolute URLs) can point elsewhere.")
     for (alias, c) in pairs(s.CACHES)
         get(c, :serializer, :json) === :serialization && get(c, :backend, :locmem) !== :locmem &&

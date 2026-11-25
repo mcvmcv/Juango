@@ -23,8 +23,11 @@ struct CheckMessage
     id::String
     hint::Union{Nothing,String}
 end
-CheckMessage(level::Symbol, msg::AbstractString; id = "", hint = nothing) =
+function CheckMessage(level::Symbol, msg::AbstractString; id = "", hint = nothing)
+    level in (:debug, :info, :warning, :error, :critical) ||
+        throw(ArgumentError("The first argument should be level: :debug, :info, :warning, :error or :critical, not :$level."))
     CheckMessage(level, String(msg), String(id), hint === nothing ? nothing : String(hint))
+end
 Base.show(io::IO, m::CheckMessage) =
     print(io, isempty(m.id) ? "" : "($(m.id)) ", m.msg, m.hint === nothing ? "" : "\n\tHINT: " * m.hint)
 is_serious(m::CheckMessage) = m.level in (:error, :critical)
