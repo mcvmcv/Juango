@@ -107,7 +107,8 @@ end
         @test occursin("Recent actions", text(get(c, "/admin/"))) && occursin(">Adm Ann</a>", text(get(c, "/admin/")))
 
         # save as new
-        post(c, "/admin/project/author/$(ann.id)/change/", Dict("name" => "Adm Copy", "email" => "c@x.io", "_saveasnew" => "1"))
+        post(c, "/admin/project/author/$(ann.id)/change/", Dict("name" => "Adm Copy", "email" => "c@x.io", "_saveasnew" => "1",
+                                                                "articles-TOTAL_FORMS" => "0", "articles-INITIAL_FORMS" => "0"))
         @test exists(filter(Author; name = "Adm Copy")) && get(Author; id = ann.id).name == "Adm Ann"
 
         # list_editable

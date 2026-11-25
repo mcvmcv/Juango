@@ -336,6 +336,46 @@ end
     Meta(table = "dav_song")
 end
 Base.show(io::IO, s::DavSong) = print(io, s.name)
+@model struct DavParentDep
+    family_name = CharField(max_length = 255)
+    some_required_info = PositiveIntegerField()
+    Meta(table = "dav_parentdep")
+end
+@model struct DavDepChild
+    parent = ForeignKey(DavParentDep, on_delete = :CASCADE, related_name = :dependentchild_set)
+    family_name = CharField(max_length = 255)
+    Meta(table = "dav_depchild")
+end
+@model struct DavPostedQ
+    posted = DateField()
+    Meta(table = "dav_postedq")
+end
+@model struct DavPostedA
+    question = ForeignKey(DavPostedQ, on_delete = :CASCADE, related_name = :answer_set)
+    Meta(table = "dav_posteda")
+end
+@model struct DavState
+    name = CharField(max_length = 100)
+    Meta(table = "dav_state")
+end
+@model struct DavCity
+    state = ForeignKey(DavState, on_delete = :CASCADE, related_name = :cities)
+    name = CharField(max_length = 100)
+    Meta(table = "dav_city")
+end
+Juango.get_absolute_url(c::DavCity) = "/dummy/$(c.id)/"
+@model struct DavRestaurant
+    city = ForeignKey(DavCity, on_delete = :CASCADE, related_name = :restaurants)
+    name = CharField(max_length = 100)
+    Meta(table = "dav_restaurant")
+end
+Juango.get_absolute_url(r::DavRestaurant) = "/dummy/r/$(r.id)/"
+@model struct DavWorker
+    work_at = ForeignKey(DavRestaurant, on_delete = :CASCADE, related_name = :workers)
+    name = CharField(max_length = 50)
+    surname = CharField(max_length = 50)
+    Meta(table = "dav_worker")
+end
 redirect_stdout(devnull) do
     ms = [DavActor, DavInquisition, DavSketch, DavCharacter, DavStumpJoke, through(DavStumpJoke, :has_fooled_today), DavAlbum, DavMessenger,
           DavBook, DavChapter, DavCoverLetter, DavParent, DavChild, DavPerson, DavTitle, DavTitleTranslation, DavRecommender,
@@ -344,7 +384,9 @@ redirect_stdout(devnull) do
           DavGqs, DavTelegram, DavShortMessage, DavPersona, DavAccount, DavFooAccount, DavBarAccount,
           DavCollector, DavWidget, DavDooHickey, DavWhatsit, DavDoodad, DavFancyDoodad,
           DavGallery, DavPicture, DavRoPost, DavRoLink, DavChoice, DavRoRelated, DavPlot, DavPlotDetails, DavStringPK,
-          DavVillain, DavSuperVillain, DavPlotV, DavPlotDetailsV, DavHideout, DavSuperHideout, DavQuestion, DavAnswer, DavAlbumR, DavSong]
+          DavVillain, DavSuperVillain, DavPlotV, DavPlotDetailsV, DavHideout, DavSuperHideout, DavQuestion, DavAnswer, DavAlbumR, DavSong,
+          DavParentDep, DavDepChild, DavPostedQ, DavPostedA,
+          DavState, DavCity, DavRestaurant, DavWorker]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
     Juango.update_permissions!(ms)
 end
@@ -1168,4 +1210,215 @@ end
         end
     end
     # not translated: test_cyclic (a model cycle declared both ways), generic relations, perms_needed and protected (in django_admin.jl)
+end
+
+@testset "django admin_views: AdminViewBasicTest (popup add)" begin
+    port_block() do
+        Admin.register!(DavArticle); Admin.register!(DavSection)
+        try
+            c = dav_super("dav_super17")
+            post_data(title) = Dict("_popup" => "1", "title" => title, "content" => "some content", "date" => "2010-09-10T14:55")
+            pr(r) = Juango.JSON.parse(Juango.html_unescape(match(r"data-popup-response=\"([^\"]*)\"", text(r))[1]))
+            # test_popup_add_POST: the response is escaped (a newline in the name)
+            r = post(c, "$DAV/davarticle/add/", post_data("title with a new\nline"))
+            @test occursin("title with a new\\nline", text(r)) && pr(r)["obj"] == "title with a new\nline"
+            # test_popup_add_POST_with_valid_source_model: no message
+            r = post(c, "$DAV/davarticle/add/", merge(post_data("Test Article"), Dict("_source_model" => "project.davsection")))
+            @test r.status == 200 && occursin("data-popup-response", text(r)) && !haskey(pr(r), "optgroup")
+            t = text(get(c, "/admin/"))
+            @test !occursin("could not be found", t)
+            # test_popup_add_POST_with_invalid_source_model: the popup closes; the message is on the next page
+            for bad in ("project.nonexistent", "invalid")
+                r = post(c, "$DAV/davarticle/add/", merge(post_data("Test Article"), Dict("_source_model" => bad)))
+                @test r.status == 200 && occursin("data-popup-response", text(r))
+                @test occursin("The app &quot;$bad&quot; could not be found.", text(get(c, "$DAV/davarticle/add/")))
+            end
+            # test_popup_add_POST_with_unregistered_source_model: a model without an admin is no error
+            r = post(c, "$DAV/davarticle/add/", merge(post_data("Test Article"), Dict("_source_model" => "project.davchapter")))
+            @test r.status == 200 && occursin("data-popup-response", text(r))
+            # (the add form in a popup carries the source model on)
+            @test occursin("<input type=\"hidden\" name=\"_source_model\" value=\"project.davsection\">",
+                           text(get(c, "$DAV/davarticle/add/?_popup=1&_source_model=project.davsection")))
+        finally
+            Admin.unregister!(DavArticle); Admin.unregister!(DavSection)
+        end
+    end
+    # not translated: the optgroup tests (they need a source form field named after the model's plural)
+end
+
+@testset "django admin_views: AdminKeepChangeListFiltersTests (rest)" begin
+    port_block() do
+        Admin.register_builtin!()
+        c = dav_super("dav_super18")
+        joe = create_user("dav_joepublic3", "secret")
+        filters = "is_superuser__exact=0&is_staff__exact=0"
+        pf = "_changelist_filters=" * Juango.urlquote(filters)
+        change = "/admin/auth/user/$(joe.id)/change/?$pf"
+        t = text(get(c, change))
+        # test_change_view: the history and delete links keep the filters
+        @test occursin("href=\"/admin/auth/user/$(joe.id)/history/?$pf\"", t)
+        @test occursin("href=\"/admin/auth/user/$(joe.id)/delete/?$pf\"", t)
+        # test_change_view_close_link: a view-only user's Close goes back to the filtered list
+        viewer = create_user("dav_viewuser", "secret"); viewer.is_staff = true; save!(viewer)
+        add!(viewer.user_permissions, get(Permission; codename = "view_user"))
+        cv = Client(); force_login!(cv, get(User; id = viewer.id))
+        t = text(get(cv, change))
+        m = match(r"<a role=\"button\" class=\"closelink[^\"]*\" href=\"([^\"]*)\">Close</a>", t)
+        @test m !== nothing && replace(m[1], "&amp;" => "&") == "/admin/auth/user/?$filters"
+        # test_delete_view: the delete page's way back keeps them, and deleting goes back to the filtered list
+        t = text(get(c, "/admin/auth/user/$(joe.id)/delete/?$pf"))
+        @test occursin("href=\"/admin/auth/user/$(joe.id)/change/?$pf\"", t)
+        r = post(c, "/admin/auth/user/$(joe.id)/delete/?$pf", Dict("post" => "yes"))
+        @test r.status == 302 && getheader(r, "Location") == "/admin/auth/user/?$filters"
+    end
+end
+
+@testset "django admin_views: AdminViewOnSiteTests (rest)" begin
+    port_block() do
+        Admin.register!(DavParentDep; inlines = [Admin.StackedInline(DavDepChild; extra = 1)])
+        try
+            c = dav_super("dav_super19")
+            # test_add_view_form_and_formsets_run_validation: the parent's errors and the inline's show together
+            r = post(c, "$DAV/davparentdep/add/", Dict("family_name" => "Test1", "dependentchild_set-TOTAL_FORMS" => "1",
+                     "dependentchild_set-INITIAL_FORMS" => "0", "dependentchild_set-MAX_NUM_FORMS" => "1", "dependentchild_set-0-id" => "",
+                     "dependentchild_set-0-family_name" => "x"^300))
+            t = text(r)
+            @test r.status == 200 && occursin("This field is required.", t) && occursin("Ensure this value has at most 255 characters", t)
+            # test_change_view_form_and_formsets_run_validation
+            p = create(DavParentDep; family_name = "Test1", some_required_info = 6)
+            r = post(c, "$DAV/davparentdep/$(p.id)/change/", Dict("family_name" => "Test2", "dependentchild_set-TOTAL_FORMS" => "1",
+                     "dependentchild_set-INITIAL_FORMS" => "0", "dependentchild_set-MAX_NUM_FORMS" => "1", "dependentchild_set-0-id" => "",
+                     "dependentchild_set-0-parent" => string(p.id), "dependentchild_set-0-family_name" => "x"^300))
+            t = text(r)
+            @test r.status == 200 && occursin("This field is required.", t) && occursin("Ensure this value has at most 255 characters", t)
+            # test_check: view_on_site is a function or a boolean (admin.E025)
+            for (v, ok) in ((true, true), (false, true), (o -> "/x/", true), (Any[], false))
+                Admin.register!(DavParentDep; view_on_site = v)
+                @test any(m -> m.id == "admin.E025", Admin.check_admin(Admin.get_admin("project", "davparentdep"))) == !ok
+            end
+            # test_view_on_site_url_non_integer_ids
+            @test reverse_url("admin:view_on_site"; content_type_id = "37156b6a-8a82", object_id = "37156b6a-8a83") == "/admin/r/37156b6a-8a82/37156b6a-8a83/"
+        finally
+            Admin.unregister!(DavParentDep)
+        end
+    end
+    # not translated: an inline's validation that depends on the parent's unsaved data (Django's contrived family-name test)
+end
+
+@testset "django admin_views: DateHierarchyTests (related field), NeverCacheTests (logout)" begin
+    port_block() do
+        Admin.register!(DavPostedA; date_hierarchy = "question__posted")
+        try
+            c = dav_super("dav_super20")
+            # test_related_field: the years of the related questions' dates that have answers
+            for (d, n) in ((Date(2001, 1, 30), 0), (Date(2003, 3, 15), 1), (Date(2005, 5, 3), 2))
+                q = create(DavPostedQ; posted = d)
+                for _ in 1:n
+                    create(DavPostedA; question = q)
+                end
+            end
+            t = text(get(c, "$DAV/davposteda/"))
+            @test !occursin("?question__posted__year=2001\"", t) && occursin("?question__posted__year=2003\"", t) &&
+                  occursin("?question__posted__year=2005\"", t)
+            @test length(collect(eachmatch(r"/davposteda/\d+/change/", text(get(c, "$DAV/davposteda/?question__posted__year=2005"))))) == 2
+            # test_logout: the logout page isn't cached
+            cc = getheader(post(c, "/admin/logout/"), "Cache-Control")
+            @test cc !== nothing && occursin("max-age=0", cc)
+        finally
+            Admin.unregister!(DavPostedA)
+        end
+    end
+end
+
+@testset "django admin_views: SaveAsTests" begin
+    port_block() do
+        Admin.register!(DavPerson; save_as = true)
+        Admin.register!(DavParent; save_as = true, inlines = [Admin.TabularInline(DavChild; extra = 3)])
+        try
+            c = dav_super("dav_super21")
+            per1 = create(DavPerson; name = "John Mauchly", gender = 1, alive = true)
+            # test_save_as_duplication: "Save as new" makes a new object and goes on to it
+            r = post(c, "$DAV/davperson/$(per1.id)/change/", Dict("_saveasnew" => "", "name" => "John M", "gender" => "1"))
+            new = first(filter(DavPerson; name = "John M"))
+            @test exists(filter(DavPerson; id = per1.id)) && getheader(r, "Location") == "$DAV/davperson/$(new.id)/change/"
+            # test_save_as_continue_false: back to the change list
+            Admin.register!(DavPerson; save_as = true, save_as_continue = false)
+            r = post(c, "$DAV/davperson/$(per1.id)/change/", Dict("_saveasnew" => "", "name" => "John N", "gender" => "1"))
+            @test exists(filter(DavPerson; name = "John N")) && getheader(r, "Location") == "$DAV/davperson/"
+            # test_save_as_new_with_validation_errors: only "Save as new" offered again
+            t = text(post(c, "$DAV/davperson/$(per1.id)/change/", Dict("_saveasnew" => "", "gender" => "invalid", "_addanother" => "fail")))
+            @test occursin("Please correct the errors below.", t) && occursin("name=\"_saveasnew\"", t) &&
+                  !occursin("name=\"_addanother\"", t) && !occursin("name=\"_continue\"", t)
+            # test_save_as_new_with_validation_errors_with_inlines, test_save_as_new_with_inlines_with_validation_errors
+            delete!(objects(DavChild)); delete!(objects(DavParent))
+            parent = create(DavParent; name = "Father"); child = create(DavChild; parent = parent, name = "Child")
+            for (pname, cname) in (("", "Child"), ("Father", "x"^40))
+                t = text(post(c, "$DAV/davparent/$(parent.id)/change/", Dict("_saveasnew" => "Save as new", "child_set-0-parent" => string(parent.id),
+                         "child_set-0-id" => string(child.id), "child_set-0-name" => cname, "child_set-INITIAL_FORMS" => "1",
+                         "child_set-MAX_NUM_FORMS" => "1000", "child_set-MIN_NUM_FORMS" => "0", "child_set-TOTAL_FORMS" => "4", "name" => pname)))
+                @test occursin("name=\"_saveasnew\"", t) && !occursin("name=\"_addanother\"", t) && !occursin("name=\"_continue\"", t)
+            end
+            @test count(objects(DavParent)) == 1
+            # ("Save as new" copies the inline's rows to the new object)
+            r = post(c, "$DAV/davparent/$(parent.id)/change/", Dict("_saveasnew" => "Save as new", "child_set-0-parent" => string(parent.id),
+                     "child_set-0-id" => string(child.id), "child_set-0-name" => "Child", "child_set-INITIAL_FORMS" => "1",
+                     "child_set-MAX_NUM_FORMS" => "1000", "child_set-MIN_NUM_FORMS" => "0", "child_set-TOTAL_FORMS" => "4", "name" => "Father copy"))
+            copy_ = first(filter(DavParent; name = "Father copy"))
+            @test r.status == 302
+            @test copy_ !== nothing && count(copy_.child_set) == 1
+            @test count(parent.child_set) == 1 && get(DavChild; id = child.id).parent_id == parent.id
+        finally
+            Admin.unregister!(DavPerson); Admin.unregister!(DavParent)
+        end
+    end
+end
+
+@testset "django admin_views: InlineAdminViewOnSiteTest" begin
+    port_block() do
+        Admin.register!(DavState; inlines = [Admin.TabularInline(DavCity; view_on_site = false)])
+        Admin.register!(DavCity; inlines = [Admin.TabularInline(DavRestaurant)])
+        Admin.register!(DavRestaurant; inlines = [Admin.StackedInline(DavWorker; view_on_site = w -> "/worker_inline/$(w.surname)/$(w.name)/")])
+        try
+            c = dav_super("dav_super22")
+            s1 = create(DavState; name = "New York"); c1 = create(DavCity; state = s1, name = "New York")
+            r1 = create(DavRestaurant; city = c1, name = "Italian Pizza"); w1 = create(DavWorker; work_at = r1, name = "Mario", surname = "Rossi")
+            vos(M, o) = "/admin/r/$(Juango.get_for_model(M).id)/$(o.id)/"
+            @test !occursin(vos(DavCity, c1), text(get(c, "$DAV/davstate/$(s1.id)/change/")))                 # test_false
+            @test occursin(vos(DavRestaurant, r1), text(get(c, "$DAV/davcity/$(c1.id)/change/")))              # test_true
+            @test occursin("\"/worker_inline/Rossi/Mario/\"", text(get(c, "$DAV/davrestaurant/$(r1.id)/change/")))   # test_callable
+        finally
+            foreach(Admin.unregister!, [DavState, DavCity, DavRestaurant])
+        end
+    end
+end
+
+@testset "django admin_views: CustomModelAdminTest (site templates)" begin
+    port_block() do
+        tpl = mktempdir()
+        mkpath(joinpath(tpl, "custom_admin"))
+        for (f, body) in (("index.html", "Hello from a custom index template {{ title }}"), ("app_index.html", "Hello from a custom app_index template"),
+                          ("login.html", "Hello from a custom login template {{ form }}"), ("logout.html", "Hello from a custom logout template"))
+            write(joinpath(tpl, "custom_admin", f), body)
+        end
+        site2 = Admin.AdminSite("dav_admin2"; index_template = "custom_admin/index.html", app_index_template = "custom_admin/app_index.html",
+                                login_template = "custom_admin/login.html", logout_template = "custom_admin/logout.html")
+        Admin.register!(DavSection; site = site2)
+        urls = vcat(Any[path("dav_admin2/", Admin.urls(site2))], settings.ROOT_URLCONF)
+        try
+            override_settings(ROOT_URLCONF = urls, TEMPLATE_DIRS = vcat(collect(settings.TEMPLATE_DIRS), [tpl])) do
+                c = dav_super("dav_super23")
+                @test occursin("Hello from a custom index template", text(get(c, "/dav_admin2/")))                # ..._index_view_and_template
+                @test occursin("Hello from a custom app_index template", text(get(c, "/dav_admin2/project/")))    # ..._app_index_view_and_template
+                @test occursin("Hello from a custom logout template", text(post(c, "/dav_admin2/logout/")))       # ..._logout_template
+                anon = Client()
+                t = text(dav_follow(anon, get(anon, "/dav_admin2/")))
+                @test occursin("Hello from a custom login template", t)                                           # ..._login_template
+                @test !occursin("Hello from a custom", text(get(c, "/admin/")))                                   # (the default site keeps its own)
+            end
+        finally
+            Admin.unregister!(DavSection; site = site2); rm(tpl; recursive = true)
+        end
+    end
+    # not translated: custom login forms and password change views of a custom site (Juango's admin has no own
+    # password change pages), custom site views (tested with `urls` in admin.jl)
 end

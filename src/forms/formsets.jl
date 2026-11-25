@@ -442,8 +442,9 @@ function inlineformset_factory(P::Type, T::Type; fk = nothing, fields = nothing,
                 d = Dict{String,Any}(k => data isa QueryDict ? getlist(data, k) : v for (k, v) in data)
                 foreach(k -> d[k] isa AbstractVector && length(d[k]) == 1 && (d[k] = d[k][1]), collect(keys(d)))
                 d["$prefix-INITIAL_FORMS"] = "0"
+                # (each row's id and parent key are dropped: the old parent's key isn't the new one's, as Django's _construct_form)
                 for k in collect(keys(d))
-                    endswith(k, "-id") && startswith(k, prefix * "-") && delete!(d, k)
+                    startswith(k, prefix * "-") && (endswith(k, "-id") || endswith(k, "-$(fkf.name)")) && delete!(d, k)
                 end
                 data = d
             end

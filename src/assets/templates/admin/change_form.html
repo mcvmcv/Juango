@@ -8,7 +8,7 @@
 </div>
 {% if form.errors %}<p class="errorlist" style="color:var(--err);font-weight:600">{% translate "Please correct the errors below." %}</p>{% endif %}
 <form method="post"{% if has_file_field %} enctype="multipart/form-data"{% endif %}>
-  {% csrf_token %}{% if is_popup %}<input type="hidden" name="_popup" value="1">{% endif %}{% if to_field %}<input type="hidden" name="_to_field" value="{{ to_field }}">{% endif %}
+  {% csrf_token %}{% if is_popup %}<input type="hidden" name="_popup" value="1">{% endif %}{% if to_field %}<input type="hidden" name="_to_field" value="{{ to_field }}">{% endif %}{% if source_model %}<input type="hidden" name="_source_model" value="{{ source_model }}">{% endif %}
   {% if save_on_top %}{% include "admin/submit_line.html" %}{% endif %}
   {% for group in groups %}
   <div class="module">
@@ -71,7 +71,7 @@
       <thead><tr><th class="original"></th>{% for h in inline.headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
       <tbody>
       {% for f in inline.forms %}
-      <tr><td class="original">{{ f.hidden }}{% if f.title %}<p>{{ f.title }}{% if f.change_link %} <a href="{{ f.change_link }}" class="inlinechangelink">{% translate "Change" %}</a>{% endif %}</p>{% endif %}</td>
+      <tr><td class="original">{{ f.hidden }}{% if f.title %}<p>{{ f.title }}{% if f.change_link %} <a href="{{ f.change_link }}" class="inlinechangelink">{% translate "Change" %}</a>{% endif %}{% if f.view_on_site %} <a href="{{ f.view_on_site }}" class="inlineviewlink">{% translate "View on site" %}</a>{% endif %}</p>{% endif %}</td>
         {% for bf in f.fields %}<td class="field-{{ bf.name }}">{% if bf.errors %}<ul class="errorlist">{% for e in bf.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}{{ bf }}</td>{% endfor %}
         {% for r in f.readonly %}<td class="readonly">{{ r.value }}</td>{% endfor %}
         {% if f.delete %}<td class="delete">{{ f.delete }}</td>{% endif %}</tr>
@@ -80,7 +80,7 @@
     </table>
     {% else %}
     {% for f in inline.forms %}
-    <fieldset class="inline-related"><legend>{{ inline.verbose_name|capfirst }}: {% if f.title %}{{ f.title }}{% if f.change_link %} <a href="{{ f.change_link }}" class="inlinechangelink">{% translate "Change" %}</a>{% endif %}{% else %}{% translate "New" %}{% endif %}</legend>
+    <fieldset class="inline-related"><legend>{{ inline.verbose_name|capfirst }}: {% if f.title %}{{ f.title }}{% if f.change_link %} <a href="{{ f.change_link }}" class="inlinechangelink">{% translate "Change" %}</a>{% endif %}{% if f.view_on_site %} <a href="{{ f.view_on_site }}" class="inlineviewlink">{% translate "View on site" %}</a>{% endif %}{% else %}{% translate "New" %}{% endif %}</legend>
       {{ f.hidden }}
       {% for bf in f.fields %}<div class="form-row field-{{ bf.name }}">{{ bf.label_tag }}<div>{% if bf.errors %}<ul class="errorlist">{% for e in bf.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}{{ bf }}</div></div>{% endfor %}
       {% for r in f.readonly %}<div class="form-row"><label>{{ r.label }}:</label><div class="readonly">{{ r.value }}</div></div>{% endfor %}

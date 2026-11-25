@@ -24,7 +24,7 @@
   {% csrf_token %}
   <input type="hidden" name="post" value="yes">{% if is_popup %}<input type="hidden" name="_popup" value="1">{% endif %}{% if to_field %}<input type="hidden" name="_to_field" value="{{ to_field }}">{% endif %}
   <input type="submit" class="button danger" value="{% translate "Yes, I’m sure" %}">
-  <a class="button secondary" href="{% url 'admin:change' app=opts.app_label model=opts.slug id=object.admin_pk %}">{% translate "No, take me back" %}</a>
+  <a class="button secondary" href="{{ change_url }}">{% translate "No, take me back" %}</a>
 </form>
 {% endif %}
 {% endblock %}

@@ -71,7 +71,7 @@ end
 "An admin ordering: field names as strings (\"-rank\"), expressions (`Desc(F(:rank))`) as they are."
 admin_ordering_terms(xs) = Any[x isa Union{AbstractString,Symbol} ? string(x) : x for x in xs]
 const INLINE_OPTIONS = (:exclude, :readonly_fields, :get_exclude, :get_readonly_fields, :min_num, :get_extra, :get_min_num, :get_max_num,
-                        :verbose_name, :verbose_name_plural, :show_change_link, :classes,
+                        :verbose_name, :verbose_name_plural, :show_change_link, :classes, :view_on_site,
                         :has_view_permission, :has_add_permission, :has_change_permission, :has_delete_permission)
 Base.@nospecializeinfer function TabularInline(@nospecialize(T); fields = nothing, extra = 1, can_delete = true, fk = nothing, max_num = 1000,
                                                ordering = (), style = :tabular, kw...)
@@ -226,6 +226,8 @@ default one is `Admin.site`; make others for, say, a staff area with fewer model
 
 `urls` adds site-wide views (`path("stats/", stats_view; name = "stats")`), behind the same
 login and permission checks, reversed as `"staff:stats"` (or `"admin:stats"` from its pages).
+`index_template`, `app_index_template`, `login_template`, `logout_template`: the site's own templates for
+those pages (Django's AdminSite attributes).
 """
 mutable struct AdminSite
     name::String
@@ -236,10 +238,16 @@ mutable struct AdminSite
     index_title::Union{Nothing,String}
     has_permission::Any                  # nothing (active staff users), or req -> Bool
     extra_urls::Vector{Any}
+    templates::Dict{Symbol,Any}          # :index, :app_index, :login, :logout: the site's own templates (Django's index_template & co.)
 end
 AdminSite(name::AbstractString = "admin"; site_header = nothing, site_title = nothing, index_title = nothing,
-          has_permission = nothing, urls = Any[], registry = Dict{String,ModelAdmin}(), order = String[]) =
-    AdminSite(String(name), registry, order, site_header, site_title, index_title, has_permission, collect(Any, urls))
+          has_permission = nothing, urls = Any[], registry = Dict{String,ModelAdmin}(), order = String[],
+          index_template = nothing, app_index_template = nothing, login_template = nothing, logout_template = nothing) =
+    AdminSite(String(name), registry, order, site_header, site_title, index_title, has_permission, collect(Any, urls),
+              Dict{Symbol,Any}(k => v for (k, v) in (:index => index_template, :app_index => app_index_template,
+                                                    :login => login_template, :logout => logout_template) if v !== nothing))
+"The site's template for a page, else the admin's (a name or a list of names)."
+site_template(st::AdminSite, which::Symbol, default) = get(st.templates, which, default)
 
 """
 What the admin lists and edits (Django's `ModelAdmin.get_queryset`): the `queryset` option's, else the model's,
@@ -338,7 +346,8 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    get_fieldsets = nothing, get_inlines = nothing, get_exclude = nothing, get_prepopulated_fields = nothing,
                    list_max_show_all = 200, preserve_filters = true, password_change_page = false, show_facets = :allow,
                    filter_horizontal = Symbol[], filter_vertical = Symbol[], import_export = nothing, view_on_site = true,
-                   lookup_allowed = nothing, get_search_results = nothing, delete_confirmation_max_display = nothing)
+                   lookup_allowed = nothing, get_search_results = nothing, delete_confirmation_max_display = nothing,
+                   save_as_continue = true)
     modelmeta(T)  # validates T is a model
     slug = model_name(T)
     key = admin_key(T)
@@ -381,6 +390,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                                                  :view_on_site => view_on_site,
                                                  :lookup_allowed => lookup_allowed, :get_search_results => get_search_results,
                                                  :delete_confirmation_max_display => delete_confirmation_max_display,
+                                                 :save_as_continue => save_as_continue,
                                                  :import_export => import_export === true ? Juango.ModelResource(T) : import_export), modelmeta(T).app)
     filter!(!=(key), site.order)
     push!(site.order, key)
@@ -499,7 +509,8 @@ function index(req::Request; app = nothing)
     else
         ctx["recent_actions"] = Dict{String,Any}[]
     end
-    render(req, app === nothing ? "admin/index.html" : ["admin/$app/app_index.html", "admin/app_index.html"], ctx)
+    render(req, app === nothing ? site_template(st, :index, "admin/index.html") :
+                site_template(st, :app_index, ["admin/$app/app_index.html", "admin/app_index.html"]), ctx)
 end
 "An app's page in the admin (`/admin/<app_label>/`): its models."
 app_index(req::Request; app) = index(req; app = app)
@@ -509,7 +520,7 @@ function admin_login(req::Request)
     if req.method == "GET" && Juango.is_authenticated(req.user) && req.user.is_active && site_access(current_site(), req)
         return Juango.HttpResponseRedirect(Juango.safe_next(req, reverse_url("admin:index")))
     end
-    LoginView(template = "admin/login.html", redirect_url = reverse_url("admin:index"), require_staff = true)(req)
+    LoginView(template = site_template(current_site(), :login, "admin/login.html"), redirect_url = reverse_url("admin:index"), require_staff = true)(req)
 end
 "Whether the request's user may use this admin site."
 site_access(st, req) = st.has_permission === nothing ? req.user.is_staff : st.has_permission(req)
@@ -517,7 +528,7 @@ site_access(st, req) = st.has_permission === nothing ? req.user.is_staff : st.ha
 function admin_logout(req::Request)
     req.method == "POST" || return Juango.HttpResponseNotAllowed(["POST"])
     Juango.logout!(req)
-    render(req, "admin/logged_out.html", base_context(req, gettext("Logged out")))
+    render(req, site_template(current_site(), :logout, "admin/logged_out.html"), base_context(req, gettext("Logged out")))
 end
 
 function header_label(ma::ModelAdmin, col)
@@ -1561,7 +1572,8 @@ Base.@nospecializeinfer function form_groups(ma::ModelAdmin, form, @nospecialize
     [Dict{String,Any}("name" => name, "rows" => [row(n) for n in names]) for (name, names) in layout]
 end
 
-Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecialize(obj), data; parent_editable::Bool = true)
+Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecialize(obj), data; parent_editable::Bool = true,
+                                                 save_as_new::Bool = false)
     out = Any[]
     prefixes = Dict{String,Int}()
     h = option(ma, :get_inlines)
@@ -1587,7 +1599,7 @@ Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecial
         prefixes[p0] = get(prefixes, p0, 0) + 1
         pfx = prefixes[p0] == 1 ? p0 : "$p0-$(prefixes[p0])"
         if can_change
-            fs = isempty(ia.ordering) ? FS(data; instance = obj, prefix = pfx) : FS(data; instance = obj, queryset = qs, prefix = pfx)
+            fs = isempty(ia.ordering) ? FS(data; instance = obj, prefix = pfx, save_as_new) : FS(data; instance = obj, queryset = qs, prefix = pfx, save_as_new)
             push!(out, (ia, fs, (readonly = ro, existing = Any[], shown = Symbol[], can_change = true, can_add = can_add)))
         else
             # (no change permission: the objects are shown as values, outside the formset, so a POST can't change
@@ -1628,6 +1640,9 @@ function inline_context(req, ia::InlineAdmin, fs, info = (readonly = Symbol[], e
                      "forms" => [Dict{String,Any}("form" => f, "hidden" => SafeString(hidden_id_html(f)),
                                                   "title" => f.instance === nothing ? "" : string(f.instance),
                                                   "change_link" => link(f.instance),
+                                                  # (a saved row's "View on site", the inline's view_on_site, as Django's)
+                                                  "view_on_site" => f.instance === nothing || f.instance.pk === nothing ? nothing :
+                                                                    view_on_site_link(inline_option(ia, :view_on_site, true), f.instance),
                                                   "fields" => [f[n] for n in names if n !== :DELETE],
                                                   "readonly" => [Dict("label" => rofield(n), "value" => rovalue(f.instance, n)) for n in ro],
                                                   "delete" => :DELETE in names ? f[:DELETE] : nothing) for f in forms],
@@ -1866,6 +1881,39 @@ Base.@nospecializeinfer function to_field_allowed(ma::ModelAdmin, name::Abstract
 end
 "The value a popup hands back for an object: its `_to_field` value, else its key."
 popup_value(@nospecialize(o), tf) = tf === nothing ? Juango.pk_string(o) : string(getproperty(o, Symbol(tf)))
+"""
+What an add popup hands back (Django's response_add): the new object's value and name, and, when the form that opened
+it (`_source_model`, "app.model") has a field named after this model's plural with grouped choices, the group the new
+object is in (`optgroup`). An unknown source model is an error message for the next page.
+"""
+function popup_add_data(req, ma::ModelAdmin, @nospecialize(o), to_field)
+    d = Dict{String,Any}("value" => popup_value(o, to_field), "obj" => string(o))
+    src = get(req.POST, "_source_model", "")
+    isempty(src) && return d
+    S = try
+        occursin('.', src) ? Juango.get_model(src) : nothing
+    catch e
+        e isa Juango.ImproperlyConfigured || rethrow()
+        nothing
+    end
+    if S === nothing
+        message!(req, :error, "The app \"$src\" could not be found.")
+        return d
+    end
+    sma = get(current_site().registry, admin_key(S), nothing)
+    sma === nothing && return d
+    form = configure_widgets!(sma, Juango.ModelForm(S; fields = admin_fields(sma, req, nothing)), req)
+    name = Symbol(modelmeta(ma.model).verbose_name_plural)
+    i = findfirst(f -> f.name === name, form.fields)
+    i === nothing && return d
+    groups = form.fields[i].choices === nothing ? nothing : Juango.choice_groups(form.fields[i])
+    groups === nothing && return d
+    for (g, cs) in groups
+        g === nothing && continue
+        any(c -> string(c.second) == string(o), cs) && (d["optgroup"] = string(g); break)
+    end
+    d
+end
 "The page that closes a popup and hands its object back to the form that opened it (Django's popup_response.html)."
 popup_response(req, data) = render(req, "admin/popup_response.html", Dict{String,Any}("popup_response_data" => Juango.JSON.json(data)))
 
@@ -1909,8 +1957,10 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
                                                    fields = filter(!in(locked), admin_fields(ma, req, obj)),
                                                    initial = adding ? changeform_initial(ma, req) : Dict{Symbol,Any}()), req)
     pfs = custom_add || (!adding && option(ma, :password_change_page, false)) ? Symbol[] : ma.password_fields
-    inlines = save_as_new || custom_add ? Any[] : inline_formsets(ma, req, obj, data; parent_editable = editable)
-    if req.method == "POST" && is_valid(form) && all(x -> is_valid(x[2]), inlines)
+    # ("Save as new": the inlines' rows are copied to the new object, and validated, as Django's save_as_new form sets)
+    inlines = custom_add ? Any[] : inline_formsets(ma, req, obj, data; parent_editable = editable, save_as_new)
+    # (the form and every inline are validated, so all their errors show at once, as Django's all_valid)
+    if req.method == "POST" && (fv = is_valid(form); ivs = [is_valid(x[2]) for x in inlines]; fv && all(ivs))
         o = Juango.atomic() do
             o = save!(form; commit = false)
             for pf in pfs
@@ -1937,7 +1987,7 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         resp_hook = option(ma, adding ? :response_add : :response_change)
         resp_hook === nothing || return Juango.to_response(resp_hook(req, o))
         # opened from a related-object link: close, handing the object back (Django's response_add / response_change)
-        haskey(req.POST, "_popup") && return popup_response(req, adding ? Dict("value" => popup_value(o, to_field), "obj" => string(o)) :
+        haskey(req.POST, "_popup") && return popup_response(req, adding ? popup_add_data(req, ma, o, to_field) :
                                                      Dict("action" => "change", "value" => old_value, "obj" => string(o),
                                                           "new_value" => popup_value(o, to_field)))
         # (the object linked: to its change page after adding, if the user may change it; to this page after changing, as Django's)
@@ -1949,7 +1999,9 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
                                        (isempty(more) ? "" : " " * escape_html(interpolate(gettext(more), Dict("model" => meta.verbose_name)))))
         added_or_changed = adding ? "The %(model)s “%(object)s” was added successfully." : "The %(model)s “%(object)s” was changed successfully."
         # (an add form of its own, the user admin's, goes on to the change page unless "Save and add another", as Django's UserAdmin)
-        if haskey(req.POST, "_continue") || save_as_new || (custom_add && !haskey(req.POST, "_addanother"))
+        # ("Save as new" goes on to the new object unless save_as_continue = false or the user may not change it, as Django's)
+        if haskey(req.POST, "_continue") || (save_as_new && option(ma, :save_as_continue, true) && can(req, ma, :change, o)) ||
+           (custom_add && !haskey(req.POST, "_addanother"))
             message!(req, :success, msg(added_or_changed; more = !adding || can(req, ma, :change, o) ? "You may edit it again below." : ""))
             return Juango.HttpResponseRedirect(obj_url * kept_query(req))
         elseif haskey(req.POST, "_addanother")
@@ -1982,8 +2034,13 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         "view_on_site" => adding ? nothing : view_on_site_url(ma, obj), "save_on_top" => option(ma, :save_on_top, false),
         "password_change" => adding || !option(ma, :password_change_page, false) ? nothing :
             Dict("summary" => Juango.password_summary(obj), "url" => reverse_url("admin:password_change"; app = ma.app, model = ma.slug, id = admin_pk(obj))),
-        "history_url" => adding ? nothing : reverse_url("admin:history"; app = ma.app, model = ma.slug, id = admin_pk(obj)),
-        "to_field" => to_field))
+        # (the history, delete and close links keep the change list's filters, as Django's add_preserved_filters)
+        "history_url" => adding ? nothing : reverse_url("admin:history"; app = ma.app, model = ma.slug, id = admin_pk(obj)) * keep_filters(req),
+        "delete_url" => adding ? nothing : reverse_url("admin:delete"; app = ma.app, model = ma.slug, id = admin_pk(obj)) * keep_filters(req),
+        "close_url" => changelist_url(ma, req),
+        "to_field" => to_field, "source_model" => popup ? get(req.GET, "_source_model", get(req.POST, "_source_model", nothing)) : nothing))
+    # (a "Save as new" that failed: only "Save as new" again, as Django's submit row)
+    save_as_new && (ctx["save_as_only"] = true; ctx["save_as"] = true)
     if popup        # (in a popup: Save only, as Django's submit row)
         ctx["can_delete"] = false; ctx["save_as"] = false; ctx["can_add"] = false
     end
@@ -2058,8 +2115,9 @@ The change form's "View on site" link (Django's view_on_site): with `view_on_sit
 default) the site's redirect to the object's `get_absolute_url` when it has one, with a function
 what it returns for the object, with `false` none.
 """
-Base.@nospecializeinfer function view_on_site_url(ma::ModelAdmin, @nospecialize(obj))
-    v = option(ma, :view_on_site, true)
+Base.@nospecializeinfer view_on_site_url(ma::ModelAdmin, @nospecialize(obj)) = view_on_site_link(option(ma, :view_on_site, true), obj)
+"An object's \"View on site\" URL for a view_on_site option (true: by get_absolute_url; false: none; a function of the object)."
+Base.@nospecializeinfer function view_on_site_link(v, @nospecialize(obj))
     v === false && return nothing
     v isa Function && return v(obj)
     absolute_url(obj) === nothing && return nothing
@@ -2067,7 +2125,8 @@ Base.@nospecializeinfer function view_on_site_url(ma::ModelAdmin, @nospecialize(
 end
 "`admin/r/<content type>/<id>/`: to the object's `get_absolute_url` (Django's contenttypes shortcut)."
 function view_on_site_view(req::Request; content_type_id, object_id)
-    ct = first(filter(Juango.ContentType; id = content_type_id))
+    ctid = tryparse(Int, string(content_type_id))
+    ct = ctid === nothing ? nothing : first(filter(Juango.ContentType; id = ctid))
     ct === nothing && throw(Http404("Content type $content_type_id object has no associated model"))
     T = Juango.model_class(ct)
     T === nothing && throw(Http404("Content type $content_type_id object has no associated model"))
@@ -2120,6 +2179,7 @@ function delete_view(req::Request; app, model, id)
     merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "object_display" => object_display(obj), "deleted_objects" => d.html,
                                  "model_count" => d.model_count, "perms_lacking" => d.perms_needed, "protected" => d.protected,
                                  "protected_html" => d.protected_html,
+                                 "change_url" => reverse_url("admin:change"; app = ma.app, model = ma.slug, id = id) * keep_filters(req),
                                  "show_objects" => (md = option(ma, :delete_confirmation_max_display); md === nothing || md > 0),
                                  "hide_protected" => option(ma, :delete_confirmation_max_display) == 0,
                                  "to_field" => to_field))
@@ -2384,7 +2444,7 @@ function urls(st::AdminSite = site)
         path("", s(index); name = "index"),
         path("login/", site_view(st, admin_login; public = true); name = "login"),
         path("logout/", site_view(st, admin_logout; public = true); name = "logout"),
-        path("r/<int:content_type_id>/<str:object_id>/", s(view_on_site_view); name = "view_on_site")],
+        path("r/<path:content_type_id>/<path:object_id>/", s(view_on_site_view); name = "view_on_site")],     # (any ids, as Django's)
         Any[wrap(p) for p in st.extra_urls], custom, Any[
         path("<slug:app>/", s(app_index); name = "app_list"),
         path("<slug:app>/<slug:model>/", s(changelist); name = "changelist"),
@@ -2530,6 +2590,10 @@ Base.@nospecializeinfer function check_admin(ma::ModelAdmin)
             end
         end
     end
+    # view_on_site (E025): a function or a boolean
+    vos = option(ma, :view_on_site, true)
+    vos isa Bool || vos isa Function ||
+        err("The value of 'view_on_site' must be a callable or a boolean value.", "admin.E025")
     # delete_confirmation_max_display (E041)
     md = option(ma, :delete_confirmation_max_display)
     md === nothing || (md isa Integer && !(md isa Bool) && md >= 0) ||
