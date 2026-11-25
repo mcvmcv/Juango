@@ -464,7 +464,11 @@ function parse_multipart_fields(req::Request)
         parts = multipart_parts(something(header(req, "content-type"), ""), req.body)
         maxfiles = get(settings, :DATA_UPLOAD_MAX_NUMBER_FILES, nothing)
         maxfiles === nothing || count(p -> p.filename !== nothing, parts) <= maxfiles ||
-            throw(BadRequest("The number of files exceeded DATA_UPLOAD_MAX_NUMBER_FILES."))
+            throw(BadRequest("The number of files exceeded settings.DATA_UPLOAD_MAX_NUMBER_FILES."))
+        # (the fields, not the files, count against DATA_UPLOAD_MAX_MEMORY_SIZE, as Django's MultiPartParser)
+        limit = get(settings, :DATA_UPLOAD_MAX_MEMORY_SIZE, nothing)
+        limit === nothing || sum((ncodeunits(p.name) + 2 + length(p.data) for p in parts if p.filename === nothing); init = 0) <= limit ||
+            throw(BadRequest("Request body exceeded settings.DATA_UPLOAD_MAX_MEMORY_SIZE."))
         for p in parts
             if p.filename === nothing
                 push!(get!(q.data, p.name, String[]), String(p.data))
@@ -544,25 +548,103 @@ function url_has_allowed_host_and_scheme(url, allowed_hosts; require_https::Bool
     host in hosts
 end
 """
+    MediaType(line)
+
+A media type from an Accept header or a response (`"text/html; level=1; q=0.7"`), as Django's: `main_type`,
+`sub_type`, `params` (in order, `q` included), `range_params(m)` (without `q`), `quality(m)` (0 to 1, 3 digits;
+an invalid q counts as 1) and `specificity(m)` (`*/*` 0, `text/*` 1, `text/html` 2, with parameters 3).
+`match(m, other)`: whether `other` is in the range `m` names.
+"""
+struct MediaType
+    main_type::String
+    sub_type::String
+    params::Vector{Pair{String,String}}
+end
+function MediaType(line::Union{Nothing,AbstractString})
+    parts = split(something(line, ""), ';')
+    full = lowercase(strip(parts[1]))
+    params = Pair{String,String}[]
+    for p in parts[2:end]
+        occursin('=', p) || continue
+        k, v = split(p, '='; limit = 2)
+        v = strip(v)
+        length(v) >= 2 && startswith(v, '"') && endswith(v, '"') && (v = v[2:end-1])
+        push!(params, lowercase(strip(k)) => String(v))
+    end
+    i = findfirst('/', full)
+    i === nothing ? MediaType(full, "", params) : MediaType(full[1:i-1], full[i+1:end], params)
+end
+MediaType(m::MediaType) = m
+Base.string(m::MediaType) = m.main_type * (isempty(m.sub_type) ? "" : "/" * m.sub_type) * join("; $k=$v" for (k, v) in m.params)
+Base.print(io::IO, m::MediaType) = print(io, string(m))
+Base.show(io::IO, m::MediaType) = print(io, "<MediaType: ", string(m), ">")
+Base.:(==)(a::MediaType, b::MediaType) = a.main_type == b.main_type && a.sub_type == b.sub_type && a.params == b.params
+range_params(m::MediaType) = Dict{String,String}(k => v for (k, v) in m.params if k != "q")
+function quality(m::MediaType)
+    i = findfirst(p -> p.first == "q", m.params)
+    i === nothing && return 1.0
+    q = tryparse(Float64, strip(m.params[i].second))
+    (q === nothing || isnan(q) || q < 0 || q > 1) && return 1.0
+    round(q; digits = 3)
+end
+specificity(m::MediaType) = m.main_type == "*" ? 0 : m.sub_type == "*" ? 1 : isempty(range_params(m)) ? 2 : 3
+function Base.match(m::MediaType, other)
+    (other === nothing || (other isa AbstractString && isempty(strip(other)))) && return false
+    o = other isa MediaType ? other : MediaType(other)
+    all(!isempty, (m.main_type, o.main_type, m.sub_type, o.sub_type)) || return false
+    for (a, b) in ((m.main_type, o.main_type), (m.sub_type, o.sub_type))
+        a != b && a != "*" && b != "*" && return false
+    end
+    rp, orp = range_params(m), range_params(o)
+    isempty(rp) == isempty(orp) ? rp == orp : (!isempty(rp) || isempty(orp))
+end
+
+"""
+    accepted_types(req) -> Vector{MediaType}
+
+The media types the request's Accept header takes, most preferred first (quality, then specificity), without
+those of quality 0; no header is `*/*`. `accepted_types_by_precedence(req)`: most specific first.
+"""
+function accepted_types(req::Request)
+    a = header(req, "accept")
+    a === nothing && (a = "*/*")
+    ts = [m for t in split(a, ',') if !isempty(strip(t)) for m in (MediaType(t),) if quality(m) != 0]
+    sort(ts; by = m -> (quality(m), specificity(m)), rev = true)
+end
+accepted_types_by_precedence(req::Request) = sort(accepted_types(req); by = m -> (specificity(m), quality(m)), rev = true)
+"The accepted type that best matches `media_type` (the most specific range it's in), or `nothing`."
+function accepted_type(req::Request, media_type)
+    mt = MediaType(media_type)
+    for a in accepted_types_by_precedence(req)
+        match(mt, a) && return a
+    end
+    nothing
+end
+"""
+    get_preferred_type(req, media_types) -> one of them, or nothing
+
+Of the media types a view can answer with, the one the request prefers, as Django's.
+"""
+function get_preferred_type(req::Request, media_types)
+    isempty(media_types) && return nothing
+    prefs = accepted_types(req)
+    isempty(prefs) && return nothing
+    best, rank = nothing, typemax(Int)
+    for t in media_types
+        a = accepted_type(req, t)
+        a === nothing && continue
+        r = findfirst(==(a), prefs)
+        r < rank && ((best, rank) = (t, r))
+    end
+    best
+end
+"""
     accepts(req, media_type) -> Bool
 
-Whether the request's Accept header takes `media_type` (Django's `HttpRequest.accepts`):
-`text/html` is accepted by `text/html`, `text/*` and `*/*`, and by a request without an Accept header.
+Whether the request's Accept header takes `media_type` (Django's `HttpRequest.accepts`): `text/html` is
+taken by `text/html`, `text/*` and `*/*`, and by a request without an Accept header (an empty one takes nothing).
 """
-function accepts(req::Request, media_type::AbstractString)
-    a = header(req, "accept")
-    (a === nothing || isempty(strip(a))) && return true
-    main, sub = split(lowercase(media_type), '/'; limit = 2)
-    for part in split(a, ',')
-        t = lowercase(strip(split(part, ';')[1]))
-        q = match(r";\s*q=([0-9.]+)", part)
-        q !== nothing && something(tryparse(Float64, q[1]), 1.0) == 0 && continue
-        t == "*/*" && return true
-        m, s = occursin('/', t) ? split(t, '/'; limit = 2) : (t, "")
-        m == main && (s == "*" || s == sub) && return true
-    end
-    false
-end
+accepts(req::Request, media_type) = accepted_type(req, media_type) !== nothing
 
 full_path(req::Request) = isempty(req.query_string) ? req.path : req.path * "?" * req.query_string
 build_absolute_uri(req::Request, loc = full_path(req)) =

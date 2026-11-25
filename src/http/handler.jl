@@ -228,11 +228,8 @@ end
 function too_many_fields(req::Request)
     limit = get(settings, :DATA_UPLOAD_MAX_NUMBER_FIELDS, nothing)
     limit === nothing && return false
-    n = 0
-    for q in (req.GET, req.POST), v in values(q.data)
-        n += length(v)
-    end
-    n > limit
+    # (each of the query string and the body on its own, as Django's QueryDict)
+    any(q -> sum(length, values(q.data); init = 0) > limit, (req.GET, req.POST))
 end
 
 "Set while a `with_live_server(; static = true)` block runs: static files are served even without DEBUG."
@@ -254,7 +251,12 @@ function handle_request_inner(req::Request)
             return serve_static_root(req)                # (contrib/staticfiles.jl: hashed, cached, pre-compressed)
         end
         haskey(req.meta, :upload_error) && throw(req.meta[:upload_error])
-        too_many_fields(req) && throw(BadRequest("The number of GET/POST parameters exceeded DATA_UPLOAD_MAX_NUMBER_FIELDS."))
+        too_many_fields(req) && throw(BadRequest("The number of GET/POST parameters exceeded settings.DATA_UPLOAD_MAX_NUMBER_FIELDS."))
+        # (a body over DATA_UPLOAD_MAX_MEMORY_SIZE: runserver refuses it before reading, this catches the rest, as Django's
+        # RequestDataTooBig; a multipart body's fields are counted when parsed)
+        (lim = get(settings, :DATA_UPLOAD_MAX_MEMORY_SIZE, nothing)) === nothing ||
+            startswith(lowercase(something(header(req, "content-type"), "")), "multipart/") || length(req.body) <= lim ||
+            throw(BadRequest("Request body exceeded settings.DATA_UPLOAD_MAX_MEMORY_SIZE."))
         host_allowed(req) || (log!("juango.security.DisallowedHost", :warning, "Invalid HTTP_HOST header: '$(get_host(req))'"; request = req);
                               throw(BadRequest("Invalid HTTP_HOST header: '$(get_host(req))'. You may need to add it to ALLOWED_HOSTS.")))
         req.resolver_match = resolve(req.path_info)
