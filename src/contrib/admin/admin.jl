@@ -1447,7 +1447,7 @@ function changelist(req::Request; app, model)
                 push!(cells, (value = cell_value(ma, o, c), link = linked(i, c)))
             end
         end
-        hidden = fo === nothing ? "" : Juango.widget_html(fo[:id])
+        hidden = fo === nothing ? "" : hidden_id_html(fo)
         pk = Juango.pk_string(o)
         # a NamedTuple, not a Dict: the template reads row.id, row.cells ..., and this is per row
         # (a row's errors that aren't a field's, unique_together: on a row of their own above it, as Django's)
@@ -1596,7 +1596,7 @@ function inline_context(req, ia::InlineAdmin, fs, info = (readonly = Symbol[], e
                      "classes" => join(string.(inline_option(ia, :classes, String[])), " "),
                      "management_form" => management_form(fs), "non_form_errors" => fs.non_form_errors,
                      "headers" => headers,
-                     "forms" => [Dict{String,Any}("form" => f, "hidden" => SafeString(Juango.widget_html(f[:id])),
+                     "forms" => [Dict{String,Any}("form" => f, "hidden" => SafeString(hidden_id_html(f)),
                                                   "title" => f.instance === nothing ? "" : string(f.instance),
                                                   "change_link" => link(f.instance),
                                                   "fields" => [f[n] for n in names if n !== :DELETE],
@@ -1610,6 +1610,8 @@ function inline_context(req, ia::InlineAdmin, fs, info = (readonly = Symbol[], e
 end
 
 changed_labels(form, ch) = Juango.get_text_list([string(label(f)) for f in form.fields if f.name in ch], gettext("and"))
+"A form set row's hidden id input (none for a model whose own primary key field is on the form: code, index)."
+hidden_id_html(f) = any(x -> x.name === :id, f.fields) ? Juango.widget_html(f[:id]) : ""
 change_message(form, inlines) = begin
     parts = String[]
     ch = changed_fields(form)
@@ -1944,6 +1946,8 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
                     form_groups(ma, form, obj, editable; locked = locked, readonly = ro,
                                 fieldsets = admin_fieldsets(ma, req, obj)),
         "inlines" => [inline_context(req, ia, fs, info) for (ia, fs, info) in inlines],
+        # (an inline's file field makes the whole form multipart, as Django's has_file_field)
+        "has_file_field" => Juango.is_multipart(form) || any(x -> Juango.is_multipart(x[2]), inlines),
         "prepopulated" => Juango.JSON.json(prepop), "save_as" => ma.save_as && !adding && can(req, ma, :add),
         "password_fields" => [Dict("name" => string(pf), "label" => uppercasefirst(string(pf))) for pf in pfs],
         "view_on_site" => adding ? nothing : view_on_site_url(ma, obj), "save_on_top" => option(ma, :save_on_top, false),

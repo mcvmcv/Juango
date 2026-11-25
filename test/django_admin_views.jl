@@ -205,12 +205,54 @@ end
 @model struct DavBarAccount <: DavAccount
     Meta(table = "dav_baraccount")
 end
+@model struct DavCollector
+    name = CharField(max_length = 100)
+    Meta(table = "dav_collector")
+end
+@model struct DavWidget
+    owner = ForeignKey(DavCollector, on_delete = :CASCADE, related_name = :widget_set)
+    name = CharField(max_length = 100)
+    Meta(table = "dav_widget")
+end
+@model struct DavDooHickey
+    code = CharField(max_length = 10, primary_key = true)
+    owner = ForeignKey(DavCollector, on_delete = :CASCADE, related_name = :doohickey_set)
+    name = CharField(max_length = 100)
+    Meta(table = "dav_doohickey")
+end
+@model struct DavWhatsit
+    index = IntegerField(primary_key = true)
+    owner = ForeignKey(DavCollector, on_delete = :CASCADE, related_name = :whatsit_set)
+    name = CharField(max_length = 100)
+    Meta(table = "dav_whatsit")
+end
+@model struct DavDoodad
+    name = CharField(max_length = 100)
+    Meta(table = "dav_doodad")
+end
+@model struct DavFancyDoodad <: DavDoodad
+    owner = ForeignKey(DavCollector, on_delete = :CASCADE, related_name = :fancydoodad_set)
+    expensive = BooleanField(default = true)
+    Meta(table = "dav_fancydoodad")
+end
+@model struct DavGallery
+    name = CharField(max_length = 100)
+    Meta(table = "dav_gallery")
+end
+@model struct DavPicture
+    name = CharField(max_length = 100)
+    image = FileField(upload_to = "dav_pictures")
+    gallery = ForeignKey(DavGallery, on_delete = :CASCADE, related_name = :pictures)
+    Meta(table = "dav_picture")
+end
 redirect_stdout(devnull) do
     ms = [DavActor, DavInquisition, DavSketch, DavCharacter, DavStumpJoke, through(DavStumpJoke, :has_fooled_today), DavAlbum, DavMessenger,
           DavBook, DavChapter, DavCoverLetter, DavParent, DavChild, DavPerson, DavTitle, DavTitleTranslation, DavRecommender,
           DavRecommendation, DavPluggable, DavFoodDelivery, DavCategory, DavUnordered, DavSection, DavArticle, DavSortPerson, DavLanguage,
           DavColor, DavThing, DavPost, DavFabric, DavTopping, DavPizza, through(DavPizza, :toppings),
-          DavGqs, DavTelegram, DavShortMessage, DavPersona, DavAccount, DavFooAccount, DavBarAccount]
+          DavGqs, DavTelegram, DavShortMessage, DavPersona, DavAccount, DavFooAccount, DavBarAccount,
+          DavCollector, DavWidget, DavDooHickey, DavWhatsit, DavDoodad, DavFancyDoodad,
+          DavGallery, DavPicture]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
     Juango.update_permissions!(ms)
 end
@@ -764,6 +806,80 @@ end
             @test count(get(DavPersona; id = p.id).accounts) == 2
         finally
             Admin.unregister!(DavPersona)
+        end
+    end
+end
+
+@testset "django admin_views: AdminInlineTests" begin
+    port_block() do
+        Admin.register!(DavCollector; inlines = [Admin.TabularInline(M; extra = 3) for M in (DavWidget, DavDooHickey, DavWhatsit, DavFancyDoodad)])
+        try
+            c = dav_super("dav_super11")
+            col = create(DavCollector; name = "John Fowles")
+            url = "$DAV/davcollector/$(col.id)/change/"
+            function base_data()
+                d = Dict{String,String}("name" => "Test Name")
+                for (pfx, keyname, extra) in (("widget_set", "id", ["name"]), ("doohickey_set", "code", ["name"]),
+                                             ("whatsit_set", "index", ["name"]), ("fancydoodad_set", "id", ["name", "expensive"]))
+                    d["$pfx-TOTAL_FORMS"] = "3"; d["$pfx-INITIAL_FORMS"] = "0"; d["$pfx-MAX_NUM_FORMS"] = "0"
+                    for i in 0:2
+                        d["$pfx-$i-$keyname"] = ""; d["$pfx-$i-owner"] = string(col.id)
+                        foreach(f -> d["$pfx-$i-$f"] = f == "expensive" ? "on" : "", extra)
+                    end
+                end
+                d
+            end
+            # test_simple_inline, test_char_pk_inline, test_integer_pk_inline, test_inherited_inline:
+            # added, re-saved unchanged, then changed, through the parent's change form
+            for (pfx, M, keyname, newkey) in (("widget_set", DavWidget, "id", nothing),
+                                             ("doohickey_set", DavDooHickey, "code", "DH1"), ("whatsit_set", DavWhatsit, "index", "42"),
+                                             ("fancydoodad_set", DavFancyDoodad, "id", nothing))
+                d = base_data()
+                newkey === nothing || (d["$pfx-0-$keyname"] = newkey)
+                d["$pfx-0-name"] = "$pfx 1"
+                r = post(c, url, d)
+                @test r.status == 302 && count(objects(M)) == 1 && first(objects(M)).name == "$pfx 1"
+                o = first(objects(M))
+                @test occursin("name=\"$pfx-0-$keyname\"", text(get(c, url)))                     # (the key's input on the form)
+                key = string(getproperty(o, Symbol(keyname)))
+                for name in ("$pfx 1", "$pfx 1 Updated")
+                    d = base_data()
+                    d["$pfx-INITIAL_FORMS"] = "1"; d["$pfx-0-$keyname"] = key; d["$pfx-0-name"] = name
+                    r = post(c, url, d)
+                    @test r.status == 302 && count(objects(M)) == 1 && first(objects(M)).name == name
+                end
+            end
+            # (no file field: no multipart form)
+            @test !occursin("multipart/form-data", text(get(c, url)))
+        finally
+            Admin.unregister!(DavCollector)
+        end
+    end
+    # not translated: test_explicit_autofield_inline (an automatic key named otherwise than id, #277), test_ordered_inline (Category's order field and its admin ordering, tested with list_editable above)
+end
+
+@testset "django admin_views: AdminInlineFileUploadTest" begin
+    port_block() do
+        Admin.register!(DavGallery; inlines = [Admin.TabularInline(DavPicture; extra = 1)])
+        media = mktempdir()
+        try
+          override_settings(MEDIA_ROOT = media) do
+            c = dav_super("dav_super12")
+            g = create(DavGallery; name = "Test Gallery")
+            pic = create(DavPicture; name = "Test Picture", image = UploadedFile("test.file1", "a"^1024), gallery = g)
+            url = "$DAV/davgallery/$(g.id)/change/"
+            # test_form_has_multipart_enctype: the inline's file field makes the parent's form multipart
+            @test occursin("enctype=\"multipart/form-data\"", text(get(c, url)))
+            # test_inline_file_upload_edit_validation_error_post: after an error the existing file is still shown
+            r = post(c, url, Dict("name" => "Test Gallery", "pictures-TOTAL_FORMS" => "2", "pictures-INITIAL_FORMS" => "1", "pictures-MAX_NUM_FORMS" => "0",
+                                  "pictures-0-id" => string(pic.id), "pictures-0-gallery" => string(g.id), "pictures-0-name" => "Test Picture",
+                                  "pictures-1-id" => "", "pictures-1-gallery" => string(g.id), "pictures-1-name" => "Test Picture 2"))
+            @test r.status == 200 && occursin("Currently", text(r))
+            # TestInlineNotEditable test_GET_parent_add
+            @test get(c, "$DAV/davgallery/add/").status == 200
+          end
+        finally
+            Admin.unregister!(DavGallery); rm(media; recursive = true)
         end
     end
 end
