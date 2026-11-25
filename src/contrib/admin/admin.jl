@@ -338,7 +338,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    get_fieldsets = nothing, get_inlines = nothing, get_exclude = nothing, get_prepopulated_fields = nothing,
                    list_max_show_all = 200, preserve_filters = true, password_change_page = false, show_facets = :allow,
                    filter_horizontal = Symbol[], filter_vertical = Symbol[], import_export = nothing, view_on_site = true,
-                   lookup_allowed = nothing, get_search_results = nothing)
+                   lookup_allowed = nothing, get_search_results = nothing, delete_confirmation_max_display = nothing)
     modelmeta(T)  # validates T is a model
     slug = model_name(T)
     key = admin_key(T)
@@ -380,6 +380,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                                                  :filter_vertical => Symbol.(collect(filter_vertical)),
                                                  :view_on_site => view_on_site,
                                                  :lookup_allowed => lookup_allowed, :get_search_results => get_search_results,
+                                                 :delete_confirmation_max_display => delete_confirmation_max_display,
                                                  :import_export => import_export === true ? Juango.ModelResource(T) : import_export), modelmeta(T).app)
     filter!(!=(key), site.order)
     push!(site.order, key)
@@ -454,7 +455,9 @@ Base.@nospecializeinfer can_view(req, ma, @nospecialize(obj = nothing)) = can(re
 "Throw 403 unless the user may do one of `actions` on the model (or on `obj`)."
 Base.@nospecializeinfer require_perm(req, ma, actions...; obj = nothing) = any(a -> can(req, ma, a, obj), actions) ||
     throw(Juango.PermissionDenied("You don't have permission to $(join(string.(actions), " or ")) $(modelmeta(ma.model).verbose_name_plural)."))
-visible_models(req) = (st = current_site(); [s for s in st.order if can_view(req, st.registry[s]) || can(req, st.registry[s], :add)])
+# (any permission on the model lists it, delete only too, as Django's has_module_permission and the index's perms)
+visible_models(req) = (st = current_site(); [s for s in st.order if listed_on_index(req, st.registry[s])])
+listed_on_index(req, ma) = can_view(req, ma) || can(req, ma, :add) || can(req, ma, :delete)
 
 function base_context(req, title)
     st = current_site()
@@ -1507,17 +1510,43 @@ end
 Base.@nospecializeinfer admin_exclude(ma::ModelAdmin, req, @nospecialize(obj)) =
     (h = option(ma, :get_exclude); h === nothing || req === nothing ? ma.exclude : Symbol.(collect(h(req, obj))))
 
+"""
+A read-only value as Django's AdminReadonlyField.contents: a related object linked to its change page when its model
+is in the admin (a foreign key, a reverse one-to-one), many-to-many objects listed, a choice's label (a choice of
+nothing too), else the value escaped with its line breaks as <br>.
+"""
 Base.@nospecializeinfer function readonly_value(@nospecialize(obj), f::Field)
     obj === nothing && return "-"
     v = getproperty(obj, f.name)
     f.kind === :m2m && return join(string.(collect(v)), ", ")
-    f.choices !== nothing && v !== nothing && return string(Juango.choice_label(Juango.field_choices(f), v))
-    format_value(v)
+    if f.choices !== nothing
+        ch = Juango.field_choices(f)
+        i = findfirst(c -> isequal(c.first, v), ch)
+        i === nothing || return string(ch[i].second)          # (a choice of nothing too: "No opinion")
+        return v === nothing ? "-" : string(Juango.choice_label(ch, v))
+    end
+    readonly_display(v)
+end
+"A value read-only: a model object linked (if its model is in the admin), else escaped with <br> for line breaks."
+function readonly_display(@nospecialize(v))
+    v isa Model && return admin_link(v)
+    s = format_value(v)
+    s isa SafeString && return s
+    SafeString(replace(escape_html(string(s)), r"\r\n|\r|\n" => "<br>"))
+end
+"An object linked to its change page when its model is registered here (Django's get_admin_url), else its name."
+Base.@nospecializeinfer function admin_link(@nospecialize(o))
+    ra = get(current_site().registry, admin_key(typeof(o)), nothing)
+    ra === nothing && return escape_html(string(o))
+    SafeString("<a href=\"" * escape_html(reverse_url("admin:change"; app = ra.app, model = ra.slug, id = admin_pk(o))) * "\">" *
+               escape_html(string(o)) * "</a>")
 end
 Base.@nospecializeinfer readonly_row(ma, @nospecialize(obj), name) = (f = findfield(modelmeta(ma.model), name);
     f === nothing && (f = findfirst(x -> x.name === name, modelmeta(ma.model).m2m) |> i -> i === nothing ? nothing : modelmeta(ma.model).m2m[i]);
     Dict{String,Any}("readonly" => true, "label" => f === nothing ? uppercasefirst(replace(string(name), '_' => ' ')) : label(f),
-                     "value" => f === nothing ? format_value(obj === nothing ? nothing : getproperty(obj, name)) : readonly_value(obj, f)))
+                     "value" => f === nothing ? readonly_display(obj === nothing ? nothing : readonly_attr(obj, name)) : readonly_value(obj, f)))
+"An attribute shown read-only: a reverse one-to-one with no object is nothing, not an error."
+readonly_attr(@nospecialize(obj), name) = try getproperty(obj, name) catch e; e isa Juango.DoesNotExist ? nothing : rethrow() end
 
 "The change form as groups of rows (fieldsets), each row a bound field or a read-only value."
 Base.@nospecializeinfer function form_groups(ma::ModelAdmin, form, @nospecialize(obj), editable; locked = Symbol[], readonly = ma.readonly_fields,
@@ -1584,7 +1613,7 @@ function inline_context(req, ia::InlineAdmin, fs, info = (readonly = Symbol[], e
     names = [f.name for f in ef.fields if f.name !== :id]
     ro = info.readonly
     rofield(n) = (fld = findfield(modelmeta(ia.model), n); fld === nothing ? uppercasefirst(replace(string(n), '_' => ' ')) : label(fld))
-    rovalue(o, n) = (fld = findfield(modelmeta(ia.model), n); fld === nothing ? format_value(o === nothing ? nothing : getproperty(o, n)) : readonly_value(o, fld))
+    rovalue(o, n) = (fld = findfield(modelmeta(ia.model), n); fld === nothing ? readonly_display(o === nothing ? nothing : readonly_attr(o, n)) : readonly_value(o, fld))
     vn, vnp = inline_verbose_names(ia)
     sub = get(current_site().registry, admin_key(ia.model), nothing)
     link(o) = (inline_option(ia, :show_change_link, false) === true && sub !== nothing && o !== nothing && can_view(req, sub, o)) ?
@@ -2084,12 +2113,15 @@ function delete_view(req::Request; app, model, id)
             return Juango.HttpResponseRedirect(reverse_url("admin:change"; app = ma.app, model = ma.slug, id = id))
         end
     end
-    d = get_deleted_objects(req, obj)
+    d = get_deleted_objects(req, obj; max_display = option(ma, :delete_confirmation_max_display))
     title = isempty(d.perms_needed) && isempty(d.protected) ? gettext("Are you sure?") :
             interpolate(gettext("Cannot delete %(name)s"), Dict("name" => meta.verbose_name))
     ctx = base_context(req, title)
     merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "object_display" => object_display(obj), "deleted_objects" => d.html,
                                  "model_count" => d.model_count, "perms_lacking" => d.perms_needed, "protected" => d.protected,
+                                 "protected_html" => d.protected_html,
+                                 "show_objects" => (md = option(ma, :delete_confirmation_max_display); md === nothing || md > 0),
+                                 "hide_protected" => option(ma, :delete_confirmation_max_display) == 0,
                                  "to_field" => to_field))
     render(req, "admin/delete_confirmation.html", ctx)
 end
@@ -2102,7 +2134,7 @@ count), `perms_needed` (the verbose names of registered models the user may not 
 `protected` (the objects behind `:PROTECT` keys, or `:RESTRICT` keys the deletion doesn't reach,
 that block it).
 """
-Base.@nospecializeinfer function get_deleted_objects(req, @nospecialize(obj))
+Base.@nospecializeinfer function get_deleted_objects(req, @nospecialize(obj); max_display = nothing)
     seen = Set{Tuple{Any,Any}}()
     counts = Dict{String,Int}()
     perms = Set{String}()
@@ -2124,7 +2156,7 @@ Base.@nospecializeinfer function get_deleted_objects(req, @nospecialize(obj))
         push!(seen, (T, o.pk))
         m = modelmeta(T)
         counts[m.verbose_name_plural] = get(counts, m.verbose_name_plural, 0) + 1
-        children = String[]
+        children = Any[]
         for (_, M, f) in Juango.deletion_referrers(T)
             f.on_delete in (:CASCADE, :PROTECT, :RESTRICT) || continue
             rel = collect(filter(Juango.base_objects(M), Juango.referrers_q(f, Any[o.pk])))
@@ -2143,14 +2175,47 @@ Base.@nospecializeinfer function get_deleted_objects(req, @nospecialize(obj))
                 (C, c.pk) in seen || push!(children, walk(c))
             end
         end
-        "<li>" * item(o) * (isempty(children) ? "" : "<ul>" * join(children) * "</ul>") * "</li>"
+        # (and a child's parent rows go with it, with what refers to them, as Django's collector)
+        P = Juango.table_parent(T)
+        if P !== nothing && !((P, o.pk) in seen)
+            for p in filter(Juango.base_objects(P); id__in = Any[o.pk])
+                push!(children, walk(p))
+            end
+        end
+        (item(o), children)
     end
-    html = walk(obj)
+    tree = walk(obj)
     for r in restricted                       # (a restricted row the deletion doesn't reach blocks it)
         (Juango.concrete_model(typeof(r)), r.pk) in seen || any(x -> typeof(x) === typeof(r) && x.pk == r.pk, protected) || push!(protected, r)
     end
-    (html = SafeString(html), model_count = sort(collect(counts); by = first), perms_needed = sort(collect(perms)),
-     protected = [SafeString(item(p)) for p in protected])
+    (html = SafeString(truncated_list([tree], max_display)), model_count = sort(collect(counts); by = first), perms_needed = sort(collect(perms)),
+     protected = [SafeString(item(p)) for p in protected],
+     protected_html = SafeString(truncated_list([(item(p), Any[]) for p in protected], max_display)))
+end
+
+"""
+A nested list of (item html, children) as <li>s, at most `max_items` of them counted in order (nothing: all), then
+"…and N more objects.", as Django's truncated_unordered_list (delete_confirmation_max_display).
+"""
+function truncated_list(nodes, max_items)
+    n = Ref(0)
+    function fmt(ns)
+        io = IOBuffer()
+        for (html, children) in ns
+            n[] += 1
+            shown = max_items === nothing || n[] <= max_items
+            sub = isempty(children) ? "" : "<ul>" * fmt(children) * "</ul>"
+            shown && print(io, "<li>", html, sub, "</li>")
+        end
+        String(take!(io))
+    end
+    max_items !== nothing && max_items <= 0 && return ""
+    out = fmt(nodes)
+    if max_items !== nothing && n[] > max_items
+        k = n[] - max_items
+        out *= "<li>" * replace(Juango.ngettext("…and %(count)d more object.", "…and %(count)d more objects.", k), "%(count)d" => string(k)) * "</li>"
+    end
+    out
 end
 
 "The change history of one object."
@@ -2465,6 +2530,10 @@ Base.@nospecializeinfer function check_admin(ma::ModelAdmin)
             end
         end
     end
+    # delete_confirmation_max_display (E041)
+    md = option(ma, :delete_confirmation_max_display)
+    md === nothing || (md isa Integer && !(md isa Bool) && md >= 0) ||
+        err("The value of 'delete_confirmation_max_display' must be a non-negative integer or None.", "admin.E041")
     # list_display (E109), list_display_links (E111)
     for (i, c) in enumerate(ma.list_display)
         c isa Union{Symbol,AbstractString} || continue

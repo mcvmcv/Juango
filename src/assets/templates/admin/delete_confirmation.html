@@ -6,14 +6,20 @@
 <p>Deleting the {{ opts.verbose_name }} “{{ object_display }}” would result in deleting related objects, but your account doesn't have permission to delete the following types of objects:</p>
 <ul>{% for obj in perms_lacking %}<li>{{ obj }}</li>{% endfor %}</ul>
 {% elif protected %}
+{% if hide_protected %}
+<p>Deleting the {{ opts.verbose_name }} “{{ object_display }}” would require deleting some protected related objects.</p>
+{% else %}
 <p>Deleting the {{ opts.verbose_name }} “{{ object_display }}” would require deleting the following protected related objects:</p>
-<ul>{% for obj in protected %}<li>{{ obj }}</li>{% endfor %}</ul>
+<ul id="deleted-objects">{{ protected_html }}</ul>
+{% endif %}
 {% else %}
 <p>Are you sure you want to delete the {{ opts.verbose_name }} “{{ object_display }}”? All of the following related items will be deleted:</p>
 <h2>{% translate "Summary" %}</h2>
 <ul>{% for item in model_count %}<li>{{ item.first|capfirst }}: {{ item.second }}</li>{% endfor %}</ul>
+{% if show_objects %}
 <h2>{% translate "Objects" %}</h2>
-<ul>{{ deleted_objects }}</ul>
+<ul id="deleted-objects">{{ deleted_objects }}</ul>
+{% endif %}
 <form method="post">
   {% csrf_token %}
   <input type="hidden" name="post" value="yes">{% if is_popup %}<input type="hidden" name="_popup" value="1">{% endif %}{% if to_field %}<input type="hidden" name="_to_field" value="{{ to_field }}">{% endif %}

@@ -245,6 +245,97 @@ end
     gallery = ForeignKey(DavGallery, on_delete = :CASCADE, related_name = :pictures)
     Meta(table = "dav_picture")
 end
+@model struct DavRoPost
+    title = CharField(max_length = 100)
+    readonly_content = TextField(blank = true)
+    Meta(table = "dav_ropost")
+end
+@model struct DavRoLink
+    url = CharField(max_length = 100)
+    post = ForeignKey(DavRoPost, on_delete = :CASCADE, related_name = :links)
+    readonly_link_content = TextField(blank = true)
+    Meta(table = "dav_rolink")
+end
+@model struct DavChoice
+    choice = IntegerField(null = true, blank = true, choices = [1 => "Yes", 0 => "No", nothing => "No opinion"])
+    Meta(table = "dav_choice")
+end
+@model struct DavRoRelated
+    chapter = ForeignKey(DavChapter, on_delete = :CASCADE)
+    language = ForeignKey(DavLanguage, on_delete = :CASCADE)
+    user = ForeignKey(Juango.User, on_delete = :CASCADE, related_name = :dav_rorelated)
+    Meta(table = "dav_rorelated")
+end
+@model struct DavPlot
+    name = CharField(max_length = 100)
+    Meta(table = "dav_plot")
+end
+Base.show(io::IO, p::DavPlot) = print(io, p.name)
+@model struct DavPlotDetails
+    details = CharField(max_length = 100)
+    plot = OneToOneField(DavPlot, on_delete = :CASCADE, null = true, blank = true, related_name = :plotdetails)
+    Meta(table = "dav_plotdetails")
+end
+Base.show(io::IO, p::DavPlotDetails) = print(io, p.details)
+@model struct DavStringPK
+    string_pk = CharField(max_length = 255, primary_key = true)
+    Meta(table = "dav_stringpk")
+end
+Base.show(io::IO, x::DavStringPK) = print(io, x.string_pk)
+@model struct DavVillain
+    name = CharField(max_length = 100)
+    Meta(table = "dav_villain")
+end
+Base.show(io::IO, v::DavVillain) = print(io, v.name)
+@model struct DavSuperVillain <: DavVillain
+    Meta(table = "dav_supervillain")
+end
+Base.show(io::IO, v::DavSuperVillain) = print(io, v.name)
+@model struct DavPlotV
+    name = CharField(max_length = 100)
+    team_leader = ForeignKey(DavVillain, on_delete = :CASCADE, related_name = :lead_plots)
+    Meta(table = "dav_plotv")
+end
+Base.show(io::IO, p::DavPlotV) = print(io, p.name)
+@model struct DavPlotDetailsV
+    details = CharField(max_length = 100)
+    plot = OneToOneField(DavPlotV, on_delete = :CASCADE, related_name = :details_v)
+    Meta(table = "dav_plotdetailsv")
+end
+Base.show(io::IO, p::DavPlotDetailsV) = print(io, p.details)
+@model struct DavHideout
+    location = CharField(max_length = 100)
+    villain = ForeignKey(DavVillain, on_delete = :CASCADE, related_name = :hideouts)
+    Meta(table = "dav_hideout")
+end
+Base.show(io::IO, h::DavHideout) = print(io, h.location)
+@model struct DavSuperHideout
+    location = CharField(max_length = 100)
+    supervillain = ForeignKey(DavSuperVillain, on_delete = :CASCADE, related_name = :super_hideouts)
+    Meta(table = "dav_superhideout")
+end
+Base.show(io::IO, h::DavSuperHideout) = print(io, h.location)
+@model struct DavQuestion
+    question = CharField(max_length = 100)
+    Meta(table = "dav_question")
+end
+Base.show(io::IO, q::DavQuestion) = print(io, q.question)
+@model struct DavAnswer
+    question = ForeignKey(DavQuestion, on_delete = :PROTECT, related_name = :answers)
+    answer = CharField(max_length = 100)
+    Meta(table = "dav_answer")
+end
+Base.show(io::IO, a::DavAnswer) = print(io, a.answer)
+@model struct DavAlbumR
+    title = CharField(max_length = 100)
+    Meta(table = "dav_albumr")
+end
+@model struct DavSong
+    album = ForeignKey(DavAlbumR, on_delete = :RESTRICT, related_name = :songs)
+    name = CharField(max_length = 100)
+    Meta(table = "dav_song")
+end
+Base.show(io::IO, s::DavSong) = print(io, s.name)
 redirect_stdout(devnull) do
     ms = [DavActor, DavInquisition, DavSketch, DavCharacter, DavStumpJoke, through(DavStumpJoke, :has_fooled_today), DavAlbum, DavMessenger,
           DavBook, DavChapter, DavCoverLetter, DavParent, DavChild, DavPerson, DavTitle, DavTitleTranslation, DavRecommender,
@@ -252,7 +343,8 @@ redirect_stdout(devnull) do
           DavColor, DavThing, DavPost, DavFabric, DavTopping, DavPizza, through(DavPizza, :toppings),
           DavGqs, DavTelegram, DavShortMessage, DavPersona, DavAccount, DavFooAccount, DavBarAccount,
           DavCollector, DavWidget, DavDooHickey, DavWhatsit, DavDoodad, DavFancyDoodad,
-          DavGallery, DavPicture]
+          DavGallery, DavPicture, DavRoPost, DavRoLink, DavChoice, DavRoRelated, DavPlot, DavPlotDetails, DavStringPK,
+          DavVillain, DavSuperVillain, DavPlotV, DavPlotDetailsV, DavHideout, DavSuperHideout, DavQuestion, DavAnswer, DavAlbumR, DavSong]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
     Juango.update_permissions!(ms)
 end
@@ -882,4 +974,198 @@ end
             Admin.unregister!(DavGallery); rm(media; recursive = true)
         end
     end
+end
+
+@testset "django admin_views: ReadonlyTest" begin
+    port_block() do
+        Admin.register!(DavRoPost; readonly_fields = [:readonly_content],
+                        inlines = [Admin.TabularInline(DavRoLink; readonly_fields = [:readonly_link_content])])
+        Admin.register!(DavChoice; readonly_fields = [:choice])
+        Admin.register!(DavRoRelated; readonly_fields = [:chapter, :language, :user])
+        Admin.register!(DavLanguage); Admin.register_builtin!()
+        Admin.register!(DavPlot; readonly_fields = [:plotdetails]); Admin.register!(DavPlotDetails)
+        try
+            c = dav_super("dav_super13")
+            # test_readonly_text_field: line breaks as <br>, in the form and in an inline
+            p = create(DavRoPost; title = "Readonly test", readonly_content = "test\r\n\r\ntest\r\n\r\ntest\r\n\r\ntest")
+            create(DavRoLink; url = "http://www.djangoproject.com", post = p, readonly_link_content = "test\r\nlink")
+            t = text(get(c, "$DAV/davropost/$(p.id)/change/"))
+            @test occursin("test<br><br>test<br><br>test<br><br>test", t) && occursin("test<br>link", t)
+            # test_change_form_renders_correct_null_choice_value
+            ch = create(DavChoice; choice = nothing)
+            @test occursin("No opinion", text(get(c, "$DAV/davchoice/$(ch.id)/change/")))
+            # test_readonly_foreignkey_links_default_admin_site: linked when the related model is in the admin (a string key too), else its name
+            chap = create(DavChapter; title = "Chapter 1", content = "content", book = create(DavBook; name = "Book 1"))
+            lang = create(DavLanguage; iso = "_40", name = "Test")
+            su = first(filter(User; username = "dav_super13"))
+            o = create(DavRoRelated; chapter = chap, language = lang, user = su)
+            t = text(get(c, "$DAV/davrorelated/$(o.id)/change/"))
+            @test occursin("<a href=\"/admin/auth/user/$(su.id)/change/\">dav_super13</a>", t)
+            @test occursin("<a href=\"$DAV/davlanguage/_5F40/change/\">", t) || occursin("<a href=\"$DAV/davlanguage/_40/change/\">", t)
+            @test occursin("Chapter 1", t) && !occursin("davchapter/$(chap.id)/change/", t)
+            # test_readonly_onetoone_backwards_ref: a reverse one-to-one, linked, or "-" without one
+            pl = create(DavPlot; name = "Test Plot"); pd = create(DavPlotDetails; details = "Brand New Plot", plot = pl)
+            @test occursin("<a href=\"$DAV/davplotdetails/$(pd.id)/change/\">Brand New Plot</a>", text(get(c, "$DAV/davplot/$(pl.id)/change/")))
+            pd.plot = nothing; save!(pd)
+            @test get(c, "$DAV/davplot/$(pl.id)/change/").status == 200
+            # test_correct_autoescaping: a read-only value is escaped
+            p2 = create(DavRoPost; title = "x", readonly_content = "<a>evil</a>")
+            t = text(get(c, "$DAV/davropost/$(p2.id)/change/"))
+            @test !occursin("<a>evil</a>", t) && occursin("&lt;a&gt;evil&lt;/a&gt;", t)
+        finally
+            foreach(Admin.unregister!, [DavRoPost, DavChoice, DavRoRelated, DavLanguage, DavPlot, DavPlotDetails])
+        end
+    end
+    # not translated: the custom admin site's links (one site in these tests), label_suffix translations, the user password
+    # change's limited queryset, generated fields, ModelForm Meta overrides of read-only labels
+end
+
+@testset "django admin_views: AdminViewStringPrimaryKeyTest (rest)" begin
+    port_block() do
+        Admin.register!(DavStringPK; view_on_site = o -> "/dummy/$(o.string_pk)/")
+        try
+            c = dav_super("dav_super14")
+            # test_url_conflicts_with_add: a key ending in "add" is a change page, and the key "add" doesn't take the add page's URL
+            k = create(DavStringPK; string_pk = "i have something to add")
+            @test occursin("Change dav string pk", text(get(c, "$DAV/davstringpk/" * Admin.admin_quote(k.string_pk) * "/change/")))
+            create(DavStringPK; string_pk = "add")
+            @test "$DAV/davstringpk/add/" != "$DAV/davstringpk/" * Admin.admin_quote("add") * "/change/"
+            # test_shortcut_view_with_escaping: "View on site" for a string key
+            create(DavStringPK; string_pk = "abc_123")
+            @test occursin("/dummy/abc_123/", text(get(c, "$DAV/davstringpk/" * Admin.admin_quote("abc_123") * "/change/")))
+            # test_redirect_on_add_view_continue_button: the new key quoted in the redirect
+            r = post(c, "$DAV/davstringpk/add/", Dict("string_pk" => "123/history", "_continue" => "1"))
+            @test r.status == 302 && occursin("/123_2Fhistory/", getheader(r, "Location"))
+            @test get(c, getheader(r, "Location")).status == 200
+            # test_recentactions_link: the index's recent actions link the object by its quoted key
+            t = text(get(c, "/admin/"))
+            @test occursin("$DAV/davstringpk/123_2Fhistory/change/", t)
+        finally
+            Admin.unregister!(DavStringPK)
+        end
+    end
+end
+
+@testset "django admin_views: AdminViewPermissionsTest (rest)" begin
+    port_block() do
+        Admin.register!(DavArticle); Admin.register!(DavSection)
+        try
+            mk(name, codes...; staff = true) = (u = create_user(name, "secret"); u.is_staff = staff; save!(u);
+                                                foreach(cd -> add!(u.user_permissions, get(Permission; codename = cd)), codes); u)
+            cl(u) = (c = Client(); force_login!(c, get(User; id = u.id)); c)
+            su = create_superuser("dav_super15", "secret")
+            c = cl(su)
+            # test_login_redirect_unsafe_next_url_when_logged_in: an unsafe next goes to the index instead
+            r = get(c, "/admin/login/?next=" * Juango.urlquote("https://example.com/bad"))
+            @test r.status == 302 && getheader(r, "Location") == "/admin/"
+            # test_double_login_is_not_allowed: logging in again while logged in works; a non-staff user can't
+            anon = Client()
+            r = post(anon, "/admin/login/?next=/admin/", Dict("username" => "dav_super15", "password" => "secret"))
+            @test r.status == 302 && getheader(r, "Location") == "/admin/"
+            joe = mk("dav_joepublic2"; staff = false)
+            r = post(anon, "/admin/login/?next=/admin/", Dict("username" => "dav_joepublic2", "password" => "secret"))
+            @test r.status == 200
+            r = post(anon, "/admin/login/?next=/admin/", Dict("username" => "dav_super15", "password" => "secret"))
+            @test r.status == 302
+            # test_login_page_notice_for_non_staff_users
+            t = text(dav_follow(Client(), get(Client(), "/admin/")))
+            @test !occursin("You are authenticated as", t)
+            cj = cl(joe)
+            t = text(dav_follow(cj, get(cj, "/admin/")))
+            @test occursin("You are authenticated as dav_joepublic2", t)
+            # test_delete_view_nonexistent_obj, test_history_view_bad_url: back to the index with a message
+            deleter = mk("dav_deleteuser", "delete_davarticle")
+            cd_ = cl(deleter)
+            r = get(cd_, "$DAV/davarticle/nonexistent/delete/")
+            @test r.status == 302 && getheader(r, "Location") == "/admin/"
+            @test occursin("dav article with ID “nonexistent” doesn’t exist. Perhaps it was deleted?", text(get(cd_, "/admin/")))
+            changer = mk("dav_changeuser2", "change_davarticle")
+            cc = cl(changer)
+            r = get(cc, "$DAV/davarticle/foo/history/")
+            @test r.status == 302 && occursin("dav article with ID “foo” doesn’t exist.", text(get(cc, "/admin/")))
+            # test_disabled_permissions_when_logged_in, test_disabled_staff_permissions_when_logged_in: back to the login form
+            for change in (u -> (u.is_active = false), u -> (u.is_staff = false))
+                u = mk("dav_dis$(rand(1000:9999))", "change_davarticle")
+                cu = cl(u)
+                change(u); save!(u)
+                t = text(dav_follow(cu, get(cu, "/admin/")))
+                @test occursin("name=\"password\"", t) && !occursin(">Log out<", t)
+            end
+            # test_app_list_permissions: the app index is 404 without any permission in the app
+            nobody = mk("dav_noperm")
+            @test get(cl(nobody), "/admin/project/").status == 404
+            @test get(cc, "/admin/project/").status == 200
+            # test_has_module_permission: any of view/add/change/delete shows the app and the model on the index
+            for codes in (("view_davarticle",), ("add_davarticle",), ("change_davarticle",), ("delete_davarticle",))
+                t = text(get(cl(mk("dav_mod_" * codes[1], codes...)), "/admin/"))
+                @test occursin("Dav articles", t)
+            end
+            # test_post_save_message_no_forbidden_links_visible: an add-only user's message doesn't link the object
+            adder = mk("dav_adduser2", "add_davarticle")
+            ca = cl(adder)
+            r = post(ca, "$DAV/davarticle/add/", Dict("title" => "Fun & games", "content" => "Some content", "date" => "2015-10-31T16:35", "_save" => "Save"))
+            @test r.status == 302
+            t = text(dav_follow(ca, r))
+            @test occursin("The dav article “Fun &amp; games” was added successfully.", t)
+        finally
+            Admin.unregister!(DavArticle); Admin.unregister!(DavSection)
+        end
+    end
+end
+
+@testset "django admin_views: AdminViewDeletedObjectsTest" begin
+    port_block() do
+        for T in (DavVillain, DavSuperVillain, DavPlotV, DavPlotDetailsV, DavQuestion, DavAnswer, DavAlbumR, DavSong)
+            Admin.register!(T)
+        end
+        try
+            c = dav_super("dav_super16")
+            v1 = create(DavVillain; name = "Adam")
+            pl1 = create(DavPlotV; name = "World Domination", team_leader = v1)
+            pd1 = create(DavPlotDetailsV; details = "almost finished", plot = pl1)
+            create(DavHideout; location = "underground bunker", villain = v1)
+            # test_nesting: what a deletion takes along, nested under what causes it
+            t = text(get(c, "$DAV/davvillain/$(v1.id)/delete/"))
+            @test occursin(Regex("<li>Dav plot v: <a href=\"$DAV/davplotv/$(pl1.id)/change/\">World Domination</a>\\s*<ul>\\s*" *
+                                 "<li>Dav plot details v: <a href=\"$DAV/davplotdetailsv/$(pd1.id)/change/\">almost finished</a>"), t)
+            # test_not_registered: a model outside the admin is listed unlinked
+            @test count("<li>Dav hideout: underground bunker", t) == 1
+            # test_inheritance: deleting a multi-table child or its parent lists both, and what each takes along
+            sv = create(DavSuperVillain; name = "Bob")
+            create(DavHideout; location = "floating castle", villain = get(DavVillain; id = sv.id))
+            create(DavSuperHideout; location = "super floating castle!", supervillain = sv)
+            for u in ("$DAV/davvillain/$(sv.id)/delete/", "$DAV/davsupervillain/$(sv.id)/delete/")
+                t = text(get(c, u))
+                @test count("<li>Dav villain: <a href=\"$DAV/davvillain/$(sv.id)/change/\">Bob</a>", t) == 1
+                @test count("<li>Dav super villain: <a href=\"$DAV/davsupervillain/$(sv.id)/change/\">Bob</a>", t) == 1
+                @test count("<li>Dav hideout: floating castle", t) == 1 && count("<li>Dav super hideout: super floating castle!", t) == 1
+            end
+            # test_post_delete_protected: a POST to delete a protected object shows the page again
+            q = create(DavQuestion; question = "Why?"); create(DavAnswer; question = q, answer = "Because.")
+            t = text(post(c, "$DAV/davquestion/$(q.id)/delete/", Dict("post" => "yes")))
+            @test count(objects(DavQuestion)) == 1 && occursin("would require deleting the following protected related objects", t)
+            # test_restricted
+            al = create(DavAlbumR; title = "Amaryllis"); song = create(DavSong; album = al, name = "Unity")
+            t = text(get(c, "$DAV/davalbumr/$(al.id)/delete/"))
+            @test occursin("would require deleting the following protected related objects", t)
+            @test occursin("<li>Dav song: <a href=\"$DAV/davsong/$(song.id)/change/\">Unity</a></li>", t)
+            # test_delete_view_uses_delete_confirmation_max_display: at most N listed, then "…and N more objects."
+            Admin.register!(DavVillain; delete_confirmation_max_display = 1)
+            t = text(get(c, "$DAV/davvillain/$(v1.id)/delete/"))
+            @test occursin("<li>Dav villain: <a", t) && occursin("…and 3 more objects.", t) && !occursin("World Domination", t)
+            # test_delete_view_hides_objects_when_delete_confirmation_max_display_is_zero, test_protected_zero_display
+            Admin.register!(DavVillain; delete_confirmation_max_display = 0)
+            t = text(get(c, "$DAV/davvillain/$(v1.id)/delete/"))
+            @test !occursin("id=\"deleted-objects\"", t) && occursin("Are you sure", t)
+            Admin.register!(DavQuestion; delete_confirmation_max_display = 0)
+            t = text(get(c, "$DAV/davquestion/$(q.id)/delete/"))
+            @test occursin("would require deleting some protected related objects.", t) && !occursin("id=\"deleted-objects\"", t)
+            # (admin.E041: a negative or non-integer limit)
+            Admin.register!(DavQuestion; delete_confirmation_max_display = -1)
+            @test any(m -> m.id == "admin.E041", Admin.check_admin(Admin.get_admin("project", "davquestion")))
+        finally
+            foreach(Admin.unregister!, [DavVillain, DavSuperVillain, DavPlotV, DavPlotDetailsV, DavQuestion, DavAnswer, DavAlbumR, DavSong])
+        end
+    end
+    # not translated: test_cyclic (a model cycle declared both ways), generic relations, perms_needed and protected (in django_admin.jl)
 end
