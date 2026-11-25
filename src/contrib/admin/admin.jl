@@ -185,11 +185,12 @@ struct Display
     f::Function
     description::Union{Nothing,String}
     boolean::Bool
-    ordering::Union{Nothing,String}
+    ordering::Any                   # a field name ("-date"), or an expression (F(:date), Lower(:title)) or OrderBy, as Django's admin_order_field
     empty_value::Union{Nothing,String}
 end
 display(f::Function; description = nothing, boolean::Bool = false, ordering = nothing, empty_value = nothing) =
-    Display(f, description === nothing ? nothing : string(description), boolean, ordering === nothing ? nothing : string(ordering),
+    Display(f, description === nothing ? nothing : string(description), boolean,
+            ordering === nothing ? nothing : ordering isa Union{AbstractString,Symbol} ? string(ordering) : ordering,
             empty_value === nothing ? nothing : string(empty_value))
 
 """
@@ -585,7 +586,7 @@ end
 function column_ordering(ma::ModelAdmin, col)
     sb = option(ma, :sortable_by)
     name = col isa Symbol ? col : col isa Display ? nothing : col isa AbstractString ? Symbol(col) : nothing
-    sb !== nothing && !(name in sb) && !(col isa Display && col.ordering !== nothing && Symbol(lstrip(col.ordering, '-')) in sb) && return nothing
+    sb !== nothing && !(name in sb) && !(col isa Display && col.ordering isa AbstractString && Symbol(lstrip(col.ordering, '-')) in sb) && return nothing
     col isa Display && return col.ordering
     (name === nothing || name === :__str__) && return nothing
     related_column_field(ma.model, name) === nothing || return string(name)      # (sorted by the lookup)
@@ -623,11 +624,17 @@ function sort_spec(req::Request, ma::ModelAdmin, cols)
     spec
 end
 function spec_ordering(ma::ModelAdmin, cols, spec)
-    out = String[]
+    out = Any[]
     for (i, desc) in spec
         o = column_ordering(ma, cols[i])
-        d = startswith(o, "-")
-        push!(out, (desc != d ? "-" : "") * lstrip(o, '-'))
+        if o isa AbstractString
+            d = startswith(o, "-")
+            push!(out, (desc != d ? "-" : "") * lstrip(o, '-'))
+        elseif o isa Juango.OrderBy         # (reversed for a descending sort, as Django's reverse_ordering)
+            push!(out, desc ? Juango.OrderBy(o.expr, !o.descending, o.nulls_first === nothing ? nothing : !o.nulls_first) : o)
+        else                                # an expression: ascending, or descending
+            push!(out, Juango.OrderBy(o, desc, nothing))
+        end
     end
     out
 end
@@ -829,7 +836,10 @@ Base.@nospecializeinfer function field_list_filter(req, ma::ModelAdmin, path::St
             ids = unique(x for x in values_list(admin_queryset(ma, req), sym(P("id")); flat = true) if x !== nothing)
             collect(filter(objects(rel); id__in = collect(Any, ids)))
         else
-            collect(objects(rel))
+            # (a foreign key's limit_choices_to leaves out what it couldn't point at, as Django's get_choices)
+            lc = kind === :field ? limit_choices_of(f) : nothing
+            lc isa Function && (lc = lc())
+            collect(lc === nothing ? objects(rel) : Juango.complex_filter(objects(rel), lc))
         end
         relma = get(current_site().registry, admin_key(rel), nothing)
         ords = relma !== nothing ? ordering(relma, req) : Any[]
@@ -1058,7 +1068,10 @@ Base.@nospecializeinfer function lookup_params(req::Request, ma::ModelAdmin, @no
         if f === nothing && !(parts[1] in ("id", "pk"))       # not a field nor a relation: a bad lookup (?e=1)
             filter_field(T, String(parts[1])) === nothing && throw(BadFilterValue(k))
         end
-        lookup_allowed(ma, k, v, req) || throw(Juango.BadRequest("Filtering by $k not allowed"))
+        if !lookup_allowed(ma, k, v, req)          # (logged as Django's SuspiciousOperation DisallowedModelAdminLookup)
+            Juango.log!("juango.security.DisallowedModelAdminLookup", :error, "Filtering by $k not allowed"; request = req)
+            throw(Juango.BadRequest("Filtering by $k not allowed"))
+        end
         lookup_path_ok(T, k) || throw(BadFilterValue(k))        # (a name past a relation that isn't a field there: ?e=1)
         lk = String(parts[end])
         # (converted for the model's own field: f, or f__<lookup> for a lookup that compares values)
@@ -1354,10 +1367,13 @@ function changelist(req::Request; app, model)
     cols = list_display(ma, req)
     ords = Any[o for o in ordering(ma, req)]
     isempty(ords) && append!(ords, meta.ordering)
+    # (and the admin queryset's own ordering, get_queryset's order_by, after them, as Django's)
+    append!(ords, Any[o for o in qs.order if !(o in ords)])
     spec = sort_spec(req, ma, cols)                    # clicked column headers come first
     if !isempty(spec)
         chosen = spec_ordering(ma, cols, spec)
-        ords = vcat(Any[chosen...], Any[o for o in ords if !(o isa AbstractString && lstrip(o, '-') in lstrip.(chosen, '-'))])
+        names = [lstrip(c, '-') for c in chosen if c isa AbstractString]
+        ords = vcat(Any[chosen...], Any[o for o in ords if !(o isa AbstractString && lstrip(o, '-') in names)])
     end
     if !Juango.is_composite(ma.model) && !any(o -> o isa AbstractString && lstrip(o, '-') in ("id", "pk"), ords)
         push!(ords, "-id")
@@ -1403,7 +1419,7 @@ function changelist(req::Request; app, model)
                         sm === nothing ? save!(o) : sm(req, o, f, true)
                         sr === nothing ? Juango.save_m2m!(f) : sr(req, f, Any[], true)
                     end
-                    log_action!(req.user, f.instance, CHANGE, "Changed " * join([lowercase(label(x)) for x in f.fields if x.name in ch], ", ") * ".")
+                    log_action!(req.user, f.instance, CHANGE, "Changed " * changed_labels(f, ch) * ".")
                 end
                 n = count(f -> !isempty(changed_fields(f)) && f.instance !== nothing && can(req, ma, :change, f.instance), fs.forms)
                 message!(req, :success, "$n $(n == 1 ? meta.verbose_name : meta.verbose_name_plural) $(n == 1 ? "was" : "were") changed successfully.")
@@ -1588,10 +1604,12 @@ function inline_context(req, ia::InlineAdmin, fs, info = (readonly = Symbol[], e
                                     for o in info.existing])
 end
 
+changed_labels(form, ch) = Juango.get_text_list([string(label(f)) for f in form.fields if f.name in ch], gettext("and"))
 change_message(form, inlines) = begin
     parts = String[]
     ch = changed_fields(form)
-    isempty(ch) || push!(parts, "Changed " * join([lowercase(label(f)) for f in form.fields if f.name in ch], ", ") * ".")
+    # (the fields' labels as written, "A, B and C", as Django's get_change_message)
+    isempty(ch) || push!(parts, "Changed " * changed_labels(form, ch) * ".")
     for (ia, fs) in inlines
         vn = inline_verbose_names(ia)[1]
         append!(parts, ["Added $vn “$(o)”." for o in fs.new_objects])
@@ -1789,7 +1807,10 @@ field a relation from a model in this admin points at (Django's to_field_allowed
 Base.@nospecializeinfer function check_to_field(ma::ModelAdmin, req)
     tf = req.method == "POST" && haskey(req.POST, "_to_field") ? req.POST["_to_field"] : get(req.GET, "_to_field", nothing)
     (tf === nothing || isempty(tf)) && return nothing
-    to_field_allowed(ma, tf) || throw(Juango.BadRequest("The field $tf cannot be referenced."))
+    if !to_field_allowed(ma, tf)                   # (logged as Django's DisallowedModelAdminToField)
+        Juango.log!("juango.security.DisallowedModelAdminToField", :error, "The field $tf cannot be referenced."; request = req)
+        throw(Juango.BadRequest("The field $tf cannot be referenced."))
+    end
     tf
 end
 Base.@nospecializeinfer function to_field_allowed(ma::ModelAdmin, name::AbstractString)
@@ -1880,7 +1901,7 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         resp_hook = option(ma, adding ? :response_add : :response_change)
         resp_hook === nothing || return Juango.to_response(resp_hook(req, o))
         # opened from a related-object link: close, handing the object back (Django's response_add / response_change)
-        popup && return popup_response(req, adding ? Dict("value" => popup_value(o, to_field), "obj" => string(o)) :
+        haskey(req.POST, "_popup") && return popup_response(req, adding ? Dict("value" => popup_value(o, to_field), "obj" => string(o)) :
                                                      Dict("action" => "change", "value" => old_value, "obj" => string(o),
                                                           "new_value" => popup_value(o, to_field)))
         # (the object linked: to its change page after adding, if the user may change it; to this page after changing, as Django's)
@@ -1894,10 +1915,10 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         # (an add form of its own, the user admin's, goes on to the change page unless "Save and add another", as Django's UserAdmin)
         if haskey(req.POST, "_continue") || save_as_new || (custom_add && !haskey(req.POST, "_addanother"))
             message!(req, :success, msg(added_or_changed; more = !adding || can(req, ma, :change, o) ? "You may edit it again below." : ""))
-            return Juango.HttpResponseRedirect(obj_url * keep_filters(req))
+            return Juango.HttpResponseRedirect(obj_url * kept_query(req))
         elseif haskey(req.POST, "_addanother")
             message!(req, :success, msg(added_or_changed; more = "You may add another %(model)s below."))
-            return Juango.HttpResponseRedirect(reverse_url("admin:add"; app = ma.app, model = ma.slug) * keep_filters(req))
+            return Juango.HttpResponseRedirect(reverse_url("admin:add"; app = ma.app, model = ma.slug) * kept_query(req))
         end
         message!(req, :success, msg(added_or_changed))
         # (to the change list if the user may see it, else the index, as Django's)
@@ -1936,6 +1957,8 @@ function changelist_url(ma::ModelAdmin, req::Request)
     f = get(req.GET, "_changelist_filters", "")
     reverse_url("admin:changelist"; app = ma.app, model = ma.slug) * (option(ma, :preserve_filters, true) && !isempty(f) ? "?" * f : "")
 end
+"The request's query string (initial values, _popup, _to_field, _changelist_filters) for the next page, as Django's preserved_qsl."
+kept_query(req::Request) = isempty(req.query_string) ? "" : "?" * req.query_string
 "`?_changelist_filters=...` to carry on to the next admin page."
 keep_filters(req::Request) = (f = get(req.GET, "_changelist_filters", ""); isempty(f) ? "" : "?_changelist_filters=" * Juango.urlquote(f))
 
@@ -2042,7 +2065,7 @@ function delete_view(req::Request; app, model, id)
             end
             rd = option(ma, :response_delete)
             rd === nothing || return Juango.to_response(rd(req, name))
-            is_popup(req) && return popup_response(req, Dict("action" => "delete", "value" => value))
+            haskey(req.POST, "_popup") && return popup_response(req, Dict("action" => "delete", "value" => value))
             message!(req, :success, interpolate(gettext("The %(model)s “%(object)s” was deleted successfully."),
                                                 Dict("model" => meta.verbose_name, "object" => name)))
             return Juango.HttpResponseRedirect(changelist_url(ma, req))

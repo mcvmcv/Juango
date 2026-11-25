@@ -120,10 +120,65 @@ end
     Meta(table = "dav_unordered")
 end
 Base.show(io::IO, u::DavUnordered) = print(io, u.name)
+@model struct DavSection
+    name = CharField(max_length = 100)
+    Meta(table = "dav_section")
+end
+@model struct DavArticle
+    title = CharField(max_length = 100)
+    content = TextField()
+    date = DateTimeField()
+    section = ForeignKey(DavSection, on_delete = :CASCADE, null = true, blank = true)
+    Meta(table = "dav_article")
+end
+Base.show(io::IO, a::DavArticle) = print(io, a.title)
+@model struct DavSortPerson
+    name = CharField(max_length = 100)
+    gender = IntegerField()
+    age = IntegerField(default = 21)
+    Meta(table = "dav_sortperson")
+end
+@model struct DavLanguage
+    iso = CharField(max_length = 5, primary_key = true)
+    name = CharField(max_length = 50)
+    Meta(table = "dav_language", ordering = ["iso"])
+end
+@model struct DavColor
+    value = CharField(max_length = 10)
+    warm = BooleanField(default = false)
+    Meta(table = "dav_color")
+end
+Base.show(io::IO, c::DavColor) = print(io, c.value)
+@model struct DavThing
+    title = CharField(max_length = 20)
+    color = ForeignKey(DavColor, on_delete = :CASCADE, limit_choices_to = Dict("warm" => true))
+    pub_date = DateField(null = true, blank = true)
+    Meta(table = "dav_thing")
+end
+@model struct DavPost
+    title = CharField(max_length = 100, default = "x")
+    public = BooleanField(null = true, blank = true)
+    Meta(table = "dav_post")
+end
+@model struct DavFabric
+    surface = CharField(max_length = 20, choices = ["Textured" => ["x" => "Horizontal", "y" => "Vertical"], "plain" => "Smooth"])
+    Meta(table = "dav_fabric")
+end
+@model struct DavTopping
+    name = CharField(max_length = 20)
+    Meta(table = "dav_topping")
+end
+Base.show(io::IO, t::DavTopping) = print(io, t.name)
+@model struct DavPizza
+    name = CharField(max_length = 20)
+    toppings = ManyToManyField(DavTopping; related_name = :pizzas, blank = true)
+    Meta(table = "dav_pizza")
+end
 redirect_stdout(devnull) do
     ms = [DavActor, DavInquisition, DavSketch, DavCharacter, DavStumpJoke, through(DavStumpJoke, :has_fooled_today), DavAlbum, DavMessenger,
           DavBook, DavChapter, DavCoverLetter, DavParent, DavChild, DavPerson, DavTitle, DavTitleTranslation, DavRecommender,
-          DavRecommendation, DavPluggable, DavFoodDelivery, DavCategory, DavUnordered]
+          DavRecommendation, DavPluggable, DavFoodDelivery, DavCategory, DavUnordered, DavSection, DavArticle, DavSortPerson, DavLanguage,
+          DavColor, DavThing, DavPost, DavFabric, DavTopping, DavPizza, through(DavPizza, :toppings)]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
     Juango.update_permissions!(ms)
 end
@@ -131,6 +186,15 @@ const DAV = "/admin/project"
 dav_super(name) = (u = create_superuser(name, "secret"); c = Client(); force_login!(c, get(User; id = u.id)); c)
 "The page a redirect leads to (Django's follow=True)."
 dav_follow(c, r) = r.status in (301, 302) ? get(c, getheader(r, "Location")) : r
+"Log records from juango.* while `f()` runs (Django's assertLogs)."
+function dav_records(f)
+    mem = Juango.MemoryHandler()
+    override_settings(LOGGING = Dict("handlers" => Dict("mem" => Dict("class" => mem, "level" => "DEBUG")),
+                                     "loggers" => Dict("juango" => Dict("handlers" => ["mem"], "level" => "DEBUG", "propagate" => false)))) do
+        f()
+    end
+    mem.records
+end
 dav_lookup_url(t, field) = (m = match(Regex("<a href=\"([^\"]*)\"[^>]* id=\"lookup_id_$field\""), t); m === nothing ? nothing : replace(m[1], "&amp;" => "&"))
 
 @testset "django admin_views: LimitChoicesToInAdminTest, RawIdFieldsTest" begin
@@ -470,4 +534,136 @@ end
     end
     # not translated: the input counts and the action counter's markup (Django's change list template), custom
     # changelist formsets (non_form_errors), inherited and custom-pk change lists (tested elsewhere)
+end
+
+"Whether `a` comes before `b` in the page (Django's assertContentBefore)."
+dav_before(t, a, b) = (i = findfirst(a, t); j = findfirst(b, t); i !== nothing && j !== nothing && first(i) < first(j))
+@testset "django admin_views: AdminViewBasicTest (sorting, isnull, query strings)" begin
+    port_block() do
+        year(a) = Dates.year(a.date)
+        Admin.register!(DavArticle; list_display = [:content, :date, Admin.display(year; ordering = "date", description = "callable year"),
+                                                    Admin.display(year; ordering = "-date", description = "year reverse"),
+                                                    Admin.display(year; ordering = F(:date), description = "f expression"),
+                                                    Admin.display(year; ordering = Juango.OrderBy(F(:date), false, nothing), description = "orderby"),
+                                                    Admin.display(year; ordering = Juango.Lower(:title), description = "by title")])
+        Admin.register!(DavSortPerson; list_display = [:name, :gender], queryset = req -> order_by(objects(DavSortPerson), "age"))
+        Admin.register!(DavLanguage; list_display = [:iso, :name])
+        Admin.register_builtin!()
+        try
+            c = dav_super("dav_super7")
+            s1 = create(DavSection; name = "Test section")
+            for (content, y, title) in (("Middle content", 2008, "b"), ("Oldest content", 2000, "c"), ("Newest content", 2009, "a"))
+                create(DavArticle; title = title, content = content, date = DateTime(y, 3, 18, 11, 54, 58), section = s1)
+            end
+            u = "$DAV/davarticle/"
+            asc(t) = dav_before(t, "Oldest content", "Middle content") && dav_before(t, "Middle content", "Newest content")
+            dsc(t) = dav_before(t, "Newest content", "Middle content") && dav_before(t, "Middle content", "Oldest content")
+            @test asc(text(get(c, u * "?o=3")))                                                     # test_change_list_sorting_callable
+            @test dsc(text(get(c, u * "?o=4"))) && asc(text(get(c, u * "?o=-4")))                   # test_change_list_sorting_model_admin_reverse ('-date')
+            for i in (5, 6)                                                                         # test_change_list_sorting_callable_query_expression, ..._reverse
+                @test asc(text(get(c, u * "?o=$i"))) && dsc(text(get(c, u * "?o=-$i")))
+            end
+            @test dav_before(text(get(c, u * "?o=7")), "Newest content", "Middle content")          # (a function of a field: Lower(title))
+            # test_change_list_sorting_multiple
+            p1 = create(DavSortPerson; name = "Chris", gender = 1, age = 1); p2 = create(DavSortPerson; name = "Chris", gender = 2, age = 2)
+            p3 = create(DavSortPerson; name = "Bob", gender = 1, age = 3)
+            link(p) = "$DAV/davsortperson/$(p.id)/change/"
+            t = text(get(c, "$DAV/davsortperson/?o=1.2"))
+            @test dav_before(t, link(p3), link(p1)) && dav_before(t, link(p1), link(p2))
+            t = text(get(c, "$DAV/davsortperson/?o=-2.1"))
+            @test dav_before(t, link(p2), link(p3)) && dav_before(t, link(p3), link(p1))
+            # test_change_list_sorting_preserve_queryset_ordering: the admin queryset's order_by("age") is kept
+            delete!(objects(DavSortPerson))
+            a = create(DavSortPerson; name = "Amy", gender = 1, age = 80); b = create(DavSortPerson; name = "Bob", gender = 1, age = 70)
+            ch = create(DavSortPerson; name = "Chris", gender = 2, age = 60)
+            t = text(get(c, "$DAV/davsortperson/"))
+            @test dav_before(t, link(ch), link(b)) && dav_before(t, link(b), link(a))
+            # test_change_list_sorting_model_meta: Meta.ordering, overridden by the query string
+            l1 = create(DavLanguage; iso = "ur", name = "Urdu"); l2 = create(DavLanguage; iso = "ar", name = "Arabic")
+            @test dav_before(text(get(c, "$DAV/davlanguage/")), "/davlanguage/ar/change/", "/davlanguage/ur/change/")
+            @test dav_before(text(get(c, "$DAV/davlanguage/?o=-1")), "/davlanguage/ur/change/", "/davlanguage/ar/change/")
+            # test_isnull_lookups
+            create(DavArticle; title = "I Could Go Anywhere", content = "Versatile", date = now())
+            nrows(q) = length(collect(eachmatch(r"/davarticle/\d+/change/", text(get(c, u * q)))))
+            @test nrows("") == 4 && nrows("?section__isnull=false") == 3 && nrows("?section__isnull=0") == 3
+            @test nrows("?section__isnull=true") == 1 && nrows("?section__isnull=1") == 1
+            # test_add_query_string_persists: "Save and add another", "continue", "save as new" keep the query string
+            for (i, opt) in enumerate((Dict("_addanother" => "1"), Dict("_continue" => "1"))), (j, other) in enumerate(("", "_changelist_filters=is_staff__exact%3D0", "_popup=1", "_to_field=id"))
+                qsl = "username=newuser" * (isempty(other) ? "" : "&" * other)
+                r = post(c, "/admin/auth/user/add/?" * qsl, merge(Dict("username" => "dav_qs$i$j", "password1" => "newpassword", "password2" => "newpassword"), opt))
+                @test r.status == 302 && last(split(getheader(r, "Location"), '?'; limit = 2)) == qsl
+            end
+            # test_change_query_string_persists
+            art = first(objects(DavArticle))
+            for opt in (Dict("_addanother" => "1"), Dict("_continue" => "1")), other in ("", "_changelist_filters=title%3Db", "_popup=1", "_to_field=id")
+                qsl = "title=x" * (isempty(other) ? "" : "&" * other)
+                r = post(c, "$DAV/davarticle/$(art.id)/change/?" * qsl,
+                         merge(Dict("title" => art.title, "content" => art.content, "date" => "2008-03-18T11:54"), opt))
+                @test r.status == 302 && last(split(getheader(r, "Location"), '?'; limit = 2)) == qsl
+            end
+        finally
+            foreach(Admin.unregister!, [DavArticle, DavSortPerson, DavLanguage])
+        end
+    end
+end
+
+@testset "django admin_views: AdminViewBasicTest (filters, to_field, choices, history)" begin
+    port_block() do
+        Admin.register!(DavThing; list_display = [:title, :color], list_filter = [:color, :pub_date, "color__value"])
+        Admin.register!(DavColor); Admin.register!(DavPost; list_display = [:title, :public])
+        Admin.register!(DavFabric; list_display = [:surface]); Admin.register!(DavPizza); Admin.register!(DavTopping)
+        Admin.register!(DavSection); Admin.register!(DavArticle); Admin.register!(DavInquisition); Admin.register!(DavActor)
+        Admin.register!(DavSketch; raw_id_fields = [:inquisition, :defendant0, :defendant1])
+        try
+            c = dav_super("dav_super8")
+            red = create(DavColor; value = "red", warm = true); create(DavColor; value = "orange", warm = true)
+            blue = create(DavColor; value = "blue", warm = false)
+            create(DavThing; title = "T1", color = red, pub_date = Date(2020, 1, 1))
+            u = "$DAV/davthing/"
+            # test_limited_filter: the color filter leaves out the colors limit_choices_to excludes
+            t = text(get(c, u))
+            @test occursin("color__id__exact=$(red.id)", t) && !occursin("color__id__exact=$(blue.id)", t)
+            # test_disallowed_filtering: a lookup across a relation no list filter names is refused and logged; one listed is allowed
+            rs = dav_records(() -> @test get(c, "$DAV/davarticle/?section__name__startswith=x").status == 400)
+            @test any(r -> r.name == "juango.security.DisallowedModelAdminLookup" && r.level == 40, rs)
+            @test get(c, u * "?color__value__startswith=red").status == 200 && get(c, u * "?color__value=red").status == 200
+            @test get(c, u * "?title__startswith=T").status == 200                                 # (a local field: allowed)
+            # test_allowed_filtering_15103: limit_choices_to's lookups (DavSketch.inquisition) are allowed
+            @test get(c, "$DAV/davinquisition/?leader__name=Palin&leader__age=27").status == 200
+            # test_disallowed_to_field: a field nothing refers to is refused (changelist, add, change, delete), and logged
+            sec = create(DavSection; name = "s")
+            rs = dav_records(() -> @test get(c, "$DAV/davsection/?_to_field=missing_field").status == 400)
+            @test any(r -> r.name == "juango.security.DisallowedModelAdminToField", rs)
+            @test get(c, "$DAV/davsection/?_to_field=name").status == 400
+            @test get(c, "$DAV/davsection/?_to_field=id").status == 200
+            @test post(c, "$DAV/davsection/add/", Dict("_to_field" => "name")).status == 400
+            @test post(c, "$DAV/davsection/$(sec.id)/change/", Dict("_to_field" => "name")).status == 400
+            @test post(c, "$DAV/davsection/$(sec.id)/delete/", Dict("_to_field" => "name")).status == 400
+            # test_incorrect_lookup_parameters: a bad lookup drops the filters (?e=1)
+            for q in ("notarealfield=5", "notarealfield__whatever=5", "color__id__exact=StringNotInteger!", "pub_date__gte=foo")
+                r = get(c, u * "?" * q)
+                @test r.status == 302 && getheader(r, "Location") == u * "?e=1"
+            end
+            # test_named_group_field_choices_change_list: grouped choices show their labels
+            f1 = create(DavFabric; surface = "x"); f2 = create(DavFabric; surface = "y")
+            t = text(get(c, "$DAV/davfabric/"))
+            @test occursin("<a href=\"$DAV/davfabric/$(f1.id)/change/\">Horizontal</a>", t) && occursin("<a href=\"$DAV/davfabric/$(f2.id)/change/\">Vertical</a>", t)
+            # test_change_list_null_boolean_display: an unknown boolean shows the unknown icon
+            create(DavPost; public = nothing)
+            @test occursin("title=\"Unknown\"", text(get(c, "$DAV/davpost/"))) || occursin("?", text(get(c, "$DAV/davpost/")))
+            # test_change_view_logs_m2m_field_changes
+            pizza = create(DavPizza; name = "Cheese"); cheese = create(DavTopping; name = "cheese")
+            r = post(c, "$DAV/davpizza/$(pizza.id)/change/", Dict("name" => "Cheese", "toppings" => string(cheese.id)))
+            @test r.status == 302 && getheader(r, "Location") == "$DAV/davpizza/"
+            log = first(order_by(filter(Juango.LogEntry; object_id = string(pizza.id), content_type = Juango.get_for_model(DavPizza)), "-id"))
+            @test log.change_message == "Changed Toppings."
+            # test_date_hierarchy_empty_queryset
+            Admin.register!(DavArticle; date_hierarchy = :date)
+            @test get(c, "$DAV/davarticle/").status == 200
+        finally
+            foreach(Admin.unregister!, [DavThing, DavColor, DavPost, DavFabric, DavPizza, DavTopping, DavSection, DavArticle, DavInquisition, DavActor, DavSketch])
+        end
+    end
+    # not translated: test_invalid_appindex_url (Juango's app index URL takes any label, answering 404 for an unknown one),
+    # m2m to_field targets, relation-spanning filters through reverse relations (tested in django_admin.jl's admin_filters)
 end

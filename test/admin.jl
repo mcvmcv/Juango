@@ -100,10 +100,10 @@ end
             "articles-1-title" => "Inline two", "articles-1-status" => "p"))
         @test [x.title for x in get(Author; id = ann.id).articles] == ["Inline two"]
         e = first(order_by(filter(LogEntry; object_id = string(ann.id), content_type = ct), "-id"))
-        @test e.action_flag == CHANGE && occursin("Changed email.", e.change_message) &&
+        @test e.action_flag == CHANGE && occursin("Changed Email.", e.change_message) &&
               occursin("Added article “Inline two”.", e.change_message) && occursin("Deleted article “Inline one”.", e.change_message)
         r = get(c, "/admin/project/author/$(ann.id)/history/")
-        @test r.status == 200 && occursin("Changed email.", text(r)) && occursin("Added.", text(r))
+        @test r.status == 200 && occursin("Changed Email.", text(r)) && occursin("Added.", text(r))
         @test occursin("Recent actions", text(get(c, "/admin/"))) && occursin(">Adm Ann</a>", text(get(c, "/admin/")))
 
         # save as new
