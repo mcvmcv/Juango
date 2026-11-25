@@ -380,6 +380,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                                                  :import_export => import_export === true ? Juango.ModelResource(T) : import_export), modelmeta(T).app)
     filter!(!=(key), site.order)
     push!(site.order, key)
+    any(x -> x === site, ALL_SITES) || push!(ALL_SITES, site)
     T
 end
 "A model's key in an admin registry: `\"app_label.model_name\"` (Django's label_lower)."
@@ -2049,6 +2050,7 @@ under the model's URL (`admin/post/3/publish/`), and the site's own `urls` at it
 go through the site's login and permission checks.
 """
 function urls(st::AdminSite = site)
+    any(x -> x === st, CHECKED_SITES) || push!(CHECKED_SITES, st)
     Juango.require_app("admin", "Admin.urls()")
     st === site && register_user_model!()
     s(v) = site_view(st, v)
@@ -2102,5 +2104,191 @@ function django_url_name(name, args, kw)
     nothing
 end
 push!(Juango.REVERSE_FALLBACKS, django_url_name)
+
+# --- system checks (Django's admin.E0xx-E2xx) -------------------------------------------------------------------
+
+"Admin sites whose URLs are mounted (`Admin.urls(site)`): the ones `manage.jl check` checks, as Django's all_sites."
+const CHECKED_SITES = AdminSite[]
+"Every admin site a model was registered on (a ModelAdmin's own site, for autocomplete_fields' check)."
+const ALL_SITES = AdminSite[]
+
+admin_field(T, name) = (i = findfirst(f -> f.name === Symbol(name), Juango.all_fields(T)); i !== nothing ? Juango.all_fields(T)[i] :
+                       (j = findfirst(f -> f.name === Symbol(name), Juango.many_to_many(T)); j === nothing ? nothing : Juango.many_to_many(T)[j]))
+admin_label(ma::ModelAdmin) = "<ModelAdmin $(admin_key(ma.model))>"
+model_label(T) = modelmeta(T).app * "." * string(nameof(T))
+missing_field(ma, option, field, T = ma.model) =
+    "The value of '$option' refers to '$field', which is not a field of '$(model_label(T))'."
+dups(xs) = length(unique(xs)) != length(xs)
+
+"""
+    Admin.check_admin(ma) -> Vector{CheckMessage}
+
+The problems in a ModelAdmin's options, with Django's ids and messages (admin.E002 ...): names that
+aren't fields of the model, or the wrong kind of field for the option, duplicates, conflicting options.
+`manage.jl check` runs it for every model of every mounted admin site.
+"""
+Base.@nospecializeinfer function check_admin(ma::ModelAdmin)
+    T = ma.model
+    out = Juango.CheckMessage[]
+    err(msg, id) = push!(out, Juango.CheckMessage(:error, admin_label(ma) * ": " * msg; id = id))
+    # raw_id_fields (E002, E003)
+    for (i, n) in enumerate(ma.raw_id_fields)
+        f = admin_field(T, n)
+        f === nothing ? err(missing_field(ma, "raw_id_fields[$(i-1)]", n), "admin.E002") :
+        f.kind in (:fk, :o2o, :m2m) || err("The value of 'raw_id_fields[$(i-1)]' must be a foreign key or a many-to-many field.", "admin.E003")
+    end
+    # fields and fieldsets (E005, E006, E012, E013)
+    ma.fields !== nothing && !isempty(ma.fieldsets) && err("Both 'fieldsets' and 'fields' are specified.", "admin.E005")
+    ma.fields !== nothing && dups(ma.fields) && err("The value of 'fields' contains duplicate field(s).", "admin.E006")
+    seen = Symbol[]
+    for (i, (_, names)) in enumerate(ma.fieldsets)
+        any(n -> n in seen, names) || dups(names) ? err("There are duplicate field(s) in 'fieldsets[$(i-1)][1]'.", "admin.E012") : nothing
+        append!(seen, names)
+    end
+    m2m_through(n) = (f = findfirst_m2m(modelmeta(T), Symbol(n)); f !== nothing && f.through !== nothing && !(Juango.through_model(f) <: Juango.AutoThrough))
+    for (label, names) in vcat(ma.fields === nothing ? Pair{String,Vector{Symbol}}[] : ["fields" => ma.fields],
+                               ["fieldsets[$(i-1)][1]['fields']" => last(fs) for (i, fs) in enumerate(ma.fieldsets)])
+        for n in names
+            m2m_through(n) && err("The value of '$label' cannot include the ManyToManyField '$n', because that field manually specifies a relationship model.", "admin.E013")
+        end
+    end
+    dups(ma.exclude) && err("The value of 'exclude' contains duplicate field(s).", "admin.E015")
+    # filter_horizontal / filter_vertical (E019, E020, E013)
+    for opt in (:filter_vertical, :filter_horizontal), (i, n) in enumerate(option(ma, opt, Symbol[]))
+        f = admin_field(T, n)
+        f === nothing ? err(missing_field(ma, "$opt[$(i-1)]", n), "admin.E019") :
+        f.kind === :m2m || err("The value of '$opt[$(i-1)]' must be a many-to-many field.", "admin.E020")
+    end
+    # radio_fields (E022, E023)
+    for n in option(ma, :radio_fields, Symbol[])
+        f = admin_field(T, n)
+        f === nothing ? err(missing_field(ma, "radio_fields", n), "admin.E022") :
+        (f.kind in (:fk, :o2o) || f.choices !== nothing) ||
+            err("The value of 'radio_fields' refers to '$n', which is not an instance of ForeignKey, and does not have a 'choices' definition.", "admin.E023")
+    end
+    # prepopulated_fields (E027, E028, E030)
+    for (k, vs) in ma.prepopulated_fields
+        f = admin_field(T, k)
+        if f === nothing
+            err(missing_field(ma, "prepopulated_fields", k), "admin.E027")
+        elseif f.kind in (:datetime, :fk, :o2o, :m2m)
+            err("The value of 'prepopulated_fields' refers to '$k', which must not be a DateTimeField, a ForeignKey, a OneToOneField, or a ManyToManyField.", "admin.E028")
+        end
+        for (i, v) in enumerate(vs)
+            admin_field(T, v) === nothing && err(missing_field(ma, "prepopulated_fields[\"$k\"][$(i-1)]", v), "admin.E030")
+        end
+    end
+    # ordering (E032, E033)
+    ords = [x for x in ma.ordering if x isa AbstractString]
+    "?" in ords && length(ma.ordering) > 1 &&
+        err("The value of 'ordering' has the random ordering marker '?', but contains other fields as well.", "admin.E032")
+    for (i, o) in enumerate(ords)
+        o == "?" && continue
+        n = lstrip(o, '-')
+        (n in ("pk", "id") || occursin("__", n) || admin_field(T, n) !== nothing) || err(missing_field(ma, "ordering[$(i-1)]", n), "admin.E033")
+    end
+    # autocomplete_fields (E037, E038, E039, E040)
+    sites = vcat(CHECKED_SITES, [site], ALL_SITES)
+    i = findfirst(x -> any(y -> y === ma, values(x.registry)), sites)
+    st = i === nothing ? site : sites[i]
+    for (i, n) in enumerate(ma.autocomplete_fields)
+        f = admin_field(T, n)
+        if f === nothing
+            err(missing_field(ma, "autocomplete_fields[$(i-1)]", n), "admin.E037")
+        elseif !(f.kind in (:fk, :o2o, :m2m))
+            err("The value of 'autocomplete_fields[$(i-1)]' must be a foreign key or a many-to-many field.", "admin.E038")
+        else
+            R = related_model(f)
+            rma = get(st.registry, admin_key(R), nothing)
+            if rma === nothing
+                err("An admin for model \"$(nameof(R))\" has to be registered to be referenced by $(admin_label(ma)).autocomplete_fields.", "admin.E039")
+            elseif isempty(rma.search_fields) && rma.get_search_fields === nothing
+                err("$(admin_label(rma)) must define \"search_fields\", because it's referenced by $(admin_label(ma)).autocomplete_fields.", "admin.E040")
+            end
+        end
+    end
+    # list_display (E109), list_display_links (E111)
+    for (i, c) in enumerate(ma.list_display)
+        c isa Union{Symbol,AbstractString} || continue
+        f = admin_field(T, c)
+        f !== nothing && f.kind === :m2m &&
+            err("The value of 'list_display[$(i-1)]' must not be a many-to-many field or a reverse foreign key.", "admin.E109")
+    end
+    links = option(ma, :list_display_links)
+    if links !== nothing
+        names = [x isa Union{Symbol,AbstractString} ? Symbol(x) : x for x in ma.list_display]
+        for (i, l) in enumerate(links)
+            (l isa Union{Symbol,AbstractString} ? Symbol(l) : l) in names ||
+                err("The value of 'list_display_links[$(i-1)]' refers to '$l', which is not defined in 'list_display'.", "admin.E111")
+        end
+    end
+    # list_filter (E116)
+    for (i, e) in enumerate(ma.list_filter)
+        e isa ListFilter && continue
+        name = string(e isa Pair ? e.first : e)
+        filter_field(T, name) === nothing &&
+            err("The value of 'list_filter[$(i-1)]' refers to '$name', which does not refer to a Field.", "admin.E116")
+    end
+    # list_editable (E121-E125)
+    ld = [x isa Union{Symbol,AbstractString} ? Symbol(x) : nothing for x in ma.list_display]
+    for (i, n) in enumerate(ma.list_editable)
+        f = admin_field(T, n)
+        label = "list_editable[$(i-1)]"
+        if f === nothing
+            err(missing_field(ma, label, n), "admin.E121")
+        elseif !(n in ld)
+            err("The value of '$label' refers to '$n', which is not contained in 'list_display'.", "admin.E122")
+        elseif links !== nothing && n in [Symbol(x) for x in links if x isa Union{Symbol,AbstractString}]
+            err("The value of '$label' cannot be in both 'list_editable' and 'list_display_links'.", "admin.E123")
+        elseif links === nothing && !isempty(ld) && ld[1] === n
+            err("The value of '$label' refers to the first field in 'list_display' ('$n'), which cannot be used unless 'list_display_links' is set.", "admin.E124")
+        elseif !f.editable
+            err("The value of '$label' refers to '$n', which is not editable through the admin.", "admin.E125")
+        end
+    end
+    # date_hierarchy (E127, E128)
+    if ma.date_hierarchy !== nothing
+        f = admin_path_field(T, string(ma.date_hierarchy))
+        f === nothing ? err("The value of 'date_hierarchy' refers to '$(ma.date_hierarchy)', which does not refer to a Field.", "admin.E127") :
+        f.kind in (:date, :datetime) || err("The value of 'date_hierarchy' must be a DateField or DateTimeField.", "admin.E128")
+    end
+    # actions (E130)
+    names = [a.name for a in ma.actions]
+    for n in unique(names)
+        count(==(n), names) > 1 && err("__name__ attributes of actions defined in $(admin_label(ma)) must be unique. Name '$n' is not unique.", "admin.E130")
+    end
+    # inlines (E201, E202)
+    for ia in ma.inlines
+        ilabel = "<$(ia.style === :tabular ? "TabularInline" : "StackedInline") $(admin_key(ia.model))>"
+        try
+            Juango.inlineformset_factory(T, ia.model; fk = ia.fk, fields = ia.fields)      # (Django's messages for a missing or ambiguous key)
+            fk = only(f for f in Juango.all_fields(ia.model) if f.kind === :fk && T in Juango.lineage(related_model(f)) &&
+                                                               (ia.fk === nothing || f.name === ia.fk))
+            fk.name in inline_option(ia, :exclude, Symbol[]) &&
+                push!(out, Juango.CheckMessage(:error, ilabel * ": Cannot exclude the field '$(fk.name)', because it is the foreign key to the parent model '$(model_label(T))'."; id = "admin.E201"))
+        catch e
+            e isa ArgumentError || rethrow()
+            push!(out, Juango.CheckMessage(:error, ilabel * ": " * e.msg; id = "admin.E202"))
+        end
+    end
+    out
+end
+
+"The field a `field__path` through relations ends at, or `nothing`."
+function admin_path_field(T, p::AbstractString)
+    M, f = T, nothing
+    for part in split(p, "__")
+        M === nothing && return nothing
+        f = admin_field(M, part)
+        f === nothing && return nothing
+        M = f.kind in (:fk, :o2o, :m2m) ? related_model(f) : nothing
+    end
+    f
+end
+
+"Every problem in the mounted admin sites' ModelAdmins (`manage.jl check`, tag `admin`)."
+admin_check_issues() = reduce(vcat, (check_admin(ma) for st in unique(vcat([site], CHECKED_SITES)) for ma in values(st.registry));
+                              init = Juango.CheckMessage[])
+Juango.register_check!(() -> Juango.is_installed("admin") ? admin_check_issues() : Juango.CheckMessage[]; tags = [:admin])
 
 end # module Admin

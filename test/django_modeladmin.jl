@@ -75,7 +75,7 @@ redirect_stdout(devnull) do
     ms = [DmaBand, DmaSong, through(DmaSong, :featuring), DmaConcert, DmaDepartment, DmaEmployee, DmaEmployeeProfile, DmaEmployeeInfo,
           DmaCountry, DmaPlace, DmaCodeCountry, DmaCodePlace, DmaRestaurant, DmaWaiter]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
-    Juango.update_permissions!()
+    Juango.update_permissions!(ms)
 end
 
 const DMA_SITE = Admin.AdminSite("dma_site")

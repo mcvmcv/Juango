@@ -802,7 +802,7 @@ Juango.username_field(::Type{Member}) = :email
         @test authenticate("m@example.com", "member-pw-1").id == m.id && authenticate(; email = "m@example.com", password = "x") === nothing
         g = create(Group; name = "members-group")
         add!(m.groups, g)
-        add!(g.permissions, get(Permission; codename = "view_article"))
+        add!(g.permissions, get(Permission; codename = "view_article", content_type = Juango.get_for_model(Article)))
         @test [u.nickname for u in g.user_set] == ["Em"] && has_perm(get(Member; id = m.id), "project.view_article")
         @test Juango.related_model(Juango.findfield(Juango.modelmeta(LogEntry), :user)) === Member
         c = Client()

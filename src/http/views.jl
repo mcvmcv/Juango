@@ -16,7 +16,7 @@ function render(req::Request, template, context = Dict{String,Any}(); status = 2
         template isa AbstractString || throw(ArgumentError("render: htmx_partial needs a template name"))
         template = string(template, "#", htmx_partial)
     end
-    t = template isa Template ? template : select_template(template)
+    t = template isa Template ? template : load_template(template)
     ctx = to_context_dict(context)
     # for the test client, response.context is what the template saw: the context processors' values, then the view's
     # (other engines' templates may not take processor_values)

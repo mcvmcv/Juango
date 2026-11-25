@@ -38,10 +38,10 @@ const DEFAULT_PERMISSIONS = ("add", "change", "delete", "view")
 "The permission string for an action on a model: `perm_name(Post, :change) == \"project.change_post\"`."
 perm_name(T::Type, action) = (m = modelmeta(T); "$(modelmeta(concrete_model(T)).app).$(action)_$(lowercase(m.name))")
 
-"Create missing permissions for every model (run by `migrate`)."
-function update_permissions!()
+"Create missing permissions for every model (run by `migrate`), or for these models."
+function update_permissions!(models = MODEL_LIST)
     table_exists(backend(), modelmeta(Permission).table) || return
-    for T in MODEL_LIST
+    for T in models
         (T <: AutoThrough || !model_in_use(T)) && continue
         m = modelmeta(T)
         ct = get_for_model(T)

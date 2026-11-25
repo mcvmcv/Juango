@@ -224,7 +224,11 @@ struct UploadedFile
     bytes::Union{Nothing,Vector{UInt8}}   # in memory, or
     path::Union{Nothing,String}           # a temporary file (big uploads; see FILE_UPLOAD_HANDLERS)
     filesize::Int
+    charset::Union{Nothing,String}        # the part's Content-Type charset, as Django's
+    content_type_extra::Dict{String,String}   # its other Content-Type parameters (Django's content_type_extra)
 end
+UploadedFile(name::String, content_type::String, bytes, path, filesize::Int) =
+    UploadedFile(name, content_type, bytes, path, filesize, nothing, Dict{String,String}())
 UploadedFile(name, data; content_type = "application/octet-stream") =
     (b = data isa AbstractString ? Vector{UInt8}(codeunits(data)) : Vector{UInt8}(data);
      UploadedFile(string(name), string(content_type), b, nothing, length(b)))
@@ -309,27 +313,146 @@ Base.propertynames(r::Request, private::Bool = false) = (fieldnames(Request)...,
 Base.setproperty!(r::Request, s::Symbol, v) =
     s === :urlconf ? (getfield(r, :meta)[:urlconf] = v) : setfield!(r, s, convert(fieldtype(Request, s), v))
 
+# --- multipart/form-data, as Django's MultiPartParser ------------------------------------------------------
+
+"A header's value and its parameters (`form-data; name=\"a\"; filename*=UTF-8''%C3%A9`), RFC 2231 ones decoded."
+function header_params(v::AbstractString)
+    items = String[]
+    buf, inq = IOBuffer(), false
+    for c in v
+        if c == '"'
+            inq = !inq; print(buf, c)
+        elseif c == ';' && !inq
+            push!(items, String(take!(buf)))
+        else
+            print(buf, c)
+        end
+    end
+    push!(items, String(take!(buf)))
+    params = Dict{String,String}()
+    for it in items[2:end]
+        i = findfirst('=', it)
+        i === nothing && continue
+        k, x = lowercase(strip(it[1:prevind(it, i)])), strip(it[nextind(it, i):end])
+        length(x) >= 2 && x[1] == '"' && x[end] == '"' && (x = replace(x[2:prevind(x, lastindex(x))], "\\\"" => "\"", "\\\\" => "\\"))
+        if endswith(k, "*")                                  # RFC 2231: charset'language'percent-encoded
+            m = match(r"^([^']*)'[^']*'(.*)$", x)
+            m === nothing || (x = String(unescape_uri_bytes(m[2]; charset = isempty(m[1]) ? "utf-8" : lowercase(m[1]))))
+            params[k[1:end-1]] = x                            # (it wins over the plain parameter)
+        else
+            haskey(params, k) || (params[k] = x)
+        end
+    end
+    lowercase(strip(items[1])), params
+end
+function unescape_uri_bytes(s::AbstractString; charset = "utf-8")
+    b = UInt8[]
+    i = 1
+    cu = codeunits(s)
+    while i <= length(cu)
+        if cu[i] == UInt8('%') && i + 2 <= length(cu) && (h = tryparse(UInt8, String(cu[i+1:i+2]); base = 16)) !== nothing
+            push!(b, h); i += 3
+        else
+            push!(b, cu[i]); i += 1
+        end
+    end
+    charset in ("utf-8", "utf8") ? String(b) : String(map(Char, b))      # (latin-1 otherwise)
+end
+
+"""
+An upload's file name made safe, as Django's MultiPartParser.sanitize_file_name and UploadedFile's name: HTML
+entities resolved, only what follows the last `/` or `\\`, without non-printable characters, at most 255
+characters (keeping the extension); `nothing` for a name that is empty, `.` or `..` after that.
+"""
+function sanitize_file_name(name::AbstractString)
+    n = html_unescape(String(name))
+    n = String(last(split(n, '/')))
+    n = String(last(split(n, '\\')))
+    n = filter(isprint, n)
+    n in ("", ".", "..") && return nothing
+    if length(n) > 255
+        dot = findlast('.', n)
+        root, ext = dot === nothing || dot == firstindex(n) ? (n, "") : (n[1:prevind(n, dot)], n[dot:end])
+        ext = first(ext, 255)
+        n = first(root, 255 - length(ext)) * ext
+    end
+    n
+end
+
+"""
+The parts of a multipart body: `(name, filename, content_type, params, data)` each, `filename === nothing`
+for a field. A part that isn't complete (a truncated body) is left out, as Django's; a part with
+`Content-Transfer-Encoding: base64` is decoded (data that isn't base64 is a BadRequest).
+"""
+function multipart_parts(content_type::AbstractString, body::AbstractVector{UInt8})
+    _, ps = header_params(content_type)
+    boundary = get(ps, "boundary", nothing)
+    (boundary === nothing || isempty(boundary)) && throw(BadRequest("Invalid boundary in multipart: None"))
+    delim = Vector{UInt8}(codeunits("--" * boundary))
+    next_delim = Vector{UInt8}(codeunits("\r\n--" * boundary))
+    parts = Any[]
+    r = findfirst(delim, body)
+    r === nothing && return parts
+    pos = last(r) + 1
+    while true
+        pos + 1 <= length(body) && body[pos] == UInt8('-') && body[pos+1] == UInt8('-') && break       # the closing delimiter
+        pos + 1 <= length(body) && body[pos] == UInt8('\r') && body[pos+1] == UInt8('\n') || break
+        pos += 2
+        he = findnext(Vector{UInt8}(codeunits("\r\n\r\n")), body, pos)
+        he === nothing && break
+        headers = Dict{String,String}()
+        for line in split(String(body[pos:first(he)-1]), "\r\n")
+            i = findfirst(':', line)
+            i === nothing || (headers[lowercase(strip(line[1:prevind(line, i)]))] = strip(line[nextind(line, i):end]))
+        end
+        dstart = last(he) + 1
+        nd = findnext(next_delim, body, dstart)
+        nd === nothing && break                                 # (truncated: the part never ends)
+        data = body[dstart:first(nd)-1]
+        pos = last(nd) + 1
+        disp, dps = header_params(get(headers, "content-disposition", ""))
+        disp == "form-data" || continue
+        name = get(dps, "name", nothing)
+        name === nothing && continue
+        if lowercase(get(headers, "content-transfer-encoding", "")) == "base64"
+            data = try
+                Base64.base64decode(filter(c -> !(c in (UInt8('\r'), UInt8('\n'), UInt8(' '))), data))
+            catch
+                throw(BadRequest("Could not decode base64 data."))
+            end
+        end
+        ct, cps = header_params(get(headers, "content-type", ""))
+        push!(parts, (name = name, filename = get(dps, "filename", nothing), content_type = ct, params = cps, data = data))
+    end
+    parts
+end
+
 "Parse a multipart body: fields into `req.POST`, files into `req.FILES`."
 function parse_multipart_fields(req::Request)
     q = QueryDict()
     files = FileDict()
     try
-        parts = HTTP.parse_multipart_form(header(req, "content-type"), req.body)
-        parts === nothing && return q
+        parts = multipart_parts(something(header(req, "content-type"), ""), req.body)
         maxfiles = get(settings, :DATA_UPLOAD_MAX_NUMBER_FILES, nothing)
         maxfiles === nothing || count(p -> p.filename !== nothing, parts) <= maxfiles ||
             throw(BadRequest("The number of files exceeded DATA_UPLOAD_MAX_NUMBER_FILES."))
         for p in parts
             if p.filename === nothing
-                push!(get!(q.data, p.name, String[]), String(read(p.data)))
+                push!(get!(q.data, p.name, String[]), String(p.data))
             else
-                isempty(p.filename) && continue      # an empty file input
-                push!(get!(files.data, p.name, UploadedFile[]),
-                      handle_upload(p.name, p.filename, isempty(p.contenttype) ? "application/octet-stream" : p.contenttype, read(p.data)))
+                fname = sanitize_file_name(p.filename)
+                fname === nothing && continue                  # an empty file input, or a name that's only a path
+                ctype = isempty(p.content_type) ? "application/octet-stream" : p.content_type
+                f = handle_upload(p.name, fname, ctype, p.data)
+                extra = Dict{String,String}(k => v for (k, v) in p.params if k != "charset")
+                f = UploadedFile(getfield(f, :name), getfield(f, :content_type), getfield(f, :bytes), getfield(f, :path),
+                                 getfield(f, :filesize), get(p.params, "charset", nothing), extra)
+                push!(get!(files.data, p.name, UploadedFile[]), f)
             end
         end
     catch e
-        e isa BadRequest && (req.meta[:upload_error] = e)     # an upload handler refused: a 400 from the handler
+        e isa BadRequest || rethrow()
+        req.meta[:upload_error] = e     # an upload handler refused, or a malformed body: a 400 from the handler
     end
     req.meta[:FILES] = files
     q

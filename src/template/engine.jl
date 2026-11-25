@@ -930,21 +930,27 @@ function render(t::MustacheTemplate, context = Dict{String,Any}(); request = not
     mustache_render(t.compiled, Dict{String,Any}(k => (v isa SafeString ? v.s : v) for (k, v) in ctx))
 end
 
-"First template in `names` that exists."
+"First template in `names` that exists (Django's: a name alone is refused; that's `get_template`)."
 function select_template(names)
-    names isa AbstractString && return get_template(names)
+    names isa AbstractString && throw(ArgumentError("select_template() takes an iterable of template names but got a string: $(repr(String(names))). " *
+                                                    "Use get_template() if you want to load a single template by name."))
+    isempty(names) && throw(TemplateDoesNotExist("No template names provided", String[]))
+    tried = String[]
     for n in names
         try
             return get_template(n)
         catch e
             e isa TemplateDoesNotExist || rethrow()
+            append!(tried, isempty(e.tried) ? [String(n)] : e.tried)
         end
     end
-    throw(TemplateDoesNotExist(join(names, ", "), String[]))
+    throw(TemplateDoesNotExist(join(names, ", "), tried))
 end
+"A template by name, or the first of several names that exists (what `render_to_string` and `render` take)."
+load_template(name) = name isa AbstractString ? get_template(name) : select_template(name)
 
 """
     render_to_string(template_name, context=Dict(); request=nothing) -> String
 """
 render_to_string(name, context = Dict{String,Any}(); request = nothing) =
-    render(select_template(name), context; request = request)
+    render(load_template(name), context; request = request)

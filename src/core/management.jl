@@ -17,7 +17,9 @@ and exits with status 1 (a script; in the REPL it only prints). `call_command` l
 """
 struct CommandError <: Exception
     msg::String
+    returncode::Int        # the exit status from the command line (Django's returncode)
 end
+CommandError(msg::AbstractString = ""; returncode::Integer = 1) = CommandError(String(msg), Int(returncode))
 Base.showerror(io::IO, e::CommandError) = print(io, "CommandError: ", e.msg)
 
 # A command's input and output: the terminal, or what call_command gives (Django's stdin/stdout/stderr
@@ -46,14 +48,21 @@ a vector of answers in turn; by default lines of `stdin` too). Output goes to `s
 A `CommandError` is thrown, not printed.
 """
 function call_command(name::AbstractString, args...; stdin = "", stdout = IOBuffer(), stderr = IOBuffer(), getpass = nothing,
-                      isatty::Bool = true, system_user::AbstractString = "")
+                      isatty::Bool = true, system_user::AbstractString = "", options...)
     entry = get(all_commands(), String(name), nothing)
     entry === nothing && throw(CommandError("Unknown command: '$name'"))
+    decl = get(DECLARED_COMMANDS, String(name), nothing)
+    decl === nothing || COMMANDS[String(name)] === entry || (decl = nothing)      # (an app's command of the same name)
+    decl === nothing && !isempty(options) &&
+        throw(ArgumentError("Unknown option(s) for $name command: $(join(sort(string.(keys(options))), ", ")). It takes command-line words only."))
     inp = stdin isa AbstractString ? IOBuffer(stdin) : stdin
     gp = getpass === nothing ? (p -> readline(inp)) :
          getpass isa AbstractVector ? (answers = Iterators.Stateful(getpass); p -> String(popfirst!(answers))) : getpass
     io = CommandIO(; stdin = inp, stdout = stdout, stderr = stderr, getpass = gp, isatty = isatty, system_user = String(system_user))
-    Base.ScopedValues.with(() -> entry[2](String[string(a) for a in args]), COMMAND_IO => io)
+    words = String[string(x) for a in args for x in (a isa Union{AbstractVector,Tuple} ? a : (a,))]   # (a list: its items, as Django's)
+    Base.ScopedValues.with(COMMAND_IO => io) do
+        decl === nothing ? entry[2](words) : run_declared(decl, words, (; options...); from_code = true)
+    end
 end
 
 "makemessages/compilemessages options, repeatable as Django's: -l/--locale, -x/--exclude, -i/--ignore, -e/--extension, -a/--all, --flag[=value]."
@@ -799,8 +808,8 @@ function execute_from_command_line(args = ARGS)
         entry[2](args[2:end])
     catch e
         e isa CommandError || rethrow()
-        println(stderr, "CommandError: ", e.msg)          # (as Django's: the message and exit status 1)
-        isinteractive() || exit(1)
+        println(stderr, "CommandError: ", e.msg)          # (as Django's: the message and its exit status, 1 by default)
+        isinteractive() || exit(e.returncode)
         nothing
     end
 end

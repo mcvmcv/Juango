@@ -178,8 +178,8 @@ public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, sitema
        clear_site_cache!, CurrentSiteMiddleware, check_site_id, create_default_site!, Redirect, RedirectFallbackMiddleware, background, TaskDef, db_worker
 # apps, settings, commands
 public build, build_workload, project_include, on_reload!, CheckMessage, register_check!, run_checks, diffsettings, sendtestemail, findstatic,
-       remove_stale_contenttypes, installed_apps, is_installed, get_app, model_label, app_models, static_dirs, default_settings,
-       startproject, startapp, collectstatic, register_command!, slugify
+       remove_stale_contenttypes, installed_apps, is_installed, get_app, model_label, model_label_lower, get_field, get_fields, RelatedObject, related_objects, app_models, static_dirs, default_settings,
+       startproject, startapp, collectstatic, register_command!, slugify, sanitize_file_name, arg, exclusive_group, cmd_stdout, cmd_stderr
 
 # --- Juango.Testing, Juango.GIS, Juango.Postgres ----------------------------------------------------
 

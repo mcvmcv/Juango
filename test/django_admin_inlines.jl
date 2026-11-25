@@ -41,7 +41,7 @@ Base.show(io::IO, q::DaiQuestion) = print(io, q.text)
 redirect_stdout(devnull) do
     ms = [DaiBook, DaiAuthor, through(DaiAuthor, :books), DaiHolder2, DaiInner2, DaiPoll, DaiQuestion]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
-    Juango.update_permissions!()
+    Juango.update_permissions!(ms)
 end
 
 "The management form's `TOTAL_FORMS` (or another count) of each inline on the page: prefix => value."

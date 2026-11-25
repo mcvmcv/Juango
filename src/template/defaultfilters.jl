@@ -325,7 +325,14 @@ const LATIN1_ENTITY_NAMES = split("nbsp iexcl cent pound curren yen brvbar sect 
     "eth ntilde ograve oacute ocirc otilde ouml divide oslash ugrave uacute ucirc uuml yacute thorn yuml")
 const ENTITIES = merge(Dict{String,String}(String(n) => string(Char(0xa0 + i - 1)) for (i, n) in enumerate(LATIN1_ENTITY_NAMES)),
                        Dict("amp" => "&", "lt" => "<", "gt" => ">", "quot" => "\"", "apos" => "'", "hellip" => "…", "mdash" => "—",
-                            "ndash" => "–", "lsquo" => "‘", "rsquo" => "’", "ldquo" => "“", "rdquo" => "”", "euro" => "€"))
+                            "ndash" => "–", "lsquo" => "‘", "rsquo" => "’", "ldquo" => "“", "rdquo" => "”", "euro" => "€"),
+                       # (HTML5's names for ASCII punctuation, as Python's: "..&sol;x" is "../x")
+                       Dict("sol" => "/", "bsol" => "\\", "period" => ".", "comma" => ",", "colon" => ":", "semi" => ";", "excl" => "!",
+                            "quest" => "?", "num" => "#", "dollar" => "\$", "percnt" => "%", "lpar" => "(", "rpar" => ")", "ast" => "*",
+                            "midast" => "*", "plus" => "+", "equals" => "=", "lowbar" => "_", "UnderBar" => "_", "Hat" => "^",
+                            "grave" => "`", "DiacriticalGrave" => "`", "lsqb" => "[", "lbrack" => "[", "rsqb" => "]", "rbrack" => "]",
+                            "lcub" => "{", "lbrace" => "{", "rcub" => "}", "rbrace" => "}", "verbar" => "|", "vert" => "|",
+                            "VerticalLine" => "|", "commat" => "@", "Tab" => "\t", "NewLine" => "\n"))
 "Python's `html.unescape`: character references and named entities to characters."
 html_unescape(s::AbstractString) = replace(s, r"&(?:#[xX][0-9a-fA-F]+|#[0-9]+|[A-Za-z][A-Za-z0-9]*);|&(?:amp|lt|gt|quot)(?![A-Za-z0-9;])" => function (m)
     endswith(m, ';') || return ENTITIES[m[2:end]]             # (&amp without a semicolon, as Python's legacy entities)

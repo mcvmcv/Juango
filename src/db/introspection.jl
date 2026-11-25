@@ -12,6 +12,7 @@
 #     end
 #     many_to_many(Material)                           # m2m fields; through(Material, f.name) is the join model
 #     model_label(Material), get_model("lab.Material")
+#     get_field(Material, :plate), get_fields(Plate)     # by name, and every field with the relations to it (RelatedObjects)
 #
 # The automatic `id` primary key isn't a field: read it as `obj.pk`. A CompositePrimaryKey's
 # fields are concrete fields with `is_primary_key(T, f)` true.

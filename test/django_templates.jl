@@ -2311,3 +2311,23 @@ end
 
 
 configure!(TEMPLATES = DJT_OLD_TEMPLATES)
+
+@testset "django template_loader: TemplateLoaderTests" begin
+    # (Juango has one template engine, so the tests of a second engine, `using` and the backends' chain aren't translated)
+    mkpath(joinpath(TPL, "template_loader"))
+    write(joinpath(TPL, "template_loader", "goodbye.html"), "Goodbye! (Django templates)\n")
+    write(joinpath(TPL, "template_loader", "request.html"), "{{ request.path }}\n")
+    @test render(Juango.get_template("template_loader/goodbye.html")) == "Goodbye! (Django templates)\n"                # test_get_template_second_engine
+    e = try Juango.get_template("template_loader/unknown.html") catch e; e end                                    # test_get_template_not_found
+    @test e isa Juango.TemplateDoesNotExist && occursin("template_loader/unknown.html", sprint(showerror, e))
+    @test render(Juango.select_template(["template_loader/unknown.html", "template_loader/goodbye.html"])) == "Goodbye! (Django templates)\n"
+    @test_throws Juango.TemplateDoesNotExist Juango.select_template(String[])                                             # test_select_template_empty
+    @test_throws "select_template() takes an iterable of template names but got a string: \"template_loader/hello.html\". Use get_template() if you want to load a single template by name." Juango.select_template("template_loader/hello.html")   # test_select_template_string
+    e = try Juango.select_template(["template_loader/unknown.html", "template_loader/missing.html"]) catch e; e end   # test_select_template_not_found
+    @test e isa Juango.TemplateDoesNotExist && any(t -> occursin("unknown.html", t), e.tried) && any(t -> occursin("missing.html", t), e.tried)
+    @test render_to_string("template_loader/goodbye.html") == "Goodbye! (Django templates)\n"               # test_render_to_string_second_engine
+    @test render_to_string("template_loader/request.html"; request = Juango.Request("GET", "/foobar/")) == "/foobar/\n"   # test_render_to_string_with_request
+    @test render_to_string(["template_loader/unknown.html", "template_loader/goodbye.html"]) == "Goodbye! (Django templates)\n"
+    @test_throws Juango.TemplateDoesNotExist render_to_string(String[])                                            # test_render_to_string_with_list_empty
+    @test_throws Juango.TemplateDoesNotExist render_to_string(["template_loader/unknown.html", "template_loader/missing.html"])
+end
