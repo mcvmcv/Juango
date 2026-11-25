@@ -122,7 +122,7 @@
         end
     finally
         configure!(INSTALLED_APPS = old_apps, MIDDLEWARE = old_mw, ROOT_URLCONF = old_urls, APPEND_SLASH = old_slash)
-        Admin.unregister!(FlatPage)
+        Admin.is_registered(FlatPage) && Admin.unregister!(FlatPage)
         Juango.execute("DELETE FROM " * Juango.qname("juango_flatpage"))
     end
     # not translated: FlatPage.sites and the per-site lookups (#270), the CSRF tests (the view is a plain

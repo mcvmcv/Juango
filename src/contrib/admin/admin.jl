@@ -246,6 +246,7 @@ AdminSite(name::AbstractString = "admin"; site_header = nothing, site_title = no
     AdminSite(String(name), registry, order, site_header, site_title, index_title, has_permission, collect(Any, urls),
               Dict{Symbol,Any}(k => v for (k, v) in (:index => index_template, :app_index => app_index_template,
                                                     :login => login_template, :logout => logout_template) if v !== nothing))
+Base.show(io::IO, st::AdminSite) = print(io, "AdminSite(name='", st.name, "')")
 "The site's template for a page, else the admin's (a name or a list of names)."
 site_template(st::AdminSite, which::Symbol, default) = get(st.templates, which, default)
 
@@ -347,7 +348,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    list_max_show_all = 200, preserve_filters = true, password_change_page = false, show_facets = :allow,
                    filter_horizontal = Symbol[], filter_vertical = Symbol[], import_export = nothing, view_on_site = true,
                    lookup_allowed = nothing, get_search_results = nothing, delete_confirmation_max_display = nothing,
-                   save_as_continue = true)
+                   save_as_continue = true, response_post_save_add = nothing, response_post_save_change = nothing)
     modelmeta(T)  # validates T is a model
     slug = model_name(T)
     key = admin_key(T)
@@ -391,6 +392,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                                                  :lookup_allowed => lookup_allowed, :get_search_results => get_search_results,
                                                  :delete_confirmation_max_display => delete_confirmation_max_display,
                                                  :save_as_continue => save_as_continue,
+                                                 :response_post_save_add => response_post_save_add, :response_post_save_change => response_post_save_change,
                                                  :import_export => import_export === true ? Juango.ModelResource(T) : import_export), modelmeta(T).app)
     filter!(!=(key), site.order)
     push!(site.order, key)
@@ -400,14 +402,30 @@ end
 "A model's key in an admin registry: `\"app_label.model_name\"` (Django's label_lower)."
 Base.@nospecializeinfer admin_key(@nospecialize(T::Type)) = modelmeta(T).app * "." * model_name(T)
 
-"Remove a model from the admin (`site` defaults to `Admin.site`)."
+"A model that isn't in an admin site (Django's NotRegistered)."
+struct NotRegistered <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::NotRegistered) = print(io, "NotRegistered: ", e.msg)
+
+"Remove a model (or a list of them) from the admin (`site` defaults to `Admin.site`); one that isn't there is an error, as Django's."
 Base.@nospecializeinfer function unregister!(@nospecialize(T::Type); site::AdminSite = Admin.site)
     key = admin_key(T)
+    haskey(site.registry, key) || throw(NotRegistered("The model $(nameof(T)) is not registered"))
     delete!(site.registry, key)
     filter!(!=(key), site.order)
     nothing
 end
+unregister!(Ts::Union{AbstractVector,Tuple}; site::AdminSite = Admin.site) = foreach(T -> unregister!(T; site), Ts)
+"Register several models with the same options (Django's site.register([A, B], ...))."
+register!(Ts::Union{AbstractVector,Tuple}; kw...) = foreach(T -> register!(T; kw...), Ts)
 is_registered(T::Type; site::AdminSite = Admin.site) = haskey(site.registry, admin_key(T))
+"A model's ModelAdmin on a site (Django's get_model_admin); a model that isn't there is NotRegistered."
+function get_model_admin(T::Type; site::AdminSite = Admin.site)
+    ma = get(site.registry, admin_key(T), nothing)
+    ma === nothing && throw(NotRegistered("The model $(nameof(T)) is not registered."))
+    ma
+end
 "The `ModelAdmin` of a model on the current site (for custom admin views)."
 model_admin(T::Type) = get_admin(modelmeta(T).app, model_name(T))
 
@@ -2009,6 +2027,9 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
             return Juango.HttpResponseRedirect(reverse_url("admin:add"; app = ma.app, model = ma.slug) * kept_query(req))
         end
         message!(req, :success, msg(added_or_changed))
+        # (where a plain "Save" goes, Django's response_post_save_add / response_post_save_change)
+        pss = option(ma, adding ? :response_post_save_add : :response_post_save_change)
+        pss === nothing || return Juango.to_response(pss(req, o))
         # (to the change list if the user may see it, else the index, as Django's)
         can_view(req, ma) || can(req, ma, :change) || return Juango.HttpResponseRedirect(reverse_url("admin:index"))
         return Juango.HttpResponseRedirect(changelist_url(ma, req))
