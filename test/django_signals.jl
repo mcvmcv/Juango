@@ -56,6 +56,11 @@ dsp_clean(sigs...) = all(s -> !Juango.any_receivers(s), sigs)
     @test send(a_signal, DsgPerson; val = 1) == [dsp_receiver_1 => 1]
     disconnect!(a_signal, dsp_receiver_1)
 
+    dsp_no_kwargs(sender) = nothing                                                      # test_cannot_connect_no_kwargs
+    @test_throws "Signal receivers must accept keyword arguments (kw...)." connect!(a_signal, dsp_no_kwargs)
+    @test_throws "Signal receivers must be callable." connect!(a_signal, 1)              # test_cannot_connect_non_callable
+    @test dsp_clean(a_signal)
+
     r1(sender; kw...) = 1                                                                # test_uid_registration
     r2(sender; kw...) = 2
     connect!(a_signal, r1; dispatch_uid = "uid")

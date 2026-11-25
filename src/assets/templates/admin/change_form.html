@@ -51,24 +51,40 @@
   </div>
   {% endfor %}
   {% for inline in inlines %}
-  <div class="module inline-group">
+  <div class="module inline-group{% if inline.classes %} {{ inline.classes }}{% endif %}">
     <h2>{{ inline.verbose_name_plural|capfirst }}</h2>
     {{ inline.management_form }}
     {% if inline.non_form_errors %}<ul class="errorlist">{% for e in inline.non_form_errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
-    {% if inline.style == "tabular" %}
+    {% if inline.existing %}
+    <table class="inline-readonly">
+      <thead><tr><th class="original"></th>{% for h in inline.existing_headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+      <tbody>
+      {% for o in inline.existing %}
+      <tr><td class="original"><p>{{ o.title }}{% if o.change_link %} <a href="{{ o.change_link }}" class="inlinechangelink">{% translate "Change" %}</a>{% endif %}</p></td>
+        {% for r in o.readonly %}<td class="readonly">{{ r.value }}</td>{% endfor %}</tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if not inline.forms %}{% elif inline.style == "tabular" %}
     <table>
-      <thead><tr>{% for h in inline.headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+      <thead><tr><th class="original"></th>{% for h in inline.headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
       <tbody>
       {% for f in inline.forms %}
-      <tr>{% for bf in f.fields %}<td>{% if forloop.first %}{{ f.hidden }}{% endif %}{% if bf.errors %}<ul class="errorlist">{% for e in bf.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}{{ bf }}</td>{% endfor %}</tr>
+      <tr><td class="original">{{ f.hidden }}{% if f.title %}<p>{{ f.title }}{% if f.change_link %} <a href="{{ f.change_link }}" class="inlinechangelink">{% translate "Change" %}</a>{% endif %}</p>{% endif %}</td>
+        {% for bf in f.fields %}<td class="field-{{ bf.name }}">{% if bf.errors %}<ul class="errorlist">{% for e in bf.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}{{ bf }}</td>{% endfor %}
+        {% for r in f.readonly %}<td class="readonly">{{ r.value }}</td>{% endfor %}
+        {% if f.delete %}<td class="delete">{{ f.delete }}</td>{% endif %}</tr>
       {% endfor %}
       </tbody>
     </table>
     {% else %}
     {% for f in inline.forms %}
-    <fieldset class="inline-related"><legend>{% if f.title %}{{ f.title }}{% else %}{% translate "New" %}{% endif %}</legend>
+    <fieldset class="inline-related"><legend>{{ inline.verbose_name|capfirst }}: {% if f.title %}{{ f.title }}{% if f.change_link %} <a href="{{ f.change_link }}" class="inlinechangelink">{% translate "Change" %}</a>{% endif %}{% else %}{% translate "New" %}{% endif %}</legend>
       {{ f.hidden }}
-      {% for bf in f.fields %}<div class="form-row">{{ bf.label_tag }}<div>{% if bf.errors %}<ul class="errorlist">{% for e in bf.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}{{ bf }}</div></div>{% endfor %}
+      {% for bf in f.fields %}<div class="form-row field-{{ bf.name }}">{{ bf.label_tag }}<div>{% if bf.errors %}<ul class="errorlist">{% for e in bf.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}{{ bf }}</div></div>{% endfor %}
+      {% for r in f.readonly %}<div class="form-row"><label>{{ r.label }}:</label><div class="readonly">{{ r.value }}</div></div>{% endfor %}
+      {% if f.delete %}<div class="form-row delete">{{ f.delete.label_tag }}<div>{{ f.delete }}</div></div>{% endif %}
     </fieldset>
     {% endfor %}
     {% endif %}

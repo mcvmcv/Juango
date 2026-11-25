@@ -62,7 +62,8 @@ end
 """
     resolve_url(to, args...; kwargs...) -> String
 
-Where `to` points, as Django's: a model instance's `get_absolute_url`, a relative URL
+Where `to` points, as Django's: a model instance's `get_absolute_url`, a view (the URL it's mounted at,
+reversed with `args`/`kwargs`), a `reverse_lazy`, a relative URL
 (`"./"`, `"../"`) as it is, a URL pattern name reversed with `args`/`kwargs`, and otherwise text
 that looks like a URL (it has a `/` or a `.`). A name that doesn't reverse and doesn't look like a
 URL is a `NoReverseMatch`, not a redirect to the misspelled name.
@@ -73,6 +74,8 @@ function resolve_url(to, args...; kwargs...)
         u === nothing && throw(ArgumentError("$(typeof(to)) does not define get_absolute_url"))
         return string(u)
     end
+    # (a view, a function or a callable object: the pattern it's mounted at, as Django's)
+    (to isa Function || !(to isa AbstractString) && !isempty(methods(to))) && return reverse_url(to, args...; kwargs...)
     s = string(to)
     (startswith(s, "./") || startswith(s, "../")) && return s
     # (a URL with a scheme or a path is used as it is without trying it as a name)

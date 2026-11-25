@@ -94,7 +94,7 @@ function CommonMiddleware(get_response)
         host = get_host(req)
         www = get(settings, :PREPEND_WWW, false) && !isempty(host) && !startswith(host, "www.")
         slash = settings.APPEND_SLASH && req.resolver_match === nothing && !endswith(req.path, "/") &&
-                (m = resolve(req.path * "/"); m !== nothing && !haskey(NO_APPEND_SLASH, m.view))
+                (m = resolve(req.path * "/", something(req.urlconf, current_urlconf())); m !== nothing && !haskey(NO_APPEND_SLASH, m.view))
         if slash && req.method in ("POST", "PUT", "PATCH") && settings.DEBUG
             error("You called this URL via $(req.method), but the URL doesn't end in a slash and APPEND_SLASH is set. " *
                   "Juango can't redirect to the slash URL while maintaining $(req.method) data. " *

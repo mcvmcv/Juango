@@ -21,10 +21,15 @@ redirect_stdout(devnull) do
 end
 write(joinpath(TPL, "ds_render.html"), "FOO.{{ foo }}")
 ds_view(req) = HttpResponse("view")
+ds_params_view(req; slug) = HttpResponse("")
+const DS_SOME_CBV = TemplateView("ds_render.html")
+const DS_PARAMS_CBV = TemplateView("ds_render.html")
 
 @testset "django shortcuts, get_object_or_404, resolve_url" begin
     old_urls = Juango.settings.ROOT_URLCONF
-    configure!(ROOT_URLCONF = [path("articles/<int:id>/", ds_view; name = "ds_article"), path("some-view/", ds_view; name = "ds_some_view")])
+    configure!(ROOT_URLCONF = [path("articles/<int:id>/", ds_view; name = "ds_article"), path("some-view/", ds_view; name = "ds_some_view"),
+                               path("params/<slug:slug>/", ds_params_view; name = "params-view"), path("params-cbv/<int:pk>/", DS_PARAMS_CBV; name = "params-cbv"),
+                               path("some-cbv/", DS_SOME_CBV; name = "some-cbv")])
     try
         port_block() do
             # --- tests/shortcuts: render
@@ -54,6 +59,15 @@ ds_view(req) = HttpResponse("view")
             @test resolve_url("ds_article", 7) == "/articles/7/"
             @test_throws Juango.NoReverseMatch resolve_url("ds_not_a_view")                   # test_view_name (a name that doesn't reverse)
             @test_throws Juango.NoReverseMatch redirect("ds_not_a_view")                      # (not a redirect to the misspelled name)
+            @test resolve_url(ds_view) == "/some-view/"                                       # test_view_function (the mount its arguments fit)
+            @test resolve_url(ds_params_view; slug = "django") == "/params/django/"           # test_view_function_with_kwargs
+            @test resolve_url(ds_params_view, "django") == "/params/django/"                  # test_view_function_with_args
+            @test resolve_url(DS_SOME_CBV) == "/some-cbv/"                                    # test_class_based_view (a generic view)
+            @test resolve_url(DS_PARAMS_CBV; pk = 5) == "/params-cbv/5/" && resolve_url(DS_PARAMS_CBV, 5) == "/params-cbv/5/"
+            @test_throws Juango.NoReverseMatch resolve_url(ds_params_view)                    # test_missing_params_raise_no_reverse_match
+            @test_throws Juango.NoReverseMatch resolve_url(DS_PARAMS_CBV)
+            @test resolve_url(reverse_lazy("ds_some_view")) === "/some-view/"                 # test_lazy_reverse (a String)
+            @test_throws Juango.NoReverseMatch resolve_url(() -> "asdf")                      # test_non_view_callable_raises_no_reverse_match
             a1 = create(DsAuthor; name = "Brave Sir Robin"); a2 = create(DsAuthor; name = "Patsy")
             # --- tests/get_object_or_404
             @test_throws Http404 get_object_or_404(DsArticle; title = "Foo")                  # test_get_object_or_404
@@ -80,8 +94,7 @@ ds_view(req) = HttpResponse("view")
             @test e isa ArgumentError && e.msg == "First argument to get_object_or_404() must be a Model, Manager, or QuerySet, not 'DsCustomClass'."
             e = try get_list_or_404([DsArticle]; title__icontains = "Run") catch e; e end
             @test e isa ArgumentError && e.msg == "First argument to get_list_or_404() must be a Model, Manager, or QuerySet, not 'Array'."
-            # not translated: render's `using` (Juango has one template engine per project), resolve_url of a
-            # view function and of lazy strings, and querysets' AttributeError
+            # not translated: render's `using` (Juango has one template engine per project) and querysets' AttributeError
         end
     finally
         configure!(ROOT_URLCONF = old_urls)

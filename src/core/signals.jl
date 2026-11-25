@@ -31,11 +31,21 @@ signals sent by that sender (for model signals: the model type) reach it. Connec
 same receiver (or `dispatch_uid`) twice for the same sender has no effect.
 """
 function connect!(sig::Signal, receiver; sender = nothing, dispatch_uid = nothing)
+    check_receiver(receiver)
     key = something(dispatch_uid, objectid(receiver))
     lock(sig.lock) do
         any(r -> r[1] == key && r[3] === sender, sig.receivers) || push!(sig.receivers, (key, receiver, sender))
     end
     receiver
+end
+
+# (as Django's: refused when connected rather than failing at the first send; every receiver gets the
+# `signal` keyword, so one without keyword arguments can't be called)
+function check_receiver(@nospecialize(receiver))
+    ms = methods(receiver)
+    isempty(ms) && throw(ArgumentError("Signal receivers must be callable."))
+    any(m -> !isempty(Base.kwarg_decl(m)), ms) || throw(ArgumentError("Signal receivers must accept keyword arguments (kw...)."))
+    nothing
 end
 
 """

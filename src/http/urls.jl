@@ -136,6 +136,21 @@ include_urls_(patterns, namespace, app_name) =
     Include(collect(Any, patterns), something(namespace, app_name, Some(nothing)) === nothing ? nothing : string(something(namespace, app_name)),
             app_name === nothing ? nothing : string(app_name))
 
+# (as Django's: a view that isn't callable is refused when the pattern is made; a string isn't a view in Juango)
+check_view(view) =
+    view isa AbstractString ? throw(ArgumentError("view must be a callable or a list/tuple in the case of include(), but got str.")) :
+    isempty(methods(view)) ? throw(ArgumentError("view must be a callable or a list/tuple in the case of include(), but got $(typeof(view)).")) : nothing
+
+# (a broken regex says which pattern, as Django's ImproperlyConfigured; Juango finds it when the pattern is made)
+function url_regex(rx, body)
+    try
+        Regex(body)
+    catch e
+        e isa ErrorException || rethrow()
+        throw(ImproperlyConfigured("\"$rx\" is not a valid regular expression: $(replace(e.msg, r"^PCRE compilation error: " => ""))"))
+    end
+end
+
 """
     path(route, view; name=nothing, kwargs...)
     path(route, include_urls(...))
@@ -145,7 +160,7 @@ Captured values are passed to the view as keyword arguments, together with any
 extra `kwargs`.
 """
 function path(route::AbstractString, view; name = nothing, kwargs...)
-    view isa AbstractString && throw(ArgumentError("view must be a callable or a list/tuple in the case of include(), but got str."))
+    check_view(view)
     startswith(route, "/") && @warn "URL route '$route' starts with '/'; routes should be relative (e.g. \"posts/\")."
     rx, params = compile_route(route; endpoint = true)
     URLPattern(String(route), rx, params, view, name === nothing ? nothing : string(name),
@@ -164,16 +179,17 @@ Pattern from a raw regular expression; named groups become keyword arguments
 (as strings). Reversing fills in its groups: named ones from keyword arguments, others from positional ones.
 """
 function re_path(rx::AbstractString, view; name = nothing, kwargs...)
+    check_view(view)
     # (a closing $ is \z, so a trailing newline doesn't match, as Django's)
     body = endswith(rx, "\$") && !endswith(rx, "\\\$") ? rx[1:prevind(rx, lastindex(rx))] * "\\z" : rx
-    r = startswith(body, "^") ? Regex(body) : Regex("^" * body)
+    r = url_regex(rx, startswith(body, "^") ? body : "^" * body)
     params = Tuple{Symbol,String}[(Symbol(n), "str") for n in Base.PCRE.capture_names(r.regex) |> values]
     URLPattern(String(rx), r, params, view, name === nothing ? nothing : string(name), Dict{Symbol,Any}(kwargs))
 end
 
 "A regex prefix for an included set (`re_path(raw\"^outer/(?P<outer>[0-9]+)/\", include_urls(...))`): its named groups go to the views."
 function re_path(rx::AbstractString, inc::Include)
-    r = startswith(rx, "^") ? Regex(rx) : Regex("^" * rx)
+    r = url_regex(rx, startswith(rx, "^") ? rx : "^" * rx)
     params = Tuple{Symbol,String}[(Symbol(n), "str") for n in Base.PCRE.capture_names(r.regex) |> values]
     URLResolver(String(rx), r, params, inc.patterns, inc.namespace, inc.app_name)
 end
@@ -291,9 +307,19 @@ function _resolve(patterns, p::AbstractString, kwargs, ns, prefix, app = nothing
 end
 
 """
-    resolve(path, urlpatterns=settings.ROOT_URLCONF) -> Union{ResolverMatch,Nothing}
+The URLconf a request uses, while it's handled: one a middleware set (`req.urlconf = inner_urls`, Django's
+`request.urlconf`), else ROOT_URLCONF. `reverse_url` and `resolve` use it, the response middleware too.
 """
-resolve(p::AbstractString, patterns = settings.ROOT_URLCONF) =
+const URLCONF_REF = Base.ScopedValues.ScopedValue{Union{Nothing,Base.RefValue{Any}}}(nothing)
+"The URLconf in use: the request's (`req.urlconf`), else ROOT_URLCONF."
+current_urlconf() = (r = URLCONF_REF[]; r === nothing || r[] === nothing ? settings.ROOT_URLCONF : r[])
+"The URLconf a middleware set for the current request, or nothing (Django's `get_urlconf`)."
+get_urlconf() = (r = URLCONF_REF[]; r === nothing ? nothing : r[])
+
+"""
+    resolve(path, urlpatterns = <the current URLconf>) -> Union{ResolverMatch,Nothing}
+"""
+resolve(p::AbstractString, patterns = current_urlconf()) =
     _resolve(patterns, lstrip(p, '/'), Dict{Symbol,Any}(), nothing, "")
 
 "All routes as `(route, name)` tuples, used by the debug 404 page and `showurls`."
@@ -727,7 +753,7 @@ url_repr(x) = string(x)
 url_tuple(xs) = "(" * join(map(url_repr, xs), ", ") * (length(xs) == 1 ? ",)" : ")")
 
 """
-    reverse_url(name, args...; urlconf=settings.ROOT_URLCONF, query=nothing, fragment=nothing, current_app=nothing, kwargs...)
+    reverse_url(name, args...; urlconf=<the current URLconf>, query=nothing, fragment=nothing, current_app=nothing, kwargs...)
 
 Build the URL for the named pattern (or a view: the pattern it's mounted at). Use `"namespace:name"` for included
 patterns. `query` (a Dict, pairs or a QueryDict) is added as the query string and `fragment` after `#`, as Django's.
@@ -735,7 +761,7 @@ patterns. `query` (a Dict, pairs or a QueryDict) is added as the query string an
     reverse_url("article"; id=3)        # "/articles/3/"
     reverse_url("blog:post", 3)         # positional arguments also work
 """
-function reverse_url(name, args...; urlconf = settings.ROOT_URLCONF, query = nothing, fragment = nothing, current_app = nothing, kwargs...)
+function reverse_url(name, args...; urlconf = current_urlconf(), query = nothing, fragment = nothing, current_app = nothing, kwargs...)
     name === nothing && throw(NoReverseMatch("Reverse for 'None' not found. 'None' is not a valid view function or pattern name."))
     !isempty(args) && !isempty(kwargs) && throw(ArgumentError("Don't mix *args and **kwargs in call to reverse()!"))
     fragment === nothing || fragment isa AbstractString || throw(ArgumentError("fragment must be a string, not $(typeof(fragment))"))
@@ -841,3 +867,29 @@ function query_string(q::Union{AbstractVector,Tuple,AbstractSet})
     plus_spaces(urlencode(Pair{Any,Any}[x isa Pair ? x : (x[1] => x[2]) for x in q]))
 end
 query_string(q) = throw(ArgumentError("query must be a mapping or a sequence of pairs, not $(typeof(q))"))
+
+"""
+    reverse_lazy(name, args...; kwargs...) -> AbstractString
+
+A URL reversed when it's used (printed, compared, redirected to), not when it's created: for URLs given at load
+time, before the URLconf is complete (a class's `success_url`, a setting), as Django's `reverse_lazy`.
+"""
+struct LazyURL <: AbstractString
+    name::Any
+    args::Tuple
+    kwargs::Base.Pairs
+end
+reverse_lazy(name, args...; kwargs...) = LazyURL(name, args, kwargs)
+Base.String(l::LazyURL) = reverse_url(l.name, l.args...; l.kwargs...)
+Base.string(l::LazyURL) = String(l)
+Base.print(io::IO, l::LazyURL) = print(io, String(l))
+Base.show(io::IO, l::LazyURL) = print(io, "reverse_lazy(", repr(l.name), isempty(l.args) ? "" : ", " * join(repr.(l.args), ", "), ")")   # (not reversed: shown before the URLconf exists)
+Base.ncodeunits(l::LazyURL) = ncodeunits(String(l))
+Base.codeunit(l::LazyURL) = UInt8
+Base.codeunit(l::LazyURL, i::Integer) = codeunit(String(l), i)
+Base.isvalid(l::LazyURL, i::Integer) = isvalid(String(l), i)
+Base.iterate(l::LazyURL, i::Integer = 1) = iterate(String(l), i)
+Base.:(==)(a::LazyURL, b::AbstractString) = String(a) == b
+Base.:(==)(a::AbstractString, b::LazyURL) = a == String(b)
+Base.:(==)(a::LazyURL, b::LazyURL) = String(a) == String(b)
+Base.hash(l::LazyURL, h::UInt) = hash(String(l), h)

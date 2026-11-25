@@ -41,11 +41,21 @@ to_action(a::AdminAction) = a
 to_action(f::Function) = action(f)
 
 """
-    TabularInline(Model; fields=nothing, extra=1, can_delete=true, fk=nothing, max_num=1000, ordering=[])
+    TabularInline(Model; fields=nothing, extra=1, can_delete=true, fk=nothing, max_num=1000, ordering=[], ...)
     StackedInline(...)
 
 Edit related objects on the parent's change page: a table row per object, or a stacked
 form per object. `ordering` orders the inline's objects (else the model's Meta.ordering), as Django's.
+Django's InlineModelAdmin options too:
+- `exclude`, `readonly_fields` (shown as values, not inputs), and the hooks `get_exclude`,
+  `get_readonly_fields = (req, obj) -> names`;
+- `min_num`, and `get_extra`, `get_min_num`, `get_max_num = (req, obj) -> n`;
+- `verbose_name`, `verbose_name_plural` (default: the model's; a `verbose_name` alone gets an "s");
+- `show_change_link = true`: a link to each saved object's own change page, when the admin has its model;
+- `classes = ["collapse"]`: CSS classes on the inline's group;
+- `has_view_permission`, `has_add_permission`, `has_change_permission`,
+  `has_delete_permission = (req, obj) -> Bool` (`obj` is the parent, or `nothing` on the add page);
+  by default the model permissions. Without change permission the objects are shown read-only.
 """
 struct InlineAdmin
     model::Any
@@ -56,13 +66,64 @@ struct InlineAdmin
     max_num::Int
     style::Symbol
     ordering::Vector{Any}
+    options::Dict{Symbol,Any}
 end
 "An admin ordering: field names as strings (\"-rank\"), expressions (`Desc(F(:rank))`) as they are."
 admin_ordering_terms(xs) = Any[x isa Union{AbstractString,Symbol} ? string(x) : x for x in xs]
-Base.@nospecializeinfer TabularInline(@nospecialize(T); fields = nothing, extra = 1, can_delete = true, fk = nothing, max_num = 1000, ordering = ()) =
-    InlineAdmin(T, fields === nothing ? nothing : Symbol.(fields), extra, can_delete, fk === nothing ? nothing : Symbol(fk), max_num, :tabular,
-                admin_ordering_terms(ordering))
-StackedInline(T; kw...) = (i = TabularInline(T; kw...); InlineAdmin(i.model, i.fields, i.extra, i.can_delete, i.fk, i.max_num, :stacked, i.ordering))
+const INLINE_OPTIONS = (:exclude, :readonly_fields, :get_exclude, :get_readonly_fields, :min_num, :get_extra, :get_min_num, :get_max_num,
+                        :verbose_name, :verbose_name_plural, :show_change_link, :classes,
+                        :has_view_permission, :has_add_permission, :has_change_permission, :has_delete_permission)
+Base.@nospecializeinfer function TabularInline(@nospecialize(T); fields = nothing, extra = 1, can_delete = true, fk = nothing, max_num = 1000,
+                                               ordering = (), style = :tabular, kw...)
+    for k in keys(kw)
+        k in INLINE_OPTIONS || throw(ArgumentError("TabularInline: unknown option '$k'"))
+    end
+    o = Dict{Symbol,Any}(kw)
+    haskey(o, :exclude) && (o[:exclude] = Symbol.(collect(o[:exclude])))
+    haskey(o, :readonly_fields) && (o[:readonly_fields] = Symbol.(collect(o[:readonly_fields])))
+    InlineAdmin(T, fields === nothing ? nothing : Symbol.(fields), extra, can_delete, fk === nothing ? nothing : Symbol(fk), max_num, Symbol(style),
+                admin_ordering_terms(ordering), o)
+end
+StackedInline(T; kw...) = TabularInline(T; kw..., style = :stacked)
+inline_option(ia::InlineAdmin, k::Symbol, default = nothing) = get(ia.options, k, default)
+"The inline's verbose names, as Django's: its own, else the model's (a `verbose_name` alone gets an \"s\")."
+function inline_verbose_names(ia::InlineAdmin)
+    m = modelmeta(ia.model)
+    vn = inline_option(ia, :verbose_name)
+    vnp = inline_option(ia, :verbose_name_plural)
+    (something(vn, m.verbose_name), string(something(vnp, vn === nothing ? m.verbose_name_plural : string(vn, "s"))))
+end
+"""
+The other model of an automatic many-to-many join model `M` seen from `P` (`Book` for Author's
+`through(Author, :books)`), or `nothing` when `M` isn't one.
+"""
+Base.@nospecializeinfer function auto_through_target(@nospecialize(M), @nospecialize(P))
+    (P === nothing || !(M <: Juango.AutoThrough)) && return nothing
+    for r in Juango.m2m_relations(P)
+        Juango.through_model(r[2]) === M && return r[3] ? related_model(r[2]) : r[2].model
+    end
+    nothing
+end
+
+"""
+Whether the user may `action` the inline's objects (Django's InlineModelAdmin.has_<action>_permission(req, obj)):
+the inline's hook, else the model permission. An automatic many-to-many join model has none of its own: as Django's,
+adding, changing and deleting its rows takes change permission on the other model, viewing them view or change.
+"""
+Base.@nospecializeinfer function inline_can(req, ia::InlineAdmin, action::Symbol, @nospecialize(obj); parent = nothing)
+    h = inline_option(ia, Symbol(:has_, action, :_permission))
+    h !== nothing && return Bool(h(req, obj))
+    target = auto_through_target(ia.model, parent)
+    if target !== nothing
+        return can_model(req, target, :change) || (action === :view && can_model(req, target, :view))
+    end
+    action === :view ? (can_model(req, ia.model, :view) || inline_can(req, ia, :change, obj)) : can_model(req, ia.model, action)
+end
+Base.@nospecializeinfer inline_readonly(ia::InlineAdmin, req, @nospecialize(obj)) =
+    (h = inline_option(ia, :get_readonly_fields); h === nothing ? inline_option(ia, :readonly_fields, Symbol[]) : Symbol.(collect(h(req, obj))))
+Base.@nospecializeinfer inline_exclude(ia::InlineAdmin, req, @nospecialize(obj)) =
+    (h = inline_option(ia, :get_exclude); h === nothing ? inline_option(ia, :exclude, Symbol[]) : Symbol.(collect(h(req, obj))))
+inline_num(ia::InlineAdmin, k::Symbol, default, req, obj) = (h = inline_option(ia, Symbol(:get_, k)); h === nothing ? default : Int(h(req, obj)))
 "An inline's objects (Django's `InlineModelAdmin.get_queryset`): the model's, by the inline's ordering when it has one."
 inline_queryset(ia::InlineAdmin, req = nothing) = isempty(ia.ordering) ? objects(ia.model) : order_by(objects(ia.model), ia.ordering...)
 
@@ -273,7 +334,8 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                    sortable_by = nothing, empty_value_display = "-", search_help_text = nothing, save_on_top = false,
                    get_fieldsets = nothing, get_inlines = nothing, get_exclude = nothing, get_prepopulated_fields = nothing,
                    list_max_show_all = 200, preserve_filters = true, password_change_page = false, show_facets = :allow,
-                   filter_horizontal = Symbol[], filter_vertical = Symbol[], import_export = nothing, view_on_site = true)
+                   filter_horizontal = Symbol[], filter_vertical = Symbol[], import_export = nothing, view_on_site = true,
+                   lookup_allowed = nothing)
     modelmeta(T)  # validates T is a model
     slug = model_name(T)
     key = admin_key(T)
@@ -283,14 +345,14 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
     for f in list_editable
         Symbol(f) in Symbol.(collect(list_display)) || throw(ArgumentError("list_editable field '$f' must also be in list_display"))
     end
-    site.registry[key] = ModelAdmin(T, slug, collect(Any, list_display), Symbol.(search_fields),
+    site.registry[key] = ModelAdmin(T, slug, collect(Any, list_display), Symbol.(collect(search_fields)),
                                 Any[x isa Union{AbstractString,Symbol} ? Symbol(x) : x for x in list_filter],
                                 admin_ordering_terms(ordering), fields === nothing ? nothing : Symbol.(fields),
-                                Symbol.(exclude), list_per_page, Symbol.(password_fields), queryset, acts,
-                                collect(InlineAdmin, inlines), Symbol.(readonly_fields),
+                                Symbol.(collect(exclude)), list_per_page, Symbol.(collect(password_fields)), queryset, acts,
+                                collect(InlineAdmin, inlines), Symbol.(collect(readonly_fields)),
                                 Pair{String,Vector{Symbol}}[string(k) => Symbol.(collect(v)) for (k, v) in fieldsets],
                                 Dict{Symbol,Vector{Symbol}}(Symbol(k) => Symbol.(collect(v)) for (k, v) in prepopulated_fields),
-                                Symbol.(raw_id_fields), Symbol.(autocomplete_fields), Symbol.(list_editable),
+                                Symbol.(collect(raw_id_fields)), Symbol.(collect(autocomplete_fields)), Symbol.(collect(list_editable)),
                                 date_hierarchy === nothing ? nothing : Symbol(date_hierarchy), save_as, add_form,
                                 has_view_permission, has_change_permission, has_add_permission, has_delete_permission,
                                 list_select_related, show_full_result_count, collect(Any, urls), get_list_display,
@@ -314,6 +376,7 @@ function register!(T::Type; list_display = Any[:__str__], search_fields = Symbol
                                                  :filter_horizontal => Symbol.(collect(filter_horizontal)),
                                                  :filter_vertical => Symbol.(collect(filter_vertical)),
                                                  :view_on_site => view_on_site,
+                                                 :lookup_allowed => lookup_allowed,
                                                  :import_export => import_export === true ? Juango.ModelResource(T) : import_export), modelmeta(T).app)
     filter!(!=(key), site.order)
     push!(site.order, key)
@@ -885,20 +948,92 @@ function filter_specs(req::Request, ma::ModelAdmin, filters = list_filters(req, 
     specs
 end
 
+"""
+One step of a lookup path from model `M`: `(is_relation, next_model, is_key, to_field, parent_link)`,
+or `nothing` when `part` names no field or relation (a lookup such as `exact`, or a custom filter's parameter).
+"""
+Base.@nospecializeinfer function lookup_step(@nospecialize(M::Type), part::AbstractString)
+    meta = modelmeta(M)
+    if part in ("id", "pk") && !Juango.natural_pk(M)
+        return (false, nothing, true, nothing, false)          # the automatic key (Django's auto_field)
+    end
+    f = part == "pk" ? Juango.pk_fields(M)[1] : findfield(meta, Symbol(part))
+    if f !== nothing
+        rel = f.kind in (:fk, :o2o)
+        return (rel, rel ? related_model(f) : nothing, f.primary_key, rel ? f.to_field : nothing, false)
+    end
+    P = Juango.table_parent(M)
+    P !== nothing && Symbol(part) === Juango.parent_accessor(M) && return (true, P, false, nothing, true)
+    m = Juango.find_m2m_query(M, part)
+    m !== nothing && return (true, m[3] ? related_model(m[2]) : m[2].model, false, nothing, false)
+    r = Juango.find_reverse(M, part)
+    r !== nothing && return (true, r[2], false, nothing, false)
+    nothing
+end
+
+"Whether every name in `lookup` after a relation is a field, relation or lookup of the related model."
+Base.@nospecializeinfer function lookup_path_ok(@nospecialize(T::Type), lookup::AbstractString)
+    M = T
+    for (i, p) in enumerate(split(lookup, "__"))
+        st = lookup_step(M, p)
+        st === nothing && return i == 1 || is_lookup_name(p)
+        st[1] || return true
+        M = st[2]
+    end
+    true
+end
+
+"""
+    Admin.lookup_allowed(ma, lookup, value, req) -> Bool
+
+Whether the change list may filter by the query parameter `lookup` (Django's
+`ModelAdmin.lookup_allowed`): a lookup on the model's own fields, or through a single relation
+to the related object's key (`?author__id__exact=1`, `?author__isnull=True`), always; one that
+goes further through relations only when a list filter (or the date hierarchy) names that path,
+so `list_filter = ["author__name"]` doesn't open `?author__password__startswith=`. Others are
+refused with 400. Override it with `register!(...; lookup_allowed = (lookup, value, req) -> ...)`.
+"""
+Base.@nospecializeinfer function lookup_allowed(ma::ModelAdmin, lookup::AbstractString, @nospecialize(value), req)
+    h = option(ma, :lookup_allowed)
+    h === nothing || return h(lookup, value, req) === true
+    M = ma.model
+    relation_parts = String[]
+    prev = nothing
+    part = ""
+    for p in split(lookup, "__")
+        part = String(p)
+        st = lookup_step(M, part)
+        st === nothing && break                                # a lookup, or a name that isn't a field
+        is_rel, next, is_key, _, parent_link = st
+        # (as Django's: the first name, then a relation or a field that isn't the related model's key, its to_field or a parent link)
+        if prev === nothing || (prev[1] && !parent_link && !(is_key && !is_rel) && Symbol(part) !== prev[4] && (is_rel || !is_key))
+            push!(relation_parts, part)
+        end
+        is_rel || break
+        prev = st
+        M = next
+    end
+    length(relation_parts) <= 1 && return true
+    valid = Set{String}()
+    ma.date_hierarchy === nothing || push!(valid, string(ma.date_hierarchy))
+    for item in list_filter(ma, req)
+        push!(valid, item isa ListFilter ? item.parameter : item isa Pair ? string(item.first) : string(item))
+    end
+    !isdisjoint(valid, (join(relation_parts, "__"), join(vcat(relation_parts, part), "__")))
+end
+
 # Query parameters of the change list itself (Django's IGNORED_PARAMS and the date hierarchy's)
 const CHANGELIST_PARAMS = Set(["q", "o", "page", "p", "all", "e", "_facets", "_popup", "_to_field", "_changelist_filters", "action",
                                "_selected_action", "select_across", "index"])
 
 """
 Query parameters no filter used, applied as lookups (Django's ChangeList, which bookmarks
-`?name__startswith=A`): a lookup on one of the model's own fields, or through a relation that a
-list filter starts with. Others are refused (400, Django's DisallowedModelAdminLookup); a value
+`?name__startswith=A`) when `lookup_allowed` allows them. Others are refused (400, Django's DisallowedModelAdminLookup); a value
 that doesn't fit its field is a `BadFilterValue` (the page drops the filters, `?e=1`).
 """
 Base.@nospecializeinfer function lookup_params(req::Request, ma::ModelAdmin, @nospecialize(qs), used::Set{String})
     T = ma.model
     dh = ma.date_hierarchy === nothing ? Set{String}() : Set(string(ma.date_hierarchy, "__", x) for x in ("year", "month", "day"))
-    allowed_rel = Set(first(split(string(e isa Pair ? e.first : e isa ListFilter ? "" : e), "__")) for e in list_filter(ma, req))
     dups = false
     for k in collect(keys(req.GET.data))
         (k in used || k in CHANGELIST_PARAMS || k in dh || startswith(k, "_")) && continue
@@ -908,9 +1043,8 @@ Base.@nospecializeinfer function lookup_params(req::Request, ma::ModelAdmin, @no
         if f === nothing && !(parts[1] in ("id", "pk"))       # not a field nor a relation: a bad lookup (?e=1)
             filter_field(T, String(parts[1])) === nothing && throw(BadFilterValue(k))
         end
-        local_field = f !== nothing && !(f.kind in (:fk, :o2o)) || parts[1] in ("id", "pk")
-        (local_field || parts[1] in allowed_rel) ||
-            throw(Juango.BadRequest("Filtering by $k not allowed"))
+        lookup_allowed(ma, k, v, req) || throw(Juango.BadRequest("Filtering by $k not allowed"))
+        lookup_path_ok(T, k) || throw(BadFilterValue(k))        # (a name past a relation that isn't a field there: ?e=1)
         lk = String(parts[end])
         # (converted for the model's own field: f, or f__<lookup> for a lookup that compares values)
         own = f !== nothing && (length(parts) == 1 || (length(parts) == 2 && is_lookup_name(lk) &&
@@ -1289,12 +1423,24 @@ end
 
 # --- change form ---------------------------------------------------------------------------------------
 
+"The change form's fieldsets (Django's `get_fieldsets`): the `get_fieldsets` hook's, else `fieldsets` (empty: none declared)."
+Base.@nospecializeinfer admin_fieldsets(ma::ModelAdmin, req = nothing, @nospecialize(obj = nothing)) =
+    (h = option(ma, :get_fieldsets); h === nothing ? ma.fieldsets :
+     Pair{String,Vector{Symbol}}[string(something(k, "")) => Symbol.(collect(v)) for (k, v) in h(req, obj)])
+
+"""
+The change form's editable fields, as Django's `get_form`: the fieldsets' fields when there are
+fieldsets (so a field they leave out isn't a hidden required one), else `get_fields`, `fields`
+or the model's editable fields; without the excluded, read-only and password ones.
+"""
 Base.@nospecializeinfer function admin_fields(ma::ModelAdmin, req = nothing, @nospecialize(obj = nothing))
-    fs = ma.get_fields !== nothing ? Symbol.(collect(ma.get_fields(req, obj))) : ma.fields !== nothing ? ma.fields :
-         [f.name for f in vcat(Juango.all_fields(ma.model), modelmeta(ma.model).m2m)
-          if f.editable && !(f.name in admin_exclude(ma, req, obj)) && !(f.name in ma.password_fields)]
+    fsets = admin_fieldsets(ma, req, obj)
+    fs = !isempty(fsets) ? unique!(reduce(vcat, (last(x) for x in fsets); init = Symbol[])) :
+         ma.get_fields !== nothing ? Symbol.(collect(ma.get_fields(req, obj))) : ma.fields !== nothing ? ma.fields :
+         [f.name for f in vcat(Juango.all_fields(ma.model), modelmeta(ma.model).m2m) if f.editable]
     ro = req === nothing ? ma.readonly_fields : readonly_fields(ma, req, obj)
-    [f for f in fs if !(f in ro)]
+    ex = admin_exclude(ma, req, obj)
+    [f for f in fs if !(f in ro) && !(f in ex) && !(f in ma.password_fields)]
 end
 
 Base.@nospecializeinfer admin_exclude(ma::ModelAdmin, req, @nospecialize(obj)) =
@@ -1325,30 +1471,76 @@ Base.@nospecializeinfer function form_groups(ma::ModelAdmin, form, @nospecialize
     [Dict{String,Any}("name" => name, "rows" => [row(n) for n in names]) for (name, names) in layout]
 end
 
-Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecialize(obj), data)
+Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecialize(obj), data; parent_editable::Bool = true)
     out = Any[]
     h = option(ma, :get_inlines)
     for ia in (h === nothing ? ma.inlines : collect(InlineAdmin, h(req, obj)))
         M = ia.model
-        (can_model(req, M, :view) || can_model(req, M, :change) || can_model(req, M, :add)) || continue
-        FS = inlineformset_factory(ma.model, M; fk = ia.fk, fields = ia.fields,
-                                   extra = can_model(req, M, :add) ? ia.extra : 0,
-                                   can_delete = ia.can_delete && can_model(req, M, :delete), max_num = ia.max_num)
-        fs = isempty(ia.ordering) ? FS(data; instance = obj) : FS(data; instance = obj, queryset = inline_queryset(ia, req))
-        push!(out, (ia, fs))
+        (inline_can(req, ia, :view, obj; parent = ma.model) || inline_can(req, ia, :add, obj; parent = ma.model)) || continue
+        # (a parent the user may only view shows its inlines read-only too)
+        can_change = parent_editable && inline_can(req, ia, :change, obj; parent = ma.model)
+        can_add = parent_editable && inline_can(req, ia, :add, obj; parent = ma.model)
+        ro = inline_readonly(ia, req, obj)
+        ex = inline_exclude(ia, req, obj)
+        editable(f) = !(f in ro) && !(f in ex)
+        fields = ia.fields === nothing ? nothing : filter(editable, ia.fields)
+        FS = inlineformset_factory(ma.model, M; fk = ia.fk, fields = fields, exclude = fields === nothing ? vcat(ex, ro) : Symbol[],
+                                   extra = can_add ? inline_num(ia, :extra, ia.extra, req, obj) : 0,
+                                   min_num = can_add ? inline_num(ia, :min_num, inline_option(ia, :min_num, 0), req, obj) : 0,
+                                   can_delete = can_change && ia.can_delete && inline_can(req, ia, :delete, obj; parent = ma.model),
+                                   # (without add permission no new objects, as Django's: max_num 0, and posted ones ignored)
+                                   max_num = can_add ? inline_num(ia, :max_num, ia.max_num, req, obj) : 0, edit_only = !can_add)
+        qs = inline_queryset(ia, req)
+        if can_change
+            fs = isempty(ia.ordering) ? FS(data; instance = obj) : FS(data; instance = obj, queryset = qs)
+            push!(out, (ia, fs, (readonly = ro, existing = Any[], shown = Symbol[], can_change = true, can_add = can_add)))
+        else
+            # (no change permission: the objects are shown as values, outside the formset, so a POST can't change
+            # them; the formset has just the new ones the user may add, as Django's)
+            fs = FS(data; instance = obj, queryset = Juango.none(qs))
+            existing = obj === nothing ? Any[] : collect(filter(qs, Q(attname(fs.fk) => Juango.target_value(fs.fk, obj))))
+            push!(out, (ia, fs, (readonly = ro, existing = existing, shown = inline_shown_fields(ia, fs, ex), can_change = false, can_add = can_add)))
+        end
     end
     out
 end
 
-function inline_context(ia::InlineAdmin, fs)
+"The fields a view-only inline shows: its `fields`, else the model's editable ones but the key to the parent."
+Base.@nospecializeinfer function inline_shown_fields(ia::InlineAdmin, fs, ex)
+    ia.fields !== nothing && return filter(!in(ex), ia.fields)
+    fkname = fs.fk.name
+    [f.name for f in Juango.all_fields(ia.model) if f.editable && f.name !== fkname && !(f.name in ex)]
+end
+
+function inline_context(req, ia::InlineAdmin, fs, info = (readonly = Symbol[], existing = Any[], shown = Symbol[], can_change = true, can_add = true))
     forms = Juango.build_forms!(fs)
-    names = isempty(forms) ? Symbol[] : [f.name for f in Juango.empty_form(fs).fields if f.name !== :id]
-    Dict{String,Any}("style" => string(ia.style), "verbose_name_plural" => modelmeta(ia.model).verbose_name_plural,
+    ef = Juango.empty_form(fs)
+    names = [f.name for f in ef.fields if f.name !== :id]
+    ro = info.readonly
+    rofield(n) = (fld = findfield(modelmeta(ia.model), n); fld === nothing ? uppercasefirst(replace(string(n), '_' => ' ')) : label(fld))
+    rovalue(o, n) = (fld = findfield(modelmeta(ia.model), n); fld === nothing ? format_value(o === nothing ? nothing : getproperty(o, n)) : readonly_value(o, fld))
+    vn, vnp = inline_verbose_names(ia)
+    sub = get(current_site().registry, admin_key(ia.model), nothing)
+    link(o) = (inline_option(ia, :show_change_link, false) === true && sub !== nothing && o !== nothing && can_view(req, sub, o)) ?
+              (try reverse_url("admin:change"; app = sub.app, model = sub.slug, id = admin_pk(o)) catch; nothing end) : nothing
+    headers = Any[n === :DELETE ? "Delete?" : label(only(filter(f -> f.name === n, ef.fields))) for n in names if n !== :DELETE]
+    append!(headers, [rofield(n) for n in ro])
+    :DELETE in names && push!(headers, "Delete?")
+    Dict{String,Any}("style" => string(ia.style), "verbose_name_plural" => vnp, "verbose_name" => vn,
+                     "classes" => join(string.(inline_option(ia, :classes, String[])), " "),
                      "management_form" => management_form(fs), "non_form_errors" => fs.non_form_errors,
-                     "headers" => [n === :DELETE ? "Delete?" : label(only(filter(f -> f.name === n, Juango.empty_form(fs).fields))) for n in names],
+                     "headers" => headers,
                      "forms" => [Dict{String,Any}("form" => f, "hidden" => SafeString(Juango.widget_html(f[:id])),
                                                   "title" => f.instance === nothing ? "" : string(f.instance),
-                                                  "fields" => [f[n] for n in names]) for f in forms])
+                                                  "change_link" => link(f.instance),
+                                                  "fields" => [f[n] for n in names if n !== :DELETE],
+                                                  "readonly" => [Dict("label" => rofield(n), "value" => rovalue(f.instance, n)) for n in ro],
+                                                  "delete" => :DELETE in names ? f[:DELETE] : nothing) for f in forms],
+                     "can_add" => info.can_add,
+                     "existing_headers" => [rofield(n) for n in info.shown],
+                     "existing" => [Dict{String,Any}("title" => string(o), "change_link" => link(o),
+                                                     "readonly" => [Dict("label" => rofield(n), "value" => rovalue(o, n)) for n in info.shown])
+                                    for o in info.existing])
 end
 
 change_message(form, inlines) = begin
@@ -1356,7 +1548,7 @@ change_message(form, inlines) = begin
     ch = changed_fields(form)
     isempty(ch) || push!(parts, "Changed " * join([lowercase(label(f)) for f in form.fields if f.name in ch], ", ") * ".")
     for (ia, fs) in inlines
-        vn = modelmeta(ia.model).verbose_name
+        vn = inline_verbose_names(ia)[1]
         append!(parts, ["Added $vn “$(o)”." for o in fs.new_objects])
         append!(parts, ["Changed $vn “$(o)”." for o in fs.changed_objects])
         append!(parts, ["Deleted $vn “$(o)”." for o in fs.deleted_objects])
@@ -1453,7 +1645,7 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
                                                    fields = filter(!in(locked), admin_fields(ma, req, obj)),
                                                    initial = adding ? changeform_initial(ma, req) : Dict{Symbol,Any}()), req)
     pfs = custom_add || (!adding && option(ma, :password_change_page, false)) ? Symbol[] : ma.password_fields
-    inlines = save_as_new || custom_add ? Any[] : inline_formsets(ma, req, obj, data)
+    inlines = save_as_new || custom_add ? Any[] : inline_formsets(ma, req, obj, data; parent_editable = editable)
     if req.method == "POST" && is_valid(form) && all(x -> is_valid(x[2]), inlines)
         o = Juango.atomic() do
             o = save!(form; commit = false)
@@ -1507,9 +1699,8 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         "opts" => opts(ma), "form" => form, "object" => obj, "adding" => adding, "readonly" => auto_readonly,
         "groups" => custom_add ? [Dict{String,Any}("name" => "", "rows" => [Dict{String,Any}("readonly" => false, "field" => form[f.name]) for f in form.fields])] :
                     form_groups(ma, form, obj, editable; locked = locked, readonly = ro,
-                                fieldsets = (h = option(ma, :get_fieldsets); h === nothing ? ma.fieldsets :
-                                             Pair{String,Vector{Symbol}}[string(k) => Symbol.(collect(v)) for (k, v) in h(req, obj)])),
-        "inlines" => editable ? [inline_context(ia, fs) for (ia, fs) in inlines] : Any[],
+                                fieldsets = admin_fieldsets(ma, req, obj)),
+        "inlines" => [inline_context(req, ia, fs, info) for (ia, fs, info) in inlines],
         "prepopulated" => Juango.JSON.json(prepop), "save_as" => ma.save_as && !adding && can(req, ma, :add),
         "password_fields" => [Dict("name" => string(pf), "label" => uppercasefirst(string(pf))) for pf in pfs],
         "view_on_site" => adding ? nothing : view_on_site_url(ma, obj), "save_on_top" => option(ma, :save_on_top, false),

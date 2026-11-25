@@ -525,10 +525,18 @@ end
             @test occursin("alfred (1)", t)                                          # (counting the other filter)
         end
         # test_list_filter_queryset_filtered_by_default / bookmarked lookups (Django applies other lookups
-        # on the model's own fields; through a relation only one a list filter names; an unknown one: ?e=1)
+        # on the model's own fields or a relation's key; further through a relation only a path a list filter names
+        # (lookup_allowed); an unknown one: ?e=1)
         with_admin(AfBook; list_filter = [:author]) do
             @test books("title__startswith=Gipsy") == [gipsy.id]
             @test books("year__gte=2000") == sort([gipsy.id, djangonaut.id])
+            @test books("author__id__exact=$(bob.id)") == [django.id] && books("author=$(bob.id)") == [django.id]
+            @test cl(c, "afbook", "author__username=bob").status == 400               # (the filter is on author, not author__username)
+            @test cl(c, "afbook", "author__email__startswith=a").status == 400
+            r = cl(c, "afbook", "author__password__startswith=a")                     # (allowed, but no such field: ?e=1, as Django's)
+            @test r.status == 302 && endswith(getheader(r, "Location"), "?e=1")
+        end
+        with_admin(AfBook; list_filter = ["author__username"]) do
             @test books("author__username=bob") == [django.id]
             @test cl(c, "afbook", "employee__name=John+Blue").status == 400            # (not a list filter's relation)
             r = cl(c, "afbook", "nonexistent=1")

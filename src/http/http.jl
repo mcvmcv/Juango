@@ -295,6 +295,7 @@ function Base.getproperty(r::Request, s::Symbol)
     s === :FILES && return get(getfield(r, :meta), :FILES, FileDict())
     s === :htmx && return htmx_details(r)                 # contrib/htmx.jl
     s === :site && return get(getfield(r, :meta), :site, nothing)       # CurrentSiteMiddleware
+    s === :urlconf && return get(getfield(r, :meta), :urlconf, nothing)  # a URLconf for this request (Django's request.urlconf)
     if s === :user
         u = getfield(r, :user)
         u isa LazyUser || return u
@@ -304,7 +305,9 @@ function Base.getproperty(r::Request, s::Symbol)
     end
     getfield(r, s)
 end
-Base.propertynames(r::Request, private::Bool = false) = (fieldnames(Request)..., :FILES, :htmx, :site)
+Base.propertynames(r::Request, private::Bool = false) = (fieldnames(Request)..., :FILES, :htmx, :site, :urlconf)
+Base.setproperty!(r::Request, s::Symbol, v) =
+    s === :urlconf ? (getfield(r, :meta)[:urlconf] = v) : setfield!(r, s, convert(fieldtype(Request, s), v))
 
 "Parse a multipart body: fields into `req.POST`, files into `req.FILES`."
 function parse_multipart_fields(req::Request)

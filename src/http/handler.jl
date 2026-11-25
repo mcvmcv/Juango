@@ -62,6 +62,14 @@ view_qualname(v) = v isa Function ? string(parentmodule(v), ".", nameof(v)) : st
 "Innermost handler: call the resolved view, converting exceptions to responses."
 function dispatch(req::Request)
     try
+        # a middleware gave the request its own URLconf: resolved in it, and reversing uses it until the response
+        # is done (Django's request.urlconf)
+        uc = get(req.meta, :urlconf, nothing)
+        if uc !== nothing
+            r = URLCONF_REF[]
+            r === nothing || (r[] = uc)
+            req.resolver_match = resolve(req.path, uc)
+        end
         rm = req.resolver_match
         rm === nothing && throw(Http404("No URL pattern matches '$(req.path)'"))
         hooks = middleware_hooks()
@@ -251,8 +259,11 @@ function handle_request_inner(req::Request)
         req.resolver_match = resolve(req.path)
         req.resolver_match === nothing || req.resolver_match.language === nothing ||
             (req.meta[:language_prefix] = req.resolver_match.language)
-        resp = build_handler()(req)
-        resp.deferred === nothing || render_response!(resp)       # a middleware returned a TemplateResponse
+        resp = Base.ScopedValues.with(URLCONF_REF => Ref{Any}(nothing)) do
+            r = build_handler()(req)
+            r.deferred === nothing || render_response!(r)          # a middleware returned a TemplateResponse
+            r
+        end
         req.method == "HEAD" && (resp.body = UInt8[]; resp.stream = nothing)
         resp
     catch e

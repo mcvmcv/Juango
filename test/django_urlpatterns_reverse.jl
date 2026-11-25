@@ -1,4 +1,6 @@
-# Django's urlpatterns_reverse tests, ported (#227): URLPatternReverse (test_data and its messages, query and fragment).
+# Django's urlpatterns_reverse tests, ported (#227): URLPatternReverse (test_data and its messages, query and fragment),
+# NamespaceTests, ResolverMatchTests, ResolverTests, LookaheadTests, ReverseResolvedTests, RequestURLconfTests,
+# ReverseLazyTest, ReverseShortcutTests.
 # julia --project=test test/django_urlpatterns_reverse.jl   (see setup.jl)
 #
 # re_path's extra kwargs are keyword arguments here (Django's positional dict). Left out: override_script_prefix
@@ -21,7 +23,8 @@ const DUR_EXTRA = Any[re_path(raw"^e-places/([0-9]+)/$", dur_empty; name = "extr
                       re_path(raw"^e-people/(?P<name>\w+)/$", dur_empty; name = "extra-people"),
                       path("", include_urls(DUR_INCLUDED2)),
                       re_path(raw"^prefix/(?P<prefix>\w+)/", include_urls(DUR_INCLUDED2))]
-const DUR_OTHER = Any[path("non_path_include/", dur_empty; name = "non_path_include"), path("nested_path/", dur_empty)]
+dur_nested(req) = HttpResponse("")
+const DUR_OTHER = Any[path("non_path_include/", dur_empty; name = "non_path_include"), path("nested_path/", dur_nested)]
 const DUR_URLS = Any[
     re_path(raw"^places/([0-9]+)/$", dur_empty; name = "places"),
     re_path(raw"^places?/$", dur_empty; name = "places?"),
@@ -379,4 +382,107 @@ const DUR_NAMED = Any[path("", dur_empty; name = "named-url1"), re_path(raw"^ext
     # ReverseResolvedTests.test_rereverse (the pattern's extra kwargs come back in the match, and reverse takes them)
     m = resolve("/resolved/12/", DUR_URLS)
     @test dur_rev(m.url_name, m.args...; m.kwargs...) == "/resolved/12/"
+end
+
+# urlconf_outer and urlconf_inner, and the middleware that switches a request to the inner one
+dur_inner_view(req) = HttpResponse(render(Template("{% url \"outer\" as outer_url %}outer:{{ outer_url }},{% url \"inner\" as inner_url %}inner:{{ inner_url }}"),
+                                          Dict{String,Any}()))
+const DUR_INNER = Any[path("second_test/", dur_inner_view; name = "inner")]
+const DUR_OUTER = Any[path("test/me/", dur_inner_view; name = "outer"), path("inner_urlconf/", include_urls(DUR_INNER))]
+dur_change_urlconf(h) = req -> (req.urlconf = DUR_INNER; h(req))
+dur_null_urlconf(h) = req -> (req.urlconf = nothing; h(req))
+dur_reverse_inner(h) = req -> (h(req); HttpResponse(reverse_url("inner")))
+dur_reverse_outer(h) = req -> (h(req); HttpResponse(reverse_url("outer")))
+
+@testset "django urlpatterns_reverse: RequestURLconfTests" begin
+    body(r) = String(r.body)
+    override_settings(ROOT_URLCONF = DUR_OUTER) do
+        c = Client()
+        r = get(c, "/test/me/")                                                                     # test_urlconf
+        @test r.status == 200 && body(r) == "outer:/test/me/,inner:/inner_urlconf/second_test/"
+        @test get(c, "/inner_urlconf/second_test/").status == 200 && get(c, "/second_test/").status == 404
+        override_settings(MIDDLEWARE = [dur_change_urlconf]) do                                      # test_urlconf_overridden
+            @test get(c, "/test/me/").status == 404 && get(c, "/inner_urlconf/second_test/").status == 404
+            r = get(c, "/second_test/")
+            @test r.status == 200 && body(r) == "outer:,inner:/second_test/"
+        end
+        override_settings(MIDDLEWARE = [dur_null_urlconf]) do                                        # test_urlconf_overridden_with_null
+            r = get(c, "/test/me/")
+            @test r.status == 200 && body(r) == "outer:/test/me/,inner:/inner_urlconf/second_test/"
+            @test get(c, "/second_test/").status == 404
+        end
+        override_settings(MIDDLEWARE = [dur_change_urlconf, dur_reverse_inner]) do                   # test_reverse_inner_in_response_middleware
+            r = get(c, "/second_test/")
+            @test r.status == 200 && body(r) == "/second_test/"
+        end
+        override_settings(MIDDLEWARE = [dur_change_urlconf, dur_reverse_outer]) do                   # test_reverse_outer_in_response_middleware
+            @test occursin("Reverse for 'outer' not found. 'outer' is not a valid view function or pattern name.",
+                           dur_msg(() -> get(Client(; raise_request_exception = true), "/second_test/")))
+        end
+        # test_urlconf_is_reset_after_request
+        @test Juango.get_urlconf() === nothing
+        override_settings(MIDDLEWARE = [dur_change_urlconf]) do
+            get(c, reverse_url("inner"; urlconf = DUR_INNER))
+        end
+        @test Juango.get_urlconf() === nothing
+    end
+    # (the streaming forms: a streamed body is read after the request is handled, outside its URLconf)
+end
+
+const DUR_LAZY_URLS = Any[path("redirected_to/", dur_empty; name = "named-lazy-url-redirected-to"),
+                          path("login/", dur_empty; name = "some-login-page"),
+                          path("login_required_view/", login_required(dur_empty; login_url = reverse_lazy("some-login-page"))),
+                          path("redirect/", RedirectView(reverse_lazy("named-lazy-url-redirected-to")))]
+
+@testset "django urlpatterns_reverse: ReverseLazyTest, ReverseShortcutTests" begin
+  port_block() do
+    override_settings(ROOT_URLCONF = DUR_LAZY_URLS) do
+        c = Client()
+        r = get(c, "/redirect/")                                                                    # test_redirect_with_lazy_reverse
+        @test r.status == 302 && getheader(r, "Location") == "/redirected_to/"
+        alfred = create_user("dur_alfred", "testpw")                                                 # test_user_permission_with_lazy_reverse
+        r = get(c, "/login_required_view/")
+        @test r.status == 302 && getheader(r, "Location") == "/login/?next=/login_required_view/"
+        force_login!(c, alfred)
+        @test get(c, "/login_required_view/").status == 200
+        @test "Some URL: $(reverse_lazy("some-login-page"))" == "Some URL: /login/"                  # test_inserting_reverse_lazy_into_string
+        @test build_absolute_uri(Juango.Request("GET", "/"; headers = Dict("Host" => "testserver")), reverse_lazy("some-login-page")) ==
+              "http://testserver/login/"                                                             # test_build_absolute_uri
+    end
+  end
+    override_settings(ROOT_URLCONF = DUR_URLS) do
+        # test_redirect_to_view_name, test_redirect_to_url
+        loc(r) = getheader(r, "Location")
+        @test loc(redirect("hardcoded2")) == "/hardcoded/doc.pdf" && loc(redirect("places", 1)) == "/places/1/"
+        @test loc(redirect("headlines"; year = "2008", month = "02", day = "17")) == "/headlines/2008.02.17/"
+        @test_throws NRM redirect("not-a-view")
+        @test loc(redirect("/foo/")) == "/foo/" && loc(redirect("http://example.com/")) == "http://example.com/"
+        @test loc(redirect("/æøå/abc/")) == "/%C3%A6%C3%B8%C3%A5/abc/" && loc(redirect("/æøå.abc/")) == "/%C3%A6%C3%B8%C3%A5.abc/"
+        @test loc(redirect("os.path")) == "os.path"
+        @test redirect("/foo/"; permanent = true).status == 301
+        # test_reverse_by_path_nested, test_redirect_view_object: by the view, included or not
+        @test reverse_url(dur_nested) == "/includes/nested_path/"
+        @test loc(redirect(dur_absolute)) == "/absolute_arg_view/"
+        @test_throws NRM redirect(dur_absolute; wrong_argument = nothing)
+    end
+end
+
+dur_bad_view(req) = throw(ArgumentError("I don't think I'm getting good value for this view"))
+const DUR_WITHOUT_HANDLERS = Any[path("test/", dur_empty), path("bad_view/", dur_bad_view)]
+
+@testset "django urlpatterns_reverse: ErroneousViewTests, DefaultErrorHandlerTests" begin
+    # test_noncallable_view: refused when the pattern is made
+    @test_throws "view must be a callable or a list/tuple in the case of include()" path("uncallable-object/", 1)
+    @test_throws "view must be a callable or a list/tuple in the case of include()" re_path("^uncallable/\$", (a = 1,))
+    # test_invalid_regex: Juango finds it when the pattern is made, not on reverse (Django's message, as ImproperlyConfigured)
+    @test_throws Juango.ImproperlyConfigured re_path("^(regex_error/\$", dur_empty)
+    @test occursin("(regex_error/\$\" is not a valid regular expression", dur_msg(() -> re_path("^(regex_error/\$", dur_empty)))
+    @test_throws Juango.ImproperlyConfigured re_path("^(bad/", include_urls(DUR_INCLUDED))
+    # test_default_handler: no HANDLER404 & co., the defaults are used; a test client raises the view's error
+    override_settings(ROOT_URLCONF = DUR_WITHOUT_HANDLERS) do
+        @test get(Client(), "/test/x/").status == 404
+        @test_throws "I don't think I'm getting good value for this view" get(Client(raise_request_exception = true), "/bad_view/")
+    end
+    # (ErrorHandlerResolutionTests: Juango's handlers are the HANDLER400/403/404/500 settings, tested in views.jl;
+    # NoRootUrlConfTests, ViewLoadingTests and the include() tuple forms are about Python's dotted-path imports and tuples)
 end
