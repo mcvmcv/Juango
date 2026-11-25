@@ -174,11 +174,43 @@ Base.show(io::IO, t::DavTopping) = print(io, t.name)
     toppings = ManyToManyField(DavTopping; related_name = :pizzas, blank = true)
     Meta(table = "dav_pizza")
 end
+@model struct DavGqs
+    deleted = BooleanField(default = false)
+    Meta(table = "dav_gqs")
+end
+Base.show(io::IO, g::DavGqs) = print(io, "Gqs #", g.id, g.deleted ? " (deleted)" : "")
+@model struct DavTelegram
+    title = CharField(max_length = 200)
+    date_sent = DateField(null = true, blank = true)
+    Meta(table = "dav_telegram")
+end
+Base.show(io::IO, t::DavTelegram) = print(io, t.title)
+@model struct DavShortMessage
+    content = CharField(max_length = 140)
+    timestamp = DateTimeField(null = true, blank = true)
+    Meta(table = "dav_shortmessage")
+end
+@model struct DavPersona
+    name = CharField(max_length = 60)
+    Meta(table = "dav_persona")
+end
+@model struct DavAccount
+    username = CharField(max_length = 100)
+    persona = ForeignKey(DavPersona, on_delete = :CASCADE, related_name = :accounts)
+    Meta(table = "dav_account")
+end
+@model struct DavFooAccount <: DavAccount
+    Meta(table = "dav_fooaccount")
+end
+@model struct DavBarAccount <: DavAccount
+    Meta(table = "dav_baraccount")
+end
 redirect_stdout(devnull) do
     ms = [DavActor, DavInquisition, DavSketch, DavCharacter, DavStumpJoke, through(DavStumpJoke, :has_fooled_today), DavAlbum, DavMessenger,
           DavBook, DavChapter, DavCoverLetter, DavParent, DavChild, DavPerson, DavTitle, DavTitleTranslation, DavRecommender,
           DavRecommendation, DavPluggable, DavFoodDelivery, DavCategory, DavUnordered, DavSection, DavArticle, DavSortPerson, DavLanguage,
-          DavColor, DavThing, DavPost, DavFabric, DavTopping, DavPizza, through(DavPizza, :toppings)]
+          DavColor, DavThing, DavPost, DavFabric, DavTopping, DavPizza, through(DavPizza, :toppings),
+          DavGqs, DavTelegram, DavShortMessage, DavPersona, DavAccount, DavFooAccount, DavBarAccount]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
     Juango.update_permissions!(ms)
 end
@@ -666,4 +698,72 @@ end
     end
     # not translated: test_invalid_appindex_url (Juango's app index URL takes any label, answering 404 for an unknown one),
     # m2m to_field targets, relation-spanning filters through reverse relations (tested in django_admin.jl's admin_filters)
+end
+
+@testset "django admin_views: AdminCustomQuerysetTest" begin
+    port_block() do
+        Admin.register!(DavGqs; queryset = req -> filter(objects(DavGqs); deleted = false))
+        Admin.register!(DavTelegram; queryset = req -> only(objects(DavTelegram), :title))
+        Admin.register!(DavShortMessage; queryset = req -> defer(objects(DavShortMessage), :timestamp))
+        try
+            c = dav_super("dav_super9")
+            obj = create(DavGqs); gone = create(DavGqs; deleted = true)
+            # test_changelist_view: the admin's queryset filters the list
+            t = text(get(c, "$DAV/davgqs/"))
+            @test occursin(string(obj), t) && !occursin(string(gone), t)
+            # test_change_view: an object outside it is "doesn't exist", back to the index
+            @test get(c, "$DAV/davgqs/$(obj.id)/change/").status == 200
+            r = get(c, "$DAV/davgqs/$(gone.id)/change/")
+            @test r.status == 302 && getheader(r, "Location") == "/admin/"
+            @test occursin("dav gqs with ID “$(gone.id)” doesn’t exist. Perhaps it was deleted?", text(get(c, "/admin/")))
+            # test_add_model_modeladmin_only_qs, test_add_model_modeladmin_defer_qs, test_edit_model_modeladmin_*: only()/defer() querysets
+            r = post(c, "$DAV/davtelegram/add/", Dict("title" => "Urgent telegram", "_save" => "Save"))
+            tg = first(objects(DavTelegram))
+            @test occursin("The dav telegram “<a href=\"$DAV/davtelegram/$(tg.id)/change/\">Urgent telegram</a>” was added successfully.", text(dav_follow(c, r)))
+            @test get(c, "$DAV/davtelegram/$(tg.id)/change/").status == 200
+            r = post(c, "$DAV/davtelegram/$(tg.id)/change/", Dict("title" => "Telegram without typo", "_save" => "Save"))
+            @test occursin("“<a href=\"$DAV/davtelegram/$(tg.id)/change/\">Telegram without typo</a>” was changed successfully.", text(dav_follow(c, r)))
+            @test count(objects(DavTelegram)) == 1 && get(DavTelegram; id = tg.id).title == "Telegram without typo"
+            sm = create(DavShortMessage; content = "This is expensive")
+            @test get(c, "$DAV/davshortmessage/$(sm.id)/change/").status == 200
+            r = post(c, "$DAV/davshortmessage/$(sm.id)/change/", Dict("content" => "Too expensive", "_save" => "Save"))
+            @test r.status == 302 && get(DavShortMessage; id = sm.id).content == "Too expensive" && count(objects(DavShortMessage)) == 1
+        finally
+            foreach(Admin.unregister!, [DavGqs, DavTelegram, DavShortMessage])
+        end
+    end
+    # not translated: the change list's query counts and selection notes (Django's action counter)
+end
+
+@testset "django admin_views: AdminInheritedInlinesTest" begin
+    port_block() do
+        Admin.register!(DavPersona; inlines = [Admin.StackedInline(DavFooAccount; extra = 1), Admin.StackedInline(DavBarAccount; extra = 1)])
+        try
+            c = dav_super("dav_super10")
+            names(t) = filter(!=("csrfmiddlewaretoken"), [m[1] for m in eachmatch(r"name=\"(.*?)\"", t)])
+            # test_inline: two inlines of the same relation get their own prefixes (accounts, accounts-2), no name twice
+            ns = names(text(get(c, "$DAV/davpersona/add/")))
+            @test length(ns) == length(unique(ns)) && "accounts-TOTAL_FORMS" in ns && "accounts-2-TOTAL_FORMS" in ns
+            r = post(c, "$DAV/davpersona/add/", Dict("name" => "Test Name",
+                     "accounts-TOTAL_FORMS" => "1", "accounts-INITIAL_FORMS" => "0", "accounts-MAX_NUM_FORMS" => "0", "accounts-0-username" => "foo username",
+                     "accounts-2-TOTAL_FORMS" => "1", "accounts-2-INITIAL_FORMS" => "0", "accounts-2-MAX_NUM_FORMS" => "0", "accounts-2-0-username" => "bar username"))
+            @test r.status == 302 && count(objects(DavPersona)) == 1 && count(objects(DavFooAccount)) == 1 && count(objects(DavBarAccount)) == 1
+            @test first(objects(DavFooAccount)).username == "foo username" && first(objects(DavBarAccount)).username == "bar username"
+            p = first(objects(DavPersona))
+            @test count(p.accounts) == 2
+            foo, bar = first(objects(DavFooAccount)), first(objects(DavBarAccount))
+            ns = names(text(get(c, "$DAV/davpersona/$(p.id)/change/")))
+            @test length(ns) == length(unique(ns))
+            r = post(c, "$DAV/davpersona/$(p.id)/change/", Dict("name" => "Test Name",
+                     "accounts-TOTAL_FORMS" => "2", "accounts-INITIAL_FORMS" => "1", "accounts-MAX_NUM_FORMS" => "0",
+                     "accounts-0-username" => "foo username-1", "accounts-0-id" => string(foo.id), "accounts-0-persona" => string(p.id),
+                     "accounts-2-TOTAL_FORMS" => "2", "accounts-2-INITIAL_FORMS" => "1", "accounts-2-MAX_NUM_FORMS" => "0",
+                     "accounts-2-0-username" => "bar username-1", "accounts-2-0-id" => string(bar.id), "accounts-2-0-persona" => string(p.id)))
+            @test r.status == 302 && count(objects(DavFooAccount)) == 1 && count(objects(DavBarAccount)) == 1
+            @test first(objects(DavFooAccount)).username == "foo username-1" && first(objects(DavBarAccount)).username == "bar username-1"
+            @test count(get(DavPersona; id = p.id).accounts) == 2
+        finally
+            Admin.unregister!(DavPersona)
+        end
+    end
 end

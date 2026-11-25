@@ -1534,6 +1534,7 @@ end
 
 Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecialize(obj), data; parent_editable::Bool = true)
     out = Any[]
+    prefixes = Dict{String,Int}()
     h = option(ma, :get_inlines)
     for ia in (h === nothing ? ma.inlines : collect(InlineAdmin, h(req, obj)))
         M = ia.model
@@ -1552,13 +1553,17 @@ Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecial
                                    # (without add permission no new objects, as Django's: max_num 0, and posted ones ignored)
                                    max_num = can_add ? inline_num(ia, :max_num, ia.max_num, req, obj) : 0, edit_only = !can_add)
         qs = inline_queryset(ia, req)
+        # (two inlines with the same prefix, the same relation: the second is prefix-2, as Django's _create_formsets)
+        p0 = FS(nothing; instance = nothing).prefix
+        prefixes[p0] = get(prefixes, p0, 0) + 1
+        pfx = prefixes[p0] == 1 ? p0 : "$p0-$(prefixes[p0])"
         if can_change
-            fs = isempty(ia.ordering) ? FS(data; instance = obj) : FS(data; instance = obj, queryset = qs)
+            fs = isempty(ia.ordering) ? FS(data; instance = obj, prefix = pfx) : FS(data; instance = obj, queryset = qs, prefix = pfx)
             push!(out, (ia, fs, (readonly = ro, existing = Any[], shown = Symbol[], can_change = true, can_add = can_add)))
         else
             # (no change permission: the objects are shown as values, outside the formset, so a POST can't change
             # them; the formset has just the new ones the user may add, as Django's)
-            fs = FS(data; instance = obj, queryset = Juango.none(qs))
+            fs = FS(data; instance = obj, queryset = Juango.none(qs), prefix = pfx)
             existing = obj === nothing ? Any[] : collect(filter(qs, Q(attname(fs.fk) => Juango.target_value(fs.fk, obj))))
             push!(out, (ia, fs, (readonly = ro, existing = existing, shown = inline_shown_fields(ia, fs, ex), can_change = false, can_add = can_add)))
         end

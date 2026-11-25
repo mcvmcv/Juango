@@ -429,8 +429,8 @@ function inlineformset_factory(P::Type, T::Type; fk = nothing, fields = nothing,
     flds = all_fields_option(fields) ? fields : [Symbol(f) for f in fields if Symbol(f) !== fkf.name]
     make = row_form(T, form; fields = flds, exclude = excl, widgets, labels, help_texts, field_classes, extra_fields,
                     formfield_callback, error_messages)
-    # (a multi-table child's inherited key: the child's own name, as Django's alternatebook_set)
-    default_prefix = fkf.model === T ? string(reverse_name(fkf)) : lowercase(modelmeta(T).name) * "_set"
+    # (a multi-table child's inherited key: its related_name, else the child's own name, as Django's alternatebook_set)
+    default_prefix = fkf.model === T || fkf.related_name !== nothing ? string(reverse_name(fkf)) : lowercase(modelmeta(T).name) * "_set"
     function (data = nothing; instance = nothing, prefix = default_prefix, queryset = nothing, save_as_new::Bool = false, initial = [])
         # (a queryset given is narrowed to the parent's objects too, as Django's)
         qs = instance === nothing || instance.id === nothing ? none(T) :
