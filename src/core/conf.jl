@@ -339,6 +339,7 @@ function apply_settings!(kwargs, enter::Bool)
     isempty(SETTINGS) && merge!(SETTINGS, default_settings())
     for (k, v) in kwargs
         SETTINGS[k] = v
+        enter && push!(EXPLICIT_SETTINGS, Symbol(k))
     end
     enter && warn_misspelled_settings(kwargs)
     foreach(h -> h(), SETTINGS_CHANGED_HOOKS)
@@ -351,12 +352,24 @@ function apply_settings!(kwargs, enter::Bool)
     nothing
 end
 
+"The settings a project (or a test's override) set, as opposed to Juango's defaults."
+const EXPLICIT_SETTINGS = Set{Symbol}()
+"""
+    is_overridden(name) -> Bool
+
+Whether the setting was set by `configure!` (or `override_settings`) rather than left at Juango's
+default, as Django's `settings.is_overridden`.
+"""
+is_overridden(name) = Symbol(name) in EXPLICIT_SETTINGS
+
 struct SettingsProxy end
 "Read-only view of the current settings: `settings.DEBUG`, `settings.DATABASE`, ..."
 const settings = SettingsProxy()
 
 function Base.getproperty(::SettingsProxy, k::Symbol)
     v = get(SETTINGS, k, NO_SETTING)
+    # (as Django's: an empty SECRET_KEY is refused where it's read)
+    k === :SECRET_KEY && v isa AbstractString && isempty(v) && throw(ImproperlyConfigured("The SECRET_KEY setting must not be empty."))
     v === NO_SETTING || return v
     isempty(SETTINGS) && (merge!(SETTINGS, default_settings()); return getproperty(settings, k))
     d = get(DECLARED_SETTINGS, k, NO_SETTING)

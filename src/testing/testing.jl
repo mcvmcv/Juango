@@ -125,6 +125,7 @@ Run `f()` with some settings changed, and put them back afterwards (even if it t
 function override_settings(f; kw...)
     saved = Dict{Symbol,Any}()
     missing_ = Symbol[]
+    explicit = Set{Symbol}(k for (k, _) in kw if k in EXPLICIT_SETTINGS)
     for (k, _) in kw
         haskey(SETTINGS, k) ? (saved[k] = SETTINGS[k]) : push!(missing_, k)
     end
@@ -132,12 +133,47 @@ function override_settings(f; kw...)
         configure!(; kw...)        # (inside: settings refused halfway are put back too)
         f()
     finally
+        for (k, _) in kw
+            k in explicit || delete!(EXPLICIT_SETTINGS, k)
+        end
         foreach(k -> delete!(SETTINGS, k), missing_)
         apply_settings!(saved, false)
         if any_receivers(setting_changed)
             foreach(k -> send(setting_changed, :settings; setting = k, value = nothing, enter = false), missing_)
         end
     end
+end
+
+"""
+    modify_settings(f; NAME = (append = items, prepend = items, remove = items), ...)
+
+Run `f()` with list settings changed, as Django's `modify_settings`: each operation, in the order
+given, appends or prepends the items not already there, or removes them (a single item or a list).
+The list is the setting's value when `modify_settings` runs, so it can be nested in
+`override_settings`.
+
+    modify_settings(MIDDLEWARE = (append = MyMiddleware, remove = [CsrfViewMiddleware])) do ... end
+"""
+function modify_settings(f; kw...)
+    changes = Dict{Symbol,Any}()
+    for (name, ops) in kw
+        value = Any[x for x in something(get(settings, name, Any[]), Any[])]
+        for (action, items) in pairs(ops)
+            items = items isa Union{AbstractVector,Tuple} ? collect(Any, items) : Any[items]
+            a = Symbol(action)
+            if a === :append
+                append!(value, [x for x in items if !(x in value)])
+            elseif a === :prepend
+                value = vcat(Any[x for x in items if !(x in value)], value)
+            elseif a === :remove
+                value = Any[x for x in value if !(x in items)]
+            else
+                throw(ArgumentError("Unsupported action: $action"))
+            end
+        end
+        changes[name] = value
+    end
+    override_settings(f; changes...)
 end
 
 """

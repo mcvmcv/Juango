@@ -305,7 +305,7 @@ end
 
 # Juango's own system checks (`register_check!` adds yours)
 register_check!(tags = [:security]) do
-    settings.SECRET_KEY == default_settings()[:SECRET_KEY] && !settings.DEBUG ?
+    get(settings, :SECRET_KEY, "") == default_settings()[:SECRET_KEY] && !settings.DEBUG ?
         [CheckMessage(:error, "SECRET_KEY is the insecure default while DEBUG is false."; id = "security.E101")] : CheckMessage[]
 end
 register_check!(tags = [:urls]) do

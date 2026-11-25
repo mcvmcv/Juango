@@ -164,7 +164,7 @@ const REFERRER_POLICY_VALUES = Set(["no-referrer", "no-referrer-when-downgrade",
 const CROSS_ORIGIN_OPENER_POLICY_VALUES = Set(["same-origin", "same-origin-allow-popups", "unsafe-none"])
 "A secret key long and varied enough (Django's: 50 characters, 5 different ones, not the default or django-insecure-)."
 strong_secret_key(k) = k isa AbstractString && k != default_settings()[:SECRET_KEY] && length(k) >= 50 && length(Set(k)) >= 5 &&
-                       !startswith(k, "django-insecure-")
+                       !startswith(k, "django-insecure-") && !startswith(k, "juango-insecure-")
 
 """
 The deployment checks as CheckMessages, with Django's ids and conditions (`check --deploy`): the HTTPS,
@@ -179,7 +179,7 @@ function deploy_checks()
     mws = s.MIDDLEWARE
     sec = SecurityMiddleware in mws
     s.DEBUG && w("security.W018", "You should not have DEBUG set to true in deployment.")
-    strong_secret_key(s.SECRET_KEY) ||
+    strong_secret_key(get(s, :SECRET_KEY, "")) ||
         w("security.W009", "Your SECRET_KEY has less than 50 characters, less than 5 unique characters, or is the default. Please generate a long and random value, otherwise many of Juango's security-critical features will be vulnerable to attack.")
     for (i, k) in enumerate(something(get(s, :SECRET_KEY_FALLBACKS, String[]), String[]))
         strong_secret_key(k) ||
