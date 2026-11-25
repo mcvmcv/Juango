@@ -131,7 +131,7 @@ export App, get_model, lookup_value, concrete_fields, many_to_many, attname, col
        @background, enqueue, get_result, TaskResult
 # server and commands
 export runserver, execute_from_command_line, call_command, CommandError
-public RawQuerySet, FieldDoesNotExist, command_io, required_fields, parse_cookies, urlencode, hasheader, accepts, MediaType, accepted_types, accepted_types_by_precedence, accepted_type, get_preferred_type, iri_to_uri, save_session!, load_session
+public RawQuerySet, log_response, escape_log, reason_phrase, FieldDoesNotExist, command_io, required_fields, parse_cookies, urlencode, hasheader, accepts, MediaType, accepted_types, accepted_types_by_precedence, accepted_type, get_preferred_type, iri_to_uri, save_session!, load_session
 
 # --- public, not exported ----------------------------------------------------------------------------
 

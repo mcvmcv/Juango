@@ -102,17 +102,30 @@ function emit(h::FileHandler, r::LogRecord, fmt)
     end
 end
 
-"Emails records to ADMINS (the subject is the level and message; the body adds the request and traceback)."
-struct MailAdminsHandler <: LogHandler end
-function emit(::MailAdminsHandler, r::LogRecord, fmt)
+"""
+Emails records to ADMINS, as Django's AdminEmailHandler: the subject is the level, whether the request came from
+an INTERNAL_IPS address, and the message (newlines escaped, at most 989 characters); the body adds the request
+and the traceback. `"include_html" => true` attaches the debug page as HTML.
+"""
+struct MailAdminsHandler <: LogHandler
+    include_html::Bool
+end
+MailAdminsHandler() = MailAdminsHandler(false)
+"A log subject on one line, as Django's format_subject."
+format_log_subject(s) = (t = replace(string(s), "\n" => "\\n", "\r" => "\\r"); length(t) > 989 ? first(t, 989) : t)
+function emit(h::MailAdminsHandler, r::LogRecord, fmt)
     req = get(r.data, :request, nothing)
+    subject = req isa Request ?
+        "$(level_name(r.level)) ($(get(req.meta, :remote_addr, "") in string.(something(get(settings, :INTERNAL_IPS, String[]), String[])) ? "internal" : "EXTERNAL") IP): $(r.message)" :
+        "$(level_name(r.level)): $(r.message)"
     body = (req isa Request ? "$(req.method) $(full_path(req))\n\n" : "") * r.message
     if r.exception isa Tuple && req isa Request         # a view's exception: the debug page's report, as text
         body *= "\n\n" * exception_report_text(req, r.exception[1], r.exception[2]; chain = [r.exception])
     elseif r.exception !== nothing
         body *= "\n\n" * exception_text(r)
     end
-    mail_admins(level_name(r.level) * ": " * first(split(r.message, '\n')), body; fail_silently = true)
+    html = h.include_html && r.exception isa Tuple && req isa Request ? text(technical_500(req, r.exception[1], r.exception[2])) : nothing
+    mail_admins(format_log_subject(subject), body; html_message = html, fail_silently = true)
 end
 
 "Keeps the records it gets (`handler.records`); useful in tests."
@@ -134,8 +147,9 @@ struct LoggingConfig
     root::LoggerConf
     levels::Dict{String,Int}          # effective level per logger name, filled in on first use
     lock::ReentrantLock
+    filters::Dict{String,Any}         # LOGGING's "filters": name => a function of the record (Django's CallbackFilter)
 end
-LoggingConfig(handlers, loggers, root) = LoggingConfig(handlers, loggers, root, Dict{String,Int}(), ReentrantLock())
+LoggingConfig(handlers, loggers, root, filters = Dict{String,Any}()) = LoggingConfig(handlers, loggers, root, Dict{String,Int}(), ReentrantLock(), filters)
 
 default_logging() = Dict(
     "handlers" => Dict("julia" => Dict("class" => "julia", "level" => "ERROR"),
@@ -148,7 +162,7 @@ function make_handler(d)
     c = get(d, "class", "console")
     c isa AbstractString || return c
     c == "julia" ? JuliaHandler() : c == "console" ? StreamHandler(get(d, "stream", stderr)) :
-    c == "file" ? FileHandler(d["filename"]) : c == "mail_admins" ? MailAdminsHandler() :
+    c == "file" ? FileHandler(d["filename"]) : c == "mail_admins" ? MailAdminsHandler(get(d, "include_html", false) === true) :
     c == "memory" ? MemoryHandler() : throw(ImproperlyConfigured("LOGGING: unknown handler class '$c'"))
 end
 
@@ -166,8 +180,15 @@ function parse_logging(conf)
             haskey(hs, string(h)) || throw(ImproperlyConfigured("LOGGING: no handler named '$h'"))
         end
     end
+    # filters: a function of the record (true: keep it), or Dict("callback" => f) as Django's CallbackFilter config
+    fs = Dict{String,Any}()
+    for (n, f) in pairs(get(conf, "filters", Dict()))
+        fs[string(n)] = f isa AbstractDict ? get(f, "callback", get(f, :callback, nothing)) : f
+        fs[string(n)] isa Function || fs[string(n)] === nothing ||
+            throw(ImproperlyConfigured("LOGGING: filter '$n' must be a function of the record, or Dict(\"callback\" => f)"))
+    end
     LoggingConfig(hs, Dict(string(n) => lc(d) for (n, d) in pairs(get(conf, "loggers", Dict()))),
-                  lc(merge(Dict("level" => "WARNING"), get(conf, "root", Dict()))))
+                  lc(merge(Dict("level" => "WARNING"), get(conf, "root", Dict()))), fs)
 end
 
 const LOGGING_CONFIG = Ref{Union{Nothing,LoggingConfig}}(nothing)
@@ -209,8 +230,11 @@ end
 "Whether a record of `level` from logger `name` would be handled (to skip building costly messages)."
 log_enabled(name::AbstractString, level) = log_level(level) >= effective_level(logging_config(), name)
 
-passes(h::HandlerConf, r::LogRecord) =
-    r.level >= h.level && all(f -> f == "require_debug_false" ? !settings.DEBUG : f == "require_debug_true" ? settings.DEBUG : true, h.filters)
+passes(h::HandlerConf, r::LogRecord, filters = Dict{String,Any}()) =
+    r.level >= h.level && all(h.filters) do f
+        f == "require_debug_false" ? !settings.DEBUG : f == "require_debug_true" ? settings.DEBUG :
+        (cb = get(filters, f, nothing); cb === nothing || cb(r) == true)
+    end
 
 """
     log!(name, level, message; exception = nothing, data...)
@@ -226,7 +250,7 @@ function log!(name::AbstractString, level, message; exception = nothing, kw...)
     for c in logger_chain(cfg, name)
         for hn in c.handlers
             h = cfg.handlers[hn]
-            passes(h, r) || continue
+            passes(h, r, cfg.filters) || continue
             try
                 emit(h.handler, r, h.format)
             catch e
@@ -237,3 +261,78 @@ function log!(name::AbstractString, level, message; exception = nothing, kw...)
     end
     nothing
 end
+
+# --- log_response (Django's django.utils.log.log_response) -------------------------------------------------
+
+"""
+A string as Python's unicode_escape writes it (Django escapes what it logs from a request): control characters
+as `\\n`, `\\x1b`, ..., a backslash doubled, non-ASCII as `\\xe9`, `\\u0301`, `\\U0001f642`, so a log line
+stays one line and a path can't forge one.
+"""
+function escape_log(s::AbstractString)
+    io = IOBuffer()
+    for c in s
+        if !isvalid(c)              # (bytes that aren't UTF-8, from a percent-encoded path: each as \\xNN)
+            foreach(b -> print(io, "\\x", string(b; base = 16, pad = 2)), codeunits(string(c)))
+            continue
+        end
+        u = UInt32(c)
+        if c == '\\'
+            print(io, "\\\\")
+        elseif c == '\n'
+            print(io, "\\n")
+        elseif c == '\r'
+            print(io, "\\r")
+        elseif c == '\t'
+            print(io, "\\t")
+        elseif u < 0x20 || 0x7f <= u <= 0xff
+            print(io, "\\x", string(u; base = 16, pad = 2))
+        elseif u > 0xff
+            print(io, u <= 0xffff ? "\\u" * string(u; base = 16, pad = 4) : "\\U" * string(u; base = 16, pad = 8))
+        else
+            print(io, c)
+        end
+    end
+    String(take!(io))
+end
+escape_log(x) = string(x)
+
+"Responses already logged (an exception's response is logged where it's made, with the exception)."
+const LOGGED_RESPONSES = WeakKeyDict{Any,Bool}()
+const LOGGED_RESPONSES_LOCK = ReentrantLock()
+mark_logged!(r) = (r === nothing || lock(() -> (LOGGED_RESPONSES[r] = true), LOGGED_RESPONSES_LOCK); r)
+was_logged(r) = lock(() -> haskey(LOGGED_RESPONSES, r), LOGGED_RESPONSES_LOCK)
+
+"""
+    log_response(message, args...; response, request = nothing, logger = "juango.request", level = nothing, exception = nothing)
+
+Log a response once, as Django's: 5xx as errors, 4xx as warnings, others as info (unless `level`), with its
+`status_code` and the request; `%s`/`%d` in `message` take `args`, strings escaped (`escape_log`).
+"""
+function log_response(message, args...; response, request = nothing, logger = "juango.request", level = nothing, exception = nothing)
+    response === nothing && throw(ArgumentError("log_response needs a response"))
+    was_logged(response) && return nothing
+    st = response.status
+    lvl = level !== nothing ? level : st >= 500 ? :error : st >= 400 ? :warning : :info
+    it = Iterators.Stateful(args)
+    msg = replace(string(message), r"%[sd]" => _ -> (isempty(it) ? "" : escape_log(popfirst!(it))))
+    log!(logger, lvl, msg; exception = exception, request = request, status_code = st)
+    mark_logged!(response)
+    nothing
+end
+
+"HTTP reason phrases (Python's http.HTTPStatus, as Django's response.reason_phrase)."
+const REASON_PHRASES = Dict(100 => "Continue", 101 => "Switching Protocols", 200 => "OK", 201 => "Created", 202 => "Accepted",
+    204 => "No Content", 206 => "Partial Content", 301 => "Moved Permanently", 302 => "Found", 303 => "See Other",
+    304 => "Not Modified", 307 => "Temporary Redirect", 308 => "Permanent Redirect", 400 => "Bad Request", 401 => "Unauthorized",
+    402 => "Payment Required", 403 => "Forbidden", 404 => "Not Found", 405 => "Method Not Allowed", 406 => "Not Acceptable",
+    408 => "Request Timeout", 409 => "Conflict", 410 => "Gone", 411 => "Length Required", 412 => "Precondition Failed",
+    413 => "Request Entity Too Large", 414 => "Request-URI Too Long", 415 => "Unsupported Media Type",
+    416 => "Requested Range Not Satisfiable", 417 => "Expectation Failed", 418 => "I'm a Teapot", 421 => "Misdirected Request",
+    422 => "Unprocessable Entity", 423 => "Locked", 424 => "Failed Dependency", 425 => "Too Early", 426 => "Upgrade Required",
+    428 => "Precondition Required", 429 => "Too Many Requests", 431 => "Request Header Fields Too Large",
+    451 => "Unavailable For Legal Reasons", 500 => "Internal Server Error", 501 => "Not Implemented", 502 => "Bad Gateway",
+    503 => "Service Unavailable", 504 => "Gateway Timeout", 505 => "HTTP Version Not Supported", 506 => "Variant Also Negotiates",
+    507 => "Insufficient Storage", 508 => "Loop Detected", 510 => "Not Extended", 511 => "Network Authentication Required")
+"A status code's reason phrase (\"Unknown Status Code\" for one HTTP doesn't name, as Django's)."
+reason_phrase(status::Integer) = get(REASON_PHRASES, Int(status), "Unknown Status Code")

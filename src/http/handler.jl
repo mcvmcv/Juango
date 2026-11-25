@@ -221,6 +221,9 @@ function handle_request(req::Request)
         cleanup_uploads(req)                         # temporary files of big uploads
     end
     has_receivers(request_finished, :handler) && send(request_finished, :handler; request = req, response = resp)
+    # a 4xx or 5xx response a view returned (Django's log_response in get_response)
+    resp isa HttpResponse && resp.status >= 400 &&
+        log_response("%s: %s", reason_phrase(resp.status), req.path; response = resp, request = req)
     resp
 end
 
@@ -316,7 +319,9 @@ function error_handler_issues()
     issues
 end
 
-function response_for_exception(req::Request, e, bt)
+"The response for an exception, logged with it (so the 4xx/5xx logging in handle_request leaves it alone)."
+response_for_exception(req::Request, e, bt) = mark_logged!(response_for_exception_(req, e, bt))
+function response_for_exception_(req::Request, e, bt)
     e isa NPlusOneError && get(req.meta, :test_client, false) === true && throw(e)     # (NPLUSONE = :raise fails the test itself)
     # (as Django's SuspiciousOperations: logged to the security logger and answered with 400)
     e isa InvalidPage && (e = Http404("Invalid page: $(e.msg)"))     # (a page out of range a view didn't catch)
@@ -325,20 +330,21 @@ function response_for_exception(req::Request, e, bt)
         e = BadRequest(e.msg)
     end
     if e isa Http404
-        log!("juango.request", :warning, "Not Found: $(req.path)"; request = req, status_code = 404)
+        log!("juango.request", :warning, "Not Found: $(escape_log(req.path))"; request = req, status_code = 404)
         settings.DEBUG && return technical_404(req, e)
         c = custom_error_response(req, 404, e)
         c === nothing || return c
         r = try_render("404.html", Dict("request_path" => iri_to_uri(req.path), "exception" => e.msg), 404; request = req)
         return something(r, HttpResponseNotFound("<h1>Not Found</h1><p>The requested resource was not found on this server.</p>"))
     elseif e isa PermissionDenied
-        log!("juango.request", :warning, "Forbidden (Permission denied): $(req.path)"; request = req, status_code = 403)
+        log!("juango.request", :warning, "Forbidden (Permission denied): $(escape_log(req.path))"; request = req, status_code = 403)
         c = custom_error_response(req, 403, e)
         c === nothing || return c
         r = try_render("403.html", Dict("exception" => e.msg), 403; request = req)
         return something(r, HttpResponseForbidden())
     elseif e isa BadRequest
-        log!("juango.request", :warning, "Bad Request: $(req.path): $(e.msg)"; request = req, status_code = 400)
+        log!("juango.request", :warning, isempty(e.msg) ? "Bad Request: $(escape_log(req.path))" : "$(escape_log(e.msg)): $(escape_log(req.path))";
+             request = req, status_code = 400)
         c = custom_error_response(req, 400, e)
         c === nothing || return c
         r = try_render("400.html", Dict("exception" => e.msg), 400)
@@ -349,7 +355,7 @@ function response_for_exception(req::Request, e, bt)
     # (a test Client with raise_request_exception: the error is the test's, not a 500 page)
     get(req.meta, :raise_request_exception, false) === true && throw(e)
     # logged to juango.request: Julia's logger, and mailed to ADMINS when DEBUG is false (see LOGGING)
-    log!("juango.request", :error, "Internal Server Error: $(req.path)"; exception = (e, bt), request = req, status_code = 500)
+    log!("juango.request", :error, "Internal Server Error: $(escape_log(req.path))"; exception = (e, bt), request = req, status_code = 500)
     settings.DEBUG && return technical_500(req, e, bt)
     c = custom_error_response(req, 500, e)
     c === nothing || return c

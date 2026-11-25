@@ -525,7 +525,12 @@ The response to a CSRF failure, as Django's: `CSRF_FAILURE_VIEW` if set, else th
 page. Both explain a missing Referer or cookie; with DEBUG the page also gives the reason and help.
 """
 function csrf_failure_response(req, reason)
-    log!("juango.security.csrf", :warning, "Forbidden (CSRF): $reason: $(req.path)"; request = req, status_code = 403)
+    r = csrf_failure_response_(req, reason)
+    # (logged once, with the response, on juango.security.csrf, as Django's _reject)
+    log_response("Forbidden (%s): %s", reason, req.path; response = r, request = req, logger = "juango.security.csrf")
+    r
+end
+function csrf_failure_response_(req, reason)
     v = settings.CSRF_FAILURE_VIEW
     v === nothing || return to_response(v(req; reason = reason))
     ctx = csrf_failure_context(reason)

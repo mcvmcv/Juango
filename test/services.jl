@@ -988,7 +988,7 @@ end
         end
         err = only(filter(r -> r.level == 40, mem.records))
         @test err.name == "juango.request" && err.exception !== nothing && err.data[:request] isa Request
-        @test endswith(only(Juango.outbox).subject, "ERROR: Internal Server Error: /boom/") && occursin("GET /boom/", only(Juango.outbox).body)
+        @test endswith(only(Juango.outbox).subject, "ERROR (EXTERNAL IP): Internal Server Error: /boom/") && occursin("GET /boom/", only(Juango.outbox).body)
         @test startswith(read(logfile, String), "ERROR|juango.request|Internal Server Error: /boom/")
         # CSRF failures on juango.security.csrf
         post(Client(; enforce_csrf = true), "/contact/", Dict("name" => "x"))
