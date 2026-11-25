@@ -500,6 +500,10 @@ function raw_value(f::Form, fld::Field)
         isempty(y) && isempty(m) && isempty(d) && return get(f.data, n, nothing)
         return (isempty(y) || isempty(m) || isempty(d)) ? "invalid" : "$y-$(lpad(m, 2, '0'))-$(lpad(d, 2, '0'))"
     end
+    if fld.kind === :m2m && widget_kind(fld.widget) === :raw_id           # "1,2,3" (Django's ManyToManyRawIdWidget)
+        v = get(f.data, html_name(f, fld), nothing)
+        return v === nothing || v == "" ? (v === nothing ? nothing : String[]) : String[strip(x) for x in split(string(v), ',') if !isempty(strip(x))]
+    end
     fld.kind in MULTI_KINDS && return raw_list(f.data, html_name(f, fld))
     v = get(f.data, html_name(f, fld), nothing)
     # a checkbox as Django's CheckboxInput reads it: "false" and "" are unchecked, any other value sent is checked ("0" too, #16820)
@@ -1249,10 +1253,53 @@ label_id(bf::BoundField) = bf.field.widget isa SelectDateWidget ? html_id(bf.for
                                                                  html_id(bf.form, bf.field)
 
 """
+    raw_id_input(bf; class = nothing)
+
+A `raw_id_fields` field's id box: the related object's key (its `to_field` value), or the many-to-many
+relation's keys comma-separated. The admin adds `class` and its lookup link.
+"""
+function raw_id_input(bf::BoundField; class = nothing)
+    f, fld = bf.form, bf.field
+    val = display_value(bf)
+    v = if fld.kind === :m2m
+        join((string(x isa Model ? x.pk : x) for x in (val isa AbstractVector ? val : val === nothing ? Any[] : Any[val])), ",")
+    else
+        val isa Model ? string(getproperty(val, something(fk_to_field(fld), :pk))) : display_string(val)
+    end
+    req = !fld.blank && f.use_required_attribute ? " required" : ""
+    dis = form_option(fld, :disabled) ? " disabled" : ""
+    a = " name=\"" * escape_html(html_name(f, fld)) * "\"" * id_attr(html_id(f, fld)) * dis * req * widget_attrs(fld.widget)
+    haskey(f.errors, fld.name) && (a *= " aria-invalid=\"true\"")
+    "<input type=\"text\"" * a * (class === nothing ? "" : " class=\"" * escape_html(class) * "\"") *
+        (isempty(v) ? "" : " value=\"" * escape_html(v) * "\"") * described_by(bf) * ">"
+end
+"The object a foreign key's raw id box names (by its `to_field`, through the base manager, as Django's label lookup), or `nothing`."
+function raw_id_current(bf::BoundField)
+    fld = bf.field
+    val = display_value(bf)
+    val isa Model && return val
+    (val === nothing || val == "") && return nothing
+    R = related_model(fld)
+    tf = something(fk_to_field(fld), :pk)
+    v = tf === :pk || tf === :id ? parse_pk(R, val) : string(val)
+    v === nothing && return nothing
+    try
+        first(filter(base_objects(R); (tf => v,)...))
+    catch e
+        e isa Union{ValidationError,ArgumentError,MethodError} || rethrow()
+        nothing
+    end
+end
+
+"""
 The field's widget, with a hidden input holding its initial value after it when the field has
 `show_hidden_initial = true` (`initial-<name>`, compared with the data for `changed_fields`, as Django's).
 """
-widget_html(bf::BoundField) = form_option(bf.field, :show_hidden_initial) ? input_html(bf) * initial_hidden_html(bf) : input_html(bf)
+function widget_html(bf::BoundField)
+    h = form_option(bf.field, :show_hidden_initial) ? input_html(bf) * initial_hidden_html(bf) : input_html(bf)
+    w = form_option(bf.field, :wrap_widget)         # (the admin's related links: `(bf, html) -> html`)
+    w === false ? h : w(bf, h)
+end
 function initial_hidden_html(bf::BoundField)
     f, fld = bf.form, bf.field
     v = initial_for(f, fld)
@@ -1278,12 +1325,13 @@ function input_html(bf::BoundField)
     if fld.kind === :bool
         checked = f.data !== nothing ? (val !== nothing && lowercase(string(val)) in ("on", "true", "1", "yes")) : truthy(val)
         return "<input type=\"checkbox\"$attrs$(checked ? " checked" : "")>"
+    elseif fld.kind === :m2m && widget_kind(fld.widget) === :raw_id        # Django's ManyToManyRawIdWidget: ids, comma-separated
+        return raw_id_input(bf)
     elseif fld.kind === :fk && widget_kind(fld.widget) in (:raw_id, :autocomplete)
         R = related_model(fld)
-        cur = (val === nothing || val == "") ? nothing : first(filter(base_objects(R); id = parse_pk(R, val)))
-        if widget_kind(fld.widget) === :raw_id     # an id box, with the current object's name
-            return "<input type=\"text\"$attrs size=\"10\" class=\"raw-id\" value=\"$(escape_html(display_string(val)))\">" *
-                   (cur === nothing ? "" : " <span class=\"muted\">" * escape_html(string(cur)) * "</span>")
+        cur = raw_id_current(bf)
+        if widget_kind(fld.widget) === :raw_id     # an id box, with the current object's name (Django's ForeignKeyRawIdWidget)
+            return raw_id_input(bf) * (cur === nothing ? "" : "&nbsp;<strong>" * escape_html(string(cur)) * "</strong>")
         end
         # autocomplete: a select holding the current choice, filled by searching (admin JavaScript)
         opt = cur === nothing ? "" : "<option value=\"$(escape_html(string(cur.id)))\" selected>$(escape_html(string(cur)))</option>"
@@ -1412,7 +1460,7 @@ function widget_type(fld::Field)
     wk === :radio && return "radioselect"
     wk === :checkboxes && return "checkboxselectmultiple"
     wk === :autocomplete && return "autocompleteselect"
-    wk === :raw_id && return "foreignkeyrawid"
+    wk === :raw_id && return fld.kind === :m2m ? "manytomanyrawid" : "foreignkeyrawid"
     wk in (:hidden, :password, :textarea) && return string(wk)
     k = fld.kind
     k === :bool && return "checkbox"

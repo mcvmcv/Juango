@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>{% translate "Popup closing…" %}</title></head>
+<body>
+<script id="django-admin-popup-response-constants" data-popup-response="{{ popup_response_data }}">
+(function () {
+  var d = JSON.parse(document.getElementById("django-admin-popup-response-constants").dataset.popupResponse);
+  var o = window.opener;
+  if (!o) return;
+  if (d.action === "change") o.dismissChangeRelatedObjectPopup(window, d.value, d.obj, d.new_value);
+  else if (d.action === "delete") o.dismissDeleteRelatedObjectPopup(window, d.value);
+  else o.dismissAddRelatedObjectPopup(window, d.value, d.obj);
+})();
+</script>
+</body>
+</html>

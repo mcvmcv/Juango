@@ -195,7 +195,7 @@ function assert_contains(r::HttpResponse, needle::AbstractString; count = nothin
     p = prefix(msg_prefix)
     r.status == status || fail(p * "Couldn't retrieve content: Response code was $(r.status) (expected $status)")
     hay = response_text(r)
-    n = html ? count_html(parse_html(needle), parse_html(hay)) : length(findall(needle, hay; overlap = false))
+    n = html ? count_html(parse_html_arg(needle, "First"), parse_html_arg(hay, "Second")) : length(findall(needle, hay; overlap = false))
     if count === nothing
         n > 0 || fail(p * "Couldn't find $(repr(needle)) in the following response\n$(repr(hay))")
     else
@@ -209,7 +209,7 @@ function assert_not_contains(r::HttpResponse, needle::AbstractString; status = 2
     p = prefix(msg_prefix)
     r.status == status || fail(p * "Couldn't retrieve content: Response code was $(r.status) (expected $status)")
     hay = response_text(r)
-    found = html ? count_html(parse_html(needle), parse_html(hay)) > 0 : occursin(needle, hay)
+    found = html ? count_html(parse_html_arg(needle, "First"), parse_html_arg(hay, "Second")) > 0 : occursin(needle, hay)
     found && fail(p * "$(repr(needle)) unexpectedly found in the following response\n$(repr(hay))")
     true
 end
@@ -314,13 +314,18 @@ struct HtmlElement
     children::Vector{Any}                   # HtmlElement and String
 end
 
-const HTML_ENTITIES = Dict("amp" => "&", "lt" => "<", "gt" => ">", "quot" => "\"", "apos" => "'", "nbsp" => "\u00a0", "#39" => "'")
-decode_entities(s::AbstractString) = replace(s, r"&(#x[0-9a-fA-F]+|#[0-9]+|[A-Za-z]+);" => function (m)
-    e = m[2:end-1]
-    startswith(e, "#x") && return string(Char(parse(Int, e[3:end]; base = 16)))
-    startswith(e, "#") && return string(Char(parse(Int, e[2:end])))
-    get(HTML_ENTITIES, e, m)
-end)
+"Character references and named entities decoded (Python's html.unescape, as Django's parser)."
+decode_entities(s::AbstractString) = html_unescape(s)
+
+"HTML's boolean attributes, as Django's: `checked`, `checked=\"\"` and `checked=\"checked\"` are the same."
+const BOOLEAN_ATTRIBUTES = Set(["allowfullscreen", "async", "autofocus", "autoplay", "checked", "controls", "default", "defer", "disabled",
+                                "formnovalidate", "hidden", "ismap", "itemscope", "loop", "multiple", "muted", "nomodule", "novalidate",
+                                "open", "playsinline", "readonly", "required", "reversed", "selected", "truespeed"])
+"HTML that isn't well formed (a stray end tag), as Django's HTMLParseError: `msg` says where."
+struct HTMLParseError <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::HTMLParseError) = print(io, "HTMLParseError: ", e.msg)
 
 "Parse HTML into a list of nodes (HtmlElement and text), normalised for comparison."
 function parse_html(s::AbstractString)
@@ -330,9 +335,17 @@ function parse_html(s::AbstractString)
     rx_tag = r"\G<(/?)([A-Za-z][A-Za-z0-9:-]*)((?:\s+[^\s\"'>/=]+(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))?)*)\s*(/?)>"s
     rx_attr = r"([^\s\"'>/=]+)(?:\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+)))?"
     text = IOBuffer()
-    flush_text!() = (t = String(take!(text)); isempty(t) || push!(stack[end].children, decode_entities(t)))
+    flush_text!() = (t = String(take!(text)); isempty(t) || push!(stack[end].children, stack[end].tag in ("script", "style") ? t : decode_entities(t)))
     while i <= lastindex(s)
         if s[i] == '<'
+            if !isempty(stack) && stack[end].tag in ("script", "style")     # raw text up to its end tag, as Django's
+                j = findnext(Regex("</" * stack[end].tag * "\\s*>", "i"), s, i)
+                if j !== nothing && first(j) != i
+                    write(text, SubString(s, i, prevind(s, first(j))))
+                    i = first(j)
+                    continue
+                end
+            end
             if startswith(SubString(s, i), "<!--")
                 j = findnext("-->", s, i)
                 i = j === nothing ? lastindex(s) + 1 : last(j) + 1
@@ -348,13 +361,20 @@ function parse_html(s::AbstractString)
                 tag = lowercase(m[2])
                 if m[1] == "/"
                     k = findlast(e -> e.tag == tag, stack)
-                    k === nothing || k == 1 || resize!(stack, k - 1)
+                    if k === nothing || k == 1
+                        line = count(==('\n'), SubString(s, firstindex(s), prevind(s, i))) + 1
+                        ls = findprev('\n', s, prevind(s, i))
+                        col = length(SubString(s, ls === nothing ? firstindex(s) : nextind(s, ls), prevind(s, i)))
+                        throw(HTMLParseError("Unexpected end tag `$tag` (Line $line, Column $col)"))
+                    end
+                    resize!(stack, k - 1)
                 else
                     attrs = Pair{String,String}[]
                     for a in eachmatch(rx_attr, m[3])
                         name = lowercase(a[1])
                         v = decode_entities(something(a[2], a[3], a[4], ""))
                         name == "class" && (v = join(sort(split(v)), " "))
+                        name in BOOLEAN_ATTRIBUTES && v == name && (v = "")      # (checked="checked" is checked)
                         push!(attrs, name => v)
                     end
                     el = HtmlElement(tag, sort!(attrs; by = first), Any[])
@@ -373,13 +393,14 @@ function parse_html(s::AbstractString)
     root.children
 end
 
+const ASCII_WS = (' ', '\t', '\n', '\f', '\r')
 "Whitespace as in rendered HTML: runs of it count as one space, and none around tags."
 function normalize_html!(el::HtmlElement)
     out = Any[]
     for c in el.children
-        if c isa String
-            t = replace(c, r"\s+" => " ")
-            isempty(strip(t)) && continue
+        if c isa AbstractString
+            t = replace(c, r"[ \t\n\f\r]+" => " ")       # (ASCII whitespace only, as Django's: &nbsp; stays)
+            isempty(strip(t, ASCII_WS)) && continue
             if !isempty(out) && out[end] isa String
                 out[end] *= t
             else
@@ -391,14 +412,14 @@ function normalize_html!(el::HtmlElement)
         end
     end
     for k in eachindex(out)
-        out[k] isa String && (out[k] = strip(out[k]))
+        out[k] isa AbstractString && (out[k] = String(strip(out[k], ASCII_WS)))   # (a String: count_html matches text by type)
     end
     empty!(el.children)
     append!(el.children, out)
     el
 end
 
-html_canonical(io::IO, t::AbstractString) = print(io, t)
+html_canonical(io::IO, t::AbstractString) = print(io, replace(t, '&' => "&amp;", '<' => "&lt;", '>' => "&gt;"))   # (text "<br>" isn't a <br>)
 function html_canonical(io::IO, el::HtmlElement)
     print(io, "<", el.tag)
     for (k, v) in el.attrs
@@ -416,13 +437,21 @@ html_canonical(nodes::Vector) = sprint(io -> foreach(n -> html_canonical(io, n),
 The two HTML strings are (aren't) the same document, as Django's `assertHTMLEqual`: whitespace
 between tags, attribute order and class order don't matter, and `<br>` equals `<br/>`.
 """
+function parse_html_arg(x, which)
+    try
+        parse_html(x)
+    catch e
+        e isa HTMLParseError || rethrow()
+        fail("$which argument is not valid HTML:\n$(e.msg)")
+    end
+end
 function assert_html_equal(a::AbstractString, b::AbstractString)
-    ca, cb = html_canonical(parse_html(a)), html_canonical(parse_html(b))
+    ca, cb = html_canonical(parse_html_arg(a, "First")), html_canonical(parse_html_arg(b, "Second"))
     ca == cb || fail("the HTML differs:\n  $ca\n  $cb")
     true
 end
 function assert_html_not_equal(a::AbstractString, b::AbstractString)
-    html_canonical(parse_html(a)) == html_canonical(parse_html(b)) && fail("the HTML is the same: $(html_canonical(parse_html(a)))")
+    html_canonical(parse_html_arg(a, "First")) == html_canonical(parse_html_arg(b, "Second")) && fail("the HTML is the same: $(html_canonical(parse_html(a)))")
     true
 end
 
@@ -448,20 +477,33 @@ function count_html(needle::Vector, hay::Vector)
     n
 end
 
+"A string as Python's repr shows it (Django's assertion messages): in single quotes, or double when it has a single one."
+function pyrepr(x::AbstractString)
+    esc(t) = replace(t, "\\" => "\\\\", "\n" => "\\n", "\t" => "\\t", "\r" => "\\r")
+    occursin('\'', x) && !occursin('"', x) ? "\"" * esc(x) * "\"" : "'" * replace(esc(x), "'" => "\\'") * "'"
+end
+
 """
-    assert_in_html(needle, hay; count = nothing)
+    assert_in_html(needle, hay; count = nothing, msg_prefix = "")    assert_not_in_html(needle, hay; msg_prefix = "")
 
 `needle` (HTML) appears in `hay` (HTML or a response), compared as `assert_html_equal` does
-(exactly `count` times when given), as Django's `assertInHTML`.
+(exactly `count` times when given), or doesn't, as Django's `assertInHTML` and `assertNotInHTML`.
 """
-function assert_in_html(needle::AbstractString, hay; count = nothing)
+function assert_in_html(needle::AbstractString, hay; count = nothing, msg_prefix = "")
     h = hay isa HttpResponse ? response_text(hay) : String(hay)
-    n = count_html(parse_html(needle), parse_html(h))
+    n = count_html(parse_html_arg(needle, "First"), parse_html_arg(h, "Second"))
+    where_ = " in the following response\n" * pyrepr(h)
     if count === nothing
-        n > 0 || fail("couldn't find $(repr(needle)) in the HTML")
+        n > 0 || fail(prefix(msg_prefix) * "Couldn't find $(pyrepr(needle))" * where_)
     else
-        n == count || fail("found $(repr(needle)) $n time(s) in the HTML, expected $count")
+        n == count || fail(prefix(msg_prefix) * "Found $n instances of $(pyrepr(needle)) (expected $count)" * where_)
     end
+    true
+end
+function assert_not_in_html(needle::AbstractString, hay; msg_prefix = "")
+    h = hay isa HttpResponse ? response_text(hay) : String(hay)
+    count_html(parse_html_arg(needle, "First"), parse_html_arg(h, "Second")) == 0 ||
+        fail(prefix(msg_prefix) * "$(pyrepr(needle)) unexpectedly found in the following response\n" * pyrepr(h))
     true
 end
 
@@ -471,13 +513,21 @@ end
 `raw` (a JSON string, or a response) decodes to `expected`, itself a JSON string or a value:
 object key order and number formatting don't matter.
 """
+function json_arg(x, which)
+    try
+        json_value(x)
+    catch e
+        e isa InterruptException && rethrow()
+        fail("$which argument is not valid JSON: $(x isa AbstractString ? repr(x) : x)")
+    end
+end
 function assert_json_equal(raw, expected)
-    a, b = json_value(raw), json_value(expected)
+    a, b = json_arg(raw, "First"), json_arg(expected, "Second")
     isequal(a, b) || fail("the JSON differs:\n  $(JSON.json(a))\n  $(JSON.json(b))")
     true
 end
 function assert_json_not_equal(raw, expected)
-    isequal(json_value(raw), json_value(expected)) && fail("the JSON is the same: $(JSON.json(json_value(raw)))")
+    isequal(json_arg(raw, "First"), json_arg(expected, "Second")) && fail("the JSON is the same: $(JSON.json(json_value(raw)))")
     true
 end
 json_value(r::HttpResponse) = json_value(response_text(r))
@@ -492,8 +542,9 @@ json_value(x) = plainjson(JSON.parse(JSON.json(x)))
 its order isn't defined.
 """
 function assert_queryset_equal(qs, values; transform = identity, ordered::Bool = true)
-    if ordered && qs isa QuerySet && isempty(qs.order) && isempty(modelmeta(model_of(qs)).ordering)
-        fail("the queryset has no ordering: give it order_by(...) or pass ordered = false")
+    # (as Django's: comparing an unordered queryset with more than one value in order is an error; one value is fine)
+    if ordered && qs isa QuerySet && isempty(qs.order) && isempty(modelmeta(model_of(qs)).ordering) && length(values) > 1
+        throw(ArgumentError("Trying to compare non-ordered queryset against more than one ordered value."))
     end
     got = Any[transform(x) for x in qs]
     want = collect(Any, values)

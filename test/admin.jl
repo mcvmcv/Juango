@@ -152,7 +152,7 @@ end
         @test !occursin("Inline two", text(get(c, "/admin/project/article/?created__year=1999")))
         Admin.register!(Article; list_display = [:title], raw_id_fields = [:author])
         r = get(c, "/admin/project/article/$(a2.id)/change/")
-        @test occursin("class=\"raw-id\" value=\"$(ann.id)\"", text(r)) && occursin(">Adm Ann</span>", text(r))
+        @test occursin("class=\"vForeignKeyRawIdAdminField\" value=\"$(ann.id)\"", text(r)) && occursin(">Adm Ann</a></strong>", text(r))
     finally
         Admin.unregister!(Author)
         Admin.register!(Author; list_display = [:name, :email], search_fields = [:name])

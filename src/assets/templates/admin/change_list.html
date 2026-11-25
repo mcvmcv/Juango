@@ -3,12 +3,13 @@
 {% block content %}
 <div class="toolbar" style="justify-content:space-between">
   <h1 class="page" style="margin:0">{{ title }}</h1>
-  <span>{% if can_import %}<a class="button secondary" href="{% url 'admin:import' app=opts.app_label model=opts.slug %}">{% translate "Import" %}</a> {% endif %}{% if can_export %}<a class="button secondary" href="{% url 'admin:export' app=opts.app_label model=opts.slug %}">{% translate "Export" %}</a> {% endif %}{% if can_add %}<a class="button" href="{% url 'admin:add' app=opts.app_label model=opts.slug %}">Add {{ opts.verbose_name }} +</a>{% endif %}</span>
+  <span>{% if can_import %}<a class="button secondary" href="{% url 'admin:import' app=opts.app_label model=opts.slug %}">{% translate "Import" %}</a> {% endif %}{% if can_export %}<a class="button secondary" href="{% url 'admin:export' app=opts.app_label model=opts.slug %}">{% translate "Export" %}</a> {% endif %}{% if can_add %}<a class="button" href="{% url 'admin:add' app=opts.app_label model=opts.slug %}{{ add_query }}">Add {{ opts.verbose_name }} +</a>{% endif %}</span>
 </div>
 <div class="layout">
   <div class="main">
     {% if has_search %}
     <form method="get" class="toolbar">
+      {% if is_popup %}<input type="hidden" name="_popup" value="1">{% endif %}{% if to_field %}<input type="hidden" name="_to_field" value="{{ to_field }}">{% endif %}
       <input type="text" name="q" value="{{ q }}" placeholder="{% translate "Search" %}" autofocus>
       <input type="submit" value="{% translate "Search" %}">
       {% if search_help_text %}<div class="help muted">{{ search_help_text }}</div>{% endif %}
@@ -37,7 +38,7 @@
         {% for row in rows %}
           <tr>
             <td>{% if actions %}<input type="checkbox" class="action-select" name="_selected_action" value="{{ row.id }}" aria-label="Select row">{% endif %}{{ row.hidden }}</td>
-            {% for cell in row.cells %}{% if cell.link %}<th><a href="{{ row.url }}">{{ cell.value }}</a></th>{% else %}<td>{{ cell.value }}</td>{% endif %}{% endfor %}
+            {% for cell in row.cells %}{% if cell.link %}<th><a href="{{ row.url }}"{% if is_popup %} data-popup-opener="{{ row.popup_value }}"{% endif %}>{{ cell.value }}</a></th>{% else %}<td>{{ cell.value }}</td>{% endif %}{% endfor %}
           </tr>
         {% empty %}
           <tr><td colspan="99" class="muted">0 {{ opts.verbose_name_plural }}</td></tr>

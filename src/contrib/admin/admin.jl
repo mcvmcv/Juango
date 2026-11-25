@@ -458,7 +458,7 @@ function base_context(req, title)
     Dict{String,Any}(
         "title" => title, "site_header" => something(st.site_header, settings.SITE_NAME * " administration"),
         "site_title" => something(st.site_title, settings.SITE_NAME * " site admin"),
-        "models" => [opts(st.registry[s]) for s in visible_models(req)])
+        "models" => [opts(st.registry[s]) for s in visible_models(req)], "is_popup" => is_popup(req))
 end
 
 # --- views -------------------------------------------------------------------------------------
@@ -998,6 +998,8 @@ Base.@nospecializeinfer function lookup_allowed(ma::ModelAdmin, lookup::Abstract
     h = option(ma, :lookup_allowed)
     h === nothing || return h(lookup, value, req) === true
     M = ma.model
+    # a raw id widget's lookup popup filters by its foreign key's limit_choices_to (Django's related_fkey_lookups)
+    any(p -> p == (lookup => string(value)), related_fkey_lookups(M)) && return true
     relation_parts = String[]
     prev = nothing
     part = ""
@@ -1021,6 +1023,16 @@ Base.@nospecializeinfer function lookup_allowed(ma::ModelAdmin, lookup::Abstract
         push!(valid, item isa ListFilter ? item.parameter : item isa Pair ? string(item.first) : string(item))
     end
     !isdisjoint(valid, (join(relation_parts, "__"), join(vcat(relation_parts, part), "__")))
+end
+
+"The `limit_choices_to` query parameters of the relations to `T` (Django's Options.related_fkey_lookups)."
+Base.@nospecializeinfer function related_fkey_lookups(@nospecialize(T))
+    out = Pair{String,String}[]
+    for M in Juango.MODEL_LIST, f in vcat(Juango.all_fields(M), Juango.many_to_many(M))
+        f.kind in (:fk, :m2m) && related_model(f) === T && (l = limit_choices_of(f)) !== nothing || continue
+        append!(out, url_params_from_lookup_dict(l))
+    end
+    out
 end
 
 # Query parameters of the change list itself (Django's IGNORED_PARAMS and the date hierarchy's)
@@ -1292,8 +1304,10 @@ function changelist(req::Request; app, model)
     T = ma.model
     meta = modelmeta(T)
     require_perm(req, ma, :view, :change)
+    popup = is_popup(req)
+    to_field = check_to_field(ma, req)
     back = req.path * (isempty(req.query_string) ? "" : "?" * req.query_string)
-    if req.method == "POST" && haskey(req.POST, "action") && !haskey(req.POST, "_save")
+    if !popup && req.method == "POST" && haskey(req.POST, "action") && !haskey(req.POST, "_save")
         r = run_action(req, ma)
         r isa HttpResponse && return r
         return Juango.HttpResponseRedirect(back)
@@ -1319,7 +1333,8 @@ function changelist(req::Request; app, model)
         dups |= extra_dups
     catch e
         e isa BadFilterValue || rethrow()
-        haskey(req.GET, "e") || return Juango.HttpResponseRedirect(req.path * "?e=1")
+        haskey(req.GET, "e") || return Juango.HttpResponseRedirect(req.path * "?e=1" * (popup ? "&_popup=1" : "") *
+                                                                    (to_field === nothing ? "" : "&_to_field=" * Juango.urlquote(to_field)))
         qs = admin_queryset(ma, req)
     end
     haskey(req.GET, "e") && message!(req, :error, gettext("The filters in the address weren't valid, so they were left out."))
@@ -1357,7 +1372,7 @@ function changelist(req::Request; app, model)
         page(p, 1)
     end
     objs = collect(pg)
-    editable = !isempty(ma.list_editable) && can(req, ma, :change)
+    editable = !popup && !isempty(ma.list_editable) && can(req, ma, :change)     # (a popup picks a row: no editing, no actions)
     fs = nothing
     if editable
         FS = modelformset_factory(T; fields = ma.list_editable, extra = 0)
@@ -1395,7 +1410,8 @@ function changelist(req::Request; app, model)
         hidden = fs === nothing ? "" : Juango.widget_html(forms[k][:id])
         pk = Juango.pk_string(o)
         # a NamedTuple, not a Dict: the template reads row.id, row.cells ..., and this is per row
-        push!(rows, (id = pk, cells = cells, hidden = SafeString(hidden), url = reverse_url("admin:change"; app = ma.app, model = ma.slug, id = admin_quote(pk)) * back_q))
+        push!(rows, (id = pk, cells = cells, hidden = SafeString(hidden), url = reverse_url("admin:change"; app = ma.app, model = ma.slug, id = admin_quote(pk)) * back_q,
+                     popup_value = popup ? popup_value(o, to_field) : nothing))
     end
     sf = option(ma, :show_facets, :allow)
     facets_on = sf === :always || (sf === :allow && haskey(req.GET, "_facets"))
@@ -1413,7 +1429,8 @@ function changelist(req::Request; app, model)
         "can_add" => can(req, ma, :add), "can_delete" => can(req, ma, :delete),
         "can_import" => option(ma, :import_export) !== nothing && can(req, ma, :add) && can(req, ma, :change),
         "can_export" => option(ma, :import_export) !== nothing,
-        "actions" => [Dict("name" => a.name, "description" => a.description) for a in ma.actions if can(req, ma, a.permission)],
+        "actions" => popup ? Any[] : [Dict("name" => a.name, "description" => a.description) for a in ma.actions if can(req, ma, a.permission)],
+        "to_field" => to_field, "add_query" => popup ? "?" * encode_params(vcat(["_popup" => "1"], to_field === nothing ? Pair{String,String}[] : ["_to_field" => to_field])) : "",
         "list_editable" => fs !== nothing, "management_form" => fs === nothing ? "" : management_form(fs),
         "date_hierarchy" => drill,
         "prev_url" => pg.has_previous ? query_with(req, "page" => pg.previous_page_number) : nothing,
@@ -1580,17 +1597,29 @@ function configure_widgets!(ma::ModelAdmin, form, req = nothing)
             ords = ordering(relma, req)
             isempty(ords) || (form.fields[i] = f = (g = deepcopy(f); g.form = merge(something(g.form, Dict{Symbol,Any}()), Dict{Symbol,Any}(:choices_ordering => ords)); g))
         end
-        for (k, v) in get(overrides, f.kind, Dict{Symbol,Any}())
+        ov = get(overrides, f.kind, Dict{Symbol,Any}())
+        for (k, v) in ov
             setproperty!(f, Symbol(k), v)
         end
-        f.name in radios && (f.widget = :radio)
-        for (opt, dir) in ((:filter_horizontal, "horizontal"), (:filter_vertical, "vertical"))
-            f.kind === :m2m && f.name in option(ma, opt, Symbol[]) &&
-                (f.widget = Juango.Widget(; attrs = Dict("data-filter-box" => dir, "data-filter-label" => string(label(f)))))
+        # (a widget formfield_overrides gives wins over radio_fields, filter_*, raw_id_fields and autocomplete_fields, as Django's)
+        if !any(k -> Symbol(k) === :widget, keys(ov))
+            f.name in radios && (f.widget = :radio)
+            for (opt, dir) in ((:filter_horizontal, "horizontal"), (:filter_vertical, "vertical"))
+                f.kind === :m2m && f.name in option(ma, opt, Symbol[]) &&
+                    (f.widget = Juango.Widget(; attrs = Dict("data-filter-box" => dir, "data-filter-label" => string(label(f)))))
+            end
+            f.name in ma.raw_id_fields && (f.widget = :raw_id)
+            f.name in ma.autocomplete_fields && (f.widget = :autocomplete)
+            f.kind === :fk && Juango.widget_kind(f.widget) === nothing && (w = big_fk_widget(f)) !== nothing && (f.widget = w)
         end
-        f.name in ma.raw_id_fields && (f.widget = :raw_id)
-        f.name in ma.autocomplete_fields && (f.widget = :autocomplete)
-        f.kind === :fk && Juango.widget_kind(f.widget) === nothing && (w = big_fk_widget(f)) !== nothing && (f.widget = w)
+        # the raw id box's lookup link, or the add / change / delete links beside a relation's select
+        if f.kind in (:fk, :m2m)
+            if Juango.widget_kind(f.widget) === :raw_id
+                wrap_widget!(f, raw_id_links(req, f))
+            elseif (w = related_links(req, ma, f)) !== nothing
+                wrap_widget!(f, w)
+            end
+        end
     end
     form
 end
@@ -1608,6 +1637,153 @@ function big_fk_widget(f)
     ra = get(current_site().registry, admin_key(R), nothing)
     ra !== nothing && !isempty(ra.search_fields) ? :autocomplete : :raw_id
 end
+
+# --- related-object links and popups (Django's RelatedFieldWidgetWrapper, raw id widgets' lookups) ------------
+
+"A page opened as a popup from a related-object link (`_popup`, Django's IS_POPUP_VAR)."
+is_popup(req) = req isa Request && (haskey(req.GET, "_popup") || (req.method == "POST" && haskey(req.POST, "_popup")))
+
+"""
+    url_params_from_lookup_dict(lookups) -> Vector{Pair{String,String}}
+
+A foreign key's `limit_choices_to` as the change list's query parameters (Django's): a list as
+comma-separated values, a boolean as 1 or 0, a function called. A `Q` gives none.
+"""
+function url_params_from_lookup_dict(lookups)
+    lookups isa Function && (lookups = lookups())
+    lookups isa AbstractDict || return Pair{String,String}[]
+    out = Pair{String,String}[]
+    for k in sort!(collect(keys(lookups)); by = string)
+        v = lookups[k]
+        v isa Function && (v = v())
+        push!(out, string(k) => v isa Bool ? (v ? "1" : "0") :
+                               v isa Union{AbstractVector,Tuple,AbstractSet} ? join(string.(collect(v)), ",") : string(v))
+    end
+    out
+end
+admin_pk_name(@nospecialize(T)) = Juango.natural_pk(T) ? Juango.pk_fields(T)[1].name : :id
+limit_choices_of(f) = f.form === nothing ? nothing : get(f.form, :limit_choices_to, nothing)
+"The field of the related model a relation points at (its `to_field`, else the primary key)."
+related_to_field(f) = f.kind === :fk ? something(Juango.fk_to_field(f), admin_pk_name(related_model(f))) : admin_pk_name(related_model(f))
+encode_params(ps) = join((Juango.urlquote(k) * "=" * Juango.urlquote(v) for (k, v) in ps), "&")
+
+"""
+The admin's raw id box (Django's ForeignKeyRawIdWidget / ManyToManyRawIdWidget): a lookup link to the
+related model's change list (opened as a popup to pick a row), and a foreign key's current object
+linked to its change page. Without an admin for the related model, the plain box.
+"""
+struct RawIdLinks
+    lookup::Union{String,Nothing}
+    change::Union{String,Nothing}           # the change page's URL with __fk__ for the key
+end
+function (w::RawIdLinks)(bf, html)
+    w.lookup === nothing && return html
+    fld = bf.field
+    m2m = fld.kind === :m2m
+    R = related_model(fld)
+    cls = m2m ? "vManyToManyRawIdAdminField" : "vForeignKeyRawIdAdminField" *
+          ((g = Juango.findfield(modelmeta(R), related_to_field(fld))) !== nothing && g.kind === :uuid ? " vUUIDField" : "")
+    io = IOBuffer()
+    print(io, "<div>", Juango.raw_id_input(bf; class = cls), "<a href=\"", escape_html(w.lookup), "\" class=\"related-lookup\" id=\"lookup_",
+          escape_html(Juango.html_id(bf.form, fld)), "\" title=\"", escape_html(gettext("Lookup")), "\"></a>")
+    if !m2m && (cur = Juango.raw_id_current(bf)) !== nothing
+        print(io, "&nbsp;<strong>", w.change === nothing ? escape_html(string(cur)) :
+                  "<a href=\"" * escape_html(replace(w.change, "__fk__" => admin_pk(cur))) * "\">" * escape_html(string(cur)) * "</a>", "</strong>")
+    end
+    print(io, "</div>")
+    String(take!(io))
+end
+function raw_id_links(req, f)
+    R = related_model(f)
+    ra = get(current_site().registry, admin_key(R), nothing)
+    ra === nothing && return RawIdLinks(nothing, nothing)
+    ps = url_params_from_lookup_dict(limit_choices_of(f))
+    f.kind === :m2m || push!(ps, "_to_field" => string(related_to_field(f)))
+    lookup = reverse_url("admin:changelist"; app = ra.app, model = ra.slug) * (isempty(ps) ? "" : "?" * encode_params(ps))
+    change = req !== nothing && (can(req, ra, :change) || can(req, ra, :view)) ?
+             reverse_url("admin:change"; app = ra.app, model = ra.slug, id = "__fk__") : nothing
+    RawIdLinks(lookup, change)
+end
+
+"""
+Links beside a relation's select to add, change, delete or view the related object in a popup
+(Django's RelatedFieldWidgetWrapper), each when the user may, the related model has an admin, and
+(change, delete, view) the select picks one object; delete not when deleting it would cascade here.
+"""
+struct RelatedLinks
+    model_ref::String
+    verbose_name::String
+    params::String                         # _to_field=...&_popup=1
+    source_model::String
+    add::Union{String,Nothing}
+    change::Union{String,Nothing}          # URLs with __fk__ for the selected key
+    delete::Union{String,Nothing}
+    view::Union{String,Nothing}
+end
+function (w::RelatedLinks)(bf, html)
+    Juango.is_hidden_field(bf.field) && return html
+    id = escape_html(Juango.html_id(bf.form, bf.field))
+    io = IOBuffer()
+    print(io, "<div class=\"related-widget-wrapper\" data-model-ref=\"", escape_html(w.model_ref), "\">", html)
+    link(kind, url, title, glyph; template = true, popup = true) =
+        print(io, "<a class=\"related-widget-wrapper-link ", kind, "-related\" id=\"", kind, "_", id, "\"",
+              template ? " data-href-template=\"" : " href=\"", escape_html(url * "?" * w.params * (kind == "add" ? "&_source_model=" * w.source_model : "")), "\"",
+              popup ? " data-popup=\"yes\"" : "", " title=\"", escape_html(title), "\"><span aria-hidden=\"true\">", glyph, "</span></a>")
+    vn = w.verbose_name
+    w.change === nothing || link("change", w.change, interpolate(gettext("Change selected %(model)s"), Dict("model" => vn)), "✎")
+    w.add === nothing || link("add", w.add, interpolate(gettext("Add another %(model)s"), Dict("model" => vn)), "+"; template = false)
+    w.delete === nothing || link("delete", w.delete, interpolate(gettext("Delete selected %(model)s"), Dict("model" => vn)), "✕")
+    w.view === nothing || link("view", w.view, interpolate(gettext("View selected %(model)s"), Dict("model" => vn)), "👁"; popup = false)
+    print(io, "</div>")
+    String(take!(io))
+end
+Base.@nospecializeinfer function related_links(req, ma::ModelAdmin, f)
+    R = related_model(f)
+    ra = get(current_site().registry, admin_key(R), nothing)
+    (ra === nothing || req === nothing) && return nothing
+    wk = Juango.widget_kind(f.widget)
+    single = f.kind !== :m2m && !(wk in (:radio, :checkboxes, :hidden)) && !(f.widget isa Juango.Widget && haskey(f.widget.attrs, "data-filter-box"))
+    url(kind) = reverse_url("admin:" * kind; app = ra.app, model = ra.slug, id = "__fk__")
+    cascade = f.kind !== :m2m && f.on_delete === :CASCADE
+    rm = modelmeta(R)
+    RelatedLinks(model_name(R), rm.verbose_name, "_to_field=" * Juango.urlquote(string(related_to_field(f))) * "&_popup=1",
+                 lowercase(Juango.model_label(ma.model)),
+                 can(req, ra, :add) ? reverse_url("admin:add"; app = ra.app, model = ra.slug) : nothing,
+                 single && can(req, ra, :change) ? url("change") : nothing,
+                 single && !cascade && can(req, ra, :delete) ? url("delete") : nothing,
+                 single && !can(req, ra, :change) && can(req, ra, :view) ? url("change") : nothing)
+end
+wrap_widget!(f, w) = (f.form = merge(something(f.form, Dict{Symbol,Any}()), Dict{Symbol,Any}(:wrap_widget => w)); f)
+
+"""
+`_to_field` (a popup picking objects by a field other than the key) must be the primary key, or a
+field a relation from a model in this admin points at (Django's to_field_allowed); else a 400.
+"""
+Base.@nospecializeinfer function check_to_field(ma::ModelAdmin, req)
+    tf = req.method == "POST" && haskey(req.POST, "_to_field") ? req.POST["_to_field"] : get(req.GET, "_to_field", nothing)
+    (tf === nothing || isempty(tf)) && return nothing
+    to_field_allowed(ma, tf) || throw(Juango.BadRequest("The field $tf cannot be referenced."))
+    tf
+end
+Base.@nospecializeinfer function to_field_allowed(ma::ModelAdmin, name::AbstractString)
+    T = ma.model
+    n = Symbol(name)
+    (n === :pk || n === admin_pk_name(T)) && return true
+    Juango.findfield(modelmeta(T), n) === nothing && return false
+    st = current_site()
+    registered = Set{Any}()
+    for (_, a) in st.registry
+        push!(registered, a.model)
+        foreach(ia -> push!(registered, ia.model), a.inlines)
+    end
+    any(Juango.related_objects(T)) do r
+        r.field.kind in (:fk, :o2o) && any(M -> M <: r.related_model || M === r.related_model, registered) && related_to_field(r.field) === n
+    end
+end
+"The value a popup hands back for an object: its `_to_field` value, else its key."
+popup_value(@nospecialize(o), tf) = tf === nothing ? Juango.pk_string(o) : string(getproperty(o, Symbol(tf)))
+"The page that closes a popup and hands its object back to the form that opened it (Django's popup_response.html)."
+popup_response(req, data) = render(req, "admin/popup_response.html", Dict{String,Any}("popup_response_data" => Juango.JSON.json(data)))
 
 "The add form's initial values from the query string (Django's get_changeform_initial_data; many-to-many as 1,2,3)."
 function changeform_initial(ma::ModelAdmin, req::Request)
@@ -1633,6 +1809,9 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
     save_as_new && (obj = nothing)
     adding = obj === nothing
     adding ? require_perm(req, ma, :add) : require_perm(req, ma, :view, :change; obj = obj)
+    popup = is_popup(req)
+    to_field = check_to_field(ma, req)
+    old_value = !popup || adding ? nothing : popup_value(obj, to_field)
     editable = adding || can(req, ma, :change, obj)
     req.method == "POST" && !editable && require_perm(req, ma, :change; obj = obj)
     ro = readonly_fields(ma, req, obj)
@@ -1673,6 +1852,10 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         log_action!(req.user, o, adding ? ADDITION : CHANGE, adding ? "Added." : change_message(form, inlines))
         resp_hook = option(ma, adding ? :response_add : :response_change)
         resp_hook === nothing || return Juango.to_response(resp_hook(req, o))
+        # opened from a related-object link: close, handing the object back (Django's response_add / response_change)
+        popup && return popup_response(req, adding ? Dict("value" => popup_value(o, to_field), "obj" => string(o)) :
+                                                     Dict("action" => "change", "value" => old_value, "obj" => string(o),
+                                                          "new_value" => popup_value(o, to_field)))
         verb = adding ? "added" : "changed"
         if haskey(req.POST, "_continue") || save_as_new || custom_add
             message!(req, :success, "The $(meta.verbose_name) “$(o)” was $verb successfully. You may edit it again below.")
@@ -1707,7 +1890,11 @@ Base.@nospecializeinfer function change_form(req::Request, ma::ModelAdmin, @nosp
         "view_on_site" => adding ? nothing : view_on_site_url(ma, obj), "save_on_top" => option(ma, :save_on_top, false),
         "password_change" => adding || !option(ma, :password_change_page, false) ? nothing :
             Dict("summary" => Juango.password_summary(obj), "url" => reverse_url("admin:password_change"; app = ma.app, model = ma.slug, id = admin_pk(obj))),
-        "history_url" => adding ? nothing : reverse_url("admin:history"; app = ma.app, model = ma.slug, id = admin_pk(obj))))
+        "history_url" => adding ? nothing : reverse_url("admin:history"; app = ma.app, model = ma.slug, id = admin_pk(obj)),
+        "to_field" => to_field))
+    if popup        # (in a popup: Save only, as Django's submit row)
+        ctx["can_delete"] = false; ctx["save_as"] = false; ctx["can_add"] = false
+    end
     render(req, "admin/change_form.html", ctx)
 end
 
@@ -1807,9 +1994,11 @@ function delete_view(req::Request; app, model, id)
     meta = modelmeta(ma.model)
     obj = admin_object(ma, req, id)
     require_perm(req, ma, :delete; obj = obj)
+    to_field = check_to_field(ma, req)
     if req.method == "POST" && isempty(get_deleted_objects(req, obj).protected)    # (protected: the page again, as Django's)
         isempty(get_deleted_objects(req, obj).perms_needed) || throw(PermissionDenied())
         name = string(obj)
+        value = popup_value(obj, to_field)
         try
             Juango.atomic() do
                 log_action!(req.user, obj, DELETION)
@@ -1818,6 +2007,7 @@ function delete_view(req::Request; app, model, id)
             end
             rd = option(ma, :response_delete)
             rd === nothing || return Juango.to_response(rd(req, name))
+            is_popup(req) && return popup_response(req, Dict("action" => "delete", "value" => value))
             message!(req, :success, interpolate(gettext("The %(model)s “%(object)s” was deleted successfully."),
                                                 Dict("model" => meta.verbose_name, "object" => name)))
             return Juango.HttpResponseRedirect(changelist_url(ma, req))
@@ -1832,7 +2022,8 @@ function delete_view(req::Request; app, model, id)
             interpolate(gettext("Cannot delete %(name)s"), Dict("name" => meta.verbose_name))
     ctx = base_context(req, title)
     merge!(ctx, Dict{String,Any}("opts" => opts(ma), "object" => obj, "deleted_objects" => d.html,
-                                 "model_count" => d.model_count, "perms_lacking" => d.perms_needed, "protected" => d.protected))
+                                 "model_count" => d.model_count, "perms_lacking" => d.perms_needed, "protected" => d.protected,
+                                 "to_field" => to_field))
     render(req, "admin/delete_confirmation.html", ctx)
 end
 

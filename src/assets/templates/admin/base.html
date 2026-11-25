@@ -51,7 +51,7 @@ ul.errorlist{color:var(--err);margin:0 0 6px;padding:0;list-style:none;font-weig
 {% block extrahead %}{% endblock %}
 </head>
 <body data-admin-root="{% url 'admin:index' %}">
-<div id="header">
+{% if not is_popup %}<div id="header">
   <h1><a href="{% url 'admin:index' %}">{{ site_header }}</a></h1>
   {% if user.is_authenticated and user.is_staff %}
   <div id="user-tools">
@@ -61,10 +61,91 @@ ul.errorlist{color:var(--err);margin:0 0 6px;padding:0;list-style:none;font-weig
   </div>
   {% endif %}
 </div>
-{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a>{% if title %} › {{ title }}{% endif %}</div>{% endblock %}
+{% block breadcrumbs %}<div class="breadcrumbs"><a href="{% url 'admin:index' %}">{% translate "Home" %}</a>{% if title %} › {{ title }}{% endif %}</div>{% endblock %}{% endif %}
 {% if messages %}<ul class="messagelist">{% for message in messages %}<li class="{{ message.tags }}">{{ message }}</li>{% endfor %}</ul>{% endif %}
 <div id="content">
 {% block content %}{% endblock %}
 </div>
+<script>
+/* Related-object popups (Django's RelatedObjectLookups.js): the links beside a relation open the
+   related model's pages in a popup named after the field; the popup hands the object back. */
+(function () {
+  var PREFIX = "popup__";
+  function fieldFor(win) { return document.getElementById(win.name.slice(PREFIX.length)); }
+  function changed(el) { el.dispatchEvent(new Event("change", {bubbles: true})); }
+  function open(href, fieldId) {
+    if (!/[?&]_popup=1/.test(href)) href += (href.indexOf("?") >= 0 ? "&" : "?") + "_popup=1";
+    var w = window.open(href, PREFIX + fieldId, "height=600,width=1000,resizable=yes,scrollbars=yes");
+    if (w) w.focus();
+    return false;
+  }
+  function wrapperLinks(sel) {
+    var wrap = sel.closest(".related-widget-wrapper");
+    if (!wrap) return;
+    wrap.querySelectorAll("a[data-href-template]").forEach(function (a) {
+      var v = sel.value;
+      if (v && !sel.multiple) { a.href = a.dataset.hrefTemplate.replace("__fk__", encodeURIComponent(v)); a.removeAttribute("aria-disabled"); a.style.visibility = ""; }
+      else { a.removeAttribute("href"); a.setAttribute("aria-disabled", "true"); a.style.visibility = "hidden"; }
+    });
+  }
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest && e.target.closest("a.related-lookup, a.related-widget-wrapper-link[data-popup], a[data-popup-opener]");
+    if (!a) return;
+    if (a.hasAttribute("data-popup-opener")) {          // a row of a lookup popup: choose it
+      if (!window.opener) return;
+      e.preventDefault();
+      window.opener.dismissRelatedLookupPopup(window, a.dataset.popupOpener);
+      return;
+    }
+    if (!a.getAttribute("href")) { e.preventDefault(); return; }
+    e.preventDefault();
+    open(a.href, a.id.replace(/^(lookup|add|change|delete|view)_/, ""));
+  });
+  document.addEventListener("change", function (e) {
+    if (e.target.matches && e.target.matches(".related-widget-wrapper select")) wrapperLinks(e.target);
+  });
+  document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll(".related-widget-wrapper select").forEach(wrapperLinks);
+  });
+  window.dismissRelatedLookupPopup = function (win, chosenId) {
+    var el = fieldFor(win);
+    if (el) {
+      el.value = el.classList.contains("vManyToManyRawIdAdminField") && el.value ? el.value + "," + chosenId : chosenId;
+      changed(el);
+    }
+    win.close();
+  };
+  window.dismissAddRelatedObjectPopup = function (win, newId, newRepr) {
+    var el = fieldFor(win);
+    if (el && el.nodeName === "SELECT") {
+      var o = new Option(newRepr, newId, true, true);
+      el.add(o);
+      changed(el);
+    } else if (el) {
+      el.value = el.classList.contains("vManyToManyRawIdAdminField") && el.value ? el.value + "," + newId : newId;
+      changed(el);
+    }
+    win.close();
+  };
+  function sameModel(el) {
+    var wrap = el && el.closest(".related-widget-wrapper");
+    return wrap ? document.querySelectorAll('.related-widget-wrapper[data-model-ref="' + wrap.dataset.modelRef + '"] select') : [];
+  }
+  window.dismissChangeRelatedObjectPopup = function (win, objId, newRepr, newId) {
+    sameModel(fieldFor(win)).forEach(function (sel) {
+      Array.prototype.forEach.call(sel.options, function (o) { if (o.value === objId) { o.textContent = newRepr; o.value = newId; } });
+      wrapperLinks(sel);
+    });
+    win.close();
+  };
+  window.dismissDeleteRelatedObjectPopup = function (win, objId) {
+    sameModel(fieldFor(win)).forEach(function (sel) {
+      Array.prototype.slice.call(sel.options).forEach(function (o) { if (o.value === objId) o.remove(); });
+      changed(sel);
+    });
+    win.close();
+  };
+})();
+</script>
 </body>
 </html>
