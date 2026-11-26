@@ -1,0 +1,6 @@
+{% extends "admin/base.html" %}
+{% block content %}<h1 class="page">Template: <q>{{ name }}</q></h1>
+<h2>Search path for template <q>{{ name }}</q>:</h2>
+<ol>{% for t in templates %}<li><code>{{ t.file }}</code>{% if not t.exists %} (does not exist){% endif %}</li>{% endfor %}</ol>
+{% for t in templates %}{% if t.exists %}<div class="module"><h2><code>{{ t.file }}</code></h2><pre>{{ t.contents }}</pre></div>{% endif %}{% endfor %}
+{% endblock %}

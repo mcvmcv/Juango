@@ -1,0 +1,5 @@
+{% extends "admin/base.html" %}
+{% block content %}<h1 class="page">{{ name }}</h1>
+<p>URL <code>{{ route }}</code>{% if urlname %} · Name: <code>{{ urlname }}</code>.{% endif %}</p>
+{% if doc %}<div class="doc">{{ doc }}</div>{% else %}<p>This view has no documentation.</p>{% endif %}
+<p><a href="{% url 'admindocs:views' %}">‹ Back to View documentation</a></p>{% endblock %}

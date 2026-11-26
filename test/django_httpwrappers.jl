@@ -1,4 +1,4 @@
-# Django's request and response tests, ported (#227): tests/httpwrappers, responses (test_cookie,
+# Django's request and response tests, ported (#227): tests/httpwrappers, responses (tests, test_cookie,
 # test_fileresponse's Content-Disposition) and utils_tests/test_http's content_disposition_header.
 # julia --project=test test/django_httpwrappers.jl   (see setup.jl)
 #
@@ -234,10 +234,14 @@ end
     delete_cookie!(r, "c")                                                              # test_default
     ck = dhw_cookie(r, "c")
     @test ck["expires"] == "Thu, 01 Jan 1970 00:00:00 GMT" && ck["max-age"] == "0" && ck["path"] == "/" && !haskey(ck, "secure")
-    for prefix in ("Secure", "Host")                                                    # test_delete_cookie_secure_prefix
+    for prefix in ("Secure", "Host", "Http", "Host-Http")                               # test_delete_cookie_secure_prefix
         delete_cookie!(r, "__$(prefix)-c")
         @test haskey(dhw_cookie(r, "__$(prefix)-c"), "secure")
     end
+    for prefix in ("Http", "Host-Http")                                                 # test_delete_cookie_http_prefix
+        @test haskey(dhw_cookie(r, "__$(prefix)-c"), "httponly")
+    end
+    @test !haskey(dhw_cookie(r, "__Secure-c"), "httponly")
     delete_cookie!(r, "s"; samesite = "none")                                           # test_delete_cookie_secure_samesite_none
     @test haskey(dhw_cookie(r, "s"), "secure") && dhw_cookie(r, "s")["samesite"] == "none"
     delete_cookie!(r, "l"; samesite = "lax")                                            # test_delete_cookie_samesite
@@ -269,4 +273,41 @@ end
     @test getheader(FileResponse(gz), "Content-Type") == "application/gzip"              # test_compressed_response
     # not translated: file-like objects without names, Content-Type sniffing of other compression
     # encodings, the response's closing of the file
+end
+
+@testset "django responses: HttpResponseBaseTests, HttpResponseTests" begin
+    r = HttpResponse()                                                                  # test_setdefault
+    setheader!(r, "Header", "Value")
+    @test get!(r, "header", "changed") == "Value" && getheader(r, "header") == "Value"
+    @test get!(r, "x-header", "DefaultValue") == "DefaultValue" && getheader(r, "X-Header") == "DefaultValue"
+    r.charset = "utf-8"; @test r.charset == "utf-8"                                     # test_charset_setter
+    r.reason_phrase = "test"; @test r.reason_phrase == "test"                           # test_reason_phrase_setter
+    r = HttpResponse(; status = 503)                                                    # test_status_code
+    @test r.status_code == 503 && r.reason_phrase == "Service Unavailable"
+    r = HttpResponse(); r.status_code = 503                                             # test_change_status_code
+    @test r.status == 503 && r.reason_phrase == "Service Unavailable"
+    @test HttpResponse(; status = "599").status == 599                                  # test_valid_status_code_string
+    reason = "I'm an anarchist coffee pot on crack."                                    # test_reason_phrase
+    r = HttpResponse(; status = 419, reason)
+    @test r.status == 419 && r.reason_phrase == reason
+    @test Juango.to_http(r).reason == reason                                            # (and sent so)
+    for bad in ("OK\r\nX-Injected-header: yes", "OK\0", "OK\x1f", "OK\x7f", "OK\u9f")    # test_invalid_reason_phrase
+        e = try HttpResponse(; reason = bad) catch e; e end
+        @test e isa BadHeaderError && e.msg == "reason_phrase can't contain control characters."
+    end
+    # test_charset_detection
+    @test HttpResponse("ok").charset == "utf-8"
+    r = HttpResponse(; charset = "iso-8859-1")
+    @test r.charset == "iso-8859-1" && getheader(r, "Content-Type") == "text/html; charset=iso-8859-1"
+    @test HttpResponse(; content_type = "text/plain; charset=utf-8", charset = "iso-8859-1").charset == "iso-8859-1"
+    @test HttpResponse(; content_type = "text/plain; charset=iso-8859-1").charset == "iso-8859-1"
+    @test HttpResponse(; content_type = "text/plain; charset=\"iso-8859-1\"").charset == "iso-8859-1"
+    @test HttpResponse(; content_type = "text/plain; charset=").charset == "utf-8"
+    @test HttpResponse(; content_type = "text/plain").charset == "utf-8"
+    # test_repr, test_repr_no_content_type
+    @test repr(HttpResponse("Caf\u00e9 :)"; status = 201)) == "<HttpResponse status_code=201, \"text/html; charset=utf-8\">"
+    r = HttpResponse(; status = 204); delheader!(r, "Content-Type")
+    @test repr(r) == "<HttpResponse status_code=204>"
+    # not translated: closed/tell/writable and TextIOWrapper (Python's file protocol), the generator cache (Julia
+    # bodies are bytes), test_response_content_charset (bodies are bytes as given)
 end

@@ -23,7 +23,8 @@ function to_http(resp::HttpResponse)
     for c in resp.cookies
         push!(hs, "Set-Cookie" => c)
     end
-    HTTP.Response(resp.status, hs, resp.body)
+    resp.reason === nothing ? HTTP.Response(resp.status, hs, resp.body) :
+                              HTTP.Response(resp.status, resp.body; headers = hs, reason = resp.reason)
 end
 
 "Timeouts for HTTP.jl's server, so slow or idle clients can't hold connections open forever."

@@ -162,7 +162,8 @@ end
 Base.@nospecializeinfer lineage(@nospecialize(T::Type)) = unique(vcat(Any[T, concrete_model(T)], ancestors(T)))
 "Multi-table children of `T` (models whose table extends `T`'s)."
 Base.@nospecializeinfer child_models(@nospecialize(T::Type)) = cached_relations(compute_child_models, :children, T)
-Base.@nospecializeinfer compute_child_models(@nospecialize(T::Type)) = Any[C for C in MODEL_LIST if (m = modelmeta(C); !m.proxy && m.parent === concrete_model(T))]
+Base.@nospecializeinfer compute_child_models(@nospecialize(T::Type)) =      # (a child of a proxy extends the proxy's concrete model's rows)
+    Any[C for C in MODEL_LIST if (m = modelmeta(C); !m.proxy && m.parent !== nothing && concrete_model(m.parent) === concrete_model(T))]
 "All fields of `T` including inherited multi-table fields, ancestors' first."
 Base.@nospecializeinfer function all_fields(@nospecialize(T::Type))
     C = concrete_model(T)
@@ -338,15 +339,18 @@ target_name(f::Field, owner) = f.related === :self ? string(nameof(owner)) : f.r
                                f.related isa Type ? string(nameof(f.related)) : string(f.related)
 
 Base.@nospecializeinfer function make_through_model(@nospecialize(T::Type), m::ModelMeta, f::Field)
-    table = something(getfield(f, :db_column), m.table * "_" * string(f.name))    # (ManyToManyField(...; db_table))
+    # (ManyToManyField(...; db_table); a long name shortened with a hash, as the model's own table's)
+    table = something(getfield(f, :db_column), Juango.constraint_name(m.table, string(f.name)))
     tname = target_name(f, T)
     src, dst = lowercase(m.name), lowercase(tname)
     if src == dst
         src, dst = "from_" * src, "to_" * dst
     end
     # Reverse names starting with '+' are hidden (not listed in propertynames).
-    srcf = ForeignKey(T; on_delete = :CASCADE, related_name = Symbol("+", table, "_src"))
-    dstf = ForeignKey(f.related === :self ? T : f.related; on_delete = :CASCADE, related_name = Symbol("+", table, "_dst"))
+    # (the many-to-many's db_constraint = false: no FOREIGN KEY constraints on the join table either, as Django's)
+    srcf = ForeignKey(T; on_delete = :CASCADE, related_name = Symbol("+", table, "_src"), db_constraint = f.db_constraint)
+    dstf = ForeignKey(f.related === :self ? T : f.related; on_delete = :CASCADE, related_name = Symbol("+", table, "_dst"),
+                      db_constraint = f.db_constraint)
     Th = AutoThrough{Symbol(m.app, ".", table)}
     register_model!(Th, Pair{Symbol,Any}[Symbol(src) => srcf, Symbol(dst) => dstf],
                     (table = table, name = m.name * "_" * string(f.name), app_label = m.app,

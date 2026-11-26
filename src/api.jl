@@ -43,7 +43,7 @@ export Model, @model, @abstract_model, Field, CharField, TextField, EmailField, 
        validate_unicode_slug, validate_ipv4_address, validate_ipv6_address, validate_ipv46_address, int_list_validator,
        validate_comma_separated_integer_list, validate_integer, validate_image_file_extension,
        MaxFileSizeValidator, ForeignKey, OneToOneField, ManyToManyField, ForeignObject, GeneratedField,
-       DB_DEFAULT, CompositePrimaryKey, CheckConstraint, UniqueConstraint, Index, get_absolute_url, connection_queries, reset_queries!, absolute_url,
+       DB_DEFAULT, CompositePrimaryKey, CheckConstraint, UniqueConstraint, Index, get_absolute_url, connection_queries, reset_queries!, check_constraints, constraint_checks_disabled, absolute_url,
        Decimal, @dec_str, @choices, Choice, ChoiceSet, IntegerChoices, TextChoices, get_display
 export ContentType, GenericForeignKey, GenericRelation
 # querysets
@@ -173,7 +173,7 @@ public cache, incr, decr, incr_version, decr_version, create_cache_table, CacheS
        add_never_cache_headers!, patch_vary_headers!, has_vary_header,
        BrokenLinkEmailsMiddleware, is_secure, get_host, get_port, csp_override, csp_report_only_override, deploy_issues
 # admin log, contrib apps, tasks
-public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, sitemap_view,
+public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, XViewMiddleware, sitemap_view,
        sitemap_index_view, flatpage, flatpage_urls, FlatpageFallbackMiddleware, flatpage_sitemap, add_domain, RequestSite,
        clear_site_cache!, CurrentSiteMiddleware, CurrentSiteManager, check_current_site_manager, check_site_id, create_default_site!, Redirect, RedirectFallbackMiddleware, background, TaskDef, db_worker
 # apps, settings, commands

@@ -482,7 +482,7 @@ check_constraints message (for MySQL, where loaddata turns the checks off).
 """
 function check_foreign_keys(models)
     for T in models, f in modelmeta(T).fields
-        f.kind === :fk || continue
+        (f.kind === :fk && f.db_constraint) || continue          # (a key without a constraint may point at nothing)
         R = related_model(f)
         t, rt = modelmeta(T).table, modelmeta(R).table
         col, rcol = column(f), target_column(f)
@@ -492,6 +492,47 @@ function check_foreign_keys(models)
         throw(IntegrityError("The row in table '$t' with primary key '$(rows[1][:pk])' has an invalid foreign key: $t.$col contains a " *
                              "value '$(rows[1][:v])' that does not have a corresponding value in $rt.$rcol."))
     end
+end
+
+"""
+    check_constraints(; table_names = nothing)
+
+Throw an `IntegrityError` for the first row whose foreign key points at no row, in these tables (else every
+table Juango manages): Django's `connection.check_constraints`, for data written with
+`constraint_checks_disabled`. Keys with `db_constraint = false` aren't checked.
+"""
+function check_constraints(; table_names = nothing)
+    names = table_names === nothing ? nothing : Set(string.(table_names))
+    ms = [T for T in all_models() if !modelmeta(T).proxy && model_in_use(T) && is_managed(T) &&
+          (names === nothing || modelmeta(T).table in names)]
+    check_foreign_keys(ms)
+end
+
+"""
+    constraint_checks_disabled(f)
+
+Run `f()` with foreign key checks off where the database allows (Django's `connection.constraint_checks_disabled`):
+MySQL turns them off for the connection; SQLite outside a transaction (inside one, as on PostgreSQL, Juango's keys
+are checked only at the commit anyway). `check_constraints` checks the data afterwards.
+"""
+function constraint_checks_disabled(f)
+    b = backend()
+    if b isa MySQLBackend
+        execute("SET FOREIGN_KEY_CHECKS = 0")
+        try
+            return f()
+        finally
+            execute("SET FOREIGN_KEY_CHECKS = 1")
+        end
+    elseif b isa SQLiteBackend && commit_holder().depth == 0      # (PRAGMA foreign_keys can't change inside a transaction)
+        execute("PRAGMA foreign_keys = OFF")
+        try
+            return f()
+        finally
+            execute("PRAGMA foreign_keys = ON")
+        end
+    end
+    f()
 end
 
 """

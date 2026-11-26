@@ -223,7 +223,7 @@ function handle_request(req::Request)
     has_receivers(request_finished, :handler) && send(request_finished, :handler; request = req, response = resp)
     # a 4xx or 5xx response a view returned (Django's log_response in get_response)
     resp isa HttpResponse && resp.status >= 400 &&
-        log_response("%s: %s", reason_phrase(resp.status), req.path; response = resp, request = req)
+        log_response("%s: %s", resp.reason_phrase, req.path; response = resp, request = req)
     resp
 end
 

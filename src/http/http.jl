@@ -669,7 +669,10 @@ mutable struct HttpResponse
     templates::Vector{String}
     stream::Any             # an iterable of chunks for a streaming response (see streaming.jl), else nothing
     deferred::Any           # a TemplateResponse not rendered yet: DeferredTemplate, else nothing
+    reason::Union{Nothing,String}   # a reason phrase of its own (Django's reason=), else the status's
 end
+HttpResponse(status, headers, body, cookies, context, templates, stream, deferred) =
+    HttpResponse(status, headers, body, cookies, context, templates, stream, deferred, nothing)
 
 "What a `TemplateResponse` renders, kept until it's rendered."
 mutable struct DeferredTemplate
@@ -695,12 +698,35 @@ function check_status(status)
     s
 end
 
-function HttpResponse(content = ""; status = 200,
-                      content_type = "text/html; charset=utf-8", headers = Pair{String,String}[])
+function HttpResponse(content = ""; status = 200, content_type = nothing, charset = nothing, reason = nothing,
+                      headers = Pair{String,String}[])
     body = content_bytes(content)
     hs = Pair{String,String}[header_pair(k, v) for (k, v) in headers]
-    any(h -> header_eq(h.first, "content-type"), hs) || pushfirst!(hs, "Content-Type" => content_type)
-    HttpResponse(check_status(status), hs, body, String[], nothing, String[], nothing, nothing)
+    ct = something(content_type, "text/html; charset=$(something(charset, "utf-8"))")
+    any(h -> header_eq(h.first, "content-type"), hs) || pushfirst!(hs, "Content-Type" => ct)
+    r = HttpResponse(check_status(status), hs, body, String[], nothing, String[], nothing, nothing, check_reason(reason))
+    # (a charset with a content type: the charset wins, in the header too)
+    content_type === nothing || charset === nothing || (r.charset = string(charset))
+    r
+end
+"A reason phrase can't hold control characters (Django's: a header could be injected)."
+check_reason(::Nothing) = nothing
+check_reason(s) = any(c -> iscntrl(c), string(s)) ? throw(BadHeaderError("reason_phrase can't contain control characters.")) : string(s)
+"""
+The response's charset (Django's HttpResponse.charset): the one given to the constructor, else the
+Content-Type's `charset=` (quoted or not), else utf-8.
+"""
+function response_charset(r::HttpResponse)
+    ct = getheader(r, "Content-Type")
+    m = ct === nothing ? nothing : match(r"charset=\"?([^\";,\s]+)\"?"i, ct)
+    m === nothing ? "utf-8" : String(m[1])
+end
+"Set a header only if the response doesn't have it yet, ignoring case (Django's setdefault); returns its value."
+function Base.get!(r::HttpResponse, name::AbstractString, default)
+    v = getheader(r, name)
+    v === nothing || return v
+    setheader!(r, name, default)
+    getheader(r, name)
 end
 
 """
@@ -728,9 +754,19 @@ function Base.getproperty(r::HttpResponse, s::Symbol)
     s === :template_name && return (d = getfield(r, :deferred); d === nothing ? nothing : d.template_name)
     s === :context_data && return (d = getfield(r, :deferred); d === nothing ? getfield(r, :context) : d.context_data)
     s === :is_rendered && return getfield(r, :deferred) === nothing
+    s === :reason_phrase && return something(getfield(r, :reason), reason_phrase(getfield(r, :status)))
+    s === :charset && return response_charset(r)
+    s === :status_code && return getfield(r, :status)
     getfield(r, s)
 end
 function Base.setproperty!(r::HttpResponse, s::Symbol, v)
+    s === :reason_phrase && return setfield!(r, :reason, check_reason(v))
+    s === :status_code && return setfield!(r, :status, check_status(v))
+    if s === :charset              # (the Content-Type's charset changed, as Django's charset setter does for encoding)
+        ct = something(getheader(r, "Content-Type"), "text/html")
+        setheader!(r, "Content-Type", occursin(r"charset="i, ct) ? replace(ct, r"charset=\"?[^\";,\s]*\"?"i => "charset=$v") : "$ct; charset=$v")
+        return v
+    end
     if s in (:template_name, :context_data)
         d = getfield(r, :deferred)
         d === nothing && throw(ArgumentError("the response is already rendered"))
@@ -742,8 +778,8 @@ end
 "Response body as a `String` (a streaming response is read to the end first)."
 text(r::HttpResponse) = (consume_stream!(r); String(copy(r.body)))
 Base.String(r::HttpResponse) = text(r)
-Base.show(io::IO, r::HttpResponse) =
-    print(io, "<HttpResponse status=", r.status, " ", repr(something(getheader(r, "Content-Type"), "")), ">")
+Base.show(io::IO, r::HttpResponse) = (ct = getheader(r, "Content-Type");
+    print(io, "<HttpResponse status_code=", r.status, ct === nothing ? "" : ", " * repr(ct), ">"))
 
 "Whether two header names are equal ignoring ASCII case (without allocating)."
 function header_eq(a::AbstractString, b::AbstractString)
@@ -810,12 +846,17 @@ function set_cookie!(r::HttpResponse, name, value; max_age = nothing, expires = 
     push!(r.cookies, s)
     r
 end
-"Delete a cookie: Secure for a `__Secure-` or `__Host-` name or with SameSite=None, as browsers require (Django's)."
+"""
+Delete a cookie: Secure for a `__Secure-`, `__Host-` or `__Http-` name or with SameSite=None, and HttpOnly for
+an `__Http-` or `__Host-Http-` name, as browsers require (Django's).
+"""
 function delete_cookie!(r::HttpResponse, name; path = "/", domain = nothing, samesite = "Lax")
-    secure = startswith(string(name), "__Secure-") || startswith(string(name), "__Host-") ||
+    n = string(name)
+    secure = any(p -> startswith(n, p), ("__Secure-", "__Host-", "__Http-")) ||
              (samesite !== nothing && lowercase(string(samesite)) == "none")
+    httponly = startswith(n, "__Http-") || startswith(n, "__Host-Http-")
     set_cookie!(r, name, ""; max_age = 0, expires = "Thu, 01 Jan 1970 00:00:00 GMT", path = path, domain = domain,
-                samesite = samesite, secure = secure)
+                samesite = samesite, secure = secure, httponly = httponly)
 end
 
 # The salt length goes first, so (name, salt) pairs can't collide: with the old salt, cookie "a" signed with salt

@@ -1228,6 +1228,26 @@ end
     end
 end
 
+@testset "swappable_models: no content type or permissions for a swapped model (Django's test_generated_data)" begin
+    cts(app, model) = filter(Juango.ContentType; app_label = app, model = model)
+    try
+        configure!(AUTH_USER_MODEL = SwapMember)
+        joins = [T for T in Juango.all_models() if T <: Juango.AutoThrough &&
+                 any(f -> f.kind === :fk && Juango.related_model(f) === SwapMember, Juango.modelmeta(T).fields)]
+        Juango.sync_models!(vcat([SwapMember], joins); verbose = false)        # (and its groups/permissions join tables)
+        delete!(filter(Juango.Permission; content_type__app_label = "auth", content_type__model = "user"))
+        delete!(cts("auth", "user")); Juango.clear_contenttype_cache!()
+        Juango.update_contenttypes!(); Juango.update_permissions!()
+        @test !exists(cts("auth", "user")) && exists(cts("project", "swapmember"))
+        @test exists(filter(Juango.Permission; codename = "add_swapmember")) &&
+              !exists(filter(Juango.Permission; content_type__app_label = "auth", content_type__model = "user"))
+    finally
+        configure!(AUTH_USER_MODEL = User)
+        Juango.clear_contenttype_cache!(); Juango.update_contenttypes!(); Juango.update_permissions!()
+    end
+    @test exists(cts("auth", "user"))
+end
+
 @testset "swap_user_model: switching AUTH_USER_MODEL with users in the database (#167)" begin
     f = tempname() * ".sqlite3"
     override_settings(DATABASES = Dict("swaptest" => f)) do
@@ -1288,7 +1308,7 @@ end
 
 @testset "pre_migrate and post_migrate signals" begin
     seen = Tuple{Symbol,String,Any}[]
-    pre = (s; app_label, database, plan, apps, kw...) -> push!(seen, (:pre, app_label, (database, apps)))
+    pre = (s; app_label, database, plan, apps, verbosity, kw...) -> push!(seen, (:pre, app_label, (database, apps, verbosity)))
     post = (s; app_label, database, plan, apps, kw...) -> push!(seen, (:post, app_label, (database, apps)))
     connect!(pre_migrate, pre; dispatch_uid = :test_pre)
     connect!(post_migrate, post; sender = "auth", dispatch_uid = :test_post)
@@ -1301,6 +1321,12 @@ end
         @test findlast(x -> x[1] === :pre, seen) < findfirst(x -> x[1] === :post, seen)
         # the built-in receiver still creates permissions for new models
         @test exists(filter(Juango.Permission; codename = "add_article"))
+        # Django's migrate_signals: the verbosity goes with the signal; migrate --check sends none
+        @test all(x -> x[1] !== :pre || x[3][3] == 1, seen)
+        empty!(seen); redirect_stdout(() -> migrate(; verbose = false), devnull)
+        @test all(x -> x[1] !== :pre || x[3][3] == 0, seen) && !isempty(seen)
+        empty!(seen); redirect_stdout(() -> migrate(; check = true), devnull)
+        @test isempty(seen)
     finally
         disconnect!(pre_migrate; dispatch_uid = :test_pre)
         disconnect!(post_migrate; dispatch_uid = :test_post, sender = "auth")

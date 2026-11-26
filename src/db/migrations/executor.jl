@@ -227,7 +227,7 @@ function migrate_here(; app = nothing, target = nothing, fake = false, fake_init
         log("  Synchronize unmigrated apps: " * join(sort(unique([modelmeta(T).app for T in unmigrated])), ", "))
     labels = migrate_labels(g)
     emit(sig, st) = for a in labels
-        Juango.send(sig, a; app_label = a, database = db, plan = plan, apps = Juango.HistoricalApps(st))
+        Juango.send(sig, a; app_label = a, database = db, plan = plan, apps = Juango.HistoricalApps(st), verbosity = verbose ? 1 : 0)
     end
     emit(Juango.pre_migrate, replay(g, filter(in(applied), keys(g.nodes))))
     log("Running migrations:")

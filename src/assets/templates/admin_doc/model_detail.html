@@ -6,5 +6,6 @@
 {% for f in fields %}<tr><td>{{ f.name }}</td><td>{{ f.type }}{% if f.null %} (null){% endif %}{% if f.unique %} (unique){% endif %}</td><td>{{ f.verbose_name }}{% if f.help %}: {{ f.help }}{% endif %}</td></tr>{% endfor %}
 </tbody></table></div>
 {% if relations %}<div class="module"><h2>Related objects</h2><table><tbody>
-{% for r in relations %}<tr><td>{{ r.name }}</td><td>{{ r.model }} (via {{ r.field }})</td></tr>{% endfor %}
+{% for r in relations %}<tr><td>{{ r.name }}</td><td>{{ r.all }} (via {{ r.field }})</td></tr>
+<tr><td>{{ r.name }}.count</td><td>{{ r.count }}</td></tr>{% endfor %}
 </tbody></table></div>{% endif %}{% endblock %}
