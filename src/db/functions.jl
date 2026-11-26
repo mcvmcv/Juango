@@ -198,6 +198,7 @@ function register_sqlite_extras!(db)
     end
     SQLite.register(db, missing, (a, x) -> x === missing ? a : a === missing ? Int(x) : a & Int(x); nargs = 1, name = "juango_bit_and")
     SQLite.register(db, missing, (a, x) -> x === missing ? a : a === missing ? Int(x) : a | Int(x); nargs = 1, name = "juango_bit_or")
+    SQLite.register(db, missing, (a, x) -> x === missing ? a : a === missing ? Int(x) : xor(a, Int(x)); nargs = 1, name = "juango_bit_xor")
     db
 end
 

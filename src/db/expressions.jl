@@ -135,13 +135,13 @@ Variance(x; sample = false, filter = nothing, default = nothing) = Aggregate(sam
 The values as a `Vector` (a JSON array in the database, so it works everywhere; dates come back as
 text). `ordering` sorts them: `ordering = "-created"`. MySQL ignores `ordering` (MariaDB sorts).
 """
-ArrayAgg(x; distinct = false, ordering = String[], filter = nothing, default = nothing) =
-    Aggregate("ARRAY_AGG", ref(x), distinct, filter; default = default, ordering = ordering)
+ArrayAgg(x; distinct = false, ordering = String[], order_by = nothing, filter = nothing, default = nothing) =
+    Aggregate("ARRAY_AGG", ref(x), distinct, filter; default = default, ordering = something(order_by, ordering))   # (order_by: Django's name now)
 "Like `ArrayAgg` (PostgreSQL's JSONBAgg: a JSON array of the values)."
 JSONBAgg(x; kw...) = ArrayAgg(x; kw...)
 "The values joined into one string with `delimiter` (STRING_AGG / GROUP_CONCAT)."
-StringAgg(x, delimiter::AbstractString; distinct = false, ordering = String[], filter = nothing, default = nothing) =
-    Aggregate("STRING_AGG", ref(x), distinct, filter; default = default, ordering = ordering, delimiter = String(delimiter))
+StringAgg(x, delimiter::AbstractString; distinct = false, ordering = String[], order_by = nothing, filter = nothing, default = nothing) =
+    Aggregate("STRING_AGG", ref(x), distinct, filter; default = default, ordering = something(order_by, ordering), delimiter = String(delimiter))
 "Whether all the values are true."
 BoolAnd(x; filter = nothing, default = nothing) = Aggregate("BOOL_AND", ref(x), false, filter; default = default)
 "Whether any of the values is true."
@@ -150,6 +150,76 @@ BoolOr(x; filter = nothing, default = nothing) = Aggregate("BOOL_OR", ref(x), fa
 BitAnd(x; filter = nothing, default = nothing) = Aggregate("BIT_AND", ref(x), false, filter; default = default)
 "Bitwise OR of the values."
 BitOr(x; filter = nothing, default = nothing) = Aggregate("BIT_OR", ref(x), false, filter; default = default)
+"Bitwise exclusive OR of the values."
+BitXor(x; filter = nothing, default = nothing) = Aggregate("BIT_XOR", ref(x), false, filter; default = default)
+
+# Statistics over pairs of values (Django's django.contrib.postgres.aggregates.statistics): PostgreSQL's own
+# functions, computed from sums elsewhere. Only rows where both y and x aren't NULL count, as PostgreSQL's.
+"""
+    StatAggregate(func; y, x, filter = nothing, default = nothing)
+
+A statistics aggregate of `y` against `x` (a field name, or a number): `Corr`, `CovarPop`, `RegrAvgX`, `RegrAvgY`,
+`RegrCount`, `RegrIntercept`, `RegrR2`, `RegrSlope`, `RegrSXX`, `RegrSXY`, `RegrSYY`.
+"""
+function StatAggregate(func::AbstractString = "STAT"; y = nothing, x = nothing, filter = nothing, default = nothing)
+    (y === nothing || x === nothing) && throw(ArgumentError("Both y and x must be provided."))
+    Aggregate(String(func), Func(:statpair, Any[ref(y), ref(x)]), false, filter; default = default)
+end
+"The correlation coefficient of `y` and `x`."
+Corr(; y = nothing, x = nothing, kw...) = StatAggregate("CORR"; y = y, x = x, kw...)
+"The covariance of `y` and `x`: of the population, or with `sample = true` of a sample."
+CovarPop(; y = nothing, x = nothing, sample::Bool = false, kw...) = StatAggregate(sample ? "COVAR_SAMP" : "COVAR_POP"; y = y, x = x, kw...)
+"The average of `x` over the pairs (`RegrAvgY`: of `y`)."
+RegrAvgX(; y = nothing, x = nothing, kw...) = StatAggregate("REGR_AVGX"; y = y, x = x, kw...)
+RegrAvgY(; y = nothing, x = nothing, kw...) = StatAggregate("REGR_AVGY"; y = y, x = x, kw...)
+"The number of pairs where neither is NULL (0 for none: it takes no `default`)."
+function RegrCount(; y = nothing, x = nothing, default = nothing, kw...)
+    default === nothing || throw(ArgumentError("RegrCount does not allow default."))
+    StatAggregate("REGR_COUNT"; y = y, x = x, kw...)
+end
+"The least-squares line's y-intercept (`RegrSlope`: its slope), and the square of the correlation (`RegrR2`)."
+RegrIntercept(; y = nothing, x = nothing, kw...) = StatAggregate("REGR_INTERCEPT"; y = y, x = x, kw...)
+RegrR2(; y = nothing, x = nothing, kw...) = StatAggregate("REGR_R2"; y = y, x = x, kw...)
+RegrSlope(; y = nothing, x = nothing, kw...) = StatAggregate("REGR_SLOPE"; y = y, x = x, kw...)
+"Sums of squares and products of the deviations: Σ(x-x̄)² (`RegrSXX`), Σ(x-x̄)(y-ȳ) (`RegrSXY`), Σ(y-ȳ)² (`RegrSYY`)."
+RegrSXX(; y = nothing, x = nothing, kw...) = StatAggregate("REGR_SXX"; y = y, x = x, kw...)
+RegrSXY(; y = nothing, x = nothing, kw...) = StatAggregate("REGR_SXY"; y = y, x = x, kw...)
+RegrSYY(; y = nothing, x = nothing, kw...) = StatAggregate("REGR_SYY"; y = y, x = x, kw...)
+is_stat_aggregate(e) = e isa Aggregate && e.arg isa Func && e.arg.name === :statpair
+
+# off PostgreSQL: each statistic from sums over the pairs ({X}, {Y}: x and y where the pair counts, else NULL)
+const STAT_SUMS = let n = "COUNT({X})", sx = "SUM({X})", sy = "SUM({Y})",
+                      sxx = "(SUM({X} * {X}) - SUM({X}) * SUM({X}) / COUNT({X}))", syy = "(SUM({Y} * {Y}) - SUM({Y}) * SUM({Y}) / COUNT({X}))",
+                      sxy = "(SUM({X} * {Y}) - SUM({X}) * SUM({Y}) / COUNT({X}))"
+    Dict("CORR" => "$sxy / {SQRT}($sxx * $syy)", "COVAR_POP" => "$sxy / $n", "COVAR_SAMP" => "$sxy / ($n - 1)",
+         "REGR_AVGX" => "AVG({X})", "REGR_AVGY" => "AVG({Y})", "REGR_COUNT" => n, "REGR_SLOPE" => "$sxy / $sxx",
+         "REGR_INTERCEPT" => "($sy - ($sxy / $sxx) * $sx) / $n",
+         "REGR_R2" => "(CASE WHEN $sxx = 0 THEN NULL WHEN $syy = 0 THEN 1.0 ELSE $sxy * $sxy / ($sxx * $syy) END)",
+         "REGR_SXX" => sxx, "REGR_SXY" => sxy, "REGR_SYY" => syy)
+end
+stat_sqrt(::DatabaseBackend) = "SQRT"
+function compile_stat_aggregate(c::SQLCompiler, e::Aggregate)
+    ysql, yps = compile_expr(c, e.arg.args[1])
+    xsql, xps = compile_expr(c, e.arg.args[2])
+    fsql, fps = e.filter === nothing ? (nothing, Any[]) : expr_condition(c, e.filter)
+    b = backend()
+    if b isa PostgresBackend
+        e.filter === nothing && return "$(e.func)($ysql, $xsql)", vcat(yps, xps)
+        return "$(e.func)(CASE WHEN $fsql THEN $ysql END, CASE WHEN $fsql THEN $xsql END)", vcat(fps, yps, fps, xps)
+    end
+    cond, cps = "$ysql IS NOT NULL AND $xsql IS NOT NULL", vcat(yps, xps)
+    fsql === nothing || (cond = "$fsql AND $cond"; cps = vcat(fps, cps))
+    X, XP = "(CASE WHEN $cond THEN 1.0 * ($xsql) END)", vcat(cps, xps)
+    Y, YP = "(CASE WHEN $cond THEN 1.0 * ($ysql) END)", vcat(cps, yps)
+    out, ps = IOBuffer(), Any[]
+    for m in eachmatch(r"\{(X|Y|SQRT)\}|[^{]+|\{", STAT_SUMS[e.func])
+        tok = m.captures[1]
+        tok === nothing ? print(out, m.match) : tok == "X" ? (print(out, X); append!(ps, XP)) :
+            tok == "Y" ? (print(out, Y); append!(ps, YP)) : print(out, stat_sqrt(b))
+    end
+    String(take!(out)), ps
+end
+stat_sqrt(::SQLiteBackend) = "juango_sqrt"
 
 """
 `When(Q(...); then=value)` or `When(; then=value, lookups...)`, used inside `Case`; a Q or a boolean
@@ -946,6 +1016,15 @@ function expr_condition(c::SQLCompiler, q::Q)
 end
 
 function compile_expr(c::SQLCompiler, e::Aggregate)
+    if is_stat_aggregate(e)
+        sql, ps = compile_stat_aggregate(c, e)
+        if e.default !== nothing
+            dsql, dps = compile_expr(c, lit_expr(e.default))
+            sql = "COALESCE($sql, $dsql)"
+            append!(ps, dps)
+        end
+        return sql, ps
+    end
     e.arg !== nothing && cpk_arg(c, e.arg) && cpk_refuse(c, e, uppercasefirst(lowercase(e.func)))
     # Count(:comments; distinct = true) of rows with a composite key: no one column to count distinct, as Django
     if e.distinct && e.arg isa F && !occursin("__", e.arg.name)
@@ -955,10 +1034,20 @@ function compile_expr(c::SQLCompiler, e::Aggregate)
         M !== nothing && multi_pk(M) && throw(NotSupportedError("COUNT(DISTINCT) doesn't support composite primary keys"))
     end
     arg, ps = e.arg === nothing ? ("*", Any[]) : compile_expr(c, e.arg)
+    filt, fps = "", Any[]
     if e.filter !== nothing
         cond, cps = expr_condition(c, e.filter)
-        arg = "CASE WHEN $cond THEN $(e.arg === nothing ? "1" : arg) END"
-        ps = vcat(cps, ps)
+        if e.func == "ARRAY_AGG" && !(backend() isa MySQLBackend)
+            # the rows filtered out aren't NULL items: FILTER (WHERE ...), as Django's on PostgreSQL (SQLite has it too)
+            filt, fps = " FILTER (WHERE $cond)", cps
+        elseif e.func == "ARRAY_AGG"
+            # MySQL has no FILTER: the kept values wrapped in one-item arrays, the rest NULL, unwrapped when read
+            arg = "CASE WHEN $cond THEN JSON_ARRAY($arg) END"
+            ps = vcat(cps, ps)
+        else
+            arg = "CASE WHEN $cond THEN $(e.arg === nothing ? "1" : arg) END"
+            ps = vcat(cps, ps)
+        end
     end
     order = String[]
     for o in e.ordering
@@ -966,8 +1055,14 @@ function compile_expr(c::SQLCompiler, e::Aggregate)
         push!(order, osql)
         append!(ps, ops)
     end
-    sql = aggregate_sql(backend(), e.func, (e.distinct ? "DISTINCT " : "") * arg, order, e)
-    if e.default !== nothing
+    sql = aggregate_sql(backend(), e.func, (e.distinct ? "DISTINCT " : "") * arg, order, e; filt = filt)
+    append!(ps, fps)
+    d = e.default isa Value ? e.default.value : e.default
+    if e.func == "ARRAY_AGG" && d isa Union{AbstractVector,Tuple}
+        # a list default is JSON text, as the aggregate's result (an array parameter isn't one everywhere)
+        sql = "COALESCE($sql, ?)"
+        push!(ps, JSON.json(json_scalar_tree(collect(d))))
+    elseif e.default !== nothing
         dsql, dps = compile_expr(c, lit_expr(e.default))
         sql = "COALESCE($sql, $dsql)"
         append!(ps, dps)
@@ -977,24 +1072,24 @@ end
 
 obsql(order) = isempty(order) ? "" : " ORDER BY " * join(order, ", ")
 "SQL for an aggregate (`arg` already has DISTINCT); PostgreSQL's spelling by default."
-function aggregate_sql(::DatabaseBackend, func, arg, order, e)
-    func == "ARRAY_AGG" && return "CAST(JSON_AGG($arg$(obsql(order))) AS TEXT)"
+function aggregate_sql(::DatabaseBackend, func, arg, order, e; filt = "")
+    func == "ARRAY_AGG" && return "CAST(JSON_AGG($arg$(obsql(order)))$filt AS TEXT)"
     func == "STRING_AGG" && return "STRING_AGG(CAST($arg AS TEXT), $(sql_string_literal(e.delimiter))$(obsql(order)))"
     "$func($arg)"
 end
-function aggregate_sql(::MySQLBackend, func, arg, order, e)
+function aggregate_sql(::MySQLBackend, func, arg, order, e; filt = "")
     func == "ARRAY_AGG" && return "JSON_ARRAYAGG($arg$(is_mariadb(backend()) ? obsql(order) : ""))"
     func == "STRING_AGG" && return "GROUP_CONCAT($arg$(obsql(order)) SEPARATOR $(sql_string_literal(e.delimiter)))"
     func == "BOOL_AND" && return "MIN($arg)"
     func == "BOOL_OR" && return "MAX($arg)"
     "$func($arg)"
 end
-function aggregate_sql(::SQLiteBackend, func, arg, order, e)
-    func == "ARRAY_AGG" && return "json_group_array($arg$(obsql(order)))"
+function aggregate_sql(::SQLiteBackend, func, arg, order, e; filt = "")
+    func == "ARRAY_AGG" && return "json_group_array($arg$(obsql(order)))$filt"
     func == "STRING_AGG" && return "GROUP_CONCAT($arg, $(sql_string_literal(e.delimiter))$(obsql(order)))"
     func == "BOOL_AND" && return "MIN($arg)"
     func == "BOOL_OR" && return "MAX($arg)"
-    func in ("STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "BIT_AND", "BIT_OR") && return "juango_$(lowercase(func))($arg)"
+    func in ("STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "BIT_AND", "BIT_OR", "BIT_XOR") && return "juango_$(lowercase(func))($arg)"
     "$func($arg)"
 end
 
@@ -1120,6 +1215,9 @@ function compile_expr(c::SQLCompiler, e::Window)
         push!(over, "ORDER BY " * join(os, ", "))
     end
     e.frame === nothing || push!(over, frame_sql(backend(), e.frame))
+    # (PostgreSQL's ArrayAgg is CAST(JSON_AGG(x) AS TEXT): the window goes on JSON_AGG, inside the cast)
+    m = match(r"^CAST\((JSON_AGG\(.*\))( AS TEXT\))$"s, sql)
+    m !== nothing && return "CAST($(m[1]) OVER ($(join(over, " ")))$(m[2])", ps
     "$sql OVER ($(join(over, " ")))", ps
 end
 
@@ -1417,9 +1515,33 @@ Base.@nospecializeinfer function expr_value(@nospecialize(T), e, v, of::Union{No
     e isa Union{RawSQL,ExpressionWrapper} && e.output isa Field && e.output.kind === :bool && return v isa Bool ? v : v != 0
     e isa ExpressionWrapper && e.output === nothing && return expr_value(T, e.expr, v, typed_output(T, e.expr))
     e isa Union{Exists,Condition,LookupExpr,NegatedExpr} && return v isa Bool ? v : v != 0          # SQLite and MySQL give 0/1
+    # an array or statistics aggregate as a window function: read as the aggregate
+    e isa Window && e.expr isa Aggregate && (e.expr.func == "ARRAY_AGG" || is_stat_aggregate(e.expr)) && return expr_value(T, e.expr, v, nothing)
+    # a subquery selecting an aggregate annotation (ArrayAgg in Subquery(values(annotate(...; agg = ...), :agg))): read as it is
+    if e isa Subquery && e.qs isa QuerySet && e.qs.values_fields !== nothing && length(e.qs.values_fields) == 1
+        k = Symbol(e.qs.values_fields[1])
+        i = findfirst(p -> p.first === k, e.qs.annotations)
+        a = i === nothing ? nothing : e.qs.annotations[i].second
+        a isa Aggregate && (a.func == "ARRAY_AGG" || is_stat_aggregate(a)) && return expr_value(T, a, v, nothing)
+    end
     if e isa Aggregate
-        e.func == "ARRAY_AGG" && return v isa AbstractString ? JSON.parse(v) : v
+        if e.func == "ARRAY_AGG"
+            a = v isa AbstractString ? JSON.parse(v) : v
+            # MySQL's filtered items came wrapped (see compile_expr), the rows filtered out as NULL
+            e.filter !== nothing && backend() isa MySQLBackend && a isa AbstractVector && (a = Any[x[1] for x in a if x !== nothing])
+            # no values is NULL, as PostgreSQL's (SQLite's json_group_array gives []), or the default
+            if a isa AbstractVector && isempty(a)
+                d = e.default isa Value ? e.default.value : e.default
+                return d isa Expression ? a : d
+            end
+            return a
+        end
         e.func in ("BOOL_AND", "BOOL_OR") && return v isa Bool ? v : v != 0
+        if is_stat_aggregate(e)              # a count, or a float (MySQL's arithmetic gives decimals)
+            e.func == "REGR_COUNT" && return v isa Integer ? Int(v) : parse(Int, string(v))
+            (e.default !== nothing && !(e.default isa Expression) && v == e.default) && return e.default
+            return v isa Real ? Float64(v) : parse(Float64, string(v))
+        end
     end
     of === nothing || return from_db(of, v)
     e isa Func && e.name === :jsonobject && return v isa AbstractString ? JSON.parse(v) : v
@@ -1555,7 +1677,7 @@ walk_refs!(out, @nospecialize(x)) = nothing
 "An aggregate's value over no rows (a count's 0, a default, Coalesce of those), or NOTFOUND when it needs the database."
 empty_aggregate(@nospecialize(e)) = NOTFOUND
 empty_aggregate(e::Value) = e.value
-empty_aggregate(e::Aggregate) = e.func == "COUNT" ? 0 : e.default === nothing ? nothing : empty_aggregate(lit_expr(e.default))
+empty_aggregate(e::Aggregate) = e.func in ("COUNT", "REGR_COUNT") ? 0 : e.default === nothing ? nothing : empty_aggregate(lit_expr(e.default))
 function empty_aggregate(e::Func)
     e.name === :coalesce || return NOTFOUND
     for a in e.args
