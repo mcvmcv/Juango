@@ -670,6 +670,8 @@ function expr_kind(c, @nospecialize(e))
         ink = expr_kind(c, e.args[1])
         return trunc_output(e.args[2], something(ink, :datetime))
     end
+    # text functions give text (Concat(Value("I'm "), F(:name)) takes text lookups: trigram_similar, unaccent)
+    e isa Func && (e.name in (:concat, :lower, :upper, :unaccent) || e.name in TEXT_FUNCS) && return :text
     e isa Value && e.value isa Date && return :date
     e isa Value && e.value isa DateTime && return :datetime
     e isa Value && e.value isa AbstractString && return :char

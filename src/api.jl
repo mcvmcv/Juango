@@ -233,11 +233,11 @@ export GeometryField, PointField, LineStringField, PolygonField, MultiPointField
 end
 
 module Postgres
-using ..Juango: HStoreField, CICharField, SearchVector, SearchQuery, SearchRank, TrigramSimilarity,
-    TrigramWordSimilarity, TrigramStrictWordSimilarity, TrigramDistance, TrigramWordDistance, Unaccent,
+using ..Juango: HStoreField, CICharField, SearchVector, SearchQuery, SearchRank, SearchHeadline, SearchConfig, SearchVectorField, Lexeme, quote_lexeme, TrigramSimilarity,
+    TrigramWordSimilarity, TrigramStrictWordSimilarity, TrigramDistance, TrigramWordDistance, TrigramStrictWordDistance, TransactionNow, RandomUUID, Unaccent,
     ExclusionConstraint, GinIndex, GistIndex, BrinIndex, SpGistIndex, HashIndex, BloomIndex
-export HStoreField, CICharField, SearchVector, SearchQuery, SearchRank, TrigramSimilarity,
-    TrigramWordSimilarity, TrigramStrictWordSimilarity, TrigramDistance, TrigramWordDistance, Unaccent,
+export HStoreField, CICharField, SearchVector, SearchQuery, SearchRank, SearchHeadline, SearchConfig, SearchVectorField, Lexeme, quote_lexeme, TrigramSimilarity,
+    TrigramWordSimilarity, TrigramStrictWordSimilarity, TrigramDistance, TrigramWordDistance, TrigramStrictWordDistance, TransactionNow, RandomUUID, Unaccent,
     ExclusionConstraint, GinIndex, GistIndex, BrinIndex, SpGistIndex, HashIndex, BloomIndex
 end
 

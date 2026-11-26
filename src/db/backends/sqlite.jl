@@ -70,6 +70,7 @@ function column_type(::SQLiteBackend, kind::Symbol, max_length)
     (kind in INT_KINDS || kind in (:bool, :fk, :duration)) && return "INTEGER"
     kind === :float && return "REAL"
     kind === :citext && return "TEXT COLLATE NOCASE"
+    kind === :tsvector && return "TEXT"              # (full-text search vectors are PostgreSQL's: the column holds text)
     kind === :binary && return "BLOB"
     kind === :decimal && return "DECIMAL"      # NUMERIC affinity: compares as numbers
     "TEXT"

@@ -698,7 +698,18 @@ Base.@nospecializeinfer function special_lookup(c::SQLCompiler, f::Field, col, l
     if k === :geometry
         return spatial_lookup(f, col, lookup, value)
     elseif lookup == "search"
+        # dialogue__search = SearchQuery(...) (or F, Lexemes): the column's vector in the query's configuration
+        if value isa Union{SearchQueryLike,Expression,LexemeLike}
+            q = as_search_query(value)
+            cfg = search_query_config(q)
+            csql, cps = cfg === nothing ? ("", Any[]) : ((x = compile_expr(c, cfg)); (x[1] * ", ", x[2]))
+            qsql, qps = compile_expr(c, q)
+            return "to_tsvector($csql COALESCE($col, '')) @@ $qsql", vcat(cps, qps)
+        end
         return search_sql(b, col, value)
+    elseif k === :tsvector && lookup == "exact" && value !== nothing
+        qsql, qps = compile_expr(c, as_search_query(value))      # (text or Lexemes: a plain query)
+        return "$col @@ $qsql", qps
     elseif k === :hstore && b isa PostgresBackend
         lookup == "exact" && value !== nothing && return "$col = CAST(? AS hstore)", Any[encode_hstore(b, value)]
         lookup == "contains" && return "$col @> CAST(? AS hstore)", Any[encode_hstore(b, value)]
@@ -774,40 +785,147 @@ end
 # --- full-text search expressions (PostgreSQL) --------------------------------------------------------
 
 """
+    SearchConfig(name)
+
+A text search configuration (`"english"`, `"french"`, `"simple"`), or an expression naming one per row
+(`SearchConfig(F(:config))`): PostgreSQL's `regconfig`. `config =` options take a name, an `F()` or one of these.
+"""
+struct SearchConfig <: Expression
+    config::Expression
+    SearchConfig(c::Expression) = new(c)
+end
+SearchConfig(c::SearchConfig) = c
+SearchConfig(c) = SearchConfig(Value(string(c)))
+Base.:(==)(a::SearchConfig, b::SearchConfig) = a.config == b.config
+"A `config =` value as a SearchConfig, or nothing (Django's `SearchConfig.from_parameter`)."
+search_config(::Nothing) = nothing
+search_config(c) = SearchConfig(c)
+function compile_expr(c::SQLCompiler, e::SearchConfig)
+    sql, ps = compile_expr(c, e.config)
+    "CAST($sql AS regconfig)", ps
+end
+
+"""
     SearchVector(fields...; config=nothing, weight=nothing)
 
 A `tsvector` of text fields for full-text search (PostgreSQL). Combine with `+`.
-`filter(annotate(qs; search = SearchVector(:title, :body)); search = SearchQuery("julia web"))`.
+`filter(annotate(qs; search = SearchVector(:title, :body)); search = SearchQuery("julia web"))`, or
+`search = "julia web"` (a plain query in the vector's configuration). `config` is a name, `F()` or SearchConfig;
+`weight` is "A", "B", "C" or "D" (for SearchRank).
 """
 struct SearchVector <: Expression
-    parts::Vector{Tuple{Vector{Any},Union{Nothing,String},Union{Nothing,Char}}}   # (fields, config, weight)
+    parts::Vector{Tuple{Vector{Any},Any,Union{Nothing,Char}}}   # (fields, config: nothing or a SearchConfig, weight)
     SearchVector(parts::Vector{<:Tuple}) = new(parts)
 end
 SearchVector(fields...; config = nothing, weight = nothing) =
-    SearchVector([(Any[ref(x) for x in fields], config === nothing ? nothing : string(config),
+    SearchVector([(Any[ref(x) for x in fields], search_config(config),
                    weight === nothing ? nothing : uppercase(string(weight))[1])])
 Base.:+(a::SearchVector, b::SearchVector) = SearchVector(vcat(a.parts, b.parts))
+Base.:+(a::SearchVector, b) = throw(ArgumentError("SearchVector can only be combined with other SearchVector instances, got $(nameof(typeof(b)))."))
+Base.:+(a, b::SearchVector) = throw(ArgumentError("SearchVector can only be combined with other SearchVector instances, got $(nameof(typeof(a)))."))
+"The configuration of a vector (its first part's), for a plain query compared with it."
+search_vector_config(v::SearchVector) = v.parts[1][2]
 
 """
-    SearchQuery(text; config=nothing, search_type=:plain)
+    Lexeme(value; invert = false, prefix = false, weight = nothing)
 
-A `tsquery`. `search_type` is `:plain` (all words), `:phrase`, `:websearch` (quotes, `or`,
-`-word`) or `:raw` (tsquery syntax).
+One word of a raw text search query, quoted so it can't be read as query syntax (Django's Lexeme). Combine
+with `&`, `|` and `~` (`~(a | b)` is `~a & ~b`); `prefix = true` matches words starting with it, `weight` (A-D) only
+in parts of the vector with that weight. `SearchQuery(Lexeme("cadeaux"); config = "french")`.
 """
-struct SearchQuery <: Expression
-    text::String
-    config::Union{Nothing,String}
+struct Lexeme
+    value::String
+    invert::Bool
+    prefix::Bool
+    weight::Union{Nothing,String}
+end
+function Lexeme(value; invert::Bool = false, prefix::Bool = false, weight = nothing)
+    value isa AbstractString || throw(ArgumentError("Lexeme value must be a string, got $(nameof(typeof(value)))."))
+    isempty(value) && throw(ArgumentError("Lexeme value cannot be empty."))
+    if weight !== nothing
+        weight isa AbstractString && weight in ("A", "B", "C", "D") ||
+            throw(ArgumentError("Weight must be one of 'A', 'B', 'C', and 'D', got $(repr(weight))."))
+    end
+    Lexeme(String(value), invert, prefix, weight === nothing ? nothing : String(weight))
+end
+struct CombinedLexeme
+    op::String                   # "&" or "|"
+    a::Union{Lexeme,CombinedLexeme}
+    b::Union{Lexeme,CombinedLexeme}
+end
+const LexemeLike = Union{Lexeme,CombinedLexeme}
+Base.:&(a::LexemeLike, b::LexemeLike) = CombinedLexeme("&", a, b)
+Base.:|(a::LexemeLike, b::LexemeLike) = CombinedLexeme("|", a, b)
+for op in (:&, :|)
+    @eval Base.$op(a::LexemeLike, b) = throw(ArgumentError("A Lexeme can only be combined with another Lexeme, got $(nameof(typeof(b)))."))
+    @eval Base.$op(a, b::LexemeLike) = throw(ArgumentError("A Lexeme can only be combined with another Lexeme, got $(nameof(typeof(a)))."))
+end
+Base.:~(l::Lexeme) = Lexeme(l.value, !l.invert, l.prefix, l.weight)
+Base.:~(l::CombinedLexeme) = CombinedLexeme(l.op == "&" ? "|" : "&", ~l.a, ~l.b)      # (De Morgan, as Django's)
+Base.:!(l::LexemeLike) = ~l
+"""
+    quote_lexeme(s)
+
+A word as a quoted tsquery lexeme: characters that are query syntax (`'`, `&`, `|`, `!`, `:`, `*`, ...) become spaces,
+and nothing left is `NULL` (Django's `quote_lexeme`).
+"""
+function quote_lexeme(s::AbstractString)
+    t = strip(replace(s, r"['\0\[\]()|&:*!@<>\\]" => " "))
+    isempty(t) && return "NULL"
+    "'" * replace(replace(t, r"\s{2,}" => " "), "'" => "''") * "'"
+end
+"A Lexeme (or a combination of them) as tsquery text (`!'a':*D`, `('a' | ('b' & !'c'))`)."
+function lexeme_text(l::Lexeme)
+    label = (l.prefix ? "*" : "") * something(l.weight, "")
+    (l.invert ? "!" : "") * quote_lexeme(l.value) * (isempty(label) ? "" : ":" * label)
+end
+lexeme_text(l::CombinedLexeme) = "(" * lexeme_text(l.a) * " " * l.op * " " * lexeme_text(l.b) * ")"
+
+abstract type SearchQueryLike <: Expression end
+const SEARCH_TYPES = Dict(:plain => "plainto_tsquery", :phrase => "phraseto_tsquery", :websearch => "websearch_to_tsquery",
+                          :raw => "to_tsquery")
+"""
+    SearchQuery(value; config=nothing, search_type=:plain)
+
+A `tsquery`: of text (`search_type` `:plain`, all words; `:phrase`; `:websearch`, quotes, `or` and `-word`; `:raw`,
+tsquery syntax), of an `F()` (a query per row), or of `Lexeme`s. Combine with `&`, `|` and `~`.
+"""
+struct SearchQuery <: SearchQueryLike
+    value::Any                       # text, an Expression, or Lexemes
+    config::Union{Nothing,SearchConfig}
     search_type::Symbol
+    invert::Bool
 end
-SearchQuery(text; config = nothing, search_type = :plain) =
-    SearchQuery(string(text), config === nothing ? nothing : string(config), Symbol(search_type))
-
-"`SearchRank(vector, query)`: relevance for ordering (`ts_rank`)."
-struct SearchRank <: Expression
-    vector::Expression
-    query::SearchQuery
+function SearchQuery(value; config = nothing, search_type = :plain, invert::Bool = false)
+    st = Symbol(search_type)
+    haskey(SEARCH_TYPES, st) || throw(ArgumentError("Unknown search_type argument '$search_type'."))
+    value isa Union{Expression,LexemeLike} || (value = string(value))
+    SearchQuery(value, search_config(config), st, invert)
 end
-SearchRank(v, q::SearchQuery) = SearchRank(v isa Expression ? v : SearchVector(v), q)
+struct CombinedSearchQuery <: SearchQueryLike
+    op::String                       # "&&" or "||"
+    a::SearchQueryLike
+    b::SearchQueryLike
+    invert::Bool
+end
+Base.:&(a::SearchQueryLike, b::SearchQueryLike) = CombinedSearchQuery("&&", a, b, false)
+Base.:|(a::SearchQueryLike, b::SearchQueryLike) = CombinedSearchQuery("||", a, b, false)
+for op in (:&, :|)
+    @eval Base.$op(a::SearchQueryLike, b) = throw(ArgumentError("SearchQuery can only be combined with other SearchQuery instances, got $(nameof(typeof(b)))."))
+    @eval Base.$op(a, b::SearchQueryLike) = throw(ArgumentError("SearchQuery can only be combined with other SearchQuery instances, got $(nameof(typeof(a)))."))
+end
+Base.:~(q::SearchQuery) = SearchQuery(q.value, q.config, q.search_type, !q.invert)
+Base.:~(q::CombinedSearchQuery) = CombinedSearchQuery(q.op, q.a, q.b, !q.invert)
+Base.:!(q::SearchQueryLike) = ~q
+"A query's configuration (a combination's: its first query's)."
+search_query_config(q::SearchQuery) = q.config
+search_query_config(q::CombinedSearchQuery) = search_query_config(q.a)
+# (Django's repr: SearchQuery(Value('a')), ~SearchQuery(...), (A || B) && C)
+Base.show(io::IO, q::SearchQuery) = print(io, q.invert ? "~" : "", "SearchQuery(", q.value isa AbstractString ? "Value('$(q.value)')" : q.value, ")")
+Base.show(io::IO, q::CombinedSearchQuery) = print(io, q.invert ? "~" : "", "(", q.a, " ", q.op, " ", q.b, ")")
+"A value compared with a tsvector as a query: text, an F() or Lexemes become a plain (or raw) SearchQuery in `config`."
+as_search_query(v::SearchQueryLike, config = nothing) = v
+as_search_query(v, config = nothing) = SearchQuery(v; config = config)
 
 need_full_text() = supports_full_text(backend()) ||
     throw(ArgumentError("full-text search expressions need PostgreSQL (the __search lookup works everywhere)"))
@@ -816,10 +934,13 @@ function compile_expr(c::SQLCompiler, e::SearchVector)
     need_full_text()
     parts, ps = String[], Any[]
     for (fields, config, weight) in e.parts
+        cfg, cps = config === nothing ? ("", Any[]) : ((x = compile_expr(c, config)); (x[1] * ", ", x[2]))
         cols = [compile_expr(c, x) for x in fields]
-        text = join(["COALESCE(CAST($(s) AS TEXT), '')" for (s, _) in cols], " || ' ' || ")
+        # (one COALESCE per field: nothing more, as Django's single coalesce)
+        text = join([(x isa Value ? s : "COALESCE(CAST($(s) AS TEXT), '')") for ((s, _), x) in zip(cols, fields)], " || ' ' || ")
+        append!(ps, cps)
         append!(ps, reduce(vcat, last.(cols); init = Any[]))
-        v = config === nothing ? "to_tsvector($text)" : "to_tsvector(CAST($(repr_sql_string(config)) AS regconfig), $text)"
+        v = "to_tsvector($cfg$text)"
         push!(parts, weight === nothing ? v : "setweight($v, '$weight')")
     end
     "(" * join(parts, " || ") * ")", ps
@@ -828,16 +949,94 @@ repr_sql_string(s) = "'" * replace(s, "'" => "''") * "'"
 
 function compile_expr(c::SQLCompiler, e::SearchQuery)
     need_full_text()
-    fn = Dict(:plain => "plainto_tsquery", :phrase => "phraseto_tsquery", :websearch => "websearch_to_tsquery",
-              :raw => "to_tsquery")[e.search_type]
-    (e.config === nothing ? "$fn(?)" : "$fn(CAST($(repr_sql_string(e.config)) AS regconfig), ?)"), Any[e.text]
+    cfg, cps = e.config === nothing ? ("", Any[]) : ((x = compile_expr(c, e.config)); (x[1] * ", ", x[2]))
+    sql, ps = if e.value isa LexemeLike
+        "to_tsquery($cfg?)", vcat(cps, Any[lexeme_text(e.value)])
+    elseif e.value isa Expression
+        v, vps = compile_expr(c, e.value)
+        "$(SEARCH_TYPES[e.search_type])($cfg$v)", vcat(cps, vps)
+    else
+        "$(SEARCH_TYPES[e.search_type])($cfg?)", vcat(cps, Any[e.value])
+    end
+    (e.invert ? "!!($sql)" : sql), ps
 end
+function compile_expr(c::SQLCompiler, e::CombinedSearchQuery)
+    a, aps = compile_expr(c, e.a)
+    b, bps = compile_expr(c, e.b)
+    sql = "(($a) $(e.op) ($b))"
+    (e.invert ? "!!$sql" : sql), vcat(aps, bps)
+end
+
+"""
+    SearchRank(vector, query; weights = nothing, normalization = nothing, cover_density = false)
+
+Relevance for ordering (`ts_rank`, or `ts_rank_cd` with `cover_density`). `vector` and `query` may be a field name
+and text. `weights`: the D, C, B, A weights' factors (`[0.1, 0.2, 0.4, 1.0]`); `normalization`: PostgreSQL's
+bit mask (2: divided by the document's length).
+"""
+struct SearchRank <: Expression
+    vector::Expression
+    query::SearchQueryLike
+    weights::Union{Nothing,Vector{Float64}}
+    normalization::Any
+    cover_density::Bool
+end
+SearchRank(v, q; weights = nothing, normalization = nothing, cover_density::Bool = false) =
+    SearchRank(v isa Expression ? v : SearchVector(v), as_search_query(q), weights === nothing ? nothing : Float64.(collect(weights)),
+               normalization, cover_density)
 
 function compile_expr(c::SQLCompiler, e::SearchRank)
     v, vps = compile_expr(c, e.vector)
     q, qps = compile_expr(c, e.query)
-    "ts_rank($v, $q)", vcat(vps, qps)
+    args, ps = String[], Any[]
+    e.weights === nothing || (push!(args, "CAST(? AS float4[])"); push!(ps, "{" * join(e.weights, ",") * "}"))
+    push!(args, v, q); append!(ps, vps); append!(ps, qps)
+    if e.normalization !== nothing
+        n, nps = compile_expr(c, lit_expr(e.normalization))
+        push!(args, "CAST($n AS integer)"); append!(ps, nps)
+    end
+    "$(e.cover_density ? "ts_rank_cd" : "ts_rank")($(join(args, ", ")))", ps
 end
+
+"""
+    SearchHeadline(expression, query; config, start_sel, stop_sel, max_words, min_words, short_word, highlight_all,
+                   max_fragments, fragment_delimiter)
+
+The text with the query's words marked (`<b>...</b>` by default): PostgreSQL's `ts_headline` and its options.
+"""
+struct SearchHeadline <: Expression
+    expr::Expression
+    query::SearchQueryLike
+    config::Union{Nothing,SearchConfig}
+    options::Vector{Pair{String,Any}}
+end
+function SearchHeadline(expression, query; config = nothing, start_sel = nothing, stop_sel = nothing, max_words = nothing,
+                        min_words = nothing, short_word = nothing, highlight_all = nothing, max_fragments = nothing,
+                        fragment_delimiter = nothing)
+    opts = Pair{String,Any}[k => v for (k, v) in ("StartSel" => start_sel, "StopSel" => stop_sel, "MaxWords" => max_words,
+                                                    "MinWords" => min_words, "ShortWord" => short_word, "HighlightAll" => highlight_all,
+                                                    "MaxFragments" => max_fragments, "FragmentDelimiter" => fragment_delimiter) if v !== nothing]
+    SearchHeadline(ref(expression), as_search_query(query), search_config(config), opts)
+end
+headline_option(v::Bool) = v ? "true" : "false"
+headline_option(v::AbstractString) = "'" * replace(v, "'" => "''") * "'"
+headline_option(v) = string(v)
+function compile_expr(c::SQLCompiler, e::SearchHeadline)
+    need_full_text()
+    args, ps = String[], Any[]
+    if e.config !== nothing
+        s, p = compile_expr(c, e.config); push!(args, s); append!(ps, p)
+    end
+    s, p = compile_expr(c, e.expr); push!(args, s); append!(ps, p)
+    s, p = compile_expr(c, e.query); push!(args, s); append!(ps, p)
+    if !isempty(e.options)
+        push!(args, "?"); push!(ps, join(["$k=$(headline_option(v))" for (k, v) in e.options], ", "))
+    end
+    "ts_headline($(join(args, ", ")))", ps
+end
+
+"A tsvector column (Django's SearchVectorField): set it with `SearchVector(...)`, filter it with a SearchQuery or text."
+SearchVectorField(; kw...) = Field(:tsvector; kw...)
 
 # --- trigram similarity and unaccent (PostgreSQL: pg_trgm, unaccent) ---------------------------------
 #
@@ -848,7 +1047,7 @@ const TEXT_KINDS = vcat(collect(STRING_KINDS), :citext)
 register_lookup((lhs, rhs) -> "$lhs % $rhs", "trigram_similar"; kinds = TEXT_KINDS)
 register_lookup((lhs, rhs) -> "$rhs <% $lhs", "trigram_word_similar"; kinds = TEXT_KINDS)
 register_lookup((lhs, rhs) -> "$rhs <<% $lhs", "trigram_strict_word_similar"; kinds = TEXT_KINDS)
-register_transform(lhs -> "UNACCENT($lhs)", "unaccent"; kinds = TEXT_KINDS)
+register_transform(lhs -> "UNACCENT($lhs)", "unaccent"; kinds = TEXT_KINDS, bilateral = true)   # (the value too, as Django's)
 
 "`SIMILARITY(field, text)`: trigram similarity from 0 to 1 (PostgreSQL `pg_trgm`)."
 TrigramSimilarity(x, text) = Func(:similarity, [ref(x), lit_expr(text)])
@@ -860,5 +1059,11 @@ TrigramStrictWordSimilarity(text, x) = Func(:strict_word_similarity, [lit_expr(t
 TrigramDistance(x, text) = CombinedExpression("<->", ref(x), lit_expr(text))
 "`text <<-> field`: trigram word distance (PostgreSQL `pg_trgm`)."
 TrigramWordDistance(text, x) = CombinedExpression("<<->", lit_expr(text), ref(x))
+"`text <<<-> field`: trigram strict word distance (PostgreSQL `pg_trgm`)."
+TrigramStrictWordDistance(text, x) = CombinedExpression("<<<->", lit_expr(text), ref(x))
+"`CURRENT_TIMESTAMP`: the time the current transaction started, the same for every statement in it (PostgreSQL's, Django's `TransactionNow`)."
+TransactionNow() = Func(:transaction_now, Any[])
+"`gen_random_uuid()`: a random version-4 UUID per row (PostgreSQL 13+; `UUID()` on MySQL)."
+RandomUUID() = Func(:random_uuid, Any[])
 "`UNACCENT(field)`: text without accents (PostgreSQL `unaccent`)."
 Unaccent(x) = Func(:unaccent, [ref(x)])

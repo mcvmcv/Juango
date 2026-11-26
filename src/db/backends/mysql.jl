@@ -65,6 +65,7 @@ function column_type(::MySQLBackend, kind::Symbol, max_length)
     kind in (:json, :hstore, :array, :intrange, :daterange, :datetimerange, :decimalrange) && return "JSON"
     kind === :uuid && return "CHAR(36)"
     kind === :citext && return "VARCHAR($(something(max_length, 255)))"
+    kind === :tsvector && return "LONGTEXT"          # (full-text search vectors are PostgreSQL's: the column holds text)
     kind === :decimal && return "DECIMAL(65, 30)"
     kind === :time && return "TIME(6)"
     kind === :binary && return "LONGBLOB"

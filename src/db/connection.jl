@@ -138,6 +138,7 @@ function column_type(::DatabaseBackend, kind::Symbol, max_length)
     kind === :hstore && return "HSTORE"
     kind === :uuid && return "UUID"
     kind === :citext && return "CITEXT"
+    kind === :tsvector && return "TSVECTOR"
     kind === :intrange && return "INT8RANGE"
     kind === :daterange && return "DATERANGE"
     kind === :datetimerange && return "TSRANGE"

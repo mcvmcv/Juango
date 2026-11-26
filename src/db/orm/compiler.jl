@@ -477,6 +477,9 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
         contains_aggregate(a) && (c.uses_aggregate = true)
         sql, colps = compile_expr(c, a)
         col = "($sql)"
+        kind = expr_kind(c, a)               # (custom lookups for its kind: trigram_similar on a Concat)
+        # search = "cadeaux" on a SearchVector annotation: a plain query in the vector's configuration, as Django's
+        a isa SearchVector && lookup == "exact" && value !== nothing && (value = as_search_query(value, search_vector_config(a)))
     elseif fname == "id" && is_composite(T)
         isempty(rest) || throw(LookupError("'pk' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
         fs = pk_fields(T)
@@ -863,7 +866,7 @@ end
 
 Base.@nospecializeinfer function lookup_condition(c::SQLCompiler, col, lookup, @nospecialize(value), @nospecialize(conv))
     value isa Q && (value = Condition(value))          # short = Q(qty__lt = F(:target)): the condition's value (#199)
-    if value isa SearchQuery && lookup == "exact"
+    if value isa SearchQueryLike && lookup == "exact"
         q, qps = compile_expr(c, value)
         return "$col @@ $q", qps
     end

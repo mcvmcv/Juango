@@ -120,6 +120,8 @@ function function_sql(b::DatabaseBackend, n::Symbol, sqls, e)
     n in (:sha224, :sha384, :sha512) && return "ENCODE($(uppercase(string(n)))(CONVERT_TO($(sqls[1]), 'UTF8')), 'hex')"
     n === :sha1 && return "ENCODE(DIGEST(CONVERT_TO($(sqls[1]), 'UTF8'), 'sha1'), 'hex')"     # (pgcrypto)
     n === :random && return "RANDOM()"
+    n === :transaction_now && return "CURRENT_TIMESTAMP"
+    n === :random_uuid && return "gen_random_uuid()"
     n === :ord && return "ASCII($(sqls[1]))"
     n === :round && return "ROUND(CAST($(sqls[1]) AS NUMERIC), $(e.args[2]))"
     n === :log && return "LOG(CAST($(sqls[1]) AS NUMERIC), CAST($(sqls[2]) AS NUMERIC))"
@@ -132,6 +134,7 @@ function function_sql(b::MySQLBackend, n::Symbol, sqls, e)
     n === :sha1 && return "SHA1($(sqls[1]))"
     n in (:sha224, :sha384, :sha512) && return "SHA2($(sqls[1]), $(string(n)[4:end]))"
     n === :random && return "RAND()"
+    n === :random_uuid && return "UUID()"
     n === :ord && return "ORD($(sqls[1]))"
     n === :chr && return "CHAR($(sqls[1]) USING utf8mb4)"
     n === :round && return "ROUND($(sqls[1]), $(e.args[2]))"
