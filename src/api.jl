@@ -35,7 +35,7 @@ export Template, render_to_string, get_template, mark_safe, SafeString, escape_h
 export Model, @model, @abstract_model, Field, CharField, TextField, EmailField, SlugField, URLField,
        IntegerField, BigIntegerField, SmallIntegerField, PositiveIntegerField, PositiveBigIntegerField,
        PositiveSmallIntegerField, AutoField, BigAutoField, SmallAutoField, FloatField, DecimalField,
-       BooleanField, DateTimeField, DateField, TimeField, DurationField, JSONField, ArrayField,
+       BooleanField, DateTimeField, DateField, TimeField, DurationField, JSONField, ArrayField, SimpleArrayField,
        UUIDField, BinaryField, GenericIPAddressField, FilePathField, IntegerRangeField, DateRangeField,
        DateTimeRangeField, DecimalRangeField, ValueRange, FileField, ImageField, UploadedFile, FileExtensionValidator,
        Validator, RegexValidator, EmailValidator, URLValidator, MinValueValidator, MaxValueValidator, MinLengthValidator,

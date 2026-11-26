@@ -23,7 +23,7 @@ end
 datetime_add_sql(::MySQLBackend, op, a, d) = (op == "+" ? "DATE_ADD" : "DATE_SUB") * "($a, INTERVAL ($d) MICROSECOND)"
 datetime_diff_sql(::MySQLBackend, ka, a, kb, b) = "TIMESTAMPDIFF(MICROSECOND, $b, $a)"
 
-encode_array(::MySQLBackend, v) = JSON.json(json_scalar_tree(collect(v)))
+encode_array(::MySQLBackend, v, kind = nothing) = JSON.json(json_scalar_tree(collect(v)))
 encode_range(::MySQLBackend, r::ValueRange) =
     JSON.json(Dict("lower" => json_scalar(r.lower), "upper" => json_scalar(r.upper), "bounds" => r.bounds))
 
@@ -58,10 +58,11 @@ function array_op_sql(b::MySQLBackend, op, col, f::Field, v)
     op == "@>" && return "JSON_CONTAINS($col, ?)", Any[p]
     op == "<@" && return "JSON_CONTAINS(?, $col)", Any[p]
     op == "&&" && return "JSON_OVERLAPS($col, ?)", Any[p]
-    "(JSON_CONTAINS($col, ?) AND JSON_CONTAINS(?, $col) AND JSON_LENGTH($col) = JSON_LENGTH(?))", Any[p, p, p]
+    # (equal as JSON: JSON_CONTAINS both ways would match [[null, null]] with [null, null])
+    is_mariadb(b) ? ("JSON_EQUALS($col, ?)", Any[p]) : ("$col = CAST(? AS JSON)", Any[p])
 end
-array_len_sql(::MySQLBackend, col) = "COALESCE(JSON_LENGTH($col), 0)"
-array_index_sql(::MySQLBackend, col, i::Int) = mysql_jtext(col), Any["\$[$i]"]
+array_len_sql(::MySQLBackend, col) = "JSON_LENGTH($col)"
+array_index_sql(::MySQLBackend, col, is::Vector{Int}) = mysql_jtext(col), Any["\$" * join("[$i]" for i in is)]
 
 function range_lookup_sql(b::MySQLBackend, op::String, col, kind, v)
     bound(k) = kind === :intrange ? "CAST(NULLIF($(mysql_jtext(col, "'\$.$k'")), 'null') AS SIGNED)" :
@@ -130,3 +131,13 @@ function advisory_acquire(::MySQLBackend, name::String, timeout)
 end
 advisory_release(::MySQLBackend, name::String) = execute("SELECT RELEASE_LOCK(?) AS ok", Any[advisory_name(name)])
 
+
+# an array's slice (JSON paths take ranges: MySQL 8, MariaDB 10.9); no items is an empty array, as PostgreSQL's
+array_slice_sql(::MySQLBackend, col, a::Int, z::Int) =
+    z <= a ? "(CASE WHEN $col IS NULL THEN NULL ELSE JSON_ARRAY() END)" :
+    "(CASE WHEN $col IS NULL THEN NULL ELSE COALESCE(JSON_EXTRACT($col, '\$[$a to $(z - 1)]'), JSON_ARRAY()) END)"
+array_order_sql(::MySQLBackend, sql, item) =
+    item isa Field && (item.kind in INT_KINDS || item.kind in (:float, :decimal)) ? "CAST($sql AS DOUBLE)" : sql
+array_item_expr(::MySQLBackend, sql, item) =
+    item isa Field && (item.kind in INT_KINDS || item.kind === :fk) ? "CAST($sql AS SIGNED)" :
+    item isa Field && item.kind === :float ? "CAST($sql AS DOUBLE)" : sql

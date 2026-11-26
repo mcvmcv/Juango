@@ -126,17 +126,18 @@ foreign_key_names(::MySQLBackend, table, col) =
 register_backend!("mysql", MySQLBackend)
 register_backend!("mariadb", MySQLBackend)
 
-# MariaDB 10.5+ has INSERT ... RETURNING; MySQL doesn't. Asked once per database URL.
-const MARIADB = Dict{String,Bool}()
+# The server's version text (MariaDB's has "MariaDB" in it). Asked once per database URL.
+const MYSQL_VERSION = Dict{String,String}()
 const MARIADB_LOCK = ReentrantLock()
+mysql_version(b::MySQLBackend) = lock(() -> get!(() -> string(execute("SELECT VERSION() AS v")[1][:v]), MYSQL_VERSION, b.url), MARIADB_LOCK)
+"Whether the server is MariaDB (`vendor` says MySQL for both)."
+is_mariadb(b::MySQLBackend) = occursin("MariaDB", mysql_version(b))
+is_mariadb(::DatabaseBackend) = false
+# MariaDB 10.5+ has INSERT ... RETURNING; MySQL doesn't.
 function supports_insert_returning(b::MySQLBackend)
-    lock(MARIADB_LOCK) do
-        get!(MARIADB, b.url) do
-            v = string(execute("SELECT VERSION() AS v")[1][:v])
-            m = match(r"^(\d+)\.(\d+)", v)
-            occursin("MariaDB", v) && m !== nothing && (parse(Int, m[1]), parse(Int, m[2])) >= (10, 5)
-        end
-    end
+    v = mysql_version(b)
+    m = match(r"^(\d+)\.(\d+)", v)
+    occursin("MariaDB", v) && m !== nothing && (parse(Int, m[1]), parse(Int, m[2])) >= (10, 5)
 end
 
 # Literals need only their quotes doubled here too: every connection sets NO_BACKSLASH_ESCAPES (above),

@@ -962,7 +962,10 @@ Base.@nospecializeinfer function get_display(@nospecialize(m::Model), name::Symb
     f = findfield(modelmeta(typeof(m)), name)
     f === nothing && throw(ArgumentError("$(typeof(m)) has no field '$name'"))
     v = getproperty(m, attname(f))
-    v === nothing ? nothing : choice_label(field_choices(f), v)
+    v === nothing && return nothing
+    r = choice_label(field_choices(f), v)
+    # a list that isn't a choice is shown as text (Django's force_str keeps only numbers and such as they are)
+    r === v && v isa Union{AbstractVector,Tuple} ? string(v) : r
 end
 
 Base.@nospecializeinfer function tattr(@nospecialize(m::Model), ::Val{:get_absolute_url})

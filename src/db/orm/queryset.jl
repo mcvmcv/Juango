@@ -522,6 +522,11 @@ function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true,
                 push!(parts, json_order_sql(backend(), qcol(field_alias!(c, alias, M, f), column(f)), String.(segs[i+1:end]), desc))
                 @goto next_order
             end
+            if f !== nothing && f.kind === :array && (tr = array_transform(backend(), f, qcol(field_alias!(c, alias, M, f), column(f)),
+                                                                          String.(segs[i+1:end]))) !== nothing
+                push!(parts, array_order_sql(backend(), tr[1], tr[2]) * (desc ? " DESC" : " ASC"))    # order_by("field__1")
+                @goto next_order
+            end
             if f !== nothing && f.kind !== :fk          # order_by("age__lastdigit"): a field through registered transforms
                 fa = field_alias!(c, alias, M, f)
                 tr = apply_transforms(qcol(fa, column(f)), f.kind, String.(segs[i+1:end]); field = f)
@@ -906,11 +911,16 @@ Base.@nospecializeinfer function build_select(@nospecialize(qs::QuerySet); colum
         # selected fields after values() following the aggregate. An object query groups by its primary key,
         # so its own table's columns are already grouped (functionally).
         aliases = query_aliases(c)
-        append!(extra_group, group_cols(o, aliases))
+        # (an ordering by an expression the query is grouped by, as values(:field__0), adds nothing: not its columns)
+        og = o
+        for g in group
+            occursin(r"^(\"[^\"]+\"\.)?\"[^\"]+\"$", g) || (og = replace(og, g => ""))     # (not a plain column)
+        end
+        append!(extra_group, group_cols(og, aliases))
         if qs.group_fields !== nothing && columns === nothing && !idonly
             for x in pre_ann
                 m = match(r"^(.*) AS \S+$", x)
-                m === nothing || append!(extra_group, group_cols(m[1], aliases))
+                m === nothing || m[1] in group || append!(extra_group, group_cols(m[1], aliases))   # (not a grouped expression's columns)
             end
         end
         own = pk_select(c.base, T) in group ? qname(c.base) * "." : nothing

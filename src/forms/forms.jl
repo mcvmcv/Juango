@@ -642,11 +642,27 @@ function to_julia(fld::Field, raw)
         end
         return v, nothing
     elseif k === :array
-        try
-            return Any[convert_elem(fld.related, strip(x)) for x in split(s, ',') if !isempty(strip(x))], nothing
-        catch
-            return nothing, gettext("Enter a comma-separated list of valid values.")
+        base = array_base(fld)
+        delim = fld.form === nothing ? "," : get(fld.form, :array_delimiter, ",")
+        if base === nothing
+            try
+                return Any[convert_elem(fld.related, strip(x)) for x in split(s, delim) if !isempty(strip(x))], nothing
+            catch
+                return nothing, gettext("Enter a comma-separated list of valid values.")
+            end
         end
+        # each item as the base field converts it (Django's SimpleArrayField.to_python): every item's error, numbered
+        out, errs = Any[], String[]
+        for (i, x) in enumerate(split(s, delim))
+            v, err = to_julia(base, x)
+            if err === nothing
+                push!(out, v)
+            else
+                push!(errs, field_message(fld, "item_invalid", gettext("Item %(nth)s in the array did not validate:"), Dict("nth" => i)) * " " *
+                            parse_message(base, err, x))
+            end
+        end
+        return isempty(errs) ? (out, nothing) : (nothing, errs)
     elseif k === :geometry
         try
             return parse_geometry_input(fld, s), nothing
@@ -761,6 +777,14 @@ function clean_file_value(fld::Field, value, initial)
 end
 
 # a date, time or duration given as one (not as text): taken as it is, as Django's fields do
+"An array as a form shows it: its items joined by the delimiter (a nested array's by its own), as Django's prepare_value."
+function array_form_text(fld::Field, v)
+    v isa AbstractString && return v
+    base = array_base(fld)
+    delim = fld.form === nothing ? (base === nothing ? ", " : ",") : get(fld.form, :array_delimiter, base === nothing ? ", " : ",")
+    join([x isa Union{AbstractVector,Tuple} && base !== nothing && base.kind === :array ? array_form_text(base, x) : string(something(x, "")) for x in v], delim)
+end
+
 function typed_form_value(fld::Field, v)
     k = fld.kind
     k === :date && v isa Union{Date,DateTime} && return Date(v)
@@ -770,6 +794,7 @@ function typed_form_value(fld::Field, v)
     k === :duration && v isa Union{Dates.Period,Dates.CompoundPeriod} && return duration_from_us(duration_us(v))
     k === :duration && v isa Integer && !(v isa Bool) && return duration_from_us(Int64(v) * 1_000_000)     # (seconds)
     k === :json && v !== nothing && !(v isa AbstractString) && return v          # (already decoded)
+    k === :array && v isa Union{AbstractVector,Tuple} && return collect(Any, v)  # (already a list)
     nothing
 end
 
@@ -964,7 +989,7 @@ function initial_for(f::Form, fld::Field)
 end
 
 Base.@nospecializeinfer normalized(@nospecialize(x::Model)) = x.id
-normalized(x::AbstractVector) = Set(normalized.(x))
+normalized(x::AbstractVector) = isempty(x) ? nothing : Set(normalized.(x))     # (no items is no value, as Django's has_changed)
 normalized(x::AbstractString) = isempty(x) ? nothing : String(x)
 normalized(x) = x
 
@@ -1134,7 +1159,7 @@ function display_value(bf::BoundField)
     fld.kind === :modelchoice && v isa Model && return choice_key(fld.related, v)
     v === nothing && return v
     fld.kind in (:json, :hstore) && return JSON.json(json_scalar_tree(v))
-    fld.kind === :array && return join(string.(v), ", ")
+    fld.kind === :array && return array_form_text(fld, v)
     v isa ValueRange && return string(something(v.lower, ""), ", ", something(v.upper, ""))
     v isa Model && return v.id
     v isa TimeZones.ZonedDateTime && (v = make_naive(v))          # shown in the current time zone

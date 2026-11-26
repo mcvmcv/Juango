@@ -669,7 +669,12 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             tr === nothing && throw(LookupError("unsupported lookup '$(join(rest, "__"))' on $(f.kind) field '$fname'"))
             col, colps = tr
             lookup == "isnull" && f.kind in (:json, :hstore) && return truthy(value) ? (col, colps) : ("NOT " * col, colps)
-            f = nothing
+            # a slice, or an item of a nested array, is an array still: its lookups are an array's (field__0_2 = [2, 3])
+            if f.kind === :array && (af = array_transform(backend(), f, "", rest)) !== nothing && af[2] isa Field && af[2].kind === :array
+                f = af[2]
+            else
+                f = nothing
+            end
         elseif !isempty(rest) && (tr = apply_transforms(qcol(alias, column(f)), f.kind, rest; field = f, bilateral = bil)) !== nothing
             tr_last = rest[end]
             tr_inner = something(apply_transforms(qcol(alias, column(f)), f.kind, rest[1:end-1]; field = f), (nothing,))[1]

@@ -23,13 +23,51 @@ JSONField(; kw...) = Field(:json; kw...)
 
 A list of values of the base field's kind (`ArrayField(IntegerField())`,
 `ArrayField(CharField(max_length=20))`): a native array on PostgreSQL, JSON text on SQLite.
-Lookups: `contains`, `contained_by`, `overlap`, `len` (`tags__len__gt=2`) and indexes (`tags__0="x"`).
+Lookups: `contains`, `contained_by`, `overlap`, `len` (`tags__len__gt=2`) and indexes (`tags__0="x"`,
+`grid__0__1` in a nested array). The base field may be an ArrayField itself (a nested array, as Django's), and
+`size` is the most items the array may hold (checked when the model is validated).
 """
-function ArrayField(base::Field; kw...)
-    f = Field(:array; max_length = base.max_length, kw...)
-    f.related = schema_kind(base.kind)
+function ArrayField(base::Field; size = nothing, kw...)
+    inner = base
+    while inner.kind === :array
+        inner = array_base(inner)
+    end
+    f = Field(:array; max_length = inner.max_length, max_digits = inner.max_digits, decimal_places = inner.decimal_places, kw...)
+    f.related = schema_kind(inner.kind)          # the innermost items' kind (PostgreSQL's arrays of any depth have one type)
+    opts = something(f.form, Dict{Symbol,Any}())
+    opts[:array_base] = base
+    size === nothing || (opts[:array_size] = Int(size))
+    f.form = opts
     f
 end
+"""
+    SimpleArrayField(base_field; delimiter = ",", max_length = nothing, min_length = nothing, kw...)
+
+A form field for a list typed as text, its items separated by `delimiter` and each cleaned as `base_field`
+cleans a value (Django's `SimpleArrayField`): `clean(SimpleArrayField(IntegerField()), "1,2")` is `[1, 2]`.
+`max_length` and `min_length` are the most and fewest items. Nest one for a list of lists
+(`SimpleArrayField(SimpleArrayField(CharField()); delimiter = "|")` reads `"a,b|c,d"`).
+"""
+function SimpleArrayField(base::Field; delimiter = ",", max_length = nothing, min_length = nothing, kw...)
+    f = ArrayField(base; size = max_length, kw...)
+    f.form[:array_delimiter] = string(delimiter)
+    min_length === nothing || (f.form[:array_min_length] = Int(min_length))
+    f
+end
+
+"An ArrayField's base field (an ArrayField again in a nested array), or nothing."
+array_base(f::Field) = f.form === nothing ? nothing : get(f.form, :array_base, nothing)
+"The most items an ArrayField may hold (its `size`), or nothing."
+array_size(f::Field) = f.form === nothing ? nothing : get(f.form, :array_size, nothing)
+array_nested(f::Field) = (b = array_base(f); b !== nothing && b.kind === :array)
+
+"An array's items as the base field takes them (numbers given as text become numbers, as Django's get_prep_value)."
+function prep_array(f::Field, v)
+    v isa AbstractString && return v
+    nested = array_nested(f)
+    Any[x === nothing ? nothing : nested ? prep_array(array_base(f), x) : prep_array_elem(f.related, x) for x in v]
+end
+prep_array_elem(kind, x) = x isa Value ? prep_array_elem(kind, x.value) : kind in INT_KINDS || kind in (:float, :decimal, :uuid, :time) ? convert_elem(kind, x) : x
 
 """
     HStoreField(; kw...)
@@ -104,16 +142,26 @@ pg_elem(x::DateTime) = "\"" * Dates.format(x, "yyyy-mm-dd HH:MM:SS.sss") * "\""
 pg_elem(x::Date) = string(x)
 pg_elem(x::Bool) = x ? "t" : "f"
 pg_elem(::Nothing) = "NULL"
+pg_elem(x::AbstractVector) = pg_array_literal(x)
+pg_elem(x::Dates.Time) = time_string(x)
 pg_elem(x) = string(x)
 pg_array_literal(v) = "{" * join([pg_elem(x) for x in v], ",") * "}"
+"An array literal whose items are JSON or ranges (written as quoted text), at any depth."
+pg_array_literal(b, v, kind) =
+    "{" * join([x === nothing ? "NULL" : x isa AbstractVector && kind !== :json ? pg_array_literal(b, x, kind) :
+                kind === :json ? pg_elem(JSON.json(json_scalar_tree(x))) :
+                kind in RANGE_KINDS && x isa ValueRange ? pg_elem(encode_range(b, x)) : pg_elem(x) for x in v], ",") * "}"
 
 json_scalar(x::DateTime) = Dates.format(x, "yyyy-mm-ddTHH:MM:SS.sss")
 json_scalar(x::Union{Date,UUID}) = string(x)
 json_scalar(x::Decimal) = Float64(x)          # a JSON number, so the bounds compare as numbers
+json_scalar(x::Dates.Time) = time_string(x)
+json_scalar(r::ValueRange) = Dict("lower" => json_scalar(r.lower), "upper" => json_scalar(r.upper), "bounds" => r.bounds)  # (in arrays)
 json_scalar(x) = x
 
-"Array value as the backend stores it: PostgreSQL array literal, or JSON text."
-encode_array(::DatabaseBackend, v) = pg_array_literal(v)
+"Array value as the backend stores it: PostgreSQL array literal, or JSON text. `kind`: the items' (innermost) kind."
+encode_array(b::DatabaseBackend, v, kind = nothing) =
+    kind === :json || kind in RANGE_KINDS ? pg_array_literal(b, v, kind) : pg_array_literal(v)
 "Range value as the backend stores it."
 function encode_range(::DatabaseBackend, r::ValueRange)
     lo = r.lower === nothing ? "" : pg_elem(r.lower)
@@ -152,7 +200,7 @@ function to_db(f::Field, v)
         return JSON.json(json_scalar_tree(v))
     end
     k === :hstore && return encode_hstore(backend(), v)
-    k === :array && return encode_array(backend(), v)
+    k === :array && return encode_array(backend(), prep_array(f, v), f.related)
     k in RANGE_KINDS && return encode_range(backend(), v)
     k === :uuid && return string(uuid_value(f, v))
     # numbers given as text are taken as numbers; other text is refused, as Django's get_prep_value
@@ -295,7 +343,25 @@ function parse_pg_array(s::AbstractString)
     isempty(inner) && return out
     i, n = 1, lastindex(inner)
     while i <= n
-        if inner[i] == '"'
+        if inner[i] == '{'                       # a nested array: up to its closing brace
+            j, depth, inq = i, 0, false
+            while true
+                c = inner[j]
+                if inq
+                    c == '\\' ? (j = nextind(inner, j)) : c == '"' && (inq = false)
+                elseif c == '"'
+                    inq = true
+                elseif c == '{'
+                    depth += 1
+                elseif c == '}'
+                    depth -= 1
+                    depth == 0 && break
+                end
+                j = nextind(inner, j)
+            end
+            push!(out, parse_pg_array(inner[i:j]))
+            i = nextind(inner, j)
+        elseif inner[i] == '"'
             buf = IOBuffer()
             i = nextind(inner, i)
             while inner[i] != '"'
@@ -323,24 +389,35 @@ function convert_elem(kind::Symbol, x)
     kind === :decimal && return x isa Decimal ? x : to_decimal(x isa AbstractFloat ? round(x; sigdigits = 15) : x)
     kind === :bool && return x isa Bool ? x : x isa Integer ? x != 0 : string(x) in ("t", "true")
     kind === :date && return x isa Date ? x : Date(string(x)[1:10])
-    kind === :datetime && return x isa DateTime ? x : something(todatetime(string(x)), string(x))
+    kind === :datetime && return x isa DateTime ? x : something(todatetime(replace(string(x), ' ' => 'T'; count = 1)), string(x))   # (PostgreSQL's array items: "2026-01-02 03:04:05.678")
     kind === :uuid && return x isa UUID ? x : UUID(string(x))
+    kind === :time && return to_time(x)
     x isa AbstractString ? String(x) : x
 end
 
 function decode_array(f::Field, v)
-    kind = f.related
-    items = v isa AbstractVector ? v :
-            startswith(v, "[") ? JSON.parse(v) : parse_pg_array(v)
-    Any[convert_elem(kind, x) for x in items]
+    pgtext = !(v isa AbstractVector) && !startswith(v, "[")      # PostgreSQL's literal (items are text), else JSON
+    items = v isa AbstractVector ? v : pgtext ? parse_pg_array(v) : JSON.parse(v)
+    decode_array_items(f, items, pgtext)
+end
+function decode_array_items(f::Field, items, pgtext::Bool)
+    nested = array_nested(f)
+    Any[x === nothing ? nothing : nested ? decode_array_items(array_base(f), x, pgtext) : decode_array_elem(f.related, x, pgtext)
+        for x in items]
+end
+function decode_array_elem(kind, x, pgtext::Bool)
+    kind === :json && return plainjson(pgtext && x isa AbstractString ? JSON.parse(x) : x)
+    kind in RANGE_KINDS && return decode_range_value(kind, x)
+    convert_elem(kind, x)
 end
 
 range_elem_kind(k) = k === :intrange ? :bigint : k === :daterange ? :date : k === :decimalrange ? :decimal : :datetime
 
-function decode_range(f::Field, v)
-    ek = range_elem_kind(f.kind)
-    if v isa AbstractString && startswith(v, "{")
-        d = JSON.parse(v)
+decode_range(f::Field, v) = decode_range_value(f.kind, v)
+function decode_range_value(kind::Symbol, v)
+    ek = range_elem_kind(kind)
+    if v isa AbstractDict || v isa AbstractString && startswith(v, "{")
+        d = v isa AbstractDict ? v : JSON.parse(v)
         return ValueRange(convert_elem(ek, d["lower"]), convert_elem(ek, d["upper"]); bounds = d["bounds"])
     end
     s = string(v)
@@ -389,9 +466,50 @@ json_has_keys_sql(::DatabaseBackend, col, ks, all_::Bool) =
     "$(all_ ? "jsonb_exists_all" : "jsonb_exists_any")($col, CAST(? AS TEXT[]))", Any[pg_array_literal(string.(ks))]
 
 array_cast(::DatabaseBackend, f::Field) = column_type(backend(), f.related === :string ? :char : f.related, f.max_length) * "[]"
-array_op_sql(b::DatabaseBackend, op, col, f::Field, v) = "$col $op CAST(? AS $(array_cast(b, f)))", Any[encode_array(b, v)]
-array_len_sql(::DatabaseBackend, col) = "COALESCE(array_length($col, 1), 0)"
-array_index_sql(::DatabaseBackend, col, i::Int) = "$col[$(i + 1)]", Any[]
+array_op_sql(b::DatabaseBackend, op, col, f::Field, v) = "$col $op CAST(? AS $(array_cast(b, f)))", Any[encode_array(b, v, f.related)]
+array_len_sql(::DatabaseBackend, col) = "CASE WHEN $col IS NULL THEN NULL ELSE COALESCE(array_length($col, 1), 0) END"   # (no array has no length)
+"Items `a` to `z - 1` of an array (Django's `field__a_z`), as an array."
+array_slice_sql(::DatabaseBackend, col, a::Int, z::Int) = "$col[$(a + 1):$z]"
+"`(a, z)` for a slice segment (`\"0_2\"`), or nothing."
+function array_slice_bounds(s::AbstractString)
+    m = match(r"^(\d+)_(\d+)$", s)
+    m === nothing ? nothing : (parse(Int, m[1]), parse(Int, m[2]))
+end
+"""
+An array transform's path (`["1"]`, `["0", "1"]`, `["0_2"]`, `["len"]`) as SQL with no parameters and the field its
+result is (an item's field, the array's for a slice, nothing for a length), or nothing when it isn't one.
+"""
+function array_transform(b::DatabaseBackend, f::Field, col, rest)
+    isempty(rest) && return nothing
+    rest == ["len"] && return array_len_sql(b, col), nothing
+    sl = array_slice_bounds(rest[end])
+    if sl !== nothing
+        length(rest) == 1 || return nothing           # (Django can't slice inside a nested array either)
+        return array_slice_sql(b, col, sl...), f
+    end
+    all(r -> !isempty(r) && all(isdigit, r), rest) || return nothing
+    item = array_item_field(f, length(rest))
+    array_item_expr(b, array_index_expr(b, col, parse.(Int, rest)), item), item
+end
+"An array item read for F(), values() and order_by(), as the item's kind (MySQL reads JSON items as text)."
+array_item_expr(::DatabaseBackend, sql, item) = sql
+"An array transform as an ORDER BY term (MySQL's items are text: numbers are ordered as numbers)."
+array_order_sql(::DatabaseBackend, sql, item) = sql
+"An array index (or nested indexes) as SQL with no parameters, for F(), values() and order_by()."
+function array_index_expr(b::DatabaseBackend, col, is::Vector{Int})
+    sql, ps = array_index_sql(b, col, is)
+    isempty(ps) ? sql : replace(sql, "?" => sql_string_literal(b, ps[1]); count = 1)
+end
+"The field of an array's items `n` levels down (its base field, the base's base, ...)."
+function array_item_field(f::Field, n::Int)
+    for _ in 1:n
+        f.kind === :array || return nothing
+        f = array_base(f)
+        f === nothing && return nothing
+    end
+    f
+end
+array_index_sql(::DatabaseBackend, col, is::Vector{Int}) = "$col" * join("[$(i + 1)]" for i in is), Any[]
 
 range_type(::DatabaseBackend, kind) = kind === :intrange ? "INT8RANGE" : kind === :daterange ? "DATERANGE" :
                                        kind === :decimalrange ? "NUMRANGE" : "TSRANGE"
@@ -435,6 +553,11 @@ Base.@nospecializeinfer function special_lookup(c::SQLCompiler, f::Field, col, l
         lookup == "has_keys" && return json_has_keys_sql(b, col, value, true)
         lookup == "has_any_keys" && return json_has_keys_sql(b, col, value, false)
     elseif k === :array
+        if lookup == "in" && value isa Union{AbstractVector,Tuple}
+            value = Any[x isa Union{AbstractVector,Tuple} ? prep_array(f, x) : x for x in value]
+        elseif value isa Union{AbstractVector,Tuple}
+            value = prep_array(f, value)
+        end
         lookup == "contains" && return array_op_sql(b, "@>", col, f, value)
         lookup == "contained_by" && return array_op_sql(b, "<@", col, f, value)
         lookup == "overlap" && return array_op_sql(b, "&&", col, f, value)
@@ -464,8 +587,10 @@ Base.@nospecializeinfer function transform_column(f::Field, col, rest::Vector{St
         return json_key_sql(b, col, rest, nums; boolean = value isa Bool)
     elseif f.kind === :array && rest == ["len"]
         return array_len_sql(b, col), Any[]
-    elseif f.kind === :array && length(rest) == 1 && all(isdigit, rest[1])
-        return array_index_sql(b, col, parse(Int, rest[1]))
+    elseif f.kind === :array && !isempty(rest) && all(r -> all(isdigit, r), rest)     # (nested: grid__0__1)
+        return array_index_expr(b, col, parse.(Int, rest)), Any[]
+    elseif f.kind === :array && length(rest) == 1 && (sl = array_slice_bounds(rest[1])) !== nothing    # field__0_2
+        return array_slice_sql(b, col, sl...), Any[]
     end
     nothing
 end

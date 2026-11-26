@@ -651,6 +651,11 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
             alias = field_alias!(c, alias, T, f)
             # data__run__0: a key path inside a JSON field (values, values_list, order_by, F)
             f.kind === :json && !last_ && return json_path_sql(backend(), qcol(alias, column(f)), segs[i+1:end]), f
+            # field__1, grid__0__1: an array's items; field__len: its length
+            if f.kind === :array && !last_
+                tr = array_transform(backend(), f, qcol(alias, column(f)), segs[i+1:end])
+                tr === nothing || return tr
+            end
             if last_ || f.kind !== :fk
                 last_ && return qcol(alias, column(f)), f
                 # opened__month, finish__date__month: transforms of the field, wherever an F() goes (#205)
@@ -974,7 +979,7 @@ function aggregate_sql(::DatabaseBackend, func, arg, order, e)
     "$func($arg)"
 end
 function aggregate_sql(::MySQLBackend, func, arg, order, e)
-    func == "ARRAY_AGG" && return "JSON_ARRAYAGG($arg$(occursin("MariaDB", vendor(backend())) ? obsql(order) : ""))"
+    func == "ARRAY_AGG" && return "JSON_ARRAYAGG($arg$(is_mariadb(backend()) ? obsql(order) : ""))"
     func == "STRING_AGG" && return "GROUP_CONCAT($arg$(obsql(order)) SEPARATOR $(sql_string_literal(e.delimiter)))"
     func == "BOOL_AND" && return "MIN($arg)"
     func == "BOOL_OR" && return "MAX($arg)"
@@ -1386,7 +1391,7 @@ Base.@nospecializeinfer function output_field(@nospecialize(T), e::Subquery)
 end
 
 "Field kinds a computed value is converted to through its `output_field` (the text and numbers some backends give back)."
-const TYPED_OUTPUT_KINDS = (:date, :datetime, :time, :uuid, :bool, :duration)
+const TYPED_OUTPUT_KINDS = (:date, :datetime, :time, :uuid, :bool, :duration, :array)   # (:array: F(:field__0_2), a slice)
 
 """
 A computed value (annotation or aggregate) as Julia sees it: through its `output_field` for

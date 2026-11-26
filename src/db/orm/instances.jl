@@ -649,6 +649,37 @@ end
 decimal_step(places) = places === nothing ? "any" : places == 0 ? "1" : places <= 6 ? "0." * "0"^(places - 1) * "1" : "1e-$places"
 
 """
+An array's items checked as its base field checks a value (Django's ArrayField.validate / run_validators):
+"Item 2 in the array did not validate: ...", a missing item where the base field isn't nullable, and nested
+arrays of different lengths. A form's array (SimpleArrayField) also has a fewest number of items.
+"""
+function array_item_errors(f::Field, v)
+    errs = String[]
+    mn = f.form === nothing ? nothing : get(f.form, :array_min_length, nothing)
+    if mn !== nothing && length(v) < mn
+        push!(errs, field_message(f, "min_length", ngettext("List contains %(show_value)d item, it should contain no fewer than %(limit_value)d.",
+                                                            "List contains %(show_value)d items, it should contain no fewer than %(limit_value)d.", length(v)),
+                                  Dict("limit_value" => mn, "show_value" => length(v), "value" => v)))
+    end
+    base = array_base(f)
+    base === nothing && return errs
+    if base.kind === :array && length(unique(length(x) for x in v if x isa Union{AbstractVector,Tuple})) > 1
+        push!(errs, field_message(f, "nested_array_mismatch", gettext("Nested arrays must have the same length.")))
+    end
+    for (i, x) in enumerate(v)
+        item = if x === nothing
+            base.null || base.kind === :array ? String[] : [field_message(base, "null", gettext("This field cannot be null."))]
+        else
+            validate_field(base, x)
+        end
+        for m in item
+            push!(errs, field_message(f, "item_invalid", gettext("Item %(nth)s in the array did not validate:"), Dict("nth" => i)) * " " * m)
+        end
+    end
+    errs
+end
+
+"""
 Run per-field validation on a cleaned (typed) value; returns a vector of messages.
 Validators are functions `v -> true/nothing` (ok) or an error message `String` / `false`.
 """
@@ -671,6 +702,14 @@ function validate_field(f::Field, v)
     if f.kind === :binary && f.max_length !== nothing && v isa AbstractVector{UInt8} && length(v) > f.max_length
         push!(errs, field_message(f, "max_length", gettext("Ensure this value has at most %(max)d bytes (it has %(len)d)."),
                                   Dict("max" => f.max_length, "len" => length(v), "limit_value" => f.max_length, "show_value" => length(v), "value" => v)))
+    end
+    if f.kind === :array && v isa AbstractVector && array_size(f) !== nothing && length(v) > array_size(f)     # (Django's ArrayMaxLengthValidator)
+        push!(errs, field_message(f, "max_length", ngettext("List contains %(show_value)d item, it should contain no more than %(limit_value)d.",
+                                                            "List contains %(show_value)d items, it should contain no more than %(limit_value)d.", length(v)),
+                                  Dict("limit_value" => array_size(f), "show_value" => length(v), "value" => v)))
+    end
+    if f.kind === :array && v isa Union{AbstractVector,Tuple}
+        append!(errs, array_item_errors(f, v))
     end
     if f.max_length !== nothing && v isa AbstractString && f.kind !== :ipaddress && length(v) > f.max_length
         push!(errs, field_message(f, "max_length", gettext("Ensure this value has at most %(max)d characters (it has %(len)d)."),

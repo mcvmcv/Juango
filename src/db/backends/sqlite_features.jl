@@ -8,7 +8,7 @@ datetime_diff_sql(::SQLiteBackend, ka, a, kb, b) = "CAST(ROUND((julianday($a) - 
 
 sqlite_json_path(keys) = "\$" * join([all(isdigit, k) ? "[$k]" : "." * "\"" * replace(k, "\"" => "\\\"") * "\"" for k in keys])
 
-encode_array(::SQLiteBackend, v) = JSON.json(json_scalar_tree(collect(v)))
+encode_array(::SQLiteBackend, v, kind = nothing) = JSON.json(json_scalar_tree(collect(v)))
 encode_range(::SQLiteBackend, r::ValueRange) =
     JSON.json(Dict("lower" => json_scalar(r.lower), "upper" => json_scalar(r.upper), "bounds" => r.bounds))
 
@@ -43,8 +43,8 @@ function array_op_sql(b::SQLiteBackend, op, col, f::Field, v)
     op == "&&" && return "EXISTS (SELECT 1 FROM json_each($col) AS ja JOIN json_each(?) AS jb ON ja.value = jb.value)", p
     "json($col) = json(?)", p
 end
-array_len_sql(::SQLiteBackend, col) = "COALESCE(json_array_length($col), 0)"
-array_index_sql(::SQLiteBackend, col, i::Int) = "json_extract($col, ?)", Any["\$[$i]"]
+array_len_sql(::SQLiteBackend, col) = "json_array_length($col)"
+array_index_sql(::SQLiteBackend, col, is::Vector{Int}) = "json_extract($col, ?)", Any["\$" * join("[$i]" for i in is)]
 
 function range_lookup_sql(b::SQLiteBackend, op::String, col, kind, v)
     sql, ps = sqlite_range_condition(b, op, col, v)
@@ -71,3 +71,8 @@ function search_sql(b::SQLiteBackend, col, text)
 end
 supports_full_text(::SQLiteBackend) = false
 array_column_type(::SQLiteBackend, of, max_length) = "TEXT"
+
+# an array's slice: its items from a to z - 1, in order (nested arrays and objects kept as JSON, not text)
+array_slice_sql(::SQLiteBackend, col, a::Int, z::Int) =
+    "(CASE WHEN $col IS NULL THEN NULL ELSE (SELECT json_group_array(CASE WHEN js.type IN ('array', 'object') THEN json(js.value) ELSE js.value END) " *
+    "FROM (SELECT value, type FROM json_each($col) WHERE key >= $a AND key < $z ORDER BY key) AS js) END)"
