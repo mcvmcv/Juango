@@ -49,6 +49,7 @@ mutable struct FormSet
     can_delete_extra::Bool       # false: only the initial forms get a DELETE box
     saved_forms::Vector{Form}    # model formsets: the forms save!(fs; commit = false) saved, for save_m2m!(fs)
     edit_only::Bool              # model formsets: save! changes existing objects but makes no new ones
+    set_parent::Any              # generic inline formsets: (obj, parent) -> attach the row to the parent (nothing: the fk)
 end
 
 "The default `max_num`; `absolute_max` defaults to twice it (Django's DEFAULT_MAX_NUM)."
@@ -312,7 +313,7 @@ end
 function new_formset(make_form; prefix, data, initial, instances, extra, min_num, max_num, validate_min, validate_max,
                      can_delete, can_order, clean, model = nothing, fk = nothing, parent = nothing, name = "FormSet",
                      auto_id = nothing, form_kwargs = nothing, error_messages = nothing, absolute_max = nothing,
-                     can_delete_extra = true, edit_only::Bool = false)
+                     can_delete_extra = true, edit_only::Bool = false, set_parent = nothing)
     max_num = max_num === nothing ? DEFAULT_MAX_NUM : max_num
     absolute_max = absolute_max === nothing ? max_num + DEFAULT_MAX_NUM : absolute_max
     FormSet(make_form, string(prefix), data, Dict{Symbol,Any}[Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(d)) for d in initial],
@@ -320,7 +321,7 @@ function new_formset(make_form; prefix, data, initial, instances, extra, min_num
             Form[], String[], false, model, fk, parent, Any[], Any[], Any[], string(name), auto_id,
             Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs_of(something(form_kwargs, Dict()))),
             Dict{String,String}(string(k) => string(v) for (k, v) in pairs_of(something(error_messages, Dict()))),
-            absolute_max, can_delete_extra, Form[], edit_only)
+            absolute_max, can_delete_extra, Form[], edit_only, set_parent)
 end
 "The forms for existing objects or initial data (Django's `initial_forms`)."
 initial_forms(fs::FormSet) = (fs_ = build_forms!(fs); fs_[1:min(initial_form_count(fs), length(fs_))])
@@ -481,6 +482,7 @@ function save!(fs::FormSet; commit = true)
             isnew = f.instance === nothing
             obj = save!(f; commit = false)
             fs.fk === nothing || setproperty!(obj, fs.fk.name, fs.parent)
+            fs.set_parent === nothing || fs.set_parent(obj, fs.parent)
             if commit
                 save!(obj)
                 save_m2m!(f)

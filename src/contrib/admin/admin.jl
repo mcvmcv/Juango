@@ -72,7 +72,7 @@ end
 admin_ordering_terms(xs) = Any[x isa Union{AbstractString,Symbol} ? string(x) : x for x in xs]
 const INLINE_OPTIONS = (:exclude, :readonly_fields, :get_exclude, :get_readonly_fields, :min_num, :get_extra, :get_min_num, :get_max_num,
                         :verbose_name, :verbose_name_plural, :show_change_link, :classes, :view_on_site,
-                        :has_view_permission, :has_add_permission, :has_change_permission, :has_delete_permission)
+                        :has_view_permission, :has_add_permission, :has_change_permission, :has_delete_permission, :generic)
 Base.@nospecializeinfer function TabularInline(@nospecialize(T); fields = nothing, extra = 1, can_delete = true, fk = nothing, max_num = 1000,
                                                ordering = (), style = :tabular, kw...)
     for k in keys(kw)
@@ -85,6 +85,16 @@ Base.@nospecializeinfer function TabularInline(@nospecialize(T); fields = nothin
                 admin_ordering_terms(ordering), o)
 end
 StackedInline(T; kw...) = TabularInline(T; kw..., style = :stacked)
+"""
+    GenericTabularInline(Model; ct_field = :content_type, ct_fk_field = :object_id, options...)
+    GenericStackedInline(...)
+
+An inline of objects that point at the parent through a generic foreign key (Django's contenttypes admin):
+`generic_inlineformset_factory`'s rows, with the inline's options.
+"""
+GenericTabularInline(T; ct_field = :content_type, ct_fk_field = :object_id, kw...) =
+    TabularInline(T; kw..., generic = (Symbol(ct_field), Symbol(ct_fk_field)))
+GenericStackedInline(T; kw...) = GenericTabularInline(T; kw..., style = :stacked)
 inline_option(ia::InlineAdmin, k::Symbol, default = nothing) = get(ia.options, k, default)
 "The inline's verbose names, as Django's: its own, else the model's (a `verbose_name` alone gets an \"s\")."
 function inline_verbose_names(ia::InlineAdmin)
@@ -1605,7 +1615,10 @@ Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecial
         ex = inline_exclude(ia, req, obj)
         editable(f) = !(f in ro) && !(f in ex)
         fields = ia.fields === nothing ? nothing : filter(editable, ia.fields)
-        FS = inlineformset_factory(ma.model, M; fk = ia.fk, fields = fields, exclude = fields === nothing ? vcat(ex, ro) : Symbol[],
+        gen = inline_option(ia, :generic)
+        factory(; kw...) = gen === nothing ? inlineformset_factory(ma.model, M; fk = ia.fk, kw...) :
+                                           Juango.generic_inlineformset_factory(M; ct_field = gen[1], fk_field = gen[2], kw...)
+        FS = factory(; fields = fields, exclude = fields === nothing ? vcat(ex, ro) : Symbol[],
                                    extra = can_add ? inline_num(ia, :extra, ia.extra, req, obj) : 0,
                                    min_num = can_add ? inline_num(ia, :min_num, inline_option(ia, :min_num, 0), req, obj) : 0,
                                    can_delete = can_change && ia.can_delete && inline_can(req, ia, :delete, obj; parent = ma.model),
@@ -1623,7 +1636,8 @@ Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecial
             # (no change permission: the objects are shown as values, outside the formset, so a POST can't change
             # them; the formset has just the new ones the user may add, as Django's)
             fs = FS(data; instance = obj, queryset = Juango.none(qs), prefix = pfx)
-            existing = obj === nothing ? Any[] : collect(filter(qs, Q(attname(fs.fk) => Juango.target_value(fs.fk, obj))))
+            existing = obj === nothing ? Any[] : gen !== nothing ? collect(filter(qs, Q(gen[1] => Juango.get_for_model(typeof(obj))), Q(gen[2] => obj.pk))) :
+                       collect(filter(qs, Q(attname(fs.fk) => Juango.target_value(fs.fk, obj))))
             push!(out, (ia, fs, (readonly = ro, existing = existing, shown = inline_shown_fields(ia, fs, ex), can_change = false, can_add = can_add)))
         end
     end
@@ -1633,8 +1647,8 @@ end
 "The fields a view-only inline shows: its `fields`, else the model's editable ones but the key to the parent."
 Base.@nospecializeinfer function inline_shown_fields(ia::InlineAdmin, fs, ex)
     ia.fields !== nothing && return filter(!in(ex), ia.fields)
-    fkname = fs.fk.name
-    [f.name for f in Juango.all_fields(ia.model) if f.editable && f.name !== fkname && !(f.name in ex)]
+    skip = fs.fk !== nothing ? (fs.fk.name,) : something(inline_option(ia, :generic), ())
+    [f.name for f in Juango.all_fields(ia.model) if f.editable && !(f.name in skip) && !(f.name in ex)]
 end
 
 function inline_context(req, ia::InlineAdmin, fs, info = (readonly = Symbol[], existing = Any[], shown = Symbol[], can_change = true, can_add = true))
@@ -2672,6 +2686,15 @@ Base.@nospecializeinfer function check_admin(ma::ModelAdmin)
     # inlines (E201, E202)
     for ia in ma.inlines
         ilabel = "<$(ia.style === :tabular ? "TabularInline" : "StackedInline") $(admin_key(ia.model))>"
+        if (gen = inline_option(ia, :generic)) !== nothing            # (a generic inline: its content type field, as Django's GenericInlineModelAdminChecks)
+            try
+                Juango.generic_inlineformset_factory(ia.model; ct_field = gen[1], fk_field = gen[2])
+            catch e
+                e isa ArgumentError || rethrow()
+                push!(out, Juango.CheckMessage(:error, ilabel * ": " * e.msg; id = "admin.E304"))
+            end
+            continue
+        end
         try
             Juango.inlineformset_factory(T, ia.model; fk = ia.fk, fields = ia.fields)      # (Django's messages for a missing or ambiguous key)
             fk = only(f for f in Juango.all_fields(ia.model) if f.kind === :fk && T in Juango.lineage(related_model(f)) &&

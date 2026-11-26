@@ -111,6 +111,37 @@ CurrentSiteMiddleware(get_response) = function (req::Request)
     get_response(req)
 end
 
+"""
+    CurrentSiteManager(Model; field = nothing) -> QuerySet
+
+The model's rows on the current site (`SITE_ID`), through its foreign key or many-to-many field to `Site`:
+`field`, else the one named `site` or `sites` (Django's CurrentSiteManager). Make it a named manager:
+
+    Juango.manager(::Type{Article}, ::Val{:on_site}) = CurrentSiteManager(Article)
+
+A field that isn't there, or isn't a relation, is ImproperlyConfigured (`check_current_site_manager`'s message).
+"""
+Base.@nospecializeinfer function CurrentSiteManager(@nospecialize(T::Type); field = nothing)
+    errs = check_current_site_manager(T; field)
+    isempty(errs) || throw(ImproperlyConfigured(first(errs).msg))
+    filter(base_objects(T), Q(Symbol(current_site_field(T, field), "__id") => get(settings, :SITE_ID, nothing)))
+end
+"A model's field or many-to-many field named `name`, or nothing."
+Base.@nospecializeinfer site_field_named(@nospecialize(T), name::Symbol) =
+    something(findfield(modelmeta(T), name), findfirst_m2m(T, name), Some(nothing))
+Base.@nospecializeinfer findfirst_m2m(@nospecialize(T), name::Symbol) = (i = findfirst(f -> f.name === name, modelmeta(T).m2m); i === nothing ? nothing : modelmeta(T).m2m[i])
+Base.@nospecializeinfer current_site_field(@nospecialize(T), field) = field !== nothing ? Symbol(field) :
+    (site_field_named(T, :site) !== nothing ? :site : site_field_named(T, :sites) !== nothing ? :sites : :site)
+"Django's CurrentSiteManager checks: sites.E001 (no such field), sites.E002 (not a foreign key or many-to-many field)."
+Base.@nospecializeinfer function check_current_site_manager(@nospecialize(T::Type); field = nothing)
+    name = current_site_field(T, field)
+    f = site_field_named(T, name)
+    f === nothing && return [CheckMessage(:error, "CurrentSiteManager could not find a field named '$name'."; id = "sites.E001")]
+    f.kind in (:fk, :m2m) ||
+        return [CheckMessage(:error, "CurrentSiteManager cannot use '$(nameof(T)).$name' as it is not a foreign key or a many-to-many field."; id = "sites.E002")]
+    CheckMessage[]
+end
+
 # --- redirects ----------------------------------------------------------------------------------------
 
 @model struct Redirect

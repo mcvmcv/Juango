@@ -72,7 +72,7 @@ export F, Value, Count, Sum, Avg, Min, Max, Lower, Upper, Length, Coalesce, Conc
 export migrate, makemigrations
 # forms
 export Form, @form, ModelForm, is_valid, add_widget_attrs!, add_error!, as_p, cleaned_data, save_m2m!, has_changed,
-       changed_fields, FormSet, formset_factory, active_forms, is_deleted, is_blank_extra, nested_form, nested_formset, nested_model_form, nested_row, NestedForm, form_html, field_html, modelformset_factory, inlineformset_factory,
+       changed_fields, FormSet, formset_factory, active_forms, is_deleted, is_blank_extra, nested_form, nested_formset, nested_model_form, nested_row, NestedForm, form_html, field_html, modelformset_factory, inlineformset_factory, generic_inlineformset_factory,
        Widget, MultiWidget, MultiValueField, SplitDateTimeField, Media, ModelChoiceField,
        ModelMultipleChoiceField, ChoiceField, TypedChoiceField, TypedMultipleChoiceField, MultipleChoiceField, MultipleFileField, RegexField,
        ComboField, as_field_group, as_div, as_ul, as_table, NullBooleanField, SelectDateWidget, SplitHiddenDateTimeWidget,
@@ -175,7 +175,7 @@ public cache, incr, decr, incr_version, decr_version, create_cache_table, CacheS
 # admin log, contrib apps, tasks
 public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, sitemap_view,
        sitemap_index_view, flatpage, flatpage_urls, FlatpageFallbackMiddleware, flatpage_sitemap, add_domain, RequestSite,
-       clear_site_cache!, CurrentSiteMiddleware, check_site_id, create_default_site!, Redirect, RedirectFallbackMiddleware, background, TaskDef, db_worker
+       clear_site_cache!, CurrentSiteMiddleware, CurrentSiteManager, check_current_site_manager, check_site_id, create_default_site!, Redirect, RedirectFallbackMiddleware, background, TaskDef, db_worker
 # apps, settings, commands
 public build, build_workload, project_include, on_reload!, CheckMessage, register_check!, run_checks, diffsettings, sendtestemail, findstatic,
        remove_stale_contenttypes, installed_apps, is_installed, get_app, model_label, model_label_lower, get_field, get_fields, RelatedObject, related_objects, app_models, static_dirs, default_settings,

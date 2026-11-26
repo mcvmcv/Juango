@@ -452,3 +452,54 @@ function prefetch_generic_relation!(objs::Vector, f::Field, qs, to_attr)
     end
     rows
 end
+
+# --- generic inline formsets (Django's generic_inlineformset_factory) ---------------------------------------
+
+"""
+    generic_inlineformset_factory(Model; ct_field = :content_type, fk_field = :object_id, fields, exclude,
+                                  extra = 3, can_delete = true, min_num = 0, max_num = 1000, for_concrete_model = true, ...)
+
+Like `inlineformset_factory`, for the objects of `Model` that point at a parent through a generic foreign key
+(`ct_field` a ForeignKey to ContentType, `fk_field` the object's id): `(data; instance = parent, prefix,
+queryset, save_as_new) -> FormSet`. The two fields aren't on the forms; `save!` sets them to the parent. The
+default prefix is "app-model-ct_field-fk_field", as Django's.
+"""
+function generic_inlineformset_factory(T::Type; ct_field = :content_type, fk_field = :object_id, fields = nothing, exclude = Symbol[],
+                                       extra = 3, can_delete = true, can_order = false, min_num = 0, max_num = 1000,
+                                       validate_min = false, validate_max = false, clean = nothing, form = nothing,
+                                       widgets = Dict{Symbol,Symbol}(), labels = Dict{Symbol,String}(), help_texts = Dict{Symbol,String}(),
+                                       field_classes = Dict{Symbol,Any}(), extra_fields = Pair{Symbol,Any}[], formfield_callback = nothing,
+                                       error_messages = Dict{Symbol,Any}(), edit_only::Bool = false, absolute_max = nothing,
+                                       can_delete_extra::Bool = true, for_concrete_model::Bool = true)
+    ctf = getfield_meta(T, Symbol(ct_field))
+    (ctf === nothing || ctf.kind !== :fk || related_model(ctf) !== ContentType) &&
+        throw(ArgumentError("fk_name '$ct_field' is not a ForeignKey to ContentType"))
+    getfield_meta(T, Symbol(fk_field)) === nothing && throw(ArgumentError("'$(nameof(T))' has no field named '$fk_field'."))
+    ct, fk = Symbol(ct_field), Symbol(fk_field)
+    excl = vcat(Symbol.(collect(exclude)), [ct, fk])
+    flds = all_fields_option(fields) ? fields : [Symbol(f) for f in fields if !(Symbol(f) in (ct, fk))]
+    make = row_form(T, form; fields = flds, exclude = excl, widgets, labels, help_texts, field_classes, extra_fields,
+                    formfield_callback, error_messages)
+    m = modelmeta(T)
+    default_prefix = "$(m.app)-$(lowercase(m.name))-$ct-$fk"
+    textkey = getfield_meta(T, fk).kind in STRING_KINDS
+    key(p) = textkey ? string(p.pk) : p.pk
+    function (data = nothing; instance = nothing, prefix = default_prefix, queryset = nothing, save_as_new::Bool = false, initial = [])
+        qs = instance === nothing || instance.pk === nothing || save_as_new ? none(T) :
+             filter(something(queryset, objects(T)), Q(ct => get_for_model(typeof(instance); for_concrete_model)), Q(fk => key(instance)))
+        if save_as_new && data !== nothing            # (every row a new object: the ids dropped)
+            d = Dict{String,Any}(k => data isa QueryDict ? getlist(data, k) : v for (k, v) in data)
+            foreach(k -> d[k] isa AbstractVector && length(d[k]) == 1 && (d[k] = d[k][1]), collect(keys(d)))
+            d["$prefix-INITIAL_FORMS"] = "0"
+            for k in collect(keys(d))
+                startswith(k, prefix * "-") && endswith(k, "-id") && delete!(d, k)
+            end
+            data = d
+        end
+        new_formset(make; prefix = prefix, data = data, initial = collect(initial), instances = collect(qs), extra = extra,
+                    min_num = min_num, max_num = max_num, validate_min = validate_min, validate_max = validate_max,
+                    can_delete = can_delete, can_order = can_order, clean = clean, model = T, parent = instance, edit_only,
+                    absolute_max, can_delete_extra,
+                    set_parent = (obj, p) -> (setproperty!(obj, ct, get_for_model(typeof(p); for_concrete_model)); setproperty!(obj, fk, key(p))))
+    end
+end

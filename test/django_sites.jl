@@ -1,4 +1,4 @@
-# Django's sites_tests and redirects_tests, ported (#227).
+# Django's sites_tests, sites_framework and redirects_tests, ported (#227).
 # julia --project=test test/django_sites.jl   (see setup.jl)
 #
 # Not translated: the "other" database and router cases of CreateDefaultSiteTests (Juango's multi-database
@@ -9,6 +9,31 @@ dsite_req(meta...) = Request("GET", "/"; headers = Dict(meta...))
 dsite_out(f) = mktemp() do path, io                     # (redirect_stdout needs a file, not an IOBuffer)
     redirect_stdout(f, io); close(io); read(path, String)
 end
+
+# sites_framework's models: an article on one site, on several, through a field of another name
+@model struct DsfExclusiveArticle
+    title = CharField(max_length = 50)
+    site = ForeignKey(Site; on_delete = :CASCADE)
+    Meta(table = "dsf_exclusivearticle")
+end
+@model struct DsfSyndicatedArticle
+    title = CharField(max_length = 50)
+    sites = ManyToManyField(Site)
+    Meta(table = "dsf_syndicatedarticle")
+end
+@model struct DsfCustomArticle
+    title = CharField(max_length = 50)
+    places_this_article_should_appear = ForeignKey(Site; on_delete = :CASCADE)
+    Meta(table = "dsf_customarticle")
+end
+@model struct DsfConfusedArticle
+    title = CharField(max_length = 50)
+    site = IntegerField()
+    Meta(table = "dsf_confusedarticle")
+end
+Juango.manager(::Type{DsfExclusiveArticle}, ::Val{:on_site}) = CurrentSiteManager(DsfExclusiveArticle)
+Juango.manager(::Type{DsfSyndicatedArticle}, ::Val{:on_site}) = CurrentSiteManager(DsfSyndicatedArticle)
+Juango.manager(::Type{DsfCustomArticle}, ::Val{:on_site}) = CurrentSiteManager(DsfCustomArticle; field = :places_this_article_should_appear)
 
 @testset "django sites_tests and redirects_tests" begin
     old_apps, old_mw, old_slash, old_urls = settings.INSTALLED_APPS, settings.MIDDLEWARE, settings.APPEND_SLASH, settings.ROOT_URLCONF
@@ -191,6 +216,34 @@ end
             delete!(objects(Redirect))
             create(Redirect; site, old_path = "/initial/", new_path = "/new_target/")
             @test get(Client(), "/initial/").status == 302                            # test_response_redirect_class
+        end
+        @testset "sites_framework" begin
+            reset()
+            ms = [DsfExclusiveArticle, DsfSyndicatedArticle, DsfCustomArticle, DsfConfusedArticle]
+            redirect_stdout(() -> (Juango.sync_models!(ms); append!(PORT_MODELS, ms)), devnull)
+            site1 = get(Site; id = settings.SITE_ID)
+            site2 = create(Site; domain = "example2.com", name = "example2.com")
+            # test_site_fk
+            a = create(DsfExclusiveArticle; title = "Breaking News!", site = site1)
+            create(DsfExclusiveArticle; title = "Elsewhere", site = site2)
+            @test get(objects(DsfExclusiveArticle, :on_site)).id == a.id
+            # test_sites_m2m
+            a = create(DsfSyndicatedArticle; title = "Fresh News!")
+            add!(a.sites, site1); add!(a.sites, site2)
+            a2 = create(DsfSyndicatedArticle; title = "More News!")
+            add!(a2.sites, site2)
+            @test get(objects(DsfSyndicatedArticle, :on_site)).id == a.id
+            # test_custom_named_field
+            a = create(DsfCustomArticle; title = "Tantalizing News!", places_this_article_should_appear_id = site1.id)
+            @test get(objects(DsfCustomArticle, :on_site)).id == a.id
+            # CurrentSiteManagerChecksTests: test_invalid_name, test_invalid_field_type
+            e = only(check_current_site_manager(DsfCustomArticle; field = :places))
+            @test e.id == "sites.E001" && e.msg == "CurrentSiteManager could not find a field named 'places'."
+            e = only(check_current_site_manager(DsfConfusedArticle))
+            @test e.id == "sites.E002" && e.msg == "CurrentSiteManager cannot use 'DsfConfusedArticle.site' as it is not a foreign key or a many-to-many field."
+            @test_throws Juango.ImproperlyConfigured CurrentSiteManager(DsfConfusedArticle)
+            @test isempty(check_current_site_manager(DsfSyndicatedArticle))
+            foreach(m -> delete!(objects(m)), ms)
         end
     finally
         delete!(objects(Redirect)); delete!(objects(Site)); clear_site_cache!()
