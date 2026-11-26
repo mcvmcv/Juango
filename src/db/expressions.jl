@@ -651,6 +651,10 @@ Base.@nospecializeinfer function resolve_path(c::SQLCompiler, alias, @nospeciali
             alias = field_alias!(c, alias, T, f)
             # data__run__0: a key path inside a JSON field (values, values_list, order_by, F)
             f.kind === :json && !last_ && return json_path_sql(backend(), qcol(alias, column(f)), segs[i+1:end]), f
+            if f.kind === :hstore && i == length(segs) - 1          # F(:field__a): the key's value
+                segs[end] in ("keys", "values") && return hstore_array_expr(backend(), qcol(alias, column(f)), Symbol(segs[end])), hstore_array_field()
+                return hstore_key_expr(backend(), qcol(alias, column(f)), segs[end]), nothing
+            end
             # field__1, grid__0__1: an array's items; field__len: its length
             if f.kind === :array && !last_
                 tr = array_transform(backend(), f, qcol(alias, column(f)), segs[i+1:end])

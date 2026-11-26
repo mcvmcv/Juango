@@ -663,8 +663,12 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             rf.one_to_one || (c.distinct = true)               # (a reverse one-to-one can't repeat rows)
             return compile_lookup(c, a, M, subkey, value, negated)
         end
-        if !isempty(rest) && f.kind in (:json, :hstore, :array)
+        if !isempty(rest) && (f.kind in (:json, :hstore, :array) || f.kind in RANGE_KINDS && rest in (["startswith"], ["endswith"]))
             # data__owner__name (JSON key path), tags__len, tags__0
+            # (an hstore's values are text: field__a = 1 is "1", as Django's)
+            if f.kind === :hstore && length(rest) == 1 && !(rest[1] in ("keys", "values")) && lookup != "isnull"
+                value = value isa Number ? string(value) : value isa AbstractVector ? Any[x isa Number ? string(x) : x for x in value] : value
+            end
             tr = transform_column(f, qcol(alias, column(f)), rest, lookup, value)
             tr === nothing && throw(LookupError("unsupported lookup '$(join(rest, "__"))' on $(f.kind) field '$fname'"))
             col, colps = tr
@@ -672,6 +676,8 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             # a slice, or an item of a nested array, is an array still: its lookups are an array's (field__0_2 = [2, 3])
             if f.kind === :array && (af = array_transform(backend(), f, "", rest)) !== nothing && af[2] isa Field && af[2].kind === :array
                 f = af[2]
+            elseif f.kind === :hstore && length(rest) == 1 && rest[1] in ("keys", "values")
+                f = hstore_array_field()           # field__keys__contains = ["a"]: an array's lookups
             else
                 f = nothing
             end
@@ -762,6 +768,11 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
             m.captures[1] == "RHS" ? (print(out, rsql); append!(ps, rps)) : print(out, tr_inner)
         end
         return String(take!(out)), ps
+    end
+    # integer__contained_by = ValueRange(1, 98): a value within a range (Django's RangeContainedBy, on any field)
+    if lookup == "contained_by" && value isa ValueRange && (f === nothing || !(f.kind in RANGE_KINDS))
+        r = scalar_in_range_sql(col, value; s = x -> x isa TimeZones.ZonedDateTime ? to_utc_naive(x) : x)
+        return r[1], vcat(colps, r[2])
     end
     if f !== nothing || lookup == "search"
         sl = special_lookup(c, something(f, Field(:text)), col, lookup, value)

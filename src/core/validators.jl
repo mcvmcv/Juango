@@ -243,6 +243,59 @@ ProhibitNullCharactersValidator(; message = nothing, code = "null_characters_not
 validation_error(v::ProhibitNullCharactersValidator, x) =
     occursin('\0', string(x)) ? (v.code, msg_or(v, gettext("Null characters are not allowed."))) : nothing
 
+"""
+    KeysValidator(keys; strict = false, messages = nothing)
+
+A dict (an `HStoreField`'s or a `JSONField`'s value) must have all of `keys` ("Some keys were missing: b", code
+"missing_keys"), and with `strict` no others ("Some unknown keys were provided: c", code "extra_keys"). `messages`
+replaces those by code: `Dict("missing_keys" => "...")` (Django's `django.contrib.postgres.validators.KeysValidator`).
+"""
+struct KeysValidator <: Validator
+    keys::Vector{String}
+    strict::Bool
+    messages::Dict{String,String}
+end
+KeysValidator(keys; strict::Bool = false, messages = nothing) =
+    KeysValidator(String[string(k) for k in keys], strict,
+                  messages === nothing ? Dict{String,String}() : Dict{String,String}(string(k) => string(v) for (k, v) in messages))
+function validation_error(v::KeysValidator, x)
+    x isa AbstractDict || return nothing
+    have = Set(string(k) for k in keys(x))
+    missing_ = [k for k in v.keys if !(k in have)]
+    isempty(missing_) || return ("missing_keys", get(v.messages, "missing_keys", interpolate(gettext("Some keys were missing: %(keys)s"), Dict("keys" => join(missing_, ", ")))))
+    if v.strict
+        extra = sort!([k for k in have if !(k in v.keys)])
+        isempty(extra) || return ("extra_keys", get(v.messages, "extra_keys", interpolate(gettext("Some unknown keys were provided: %(keys)s"), Dict("keys" => join(extra, ", ")))))
+    end
+    nothing
+end
+
+"`RangeMaxValueValidator(limit)`: a range's upper bound is at most `limit`; an unbounded one isn't (code \"max_value\")."
+struct RangeMaxValueValidator <: Validator
+    limit::Any
+    message::Any
+    code::String
+end
+RangeMaxValueValidator(limit; message = nothing, code = "max_value") = RangeMaxValueValidator(limit, message, string(code))
+"`RangeMinValueValidator(limit)`: a range's lower bound is at least `limit`; an unbounded one isn't (code \"min_value\")."
+struct RangeMinValueValidator <: Validator
+    limit::Any
+    message::Any
+    code::String
+end
+RangeMinValueValidator(limit; message = nothing, code = "min_value") = RangeMinValueValidator(limit, message, string(code))
+function validation_error(v::RangeMaxValueValidator, r)
+    (hasproperty(r, :upper) && !isempty(r)) || return nothing
+    r.upper === nothing || r.upper > v.limit ?
+        (v.code, msg_or(v, interpolate(gettext("Ensure that the upper bound of the range is not greater than %(limit_value)s."), Dict("limit_value" => v.limit)))) : nothing
+end
+function validation_error(v::RangeMinValueValidator, r)
+    (hasproperty(r, :lower) && !isempty(r)) || return nothing
+    r.lower === nothing || r.lower < v.limit ?
+        (v.code, msg_or(v, interpolate(gettext("Ensure that the lower bound of the range is not less than %(limit_value)s."), Dict("limit_value" => v.limit)))) : nothing
+end
+validator_params(v::Union{RangeMaxValueValidator,RangeMinValueValidator}, x) = Dict{String,Any}("limit_value" => v.limit, "value" => x)
+
 "`IPAddressValidator(protocol)`: an IPv4 (`\"ipv4\"`), IPv6 (`\"ipv6\"`) or either (`\"both\"`) address."
 struct IPAddressValidator <: Validator
     protocol::String

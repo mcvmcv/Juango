@@ -46,23 +46,18 @@ end
 array_len_sql(::SQLiteBackend, col) = "json_array_length($col)"
 array_index_sql(::SQLiteBackend, col, is::Vector{Int}) = "json_extract($col, ?)", Any["\$" * join("[$i]" for i in is)]
 
+# a range's parts in its JSON ({"lower", "upper", "bounds"}; bounds "empty" for the empty range)
+function sqlite_range_parts(col)
+    bounds = "json_extract($col, '\$.bounds')"
+    (lo = "json_extract($col, '\$.lower')", hi = "json_extract($col, '\$.upper')", loinc = "(substr($bounds, 1, 1) = '[')",
+     hiinc = "(substr($bounds, 2, 1) = ']')", empty = "($bounds = 'empty')")
+end
 function range_lookup_sql(b::SQLiteBackend, op::String, col, kind, v)
-    sql, ps = sqlite_range_condition(b, op, col, v)
+    sql, ps = range_parts_sql(b, sqlite_range_parts(col), op, col, kind, v)
     "($col IS NOT NULL AND $sql)", ps          # NULL is no range at all, not an unbounded one
 end
-function sqlite_range_condition(b::SQLiteBackend, op::String, col, v)
-    lo, hi = "json_extract($col, '\$.lower')", "json_extract($col, '\$.upper')"
-    s(x) = json_scalar(x)
-    if !(v isa ValueRange)
-        op == "contains" || throw(LookupError("range lookup '$op' needs a ValueRange"))
-        return "(($lo IS NULL OR $lo <= ?) AND ($hi IS NULL OR ? < $hi))", Any[s(v), s(v)]
-    end
-    l, u = s(v.lower), s(v.upper)
-    op == "contains" && return "(($lo IS NULL OR (? IS NOT NULL AND $lo <= ?)) AND ($hi IS NULL OR (? IS NOT NULL AND ? <= $hi)))", Any[l, l, u, u]
-    op == "contained_by" && return "((? IS NULL OR ($lo IS NOT NULL AND ? <= $lo)) AND (? IS NULL OR ($hi IS NOT NULL AND $hi <= ?)))", Any[l, l, u, u]
-    op == "overlap" && return "((? IS NULL OR $lo IS NULL OR $lo < ?) AND (? IS NULL OR $hi IS NULL OR ? < $hi))", Any[u, u, l, l]
-    "json($col) = json(?)", Any[encode_range(b, v)]
-end
+range_exact_sql(b::SQLiteBackend, col, v) = "json($col) = json(?)", Any[encode_range(b, v)]
+range_bound_expr(::SQLiteBackend, col, which::Symbol) = "json_extract($col, '\$.$which')"
 
 function search_sql(b::SQLiteBackend, col, text)
     words = split(lowercase(string(text)))
@@ -76,3 +71,15 @@ array_column_type(::SQLiteBackend, of, max_length) = "TEXT"
 array_slice_sql(::SQLiteBackend, col, a::Int, z::Int) =
     "(CASE WHEN $col IS NULL THEN NULL ELSE (SELECT json_group_array(CASE WHEN js.type IN ('array', 'object') THEN json(js.value) ELSE js.value END) " *
     "FROM (SELECT value, type FROM json_each($col) WHERE key >= $a AND key < $z ORDER BY key) AS js) END)"
+
+hstore_key_expr(b::SQLiteBackend, col, key) = "json_extract($col, " * sql_string_literal(b, hstore_json_path(key)) * ")"
+hstore_array_expr(::SQLiteBackend, col, which::Symbol) =
+    "(CASE WHEN $col IS NULL THEN NULL ELSE (SELECT json_group_array($(which === :keys ? "hk.key" : "hk.value")) FROM json_each($col) AS hk) END)"
+hstore_has_key_sql(::SQLiteBackend, col, k) = "json_type($col, ?) IS NOT NULL", Any[hstore_json_path(k)]
+# every key of map `a` is one of map `b`'s, with the same value (NULL matching NULL)
+sqlite_hstore_subset(a, b) = "NOT EXISTS (SELECT 1 FROM json_each($a) AS hj WHERE NOT EXISTS (SELECT 1 FROM json_each($b) AS hp " *
+                             "WHERE hp.key = hj.key AND hp.value IS hj.value))"
+hstore_contained_by_sql(::SQLiteBackend, col, v) = "($col IS NOT NULL AND $(sqlite_hstore_subset(col, "?")))", Any[JSON.json(hstore_dict(v))]
+hstore_contains_sql(::SQLiteBackend, col, v) = "($col IS NOT NULL AND $(sqlite_hstore_subset("?", col)))", Any[JSON.json(hstore_dict(v))]
+hstore_exact_sql(b::SQLiteBackend, col, v) =
+    (s1 = hstore_contained_by_sql(b, col, v); s2 = hstore_contains_sql(b, col, v); ("(" * s1[1] * " AND " * s2[1] * ")", vcat(s1[2], s2[2])))

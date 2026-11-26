@@ -64,24 +64,21 @@ end
 array_len_sql(::MySQLBackend, col) = "JSON_LENGTH($col)"
 array_index_sql(::MySQLBackend, col, is::Vector{Int}) = mysql_jtext(col), Any["\$" * join("[$i]" for i in is)]
 
-function range_lookup_sql(b::MySQLBackend, op::String, col, kind, v)
+# a range's parts in its JSON (bounds "empty" for the empty range), the bounds as the range's kind compares them
+function mysql_range_parts(col, kind)
     bound(k) = kind === :intrange ? "CAST(NULLIF($(mysql_jtext(col, "'\$.$k'")), 'null') AS SIGNED)" :
                kind === :decimalrange ? "CAST(NULLIF($(mysql_jtext(col, "'\$.$k'")), 'null') AS DECIMAL(65,30))" :
-                                    "NULLIF($(mysql_jtext(col, "'\$.$k'")), 'null')"
-    lo, hi = bound("lower"), bound("upper")
-    s(x) = json_scalar(x)
-    sql, ps = if !(v isa ValueRange)
-        op == "contains" || throw(LookupError("range lookup '$op' needs a ValueRange"))
-        "(($lo IS NULL OR $lo <= ?) AND ($hi IS NULL OR ? < $hi))", Any[s(v), s(v)]
-    else
-        l, u = s(v.lower), s(v.upper)
-        op == "contains" ? ("(($lo IS NULL OR (? IS NOT NULL AND $lo <= ?)) AND ($hi IS NULL OR (? IS NOT NULL AND ? <= $hi)))", Any[l, l, u, u]) :
-        op == "contained_by" ? ("((? IS NULL OR ($lo IS NOT NULL AND ? <= $lo)) AND (? IS NULL OR ($hi IS NOT NULL AND $hi <= ?)))", Any[l, l, u, u]) :
-        op == "overlap" ? ("((? IS NULL OR $lo IS NULL OR $lo < ?) AND (? IS NULL OR $hi IS NULL OR ? < $hi))", Any[u, u, l, l]) :
-        ("(JSON_CONTAINS($col, ?) AND JSON_CONTAINS(?, $col))", Any[encode_range(b, v), encode_range(b, v)])
-    end
+                                        "NULLIF($(mysql_jtext(col, "'\$.$k'")), 'null')"
+    bounds = mysql_jtext(col, "'\$.bounds'")
+    (lo = bound("lower"), hi = bound("upper"), loinc = "(SUBSTRING($bounds, 1, 1) = '[')", hiinc = "(SUBSTRING($bounds, 2, 1) = ']')",
+     empty = "($bounds = 'empty')")
+end
+function range_lookup_sql(b::MySQLBackend, op::String, col, kind, v)
+    sql, ps = range_parts_sql(b, mysql_range_parts(col, kind), op, col, kind, v)
     "($col IS NOT NULL AND $sql)", ps
 end
+range_exact_sql(b::MySQLBackend, col, v) = (p = encode_range(b, v); ("(JSON_CONTAINS($col, ?) AND JSON_CONTAINS(?, $col))", Any[p, p]))
+range_bound_expr(::MySQLBackend, col, which::Symbol) = (k = string(which); "NULLIF($(mysql_jtext(col, "'\$.$k'")), 'null')")
 
 function search_sql(b::MySQLBackend, col, text)
     words = split(lowercase(string(text)))
@@ -141,3 +138,10 @@ array_order_sql(::MySQLBackend, sql, item) =
 array_item_expr(::MySQLBackend, sql, item) =
     item isa Field && (item.kind in INT_KINDS || item.kind === :fk) ? "CAST($sql AS SIGNED)" :
     item isa Field && item.kind === :float ? "CAST($sql AS DOUBLE)" : sql
+
+hstore_key_expr(b::MySQLBackend, col, key) = (p = sql_string_literal(b, hstore_json_path(key));
+    "(CASE WHEN JSON_TYPE(JSON_EXTRACT($col, $p)) = 'NULL' THEN NULL ELSE JSON_UNQUOTE(JSON_EXTRACT($col, $p)) END)")
+hstore_array_expr(::MySQLBackend, col, which::Symbol) = which === :keys ? "JSON_KEYS($col)" :
+    "(CASE WHEN $col IS NULL THEN NULL ELSE COALESCE(JSON_EXTRACT($col, '\$.*'), JSON_ARRAY()) END)"
+hstore_has_key_sql(::MySQLBackend, col, k) = "JSON_CONTAINS_PATH($col, 'one', ?)", Any[hstore_json_path(k)]
+hstore_contained_by_sql(b::MySQLBackend, col, v) = json_contained_by_sql(b, col, v)

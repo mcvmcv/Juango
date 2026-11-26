@@ -65,6 +65,17 @@ Base.@nospecializeinfer function model_check_issues(@nospecialize(T::Type))
                                                    id = "models.E007", hint = "Specify a 'db_column' for the field."))
         seen[c] = f.name
     end
+    # a JSON, array or hstore field whose default is a value rather than a function (fields.E010): one dict or list
+    # would be shared by every instance
+    for f in m.fields
+        f.kind in (:json, :array, :hstore) || continue
+        d = f.default
+        d isa Union{AbstractDict,AbstractVector} || continue
+        cls = f.kind === :json ? "JSONField" : f.kind === :array ? "ArrayField" : "HStoreField"
+        eg = d isa AbstractDict ? "use `Dict` instead of `Dict()`" : "use `Vector{Any}` instead of `[]`"
+        push!(out, CheckMessage(:warning, "$label.$(f.name): $cls default should be a callable instead of an instance so that it's not shared between all field instances.";
+                                id = "fields.E010", hint = "Use a callable instead, e.g., $eg."))
+    end
     # reverse accessor and query name clashes (fields.E302-E305)
     rels = [(f, false) for f in m.fields if f.kind === :fk]
     append!(rels, [(f, true) for f in m.m2m])

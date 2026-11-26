@@ -685,7 +685,8 @@ Validators are functions `v -> true/nothing` (ok) or an error message `String` /
 """
 function validate_field(f::Field, v)
     errs = String[]
-    isempty_val = v === nothing || (v isa AbstractString && isempty(v))
+    isempty_val = v === nothing || (v isa AbstractString && isempty(v)) ||
+                  (f.kind in (:hstore, :array) && v isa Union{AbstractDict,AbstractVector} && isempty(v))    # (Django's empty values: {} and [])
     if isempty_val
         (!f.blank && f.kind !== :bool) && push!(errs, field_message(f, "required", gettext("This field is required.")))
         # a BooleanField that isn't nullable must be true or false
@@ -710,6 +711,12 @@ function validate_field(f::Field, v)
     end
     if f.kind === :array && v isa Union{AbstractVector,Tuple}
         append!(errs, array_item_errors(f, v))
+    end
+    if f.kind === :hstore && v isa AbstractDict           # (Django's HStoreField.validate)
+        for (k, x) in v
+            x === nothing || x isa AbstractString ||
+                push!(errs, field_message(f, "not_a_string", gettext("The value of “%(key)s” is not a string or null."), Dict("key" => string(k))))
+        end
     end
     if f.max_length !== nothing && v isa AbstractString && f.kind !== :ipaddress && length(v) > f.max_length
         push!(errs, field_message(f, "max_length", gettext("Ensure this value has at most %(max)d characters (it has %(len)d)."),

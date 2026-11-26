@@ -84,17 +84,32 @@ UUIDField(; kw...) = Field(:uuid; kw...)
 "Case-insensitive text: `citext` on PostgreSQL, `COLLATE NOCASE` on SQLite."
 CICharField(; max_length = 255, kw...) = Field(:citext; max_length = max_length, kw...)
 
-"Integer range (`ValueRange(1, 10)`): `int8range` on PostgreSQL."
-IntegerRangeField(; kw...) = Field(:intrange; kw...)
+"Integer range (`ValueRange(1, 10)`, or a tuple `(1, 10)`): `int8range` on PostgreSQL."
+IntegerRangeField(; default_bounds = nothing, kw...) = range_field(:intrange, "IntegerRangeField", default_bounds; kw...)
+"The same as `IntegerRangeField` (Juango's integer ranges are 64-bit already)."
+BigIntegerRangeField(; default_bounds = nothing, kw...) = range_field(:intrange, "BigIntegerRangeField", default_bounds; kw...)
 "Date range: `daterange` on PostgreSQL."
-DateRangeField(; kw...) = Field(:daterange; kw...)
-"DateTime range: `tsrange` on PostgreSQL."
-DateTimeRangeField(; kw...) = Field(:datetimerange; kw...)
+DateRangeField(; default_bounds = nothing, kw...) = range_field(:daterange, "DateRangeField", default_bounds; kw...)
+"""
+DateTime range: `tsrange` on PostgreSQL. `default_bounds` (`"[)"`, `"(]"`, `"()"` or `"[]"`) are the bounds of a
+`(lower, upper)` tuple assigned to it, as Django's.
+"""
+DateTimeRangeField(; default_bounds = nothing, kw...) = range_field(:datetimerange, "DateTimeRangeField", default_bounds; kw...)
+# discrete ranges (integers, dates) are always stored as [): only continuous ones take other default bounds, as Django's
+function range_field(kind::Symbol, cls, default_bounds; kw...)
+    f = Field(kind; kw...)
+    if default_bounds !== nothing
+        kind in (:intrange, :daterange) && throw(ArgumentError("Cannot use 'default_bounds' with $cls."))
+        default_bounds in ("[)", "(]", "()", "[]") || throw(ArgumentError("default_bounds must be one of '[)', '(]', '()', or '[]'."))
+        f.form = merge(something(f.form, Dict{Symbol,Any}()), Dict{Symbol,Any}(:default_bounds => String(default_bounds)))
+    end
+    f
+end
 """
 Decimal range (`ValueRange(Decimal("1.5"), Decimal("9.75"))`): `numrange` on PostgreSQL, exact.
 SQLite and MySQL keep ranges as JSON, where the bounds are numbers (about 15 significant digits).
 """
-DecimalRangeField(; kw...) = Field(:decimalrange; kw...)
+DecimalRangeField(; default_bounds = nothing, kw...) = range_field(:decimalrange, "DecimalRangeField", default_bounds; kw...)
 
 """
     ValueRange(lower, upper; bounds="[)")
@@ -108,11 +123,33 @@ struct ValueRange{T}
     bounds::String
 end
 function ValueRange(lo, hi; bounds = "[)")
+    bounds == "empty" && return ValueRange{Any}(nothing, nothing, "empty")
+    bounds in ("[)", "(]", "()", "[]") || throw(ArgumentError("bounds must be one of '[)', '(]', '()', or '[]'."))
     T = lo === nothing ? typeof(hi) : typeof(lo)
-    ValueRange{T}(canonical(lo, hi, bounds)...)
+    lo2, hi2, b2 = canonical(lo, hi, bounds)
+    # (nothing between the bounds: the empty range, as PostgreSQL stores [5,5) or (1,2) of integers)
+    lo2 !== nothing && hi2 !== nothing && (lo2 > hi2 || (lo2 == hi2 && b2 != "[]")) && return ValueRange{Any}(nothing, nothing, "empty")
+    ValueRange{T}(lo2, hi2, b2)
 end
-# Django's window frame class has this name too: with keywords only, it's a RANGE frame (see RowRange)
-ValueRange(; start = nothing, stop = nothing, exclusion = nothing) = WindowFrame("RANGE", start, stop, exclusion)
+# Django's window frame class has this name too: with keywords only, it's a RANGE frame (see RowRange);
+# ValueRange(empty = true) is the empty range (Django's NumericRange(empty=True))
+ValueRange(; start = nothing, stop = nothing, exclusion = nothing, empty::Bool = false) =
+    empty ? ValueRange{Any}(nothing, nothing, "empty") : WindowFrame("RANGE", start, stop, exclusion)
+"Whether a range is the empty range (no values at all)."
+Base.isempty(r::ValueRange) = r.bounds == "empty"
+"""
+A range field's value from what's assigned (a ValueRange, or a `(lower, upper)` tuple with the field's
+`default_bounds`), with aware datetimes in UTC as stored.
+"""
+function range_value(f::Field, v)
+    v isa Tuple && length(v) == 2 && (v = ValueRange(v[1], v[2]; bounds = range_default_bounds(f)))
+    v isa ValueRange || return v
+    isempty(v) && return v
+    utc(x) = x isa TimeZones.ZonedDateTime ? to_utc_naive(x) : x
+    f.kind === :datetimerange && (v.lower isa TimeZones.ZonedDateTime || v.upper isa TimeZones.ZonedDateTime) ?
+        ValueRange(utc(v.lower), utc(v.upper); bounds = v.bounds) : v
+end
+range_default_bounds(f::Field) = f.form === nothing ? "[)" : get(f.form, :default_bounds, "[)")
 step_of(x::Integer) = 1
 step_of(x::Date) = Day(1)
 step_of(x) = nothing
@@ -126,11 +163,12 @@ end
 Base.:(==)(a::ValueRange, b::ValueRange) = a.lower == b.lower && a.upper == b.upper && a.bounds == b.bounds
 Base.hash(r::ValueRange, h::UInt) = hash((r.lower, r.upper, r.bounds), h)
 function Base.in(x, r::ValueRange)
+    isempty(r) && return false
     lo_ok = r.lower === nothing || (r.bounds[1] == '[' ? x >= r.lower : x > r.lower)
     hi_ok = r.upper === nothing || (r.bounds[2] == ']' ? x <= r.upper : x < r.upper)
     lo_ok && hi_ok
 end
-Base.show(io::IO, r::ValueRange) =
+Base.show(io::IO, r::ValueRange) = isempty(r) ? print(io, "empty") :
     print(io, r.bounds[1], something(r.lower, ""), ", ", something(r.upper, ""), r.bounds[2])
 display_string(r::ValueRange) = sprint(show, r)
 
@@ -150,7 +188,8 @@ pg_array_literal(v) = "{" * join([pg_elem(x) for x in v], ",") * "}"
 pg_array_literal(b, v, kind) =
     "{" * join([x === nothing ? "NULL" : x isa AbstractVector && kind !== :json ? pg_array_literal(b, x, kind) :
                 kind === :json ? pg_elem(JSON.json(json_scalar_tree(x))) :
-                kind in RANGE_KINDS && x isa ValueRange ? pg_elem(encode_range(b, x)) : pg_elem(x) for x in v], ",") * "}"
+                kind in RANGE_KINDS && x isa ValueRange ? pg_elem(encode_range(b, x)) :
+                kind === :hstore && x isa AbstractDict ? pg_elem(encode_hstore(b, x)) : pg_elem(x) for x in v], ",") * "}"
 
 json_scalar(x::DateTime) = Dates.format(x, "yyyy-mm-ddTHH:MM:SS.sss")
 json_scalar(x::Union{Date,UUID}) = string(x)
@@ -161,9 +200,10 @@ json_scalar(x) = x
 
 "Array value as the backend stores it: PostgreSQL array literal, or JSON text. `kind`: the items' (innermost) kind."
 encode_array(b::DatabaseBackend, v, kind = nothing) =
-    kind === :json || kind in RANGE_KINDS ? pg_array_literal(b, v, kind) : pg_array_literal(v)
+    kind === :json || kind === :hstore || kind in RANGE_KINDS ? pg_array_literal(b, v, kind) : pg_array_literal(v)
 "Range value as the backend stores it."
 function encode_range(::DatabaseBackend, r::ValueRange)
+    isempty(r) && return "empty"
     lo = r.lower === nothing ? "" : pg_elem(r.lower)
     hi = r.upper === nothing ? "" : pg_elem(r.upper)
     string(r.bounds[1], lo, ",", hi, r.bounds[2])
@@ -201,7 +241,7 @@ function to_db(f::Field, v)
     end
     k === :hstore && return encode_hstore(backend(), v)
     k === :array && return encode_array(backend(), prep_array(f, v), f.related)
-    k in RANGE_KINDS && return encode_range(backend(), v)
+    k in RANGE_KINDS && return encode_range(backend(), range_value(f, v))
     k === :uuid && return string(uuid_value(f, v))
     # numbers given as text are taken as numbers; other text is refused, as Django's get_prep_value
     k in INT_KINDS && v isa AbstractString && return dbparam(prep_number(f, Int, v))
@@ -280,6 +320,24 @@ function hstore_quote(io::IO, s::AbstractString)
     end
     print(io, '"')
 end
+
+# hstore off PostgreSQL is a JSON object of strings (or nulls): its keys are always an object's keys (a JSON path
+# would take "2" for an array index), and its values are compared as text.
+"A JSON path naming one object key (`\$.\"2\"`)."
+hstore_json_path(k) = "\$.\"" * replace(string(k), "\\" => "\\\\", "\"" => "\\\"") * "\""
+"An hstore key's value, as text or NULL, as SQL with no parameters (F(), values(), order_by() and lookups)."
+hstore_key_expr(b::DatabaseBackend, col, key) = "($col -> " * sql_string_literal(b, string(key)) * ")"
+"An hstore's keys (`which = :keys`) or values (`:values`) as an array of text (Django's `field__keys`, `field__values`)."
+hstore_array_expr(b::DatabaseBackend, col, which::Symbol) =
+    "CAST($(which === :keys ? "akeys" : "avals")($col) AS $(array_cast(b, hstore_array_field())))"
+const HSTORE_ARRAY_FIELD = Ref{Any}(nothing)
+"The field of `field__keys` / `field__values` (an array of text)."
+hstore_array_field() = (x = HSTORE_ARRAY_FIELD[]; x === nothing ? (HSTORE_ARRAY_FIELD[] = ArrayField(TextField())) : x)
+"A map contained by another (every key of the column's is the value's, with the same value), off PostgreSQL."
+hstore_contained_by_sql(b::DatabaseBackend, col, v) = "$col <@ CAST(? AS hstore)", Any[encode_hstore(b, v)]
+hstore_contains_sql(b::DatabaseBackend, col, v) = json_contains_sql(b, col, hstore_dict(v))
+hstore_exact_sql(b::DatabaseBackend, col, v) = json_exact_sql(b, col, hstore_dict(v))
+hstore_has_key_sql(b::DatabaseBackend, col, k) = json_has_key_sql(b, col, k)
 
 "An hstore literal (`\"a\"=>\"1\", \"b\"=>NULL`) on PostgreSQL, JSON elsewhere."
 function encode_hstore(b::DatabaseBackend, d)
@@ -407,6 +465,7 @@ function decode_array_items(f::Field, items, pgtext::Bool)
 end
 function decode_array_elem(kind, x, pgtext::Bool)
     kind === :json && return plainjson(pgtext && x isa AbstractString ? JSON.parse(x) : x)
+    kind === :hstore && return decode_hstore(x)
     kind in RANGE_KINDS && return decode_range_value(kind, x)
     convert_elem(kind, x)
 end
@@ -418,10 +477,11 @@ function decode_range_value(kind::Symbol, v)
     ek = range_elem_kind(kind)
     if v isa AbstractDict || v isa AbstractString && startswith(v, "{")
         d = v isa AbstractDict ? v : JSON.parse(v)
+        d["bounds"] == "empty" && return ValueRange(; empty = true)
         return ValueRange(convert_elem(ek, d["lower"]), convert_elem(ek, d["upper"]); bounds = d["bounds"])
     end
     s = string(v)
-    s == "empty" && return ValueRange{Any}(nothing, nothing, "()")
+    s == "empty" && return ValueRange(; empty = true)
     # "[1,10)", "[20,)" or "(,5]": an empty side is unbounded (a PostgreSQL array parse would drop it)
     lo, hi = split(s[nextind(s, 1):prevind(s, lastindex(s))], ','; limit = 2)
     conv(x) = (x = strip(x, '"'); isempty(x) ? nothing : convert_elem(ek, replace(x, "\\\"" => "\"")))
@@ -514,13 +574,115 @@ array_index_sql(::DatabaseBackend, col, is::Vector{Int}) = "$col" * join("[$(i +
 range_type(::DatabaseBackend, kind) = kind === :intrange ? "INT8RANGE" : kind === :daterange ? "DATERANGE" :
                                        kind === :decimalrange ? "NUMRANGE" : "TSRANGE"
 range_elem_type(b::DatabaseBackend, kind) = column_type(b, range_elem_kind(kind), nothing)
+const RANGE_OPS = Dict("contains" => "@>", "contained_by" => "<@", "overlap" => "&&", "exact" => "=", "fully_lt" => "<<",
+                       "fully_gt" => ">>", "not_lt" => "&>", "not_gt" => "&<", "adjacent_to" => "-|-")
+"Lookups on a range field besides contains, contained_by, overlap and exact (Django's RangeField lookups)."
+const RANGE_LOOKUPS = ("fully_lt", "fully_gt", "not_lt", "not_gt", "adjacent_to", "isempty", "lower_inc", "lower_inf",
+                       "upper_inc", "upper_inf", "startswith", "endswith")
+"A bound or an element compared with a range column: as the range's kind stores it (a datetime's date for dates)."
+function range_elem_value(kind, x)
+    x isa Value && (x = x.value)
+    x isa TimeZones.ZonedDateTime && (x = to_utc_naive(x))
+    kind === :daterange && x isa DateTime && return Date(x)
+    kind === :decimalrange && x isa Real && !(x isa Decimal) && return to_decimal(x)
+    x
+end
+range_param(kind, v) = v isa Tuple && length(v) == 2 ? ValueRange(range_elem_value(kind, v[1]), range_elem_value(kind, v[2])) :
+                       v isa ValueRange ? v : range_elem_value(kind, v)
 function range_lookup_sql(b::DatabaseBackend, op::String, col, kind, v)
+    v = range_param(kind, v)
+    if op in ("isempty", "lower_inc", "lower_inf", "upper_inc", "upper_inf")
+        return "$op($col) = ?", Any[truthy(v)]
+    end
+    op == "startswith" && return "lower($col) = CAST(? AS $(range_elem_type(b, kind)))", Any[v]
+    op == "endswith" && return "upper($col) = CAST(? AS $(range_elem_type(b, kind)))", Any[v]
     if v isa ValueRange
-        sqlop = Dict("contains" => "@>", "contained_by" => "<@", "overlap" => "&&", "exact" => "=")[op]
-        return "$col $sqlop CAST(? AS $(range_type(b, kind)))", Any[encode_range(b, v)]
+        return "$col $(RANGE_OPS[op]) CAST(? AS $(range_type(b, kind)))", Any[encode_range(b, v)]
     end
     op == "contains" || throw(LookupError("range lookup '$op' needs a ValueRange"))
     "$col @> CAST(? AS $(range_elem_type(b, kind)))", Any[v]
+end
+"A range's lower (`which = :lower`) or upper bound as SQL (Django's `startswith` / `endswith` transforms)."
+range_bound_expr(b::DatabaseBackend, col, which::Symbol) = "$which($col)"
+
+# Off PostgreSQL a range is JSON ({"lower", "upper", "bounds"}, bounds "empty" for the empty range): lookups compare
+# its parts with the value's, which are known (a constant), so each comparison is written out for them.
+"""
+SQL for a range lookup off PostgreSQL, from the column's parts `p` (`lo`, `hi`: the bounds, NULL when unbounded;
+`loinc`, `hiinc`, `empty`: conditions) and the value. As PostgreSQL's operators, inclusive and exclusive bounds included.
+"""
+function range_parts_sql(b::DatabaseBackend, p, op::String, col, kind, v)
+    v = range_param(kind, v)
+    s(x) = json_scalar(x)
+    T, Fa = sql_true(b), sql_false(b)
+    ne = "NOT $(p.empty)"
+    if op in ("isempty", "lower_inc", "lower_inf", "upper_inc", "upper_inf")
+        e = op == "isempty" ? p.empty : op == "lower_inc" ? "($ne AND $(p.lo) IS NOT NULL AND $(p.loinc))" : op == "lower_inf" ? "($ne AND $(p.lo) IS NULL)" :
+            op == "upper_inc" ? "($ne AND $(p.hi) IS NOT NULL AND $(p.hiinc))" : "($ne AND $(p.hi) IS NULL)"
+        return (truthy(v) ? e : "NOT $e"), Any[]
+    end
+    op == "startswith" && return "($ne AND $(p.lo) = ?)", Any[s(v)]
+    op == "endswith" && return "($ne AND $(p.hi) = ?)", Any[s(v)]
+    if !(v isa ValueRange)                     # an element
+        op == "contains" || throw(LookupError("range lookup '$op' needs a ValueRange"))
+        x = s(v)
+        return "($ne AND ($(p.lo) IS NULL OR $(p.lo) < ? OR ($(p.loinc) AND $(p.lo) = ?)) AND ($(p.hi) IS NULL OR ? < $(p.hi) OR ($(p.hiinc) AND $(p.hi) = ?)))",
+               Any[x, x, x, x]
+    end
+    op == "exact" && return range_exact_sql(b, col, v)
+    lo, hi = s(v.lower), s(v.upper)
+    li, hinc = !isempty(v) && v.bounds[1] == '[', !isempty(v) && v.bounds[2] == ']'
+    # the column's lower bound <= / >= the value's, and its upper bound >= / <=
+    lower_le() = v.lower === nothing ? ("$(p.lo) IS NULL", Any[]) :
+        ("($(p.lo) IS NULL OR $(p.lo) < ? OR ($(p.lo) = ?" * (li ? " AND $(p.loinc)" : "") * "))", Any[lo, lo])
+    lower_ge() = v.lower === nothing ? (T, Any[]) :
+        ("($(p.lo) IS NOT NULL AND ($(p.lo) > ? OR ($(p.lo) = ?" * (li ? "" : " AND NOT $(p.loinc)") * ")))", Any[lo, lo])
+    upper_ge() = v.upper === nothing ? ("$(p.hi) IS NULL", Any[]) :
+        ("($(p.hi) IS NULL OR $(p.hi) > ? OR ($(p.hi) = ?" * (hinc ? " AND $(p.hiinc)" : "") * "))", Any[hi, hi])
+    upper_le() = v.upper === nothing ? (T, Any[]) :
+        ("($(p.hi) IS NOT NULL AND ($(p.hi) < ? OR ($(p.hi) = ?" * (hinc ? "" : " AND NOT $(p.hiinc)") * ")))", Any[hi, hi])
+    both(a, c) = ("($ne AND " * a[1] * " AND " * c[1] * ")", vcat(a[2], c[2]))
+    if op == "contains"
+        isempty(v) && return T, Any[]
+        return both(lower_le(), upper_ge())
+    elseif op == "contained_by"
+        isempty(v) && return p.empty, Any[]
+        x = both(lower_ge(), upper_le())
+        return "($(p.empty) OR $(x[1]))", x[2]
+    end
+    isempty(v) && return Fa, Any[]                  # the empty range overlaps, adjoins and is beside nothing
+    if op == "overlap"
+        a = v.upper === nothing ? (T, Any[]) :
+            ("($(p.lo) IS NULL OR $(p.lo) < ?" * (hinc ? " OR ($(p.lo) = ? AND $(p.loinc))" : "") * ")", hinc ? Any[hi, hi] : Any[hi])
+        c = v.lower === nothing ? (T, Any[]) :
+            ("($(p.hi) IS NULL OR ? < $(p.hi)" * (li ? " OR ($(p.hi) = ? AND $(p.hiinc))" : "") * ")", li ? Any[lo, lo] : Any[lo])
+        return both(a, c)
+    elseif op == "fully_lt"
+        v.lower === nothing && return Fa, Any[]
+        return "($ne AND $(p.hi) IS NOT NULL AND ($(p.hi) < ? OR ($(p.hi) = ?" * (li ? " AND NOT $(p.hiinc)" : "") * ")))", Any[lo, lo]
+    elseif op == "fully_gt"
+        v.upper === nothing && return Fa, Any[]
+        return "($ne AND $(p.lo) IS NOT NULL AND ($(p.lo) > ? OR ($(p.lo) = ?" * (hinc ? " AND NOT $(p.loinc)" : "") * ")))", Any[hi, hi]
+    elseif op == "not_lt"
+        x = lower_ge(); return "($ne AND $(x[1]))", x[2]
+    elseif op == "not_gt"
+        x = upper_le(); return "($ne AND $(x[1]))", x[2]
+    elseif op == "adjacent_to"
+        parts, ps = String[], Any[]
+        v.lower === nothing || (push!(parts, "($(p.hi) = ? AND " * (li ? "NOT $(p.hiinc)" : "$(p.hiinc)") * ")"); push!(ps, lo))
+        v.upper === nothing || (push!(parts, "($(p.lo) = ? AND " * (hinc ? "NOT $(p.loinc)" : "$(p.loinc)") * ")"); push!(ps, hi))
+        isempty(parts) && return Fa, Any[]
+        return "($ne AND (" * join(parts, " OR ") * "))", ps
+    end
+    throw(LookupError("unsupported range lookup '$op'"))
+end
+"A scalar column within a range (Django's `contained_by` on an integer, decimal, date or datetime field)."
+function scalar_in_range_sql(col, r::ValueRange; s = identity)
+    isempty(r) && return sql_false(backend()), Any[]
+    parts, ps = String[], Any[]
+    r.lower === nothing || (push!(parts, "$col $(r.bounds[1] == '[' ? ">=" : ">") ?"); push!(ps, s(r.lower)))
+    r.upper === nothing || (push!(parts, "$col $(r.bounds[2] == ']' ? "<=" : "<") ?"); push!(ps, s(r.upper)))
+    isempty(parts) ? ("$col IS NOT NULL", ps) : ("(" * join(parts, " AND ") * ")", ps)
 end
 
 search_sql(::DatabaseBackend, col, text) = "to_tsvector(COALESCE($col, '')) @@ plainto_tsquery(?)", Any[string(text)]
@@ -544,6 +706,15 @@ Base.@nospecializeinfer function special_lookup(c::SQLCompiler, f::Field, col, l
         lookup == "has_key" && return "exist($col, ?)", Any[string(value)]
         lookup == "has_keys" && return hstore_has_keys_sql(col, value, true)
         lookup == "has_any_keys" && return hstore_has_keys_sql(col, value, false)
+    elseif k === :hstore && value isa AbstractDict && lookup in ("exact", "contains", "contained_by")
+        lookup == "exact" && return hstore_exact_sql(b, col, value)
+        lookup == "contains" && return hstore_contains_sql(b, col, value)
+        return hstore_contained_by_sql(b, col, hstore_dict(value))
+    elseif k === :hstore && lookup in ("has_key", "has_keys", "has_any_keys")
+        lookup == "has_key" && return hstore_has_key_sql(b, col, string(value))
+        parts = [hstore_has_key_sql(b, col, string(x)) for x in value]
+        isempty(parts) && return (lookup == "has_keys" ? sql_true(b) : sql_false(b)), Any[]
+        return "(" * join(first.(parts), lookup == "has_keys" ? " AND " : " OR ") * ")", reduce(vcat, last.(parts))
     elseif k === :json || k === :hstore
         k === :hstore && value isa AbstractDict && (value = hstore_dict(value))
         lookup == "exact" && value !== nothing && return json_exact_sql(b, col, value)
@@ -564,6 +735,7 @@ Base.@nospecializeinfer function special_lookup(c::SQLCompiler, f::Field, col, l
         lookup == "exact" && value !== nothing && return array_op_sql(b, "=", col, f, value)
     elseif k in RANGE_KINDS
         lookup in ("contains", "contained_by", "overlap") && return range_lookup_sql(b, lookup, col, k, value)
+        lookup in RANGE_LOOKUPS && return range_lookup_sql(b, lookup, col, k, value)
         lookup == "exact" && value !== nothing && return range_lookup_sql(b, "exact", col, k, value)
     end
     nothing
@@ -575,16 +747,20 @@ Returns `(sql, params)` or `nothing`.
 """
 Base.@nospecializeinfer function transform_column(f::Field, col, rest::Vector{String}, lookup, @nospecialize(value))
     b = backend()
-    if f.kind === :hstore && b isa PostgresBackend && !isempty(rest)
+    if f.kind === :hstore && !isempty(rest)
         length(rest) == 1 || return nothing
-        lookup == "isnull" && return "($col -> ?) IS NULL", Any[rest[1]]
-        return "($col -> ?)", Any[rest[1]]
+        rest[1] in ("keys", "values") && return hstore_array_expr(b, col, Symbol(rest[1])), Any[]      # field__keys, field__values
+        e = hstore_key_expr(b, col, rest[1])         # field__a: the key's value, text (a key with a NULL value is NULL)
+        lookup == "isnull" && return "$e IS NULL", Any[]
+        return e, Any[]
     end
     if (f.kind === :json || f.kind === :hstore) && !isempty(rest)
         lookup == "isnull" && return json_key_isnull_sql(b, col, rest)
         nums = value isa Number && !(value isa Bool) || value isa AbstractVector && !isempty(value) &&
                all(x -> x isa Number && !(x isa Bool), value) || value isa Tuple
         return json_key_sql(b, col, rest, nums; boolean = value isa Bool)
+    elseif f.kind in RANGE_KINDS && rest in (["startswith"], ["endswith"])       # ints__startswith__gte = 0: the bound
+        return range_bound_expr(b, col, rest[1] == "startswith" ? :lower : :upper), Any[]
     elseif f.kind === :array && rest == ["len"]
         return array_len_sql(b, col), Any[]
     elseif f.kind === :array && !isempty(rest) && all(r -> all(isdigit, r), rest)     # (nested: grid__0__1)

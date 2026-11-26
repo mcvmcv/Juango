@@ -46,6 +46,7 @@ Base.xor(a::Q, b::Q, rest::Q...) = Q(:XOR, Any[c for x in (a, b, rest...) for c 
 const LOOKUPS = Set(["exact", "iexact", "contains", "icontains", "startswith", "istartswith",
                      "endswith", "iendswith", "gt", "gte", "lt", "lte", "in", "isnull", "range",
                      "ne", "regex", "iregex", "contained_by", "overlap", "has_key", "has_keys",
+                     "fully_lt", "fully_gt", "not_lt", "not_gt", "adjacent_to", "isempty", "lower_inc", "lower_inf", "upper_inc", "upper_inf",
                      "has_any_keys", "search", "intersects", "within", "covers", "coveredby", "disjoint", "touches",
                      "crosses", "overlaps", "equals", "distance_lt", "distance_lte", "distance_gt", "distance_gte", "dwithin"])
 

@@ -545,6 +545,7 @@ end
 function to_julia(fld::Field, raw)
     k = fld.kind
     k === :multi && return clean_multi(fld, raw)
+    k in RANGE_KINDS && raw isa Union{AbstractVector,Tuple} && return range_from_parts(fld, raw)
     if k in (:modelmultichoice, :multichoice)
         vals = String[strip(string(r)) for r in (raw === nothing ? [] : raw) if !isempty(strip(string(r)))]
         if k === :multichoice
@@ -593,6 +594,7 @@ function to_julia(fld::Field, raw)
     end
     s = raw === nothing ? "" : (widget_kind(fld.widget) === :password || !form_option(fld, :strip) ? string(raw) : strip(string(raw)))
     k === :typedchoice && isempty(s) && return fld.related.empty_value, nothing     # not coerced, as in Django
+    k === :hstore && isempty(s) && return HStoreDict(), nothing                      # (no map is an empty one, as Django's)
     ev = form_option(fld, :empty_value)
     isempty(s) && ev !== NO_DEFAULT && return ev, nothing
     isempty(s) && return ((k in STRING_KINDS || k in (:filepath, :combo)) && !fld.null ? "" : nothing), nothing
@@ -634,7 +636,15 @@ function to_julia(fld::Field, raw)
     elseif k === :duration
         us = try parse_duration_us(s) catch; nothing end
         return us === nothing ? (nothing, gettext("Enter a valid duration.")) : (duration_from_us(us), nothing)
-    elseif k === :json || k === :hstore
+    elseif k === :hstore                 # a JSON object; its values become text (Django's forms.HStoreField)
+        v = try
+            JSON.parse(s)
+        catch
+            return nothing, coded("invalid_json", gettext("Could not load JSON data."))
+        end
+        v isa AbstractDict || return nothing, coded("invalid_format", gettext("Input must be a JSON dictionary."))
+        return hstore_dict(v), nothing
+    elseif k === :json
         v = try
             plainjson(JSON.parse(s))
         catch
@@ -673,16 +683,10 @@ function to_julia(fld::Field, raw)
         v = tryparse(UUID, s)
         v === nothing && length(s) == 32 && all(isxdigit, s) && (v = UUID(parse(UInt128, s; base = 16)))
         return v, v === nothing ? gettext("Enter a valid UUID.") : nothing
-    elseif k in RANGE_KINDS
+    elseif k in RANGE_KINDS             # "lower, upper" (either may be empty: unbounded)
         parts = strip.(split(s, ','))
-        length(parts) == 2 || return nothing, "Enter the lower and upper bounds, separated by a comma."
-        try
-            ek = range_elem_kind(k)
-            conv(x) = isempty(x) ? nothing : convert_elem(ek, x)
-            return ValueRange(conv(parts[1]), conv(parts[2])), nothing
-        catch
-            return nothing, "Enter valid range bounds."
-        end
+        length(parts) == 2 || return nothing, coded("invalid", RANGE_FORM_INVALID[k])
+        return range_from_parts(fld, parts)
     elseif k === :modelchoice
         sp = fld.related
         obj = sp.to_field_name === nothing ? (id = parse_pk(queryset_model(choice_queryset(sp)), s); id === nothing ? nothing : first(filter(choice_queryset(sp); pk = id))) :
@@ -777,6 +781,30 @@ function clean_file_value(fld::Field, value, initial)
 end
 
 # a date, time or duration given as one (not as text): taken as it is, as Django's fields do
+# Django's range form fields' messages for a value that isn't two bounds
+const RANGE_FORM_INVALID = Dict(:intrange => "Enter two whole numbers.", :decimalrange => "Enter two numbers.",
+                                :daterange => "Enter two valid dates.", :datetimerange => "Enter two valid date/times.")
+"""
+A range from its two bounds as a form gives them (Django's RangeField.compress): each cleaned as a field of the
+bounds' kind ("Enter a whole number."), both empty for no range, and the start not after the end.
+"""
+function range_from_parts(fld::Field, parts)
+    length(parts) == 2 || return nothing, coded("invalid", RANGE_FORM_INVALID[fld.kind])
+    ef = Field(range_elem_kind(fld.kind); null = true, blank = true)
+    vals, errs = Any[], Any[]
+    for x in parts
+        x === nothing || (x isa AbstractString && isempty(strip(x))) ? (push!(vals, nothing); continue) : nothing
+        v, err = x isa AbstractString ? to_julia(ef, x) : (range_elem_value(fld.kind, x), nothing)
+        err === nothing ? push!(vals, v) : push!(errs, parse_message(ef, err, x))
+    end
+    isempty(errs) || return nothing, errs
+    all(isnothing, vals) && return nothing, nothing
+    lo, hi = vals
+    lo !== nothing && hi !== nothing && lo > hi &&
+        return nothing, coded("bound_ordering", gettext("The start of the range must not exceed the end of the range."))
+    ValueRange(lo, hi; bounds = range_default_bounds(fld)), nothing
+end
+
 "An array as a form shows it: its items joined by the delimiter (a nested array's by its own), as Django's prepare_value."
 function array_form_text(fld::Field, v)
     v isa AbstractString && return v
@@ -795,6 +823,7 @@ function typed_form_value(fld::Field, v)
     k === :duration && v isa Integer && !(v isa Bool) && return duration_from_us(Int64(v) * 1_000_000)     # (seconds)
     k === :json && v !== nothing && !(v isa AbstractString) && return v          # (already decoded)
     k === :array && v isa Union{AbstractVector,Tuple} && return collect(Any, v)  # (already a list)
+    k === :hstore && v isa AbstractDict && return v                               # (already a map: its values are checked)
     nothing
 end
 
@@ -989,6 +1018,7 @@ function initial_for(f::Form, fld::Field)
 end
 
 Base.@nospecializeinfer normalized(@nospecialize(x::Model)) = x.id
+normalized(x::AbstractDict) = isempty(x) ? nothing : x
 normalized(x::AbstractVector) = isempty(x) ? nothing : Set(normalized.(x))     # (no items is no value, as Django's has_changed)
 normalized(x::AbstractString) = isempty(x) ? nothing : String(x)
 normalized(x) = x
@@ -1083,6 +1113,8 @@ function changed_fields(f::Form)
             init = iv
         end
         fld.kind === :bool && (init = truthy(init))
+        # an hstore's initial value as the field reads it (JSON text, or a map whose values become text), as Django's
+        fld.kind === :hstore && (init = init isa AbstractString ? first(to_julia(fld, init)) : init isa AbstractDict ? hstore_dict(init) : init)
         fld.kind === :m2m && init === nothing && (init = Any[])
         (err !== nothing || !isequal(normalized(v), normalized(init))) && push!(out, fld.name)
     end

@@ -518,6 +518,10 @@ function order_clause(c::SQLCompiler, order::Vector; meta_ordering::Bool = true,
                 continue
             end
             f = findfield(modelmeta(M), Symbol(s))
+            if f !== nothing && f.kind === :hstore && i == length(segs) - 1     # order_by("field__g"): an hstore key's value
+                push!(parts, hstore_key_expr(backend(), qcol(field_alias!(c, alias, M, f), column(f)), segs[end]) * (desc ? " DESC" : " ASC"))
+                @goto next_order
+            end
             if f !== nothing && f.kind === :json         # order_by("data__run"): a key inside a JSON field
                 push!(parts, json_order_sql(backend(), qcol(field_alias!(c, alias, M, f), column(f)), String.(segs[i+1:end]), desc))
                 @goto next_order
