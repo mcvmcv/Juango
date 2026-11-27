@@ -1136,7 +1136,7 @@ end
 
     # diffsettings, sendtestemail, findstatic, remove_stale_contenttypes
     @test any(l -> startswith(l, "DATABASE = "), Juango.diffsettings()) && !any(l -> startswith(l, "MEDIA_URL = "), Juango.diffsettings())
-    @test any(l -> startswith(l, "MEDIA_URL = "), Juango.diffsettings(all = true))
+    @test any(l -> startswith(l, "### MEDIA_URL = ") || startswith(l, "MEDIA_URL = "), Juango.diffsettings(all = true))
     empty!(Juango.outbox)
     configure!(EMAIL_BACKEND = :locmem)
     @test Juango.sendtestemail("ops@example.com") == 1 && startswith(only(Juango.outbox).subject, "Test email from ")

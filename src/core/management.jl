@@ -118,20 +118,39 @@ function parse_flags(args)
     positional, flags
 end
 
-function cmd_runserver(args)
-    pos, flags = parse_flags(args)
-    host, port = "127.0.0.1", 8000
-    if !isempty(pos)
-        a = pos[1]
-        if occursin(':', a)
-            h, p = rsplit(a, ':'; limit = 2)
-            isempty(h) || (host = h)
-            port = parse(Int, p)
-        else
-            port = parse(Int, a)
+const NAIVE_IP_RE = r"^(?:(?<addr>(?<ipv4>\d{1,3}(?:\.\d{1,3}){3})|(?<ipv6>\[[a-fA-F0-9:]+\])|(?<fqdn>[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*)):)?(?<port>\d+)$"
+"""
+    parse_addrport(addrport = ""; use_ipv6 = false, default_addr = "127.0.0.1", default_addr_ipv6 = "::1", default_port = "8000")
+        -> (addr, port, use_ipv6, raw_ipv6)
+
+runserver's `[addr:]port` argument, as Django's: an IPv4 address, `[an IPv6 one]` or a host name, then
+the port. `raw_ipv6` says the address is an IPv6 address (shown in brackets).
+"""
+function parse_addrport(addrport::AbstractString = ""; use_ipv6::Bool = false, default_addr = "127.0.0.1",
+                        default_addr_ipv6 = "::1", default_port = "8000")
+    addr, port, raw = "", string(default_port), false
+    if !isempty(addrport)
+        m = match(NAIVE_IP_RE, addrport)
+        m === nothing && throw(CommandError("\"$addrport\" is not a valid port number or address:port pair."))
+        port = String(m[:port])
+        if m[:addr] !== nothing
+            addr = String(m[:addr])
+            if m[:ipv6] !== nothing
+                addr, use_ipv6, raw = addr[2:end-1], true, true
+            elseif use_ipv6 && m[:fqdn] === nothing
+                throw(CommandError("\"$addr\" is not a valid IPv6 address."))
+            end
         end
     end
-    runserver(host, port; certfile = get(flags, "cert", nothing), keyfile = get(flags, "key", nothing),
+    isempty(addr) && ((addr, raw) = (use_ipv6 ? default_addr_ipv6 : default_addr, use_ipv6))
+    (addr, port, use_ipv6, raw)
+end
+
+function cmd_runserver(args)
+    ipv6 = "-6" in args || "--ipv6" in args
+    pos, flags = parse_flags(filter(a -> !(a in ("-6", "--ipv6")), args))
+    addr, port, _, _ = parse_addrport(isempty(pos) ? "" : pos[1]; use_ipv6 = ipv6)
+    runserver(addr == "0" ? "0.0.0.0" : addr, parse(Int, port); certfile = get(flags, "cert", nothing), keyfile = get(flags, "key", nothing),
               reload = !haskey(flags, "noreload"))
 end
 
@@ -381,18 +400,27 @@ function report_checks(msgs, silenced::Integer = 0; io = stdout)
 end
 
 """
-    diffsettings(; all = false) -> Vector{String}
+    diffsettings(; all = false, output = :hash, default = default_settings()) -> Vector{String}
 
-The settings that differ from Juango's defaults as `NAME = value` lines (`all = true`: every
-setting, the changed ones marked `###`), as Django's `diffsettings`.
+The settings that differ from `default` (Juango's defaults), as Django's `diffsettings`: with
+`output = :hash`, `NAME = value  ###` lines (`all = true` adds the others as `### NAME = value`); with
+`:unified`, `- NAME = default` and `+ NAME = value` (`all`: the others as `  NAME = value`).
 """
-function diffsettings(; all::Bool = false)
-    defaults = default_settings()
+function diffsettings(; all::Bool = false, output::Symbol = :hash, default = default_settings())
+    output in (:hash, :unified) || throw(CommandError("argument --output: invalid choice: '$output' (choose from 'hash', 'unified')"))
+    defaults = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in pairs(default))
     lines = String[]
     for k in sort(collect(keys(Juango.SETTINGS)); by = string)
         v = Juango.SETTINGS[k]
         changed = !haskey(defaults, k) || !isequal(defaults[k], v)
-        (changed || all) && push!(lines, string(k, " = ", repr(v), all && changed ? "  ###" : ""))
+        if output === :hash               # (Django's: "KEY = value  ###" when changed, "### KEY = value" with --all)
+            changed ? push!(lines, string(k, " = ", repr(v), "  ###")) : all && push!(lines, string("### ", k, " = ", repr(v)))
+        elseif changed                    # unified: the default as "- ", the setting as "+ "
+            haskey(defaults, k) && push!(lines, string("- ", k, " = ", repr(defaults[k])))
+            push!(lines, string("+ ", k, " = ", repr(v)))
+        elseif all
+            push!(lines, string("  ", k, " = ", repr(v)))
+        end
     end
     lines
 end
@@ -660,12 +688,47 @@ function cmd_sqlmigrate(args)
     println(sqlmigrate(app, name; backwards = haskey(flags, "backwards")))
 end
 
+"""
+`help`: the commands, grouped by the app they come from (`[juango]`, then each installed app's), as Django's
+`manage.py help`; `help --commands` lists the names alone, and `help <command>` gives that command's help.
+"""
 function cmd_help(args)
-    println("Usage: julia --project manage.jl <command> [options]\n\nAvailable commands:")
-    cmds = all_commands()
-    for k in sort(collect(keys(cmds)))
-        println("  ", rpad(k, 18), cmds[k][1])
+    io = cmd_stdout()
+    if "--commands" in args
+        foreach(k -> println(io, k), sort(collect(keys(all_commands()))))
+        return nothing
     end
+    if !isempty(args) && !startswith(args[1], "-")
+        name = args[1]
+        entry = get(all_commands(), name, nothing)
+        entry === nothing && throw(CommandError(unknown_command_message(name)))
+        decl = get(DECLARED_COMMANDS, name, nothing)
+        decl !== nothing && COMMANDS[name] === entry && return print_command_help(decl)
+        println(io, "usage: manage.jl ", name, "\n\n", entry[1])
+        return nothing
+    end
+    println(io, "\nType 'manage.jl help <subcommand>' for help on a specific subcommand.\n\nAvailable subcommands:\n")
+    println(io, "[juango]")
+    for k in sort(collect(keys(COMMANDS)))
+        println(io, "    ", rpad(k, 24), COMMANDS[k][1])
+    end
+    for a in installed_apps()
+        isempty(a.commands) && continue
+        println(io, "\n[", a.label, "]")
+        for k in sort(collect(keys(a.commands)))
+            println(io, "    ", rpad(k, 24), a.commands[k][1])
+        end
+    end
+    nothing
+end
+
+"Python's difflib.get_close_matches: the candidates at least `cutoff` similar to `word`, most similar first."
+close_matches(word, candidates; n = 3, cutoff = 0.6) =
+    first([c for (r, c) in sort([(similarity(word, c), c) for c in candidates]; by = first, rev = true) if r >= cutoff], n)
+"Django's message for an unknown command, with the closest one if there is one."
+function unknown_command_message(name)
+    m = close_matches(name, collect(keys(all_commands())))
+    "Unknown command: '$name'." * (isempty(m) ? "" : " Did you mean $(m[1])?") * "\nType 'manage.jl help' for usage."
 end
 
 
@@ -715,10 +778,10 @@ for (n, h, f) in (
     ("squashmigrations", "Combine migrations into one: squashmigrations <app> [start] <stop> [--name NAME]", cmd_squashmigrations),
     ("createsuperuser", "Create an admin user (--username, --email, --password, --noinput)", cmd_createsuperuser),
     ("showurls", "List all URL patterns", cmd_showurls),
-    ("startapp", "Create an app skeleton: startapp <name> [--dir DIR]", function (args)
+    ("startapp", "Create an app skeleton: startapp <name> [directory] [--dir DIR]", function (args)
         pos, flags = parse_flags(args)
-        isempty(pos) && error("usage: startapp <name>")
-        startapp(pos[1]; dir = get(flags, "dir", pwd()))
+        isempty(pos) && throw(CommandError("usage: startapp <name> [directory]"))
+        startapp(pos[1], get(pos, 2, nothing); dir = get(flags, "dir", pwd()))
     end),
     ("collectstatic", "Copy static files from STATIC_DIRS and apps into STATIC_ROOT (--clear)",
      args -> println(collectstatic(; clear = haskey(last(parse_flags(args)), "clear")), " static files copied to ", settings.STATIC_ROOT)),
@@ -750,10 +813,10 @@ for (n, h, f) in (
         haskey(f, "dry-run") && println("JULIA_LOAD_PATH='@:$BUILD_ENV:@stdlib' ", Base.shell_escape(r.exec...))
         r
     end),
-    ("diffsettings", "Show the settings that differ from the defaults: diffsettings [--all]",
+    ("diffsettings", "Show the settings that differ from the defaults: diffsettings [--all] [--output hash|unified]",
      function (args)
         _, f = parse_flags(args)
-        foreach(println, diffsettings(; all = haskey(f, "all")))
+        foreach(l -> println(cmd_stdout(), l), diffsettings(; all = haskey(f, "all"), output = Symbol(get(f, "output", "hash"))))
     end),
     ("sendtestemail", "Send a test email: sendtestemail [address ...] [--managers] [--admins]", function (args)
         pos, f = parse_flags(args)
@@ -794,9 +857,12 @@ function execute_from_command_line(args = ARGS)
         return cmd_help(args)
     end
     cmd = args[1]
+    cmd in ("--version", "version") && (println(cmd_stdout(), pkgversion(@__MODULE__)); return nothing)
+    cmd in ("--help", "-h") && return cmd_help(args[2:end])
     entry = get(all_commands(), cmd, nothing)
     if entry === nothing
-        println(stderr, "Unknown command: '$cmd'. Type 'julia --project manage.jl help' for usage.")
+        println(cmd_stderr(), unknown_command_message(cmd))
+        isinteractive() || exit(1)
         return nothing
     end
     try
@@ -972,17 +1038,43 @@ end
 
 # --- startapp ----------------------------------------------------------------------------------------
 
-"""
-    startapp(name; dir=pwd()) -> path
+"The module name of an app (`blog_posts` → `BlogPosts`)."
+app_module_name(name) = join(uppercasefirst.(split(name, '_'; keepempty = false)))
+"Whether a module of that name exists already (a package of the environment, a standard library, Base's own)."
+existing_module(M) = !isempty(M) && (Base.identify_package(M) !== nothing || isdefined(Base, Symbol(M)) || isdefined(Core, Symbol(M)))
+const JULIA_KEYWORDS = Set(["baremodule", "begin", "break", "catch", "const", "continue", "do", "else", "elseif", "end", "export",
+                             "false", "finally", "for", "function", "global", "if", "import", "let", "local", "macro", "module",
+                             "quote", "return", "struct", "true", "try", "using", "while"])
+valid_app_identifier(s) = Base.isidentifier(s) && !(s in JULIA_KEYWORDS)
 
-Create an app skeleton in `dir/name`: a module `Name` (in `Name.jl`) with `const APP`,
-models, admin, views and URLs, and `templates/name/`, `static/name/` and `migrations/`.
 """
-function startapp(name::AbstractString; dir = pwd())
-    occursin(r"^[a-z_][a-z0-9_]*$", name) || error("'$name' is not a valid app name (use lowercase letters, digits, underscores).")
-    root = joinpath(dir, name)
-    ispath(root) && error("'$root' already exists")
-    M = join(uppercasefirst.(split(name, '_'; keepempty = false)))
+    startapp(name, target = nothing; dir = pwd()) -> path
+
+Create an app skeleton in `dir/name` (or in `target`, a directory made if it doesn't exist): a module
+`Name` (in `Name.jl`) with `const APP`, models, admin, views and URLs, and `templates/name/`,
+`static/name/` and `migrations/`. As Django's, the name must be an identifier whose module (`Name`)
+isn't one that exists already (an app `dates` would hide the standard library's `Dates`), and an
+existing target directory gets the files unless one is there already.
+"""
+function startapp(name::AbstractString, target = nothing; dir = pwd())
+    valid_app_identifier(name) || throw(CommandError("'$name' is not a valid app name. Please make sure the name is a valid identifier."))
+    M = app_module_name(name)
+    existing_module(M) && throw(CommandError("'$name' conflicts with the name of an existing Julia module ($M) and cannot be used as an app name. Please try another name."))
+    if target === nothing
+        root = joinpath(dir, name)
+        ispath(root) && throw(CommandError("'$root' already exists"))
+    else
+        root = abspath(joinpath(dir, target))
+        base = basename(rstrip(target, ['/', '\\']))
+        valid_app_identifier(base) || throw(CommandError("'$target' is not a valid app directory. Please make sure the directory is a valid identifier."))
+        existing_module(app_module_name(base)) &&
+            throw(CommandError("'$base' conflicts with the name of an existing Julia module and cannot be used as an app directory. Please try another directory."))
+        try
+            mkpath(root)
+        catch e
+            throw(CommandError(sprint(showerror, e)))
+        end
+    end
     files = Dict(
         "$M.jl" => """
         # The $name app. To install it, in project.jl:
@@ -1035,10 +1127,18 @@ function startapp(name::AbstractString; dir = pwd())
     )
     for (rel, content) in files
         p = joinpath(root, rel)
-        mkpath(dirname(p))
-        write(p, content)
+        ispath(p) && throw(CommandError("$p already exists. Overlaying an app into an existing directory won't replace conflicting files."))
     end
-    println("""Created app '$name' in $root
+    for (rel, content) in files
+        p = joinpath(root, rel)
+        try
+            mkpath(dirname(p))
+            write(p, content)
+        catch e
+            throw(CommandError(sprint(showerror, e)))
+        end
+    end
+    println(cmd_stdout(), """Created app '$name' in $root
 
     Install it: include("$name/$M.jl") and `using .$M` in project.jl, add $M.APP to INSTALLED_APPS,
     and add path("$name/", include_urls($M.APP)) to urlpatterns.

@@ -225,10 +225,10 @@ end
 static_dirs() = vcat(String[d for f in static_finders() for d in finder_dirs(f)])
 app_locale_dirs() = app_dirs("locale")
 
-"Management commands: Juango's own, plus those of installed apps."
+"Management commands: Juango's own, plus those of installed apps (an app's replaces Juango's; of two apps with one, the first in INSTALLED_APPS wins, as Django's)."
 function all_commands()
     cmds = copy(COMMANDS)
-    for a in installed_apps()
+    for a in reverse(installed_apps())
         merge!(cmds, a.commands)
     end
     cmds

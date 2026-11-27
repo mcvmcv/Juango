@@ -181,7 +181,8 @@ public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, XViewM
        supports_priority, supports_defer, supports_get_result, task_enqueued, task_started, task_finished,
        DEFAULT_TASK_QUEUE_NAME, DEFAULT_TASK_PRIORITY, TASK_MAX_PRIORITY, TASK_MIN_PRIORITY, dummy_results
 # apps, settings, commands
-public build, build_workload, project_include, on_reload!, CheckMessage, register_check!, run_checks, diffsettings, sendtestemail, findstatic,
+public colorize, termcolor_style, parse_color_setting, PALETTES, Style, make_style, no_style, color_style, supports_color, cmd_write, cmd_style,
+       build, build_workload, project_include, on_reload!, CheckMessage, register_check!, run_checks, diffsettings, sendtestemail, findstatic,
        remove_stale_contenttypes, installed_apps, is_installed, get_app, model_label, model_label_lower, get_field, get_fields, RelatedObject, related_objects, app_models, static_dirs, default_settings,
        startproject, startapp, collectstatic, register_command!, slugify, sanitize_file_name, arg, exclusive_group, cmd_stdout, cmd_stderr
 

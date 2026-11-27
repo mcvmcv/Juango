@@ -262,7 +262,25 @@ function run_declared(cmd::DeclaredCommand, words::Vector{String}, options; from
         isempty(serious) || throw(CommandError("System check identified some issues:\n" * join(string.(serious), "\n")))
     end
     nt = NamedTuple{Tuple(keys(opts))}(Tuple(values(opts)))
-    cmd.handle(nt)
+    opts[:no_color] && opts[:force_color] && throw(CommandError("The --no-color and --force-color options can't be used together."))
+    style = opts[:no_color] ? no_style() : color_style(; force_color = opts[:force_color], io = cmd_stdout())
+    Base.ScopedValues.with(() -> cmd.handle(nt), COMMAND_STYLE => style)
+end
+
+"The style of the running command's output (Django's `self.style`): colors unless `--no-color` or not a terminal."
+const COMMAND_STYLE = Base.ScopedValues.ScopedValue{Union{Nothing,Style}}(nothing)
+cmd_style() = something(COMMAND_STYLE[], no_style())
+"""
+    cmd_write(msg; style = nothing, ending = "\n", err = false)
+
+Write a line of command output (Django's `self.stdout.write(msg, style_func)`): `style` is a role of the
+command's style (`:SUCCESS`, `:ERROR`, ...) or a function; `err = true` writes to the command's stderr.
+"""
+function cmd_write(msg; style = nothing, ending = "\n", err::Bool = false)
+    text = endswith(string(msg), ending) ? string(msg) : string(msg, ending)
+    f = style === nothing ? identity : style isa Symbol ? getproperty(cmd_style(), style) : style
+    print(err ? cmd_stderr() : cmd_stdout(), f(text))
+    nothing
 end
 
 function print_command_help(cmd::DeclaredCommand)

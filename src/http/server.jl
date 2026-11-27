@@ -241,6 +241,18 @@ function reload_if_changed(R = revise_module())
 end
 
 """
+The lines runserver prints when it starts listening (Django's on_bind): its address and, unless
+JUANGO_RUNSERVER_HIDE_WARNING (or DJANGO_RUNSERVER_HIDE_WARNING) is "true", that it isn't for production.
+"""
+function runserver_banner(scheme, host, port)
+    shown = host == "0" ? "0.0.0.0" : occursin(':', host) ? "[$host]" : host
+    hide = lowercase(get(ENV, "JUANGO_RUNSERVER_HIDE_WARNING", get(ENV, "DJANGO_RUNSERVER_HIDE_WARNING", ""))) == "true"
+    "Starting development server at $scheme://$shown:$port/\nQuit the server with CONTROL-C." *
+        (hide ? "" : "\n\nWARNING: This is a development server. Do not use it in a production setting. " *
+                     "Use a production server instead (see the README's Deployment section).")
+end
+
+"""
     runserver(host="127.0.0.1", port=8000; block=true, certfile=nothing, keyfile=nothing, reload=true)
 
 Start the development server. With `block=false` the server runs in the background and the
@@ -260,8 +272,7 @@ function runserver(host::AbstractString = "127.0.0.1", port::Integer = 8000; blo
         isempty(msgs) || report_checks(msgs)
         println(Dates.format(now(), "U dd, yyyy - HH:MM:SS"))
         println("Juango version $VERSION_STRING (Julia $(VERSION)), DEBUG = $(settings.DEBUG)")
-        println("Starting development server at $scheme://$(occursin(':', host) ? "[$host]" : host):$port/")
-        println("Quit the server with CONTROL-C.")
+        println(runserver_banner(scheme, host, port))
     end
     RELOAD[] = reload && revise_module() !== nothing
     if !quiet

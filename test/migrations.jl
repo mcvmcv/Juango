@@ -464,7 +464,7 @@ end
     root = quiet(() -> startapp("shop"; dir = tmp))
     @test isfile(joinpath(root, "Shop.jl")) && isfile(joinpath(root, "templates", "shop", "index.html")) &&
           isdir(joinpath(root, "migrations")) && isdir(joinpath(root, "static", "shop"))
-    @test_throws ErrorException quiet(() -> startapp("Bad-Name"; dir = tmp))
+    @test_throws CommandError quiet(() -> startapp("Bad-Name"; dir = tmp))
     write(joinpath(root, "models.jl"), "@model struct Product\n    name = CharField(max_length = 50)\nend\n")
     write(joinpath(root, "static", "shop", "app.css"), "body{}")
     mkpath(joinpath(root, "locale", "de", "LC_MESSAGES"))
