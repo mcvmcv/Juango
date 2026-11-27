@@ -117,6 +117,11 @@ for JSON, array and full-text columns; other databases skip it.
   index (needs `name`; not on MySQL/MariaDB).
 * `include = [:f, ...]`: non-key columns stored in the index (PostgreSQL `INCLUDE`).
 * `opclasses = ["varchar_pattern_ops", ...]`: one operator class per field (PostgreSQL).
+* Any expression over the model's fields (PostgreSQL and SQLite): `Cast(:body, SearchVectorField())`,
+  `SearchVector(:title, :body; config = "english")`, `OpClass(Lower(:name), "text_pattern_ops")`, `Desc(Lower(:name))`,
+  `Collate(expr, "C")`.
+* `db_tablespace = "..."` (PostgreSQL); the PostgreSQL index classes take their storage parameters
+  (`GinIndex(...; fastupdate, gin_pending_list_limit)`, `fillfactor`, ...).
 """
 struct Index
     columns::Vector{String}
@@ -127,9 +132,20 @@ struct Index
     condition::Union{Nothing,Q}
     include::Vector{String}
     opclasses::Vector{String}
+    exprs::Vector{Any}                          # any other expressions (over field names), compiled for the DDL
+    params::Vector{Pair{String,Any}}            # storage parameters: WITH (name = value, ...) (PostgreSQL)
+    tablespace::Union{Nothing,String}           # db_tablespace (PostgreSQL)
+    suffix::String                              # Django's index suffix: "idx", "btree", "gin", ...
 end
+Index(columns, name, unique, method, expressions, condition, include, opclasses) =
+    Index(columns, name, unique, method, expressions, condition, include, opclasses, Any[], Pair{String,Any}[], nothing,
+          method === :btree ? "idx" : string(method))
+"Whether an index item needs the general expression compiler (anything but a field, `F`, `Lower(F)`, `Upper(F)`)."
+general_index_expr(c) = c isa OrderBy || c isa OpClass ||
+    c isa Expression && !(c isa F) && !(c isa Func && c.name in (:lower, :upper) && length(c.args) == 1 && c.args[1] isa F)
 function Index(cols...; fields = nothing, name = nothing, unique = false, method = :btree, condition = nothing, include = nothing,
-               opclasses = String[], expressions = Tuple{String,String}[])
+               opclasses = String[], expressions = Tuple{String,String}[], params = Pair{String,Any}[], db_tablespace = nothing,
+               suffix = nothing, expression_items = Any[])
     islist(x) = x isa AbstractVector || x isa Tuple
     # Django's checks, in Django's order and words
     !isempty(opclasses) && name === nothing && throw(ArgumentError("An index must be named to use opclasses."))
@@ -141,9 +157,19 @@ function Index(cols...; fields = nothing, name = nothing, unique = false, method
     # positional expressions (Lower(:title), F(:x)): with one of them, plain names are F()s too, as Django's
     positional_exprs = fields === nothing && any(c -> c isa Func || c isa F, items)
     fields !== nothing && !isempty(cols) && throw(ArgumentError("Index.fields and expressions are mutually exclusive."))
-    isempty(items) && isempty(expressions) && throw(ArgumentError("At least one field or expression is required to define an index."))
+    isempty(items) && isempty(expressions) && isempty(expression_items) &&
+        throw(ArgumentError("At least one field or expression is required to define an index."))
     fields !== nothing && any(c -> !(c isa AbstractString || c isa Symbol), items) &&
         throw(ArgumentError("Index.fields must contain only strings with field names."))
+    if fields === nothing && any(general_index_expr, items)
+        isempty(opclasses) || throw(ArgumentError("Index.opclasses cannot be used with expressions. Use OpClass() instead."))
+        name === nothing && throw(ArgumentError("An index must be named to use expressions."))
+        items = Any[c isa Union{Symbol,AbstractString} ? F(string(c)) : c for c in items]
+        return Index(String[], string(name), unique, Symbol(method), Tuple{String,String}[], condition,
+                     String[string(c) for c in something(include, String[])], String[], items, collect(Pair{String,Any}, params),
+                     db_tablespace === nothing ? nothing : string(db_tablespace),
+                     something(suffix, Symbol(method) === :btree ? "idx" : string(method)))
+    end
     columns = String[]
     exprs = Tuple{String,String}[(string(a), string(b)) for (a, b) in expressions]
     for c in items
@@ -168,7 +194,9 @@ function Index(cols...; fields = nothing, name = nothing, unique = false, method
     include === nothing || name !== nothing || isempty(include) || throw(ArgumentError("A covering index must be named."))
     include === nothing || islist(include) || throw(ArgumentError("Index.include must be a list or tuple."))
     Index(columns, name === nothing ? nothing : string(name), unique, Symbol(method), exprs, condition,
-          String[string(c) for c in something(include, String[])], String[string(c) for c in opclasses])
+          String[string(c) for c in something(include, String[])], String[string(c) for c in opclasses], collect(Any, expression_items),
+          collect(Pair{String,Any}, params), db_tablespace === nothing ? nothing : string(db_tablespace),
+          something(suffix, Symbol(method) === :btree ? "idx" : string(method)))
 end
 # (Django's index.fields)
 Base.getproperty(i::Index, s::Symbol) = s === :fields ? getfield(i, :columns) : getfield(i, s)
@@ -184,19 +212,52 @@ function Base.show(io::IO, i::Index)
     isempty(i.opclasses) || print(io, " opclasses=", pyl(i.opclasses))
     print(io, ">")
 end
-GinIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :gin, kw...)
-"PostgreSQL GiST index (ranges, geometry, trigram `gist_trgm_ops`, exclusion constraints); other databases skip it."
-GistIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :gist, kw...)
+"Storage parameters, in order, without the unset ones (booleans as on/off)."
+index_params(ps...) = Pair{String,Any}[k => (v isa Bool ? (v ? "on" : "off") : v) for (k, v) in ps if v !== nothing]
+"PostgreSQL GIN index (arrays, JSON, full-text, trigram `gin_trgm_ops`): `fastupdate`, `gin_pending_list_limit`."
+GinIndex(cols...; name = nothing, fastupdate = nothing, gin_pending_list_limit = nothing, kw...) =
+    Index(cols...; name = name, method = :gin, params = index_params("gin_pending_list_limit" => gin_pending_list_limit, "fastupdate" => fastupdate), kw...)
+"PostgreSQL GiST index (ranges, geometry, trigram `gist_trgm_ops`, exclusion constraints); other databases skip it. `buffering`, `fillfactor`."
+GistIndex(cols...; name = nothing, buffering = nothing, fillfactor = nothing, kw...) =
+    Index(cols...; name = name, method = :gist, params = index_params("buffering" => buffering, "fillfactor" => fillfactor), kw...)
 "PostgreSQL BRIN index: tiny, for huge tables whose rows are stored in the column's order (timestamps of appended rows)."
-BrinIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :brin, kw...)
-"PostgreSQL SP-GiST index (space-partitioned: points, ranges, text prefixes)."
-SpGistIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :spgist, kw...)
-"PostgreSQL hash index: equality lookups only."
-HashIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :hash, kw...)
-"PostgreSQL bloom index (needs `CreateExtension(\"bloom\")` in a migration): equality on any combination of many columns."
-BloomIndex(cols...; name = nothing, kw...) = Index(cols...; name = name, method = :bloom, kw...)
-index_key(i::Index) = (i.columns, i.name, i.unique, i.method, i.expressions,
+function BrinIndex(cols...; name = nothing, autosummarize = nothing, pages_per_range = nothing, kw...)
+    pages_per_range === nothing || pages_per_range isa Integer && pages_per_range > 0 ||
+        throw(ArgumentError("pages_per_range must be None or a positive integer"))
+    Index(cols...; name = name, method = :brin, params = index_params("autosummarize" => autosummarize, "pages_per_range" => pages_per_range), kw...)
+end
+"PostgreSQL B-tree index with storage parameters (`fillfactor`, `deduplicate_items`; Django's BTreeIndex, suffix \"btree\")."
+BTreeIndex(cols...; name = nothing, fillfactor = nothing, deduplicate_items = nothing, kw...) =
+    Index(cols...; name = name, method = :btree, suffix = "btree",
+          params = index_params("fillfactor" => fillfactor, "deduplicate_items" => deduplicate_items), kw...)
+"PostgreSQL SP-GiST index (space-partitioned: points, ranges, text prefixes). `fillfactor`."
+SpGistIndex(cols...; name = nothing, fillfactor = nothing, kw...) =
+    Index(cols...; name = name, method = :spgist, params = index_params("fillfactor" => fillfactor), kw...)
+"PostgreSQL hash index: equality lookups only. `fillfactor`."
+HashIndex(cols...; name = nothing, fillfactor = nothing, kw...) =
+    Index(cols...; name = name, method = :hash, params = index_params("fillfactor" => fillfactor), kw...)
+"""
+PostgreSQL bloom index (needs `CreateExtension(\"bloom\")` in a migration): equality on any combination of many columns.
+`length` (bits per entry), `columns` (bits per column, in the fields' order).
+"""
+function BloomIndex(cols...; name = nothing, fields = nothing, length = nothing, columns = Int[], kw...)
+    nf = fields === nothing ? Base.length(cols) : Base.length(fields)
+    nf > 32 && throw(ArgumentError("Bloom indexes support a maximum of 32 fields."))
+    columns isa Union{AbstractVector,Tuple} || throw(ArgumentError("BloomIndex.columns must be a list or tuple."))
+    Base.length(columns) > nf && throw(ArgumentError("BloomIndex.columns cannot have more values than fields."))
+    all(c -> c isa Integer && 0 < c < 4096, columns) || throw(ArgumentError("BloomIndex.columns must contain integers from 1 to 4095."))
+    length === nothing || length isa Integer && 0 < length <= 4096 ||
+        throw(ArgumentError("BloomIndex.length must be None or an integer from 1 to 4096."))
+    ps = index_params("length" => length, ("col$i" => c for (i, c) in enumerate(columns))...)
+    fields === nothing ? Index(cols...; name = name, method = :bloom, params = ps, kw...) :
+                         Index(cols...; fields = fields, name = name, method = :bloom, params = ps, kw...)
+end
+index_key(i::Index) = (i.columns, i.name, i.unique, i.method, i.expressions, [index_item_code(e) for e in i.exprs], i.params, i.tablespace,
                        i.condition === nothing ? nothing : q_code(i.condition), i.include, i.opclasses)
+"An index expression as code (for comparing indexes and writing migration files)."
+index_item_code(e::OrderBy) = (e.descending ? "Desc(" : "Asc(") * index_item_code(e.expr) *
+    (e.nulls_first === nothing ? "" : e.nulls_first ? "; nulls_first = true" : "; nulls_last = true") * ")"
+index_item_code(e) = try expr_code(e) catch err; err isa ArgumentError || rethrow(); repr(e) end
 Base.:(==)(a::Index, b::Index) = index_key(a) == index_key(b)
 Base.hash(i::Index, h::UInt) = hash(i.name, h)
 
@@ -348,13 +409,28 @@ The name of an index declared without one: with `INDEX_NAMES = :django` (new pro
 `<table[:11]>_<first column[:7]>_<md5 digest[:6]>_<suffix>` (`model_index_author_0f5565_idx`); else (the default, so
 existing projects' migrations keep their names) Juango's `<table>_<columns>_<suffix>` (#281).
 """
-function auto_index_name(table::AbstractString, cols::Vector{String}, suffix::AbstractString)
+function auto_index_name(table::AbstractString, cols::Vector{String}, suffix::AbstractString; max_length = 30)
     get(settings, :INDEX_NAMES, :juango) === :django || return constraint_name(table, lstrip.(cols, '-')..., suffix)
     t = strip(string(last(split(table, '.'))), '"')          # (Django's split_identifier: no schema, no quotes)
     name = string(first(t, 11), "_", first(lstrip(cols[1], '-'), 7), "_",
                   first(md5_hex(Vector{UInt8}(codeunits(join(vcat(t, cols, suffix))))), 6), "_", suffix)
-    length(name) > 30 && throw(ArgumentError("Index too long for multiple database support. Is self.suffix longer than 3 characters?"))
+    length(name) > max_length && throw(ArgumentError("Index too long for multiple database support. Is self.suffix longer than 3 characters?"))
     (name[1] == '_' || isdigit(name[1])) ? "D" * name[2:end] : name
+end
+
+"A model's index in a table snapshot: column names for field names, and its name (given or generated)."
+Base.@nospecializeinfer function index_state(@nospecialize(T::Type), ix::Index)
+    m = modelmeta(T)
+    col(n) = (f = findfield(m, Symbol(n)); f !== nothing ? column(f) : n == "id" && !natural_pk(T) ? "id" :
+              error("$(m.name): Meta names unknown field '$n'"))
+    # ("-field": that column descending)
+    cols = [startswith(c, "-") ? "-" * col(c[2:end]) : col(c) for c in ix.columns]
+    Index(cols, something(ix.name, auto_index_name(m.table, cols, ix.suffix;
+          # (PostgreSQL's index classes get their longer suffix's extra, as Django's PostgresIndex.max_name_length)
+          max_length = ix.suffix == "idx" ? 30 : 27 + length(ix.suffix))),
+          ix.unique, ix.method, Tuple{String,String}[(f, col(x)) for (f, x) in ix.expressions],
+          ix.condition === nothing ? nothing : condition_to_columns(T, ix.condition),
+          String[col(c) for c in ix.include], ix.opclasses, ix.exprs, ix.params, ix.tablespace, ix.suffix)
 end
 
 "The snapshot `Table` for a model."
@@ -364,15 +440,7 @@ Base.@nospecializeinfer function table_state(@nospecialize(T::Type))
               error("$(m.name): Meta names unknown field '$n'"))
     P = table_parent(T)
     root = isempty(ancestors(T)) ? T : last(ancestors(T))
-    idx = Index[]
-    for ix in get(m.extra, :indexes, Index[])
-        # ("-field": that column descending)
-        cols = [startswith(c, "-") ? "-" * col(c[2:end]) : col(c) for c in ix.columns]
-        push!(idx, Index(cols, something(ix.name, auto_index_name(m.table, cols, ix.method === :btree ? "idx" : string(ix.method))),
-                         ix.unique, ix.method, Tuple{String,String}[(f, col(x)) for (f, x) in ix.expressions],
-                         ix.condition === nothing ? nothing : condition_to_columns(T, ix.condition),
-                         String[col(c) for c in ix.include], ix.opclasses))
-    end
+    idx = Index[index_state(T, ix) for ix in get(m.extra, :indexes, Index[])]
     pk = get(modelmeta(root).extra, :pk, nothing)
     pk isa CompositePrimaryKey || (pk = meta_pk_kind(root))
     pkcols = String[]
@@ -550,7 +618,9 @@ function index_spec_sql(b::DatabaseBackend, table, ix::Index; if_not_exists = fa
     io = IOBuffer()
     print(io, "CREATE ", ix.unique ? "UNIQUE " : "", "INDEX ", if_not_exists ? "IF NOT EXISTS " : "",
           quote_name(b, ix.name), " ON ", quote_name(b, table), using_, " (")
-    if isempty(ix.expressions)
+    if !isempty(ix.exprs)
+        join(io, (index_item_sql(b, table, e) for e in ix.exprs), ", ")
+    elseif isempty(ix.expressions)
         for (i, c) in enumerate(ix.columns)
             i > 1 && print(io, ", ")
             print(io, quote_name(b, lstrip(c, '-')))
@@ -562,12 +632,38 @@ function index_spec_sql(b::DatabaseBackend, table, ix::Index; if_not_exists = fa
     end
     print(io, ")")
     pg && !isempty(ix.include) && print(io, " INCLUDE (", join((quote_name(b, c) for c in ix.include), ", "), ")")
-    ix.condition === nothing || print(io, " WHERE ", condition_sql(b, ix.condition))
+    pg && !isempty(ix.params) && print(io, " WITH (", join(("$k = $v" for (k, v) in ix.params), ", "), ")")
+    pg && ix.tablespace !== nothing && print(io, " TABLESPACE ", quote_name(b, ix.tablespace))
+    ix.condition === nothing || print(io, " WHERE ", ddl_condition_sql(b, table, ix.condition))
     [String(take!(io))]
 end
 "Whether the database builds this index (others skip it, as Django does)."
 index_supported(b::DatabaseBackend, ix::Index) = supports_index_method(b, ix.method) &&
-    (ix.condition === nothing || supports_partial_indexes(b)) && (isempty(ix.expressions) || supports_expression_indexes(b))
+    (ix.condition === nothing || supports_partial_indexes(b)) && (isempty(ix.expressions) && isempty(ix.exprs) || supports_expression_indexes(b))
+"""
+An index item (an expression with its collation, operator class and order) as DDL:
+`(LOWER("name")) COLLATE "C" text_pattern_ops DESC NULLS LAST`; a plain field is its column.
+"""
+function index_item_sql(b::DatabaseBackend, table, e)
+    collation, opclass, order = "", "", ""
+    while true
+        if e isa OrderBy
+            order = (e.descending ? " DESC" : "") * (e.nulls_first === nothing ? "" : e.nulls_first ? " NULLS FIRST" : " NULLS LAST")
+            e = e.expr
+        elseif e isa OpClass
+            opclass = " " * e.name
+            e = e.expr
+        elseif e isa Func && e.name === :collate
+            collation = " COLLATE " * quote_name(b, string(e.args[2]))
+            e = e.args[1]
+        else
+            break
+        end
+    end
+    sql = ddl_expr_sql(b, table, e)
+    plain = e isa F && !occursin("__", e.name)
+    (plain ? sql : "(" * sql * ")") * collation * opclass * order
+end
 drop_index_spec_sql(b::DatabaseBackend, table, ix::Index) =
     index_supported(b, ix) ? [drop_index_stmt(b, table, ix.name)] : String[]
 

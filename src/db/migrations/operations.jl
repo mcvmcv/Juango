@@ -376,7 +376,7 @@ function state_forwards!(op::RenameField, st, app)
     ren(x) = x == op.old ? op.new : x
     t.indexes = [ix.name === nothing ? ix :
                  Juango.Index(ren.(ix.columns), ix.name, ix.unique, ix.method, [(f, ren(c)) for (f, c) in ix.expressions],
-                              ix.condition, ren.(ix.include), ix.opclasses) for ix in t.indexes]
+                              ix.condition, ren.(ix.include), ix.opclasses, ix.exprs, ix.params, ix.tablespace, ix.suffix) for ix in t.indexes]
     t.constraints = [Juango.ConstraintSpec(c.kind, c.name, ren.(c.columns),
                                            [c.kind === :exclusion ? (ren(f), x) : (f, ren(x)) for (f, x) in c.expressions],
                                            c.condition, c.index_type, c.opclasses, ren.(c.include), c.deferrable) for c in t.constraints]

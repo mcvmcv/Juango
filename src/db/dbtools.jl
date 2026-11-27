@@ -228,17 +228,21 @@ end
 
 A table's constraints and indexes in the database, by name (Django's
 `connection.introspection.get_constraints`): each has `columns` (column names; an expression is
-`""`), `primary_key`, `unique`, `foreign_key` (`(table, column)` or `nothing`), `check`, `index`
-and `type` (the index method as Django names it: `"idx"` for a B-tree index, else e.g. "gin", "hash"; or `nothing`). A primary key with no name of its own
+`""`), `primary_key`, `unique`, `foreign_key` (`(table, column)` or `nothing`), `check`, `index`,
+`type` (the index method as Django names it: `"idx"` for a B-tree index, else e.g. "gin", "hash"; or `nothing`),
+`orders` (an index's `"ASC"`/`"DESC"` per key column; empty for other constraints, and on PostgreSQL for methods
+without an order) and `options` (PostgreSQL: an index's storage parameters, `["fillfactor=80"]`, or `nothing`). A primary key with no name of its own
 (SQLite) is `"__primary__"`; SQLite's unnamed foreign keys are `"fk_<n>"`.
 """
 index_type(method) = (m = lowercase(method); m == "btree" ? "idx" : m)      # (Django's Index.suffix for a B-tree)
 function introspect_constraints(table)
     b = backend()
-    out = Dict{String,NamedTuple{(:columns, :primary_key, :unique, :foreign_key, :check, :index, :type),
-                                 Tuple{Vector{String},Bool,Bool,Union{Nothing,Tuple{String,String}},Bool,Bool,Union{Nothing,String}}}}()
-    entry(cols; pk = false, unique = false, fk = nothing, check = false, index = false, type = nothing) =
-        (columns = collect(String, cols), primary_key = pk, unique = unique, foreign_key = fk, check = check, index = index, type = type)
+    out = Dict{String,NamedTuple{(:columns, :primary_key, :unique, :foreign_key, :check, :index, :type, :orders, :options),
+                                 Tuple{Vector{String},Bool,Bool,Union{Nothing,Tuple{String,String}},Bool,Bool,Union{Nothing,String},
+                                       Vector{String},Union{Nothing,Vector{String}}}}}()
+    entry(cols; pk = false, unique = false, fk = nothing, check = false, index = false, type = nothing, orders = String[], options = nothing) =
+        (columns = collect(String, cols), primary_key = pk, unique = unique, foreign_key = fk, check = check, index = index, type = type,
+         orders = collect(String, orders), options = options)
     splitcols(x) = x === nothing || x === missing ? String[] : String.(split(String(x), ','; keepempty = true))
     if b isa SQLiteBackend
         q = quote_name(b, table)
@@ -250,7 +254,8 @@ function introspect_constraints(table)
             if String(r[:origin]) == "pk"
                 out["__primary__"] = entry(cols; pk = true, unique = true); continue
             end
-            out[name] = entry(cols; unique = r[:unique] != 0, index = true, type = "idx")
+            orders = [r2[:desc] == 1 ? "DESC" : "ASC" for r2 in execute("PRAGMA index_xinfo($(quote_name(b, name)))") if r2[:key] == 1]
+            out[name] = entry(cols; unique = r[:unique] != 0, index = true, type = "idx", orders = orders)
         end
         for r in execute("PRAGMA foreign_key_list($q)")
             name = "fk_$(r[:id])"
@@ -284,16 +289,25 @@ function introspect_constraints(table)
         end
         for r in execute("SELECT ic.relname AS name, ix.indisunique AS uniq, ix.indisprimary AS pk, am.amname AS method, " *
                          "(SELECT string_agg(COALESCE(a.attname, ''), ',' ORDER BY u.ord) FROM unnest(ix.indkey::int2[]) WITH ORDINALITY u(attnum, ord) " *
-                         " LEFT JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = u.attnum) AS cols " *
+                         " LEFT JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = u.attnum) AS cols, " *
+                         "(SELECT string_agg(CASE WHEN o & 1 = 1 THEN 'DESC' ELSE 'ASC' END, ',' ORDER BY u.ord) " *
+                         " FROM unnest(ix.indoption::int2[]) WITH ORDINALITY u(o, ord)) AS orders, " *
+                         "array_to_string(ic.reloptions, '\x1f') AS options " *
                          "FROM pg_index ix JOIN pg_class ic ON ic.oid = ix.indexrelid JOIN pg_class t ON t.oid = ix.indrelid " *
                          "JOIN pg_namespace n ON n.oid = t.relnamespace JOIN pg_am am ON am.oid = ic.relam " *
                          "WHERE t.relname = ? AND n.nspname = current_schema()", [table])
             name = String(r[:name])
             prev = get(out, name, nothing)
+            method = String(r[:method])
+            opts = r[:options] === nothing || r[:options] === missing ? nothing : String.(split(String(r[:options]), '\x1f'))
+            # a B-tree index is Django's plain "idx", unless it's a BTreeIndex (named ..._btree, or with storage parameters)
+            type = method == "btree" && (endswith(name, "_btree") || opts !== nothing) ? "btree" : index_type(method)
+            orders = method == "btree" ? splitcols(r[:orders]) : String[]
             if prev === nothing
-                out[name] = entry(splitcols(r[:cols]); pk = r[:pk] == true, unique = r[:uniq] == true, index = true, type = index_type(String(r[:method])))
+                out[name] = entry(splitcols(r[:cols]); pk = r[:pk] == true, unique = r[:uniq] == true, index = true, type = type,
+                                  orders = orders, options = opts)
             else                                       # the index behind a primary key or unique constraint
-                out[name] = merge(prev, (index = true, type = index_type(String(r[:method]))))
+                out[name] = merge(prev, (index = true, type = type, orders = orders, options = opts))
             end
         end
     else
@@ -310,18 +324,20 @@ function introspect_constraints(table)
                               fk = t == "FOREIGN KEY" ? (String(r[:ftable]), String(r[:fcol])) : nothing)
         end
         keyed = Set(keys(out))                         # constraints whose columns are known already
-        for r in execute("SELECT index_name AS name, non_unique AS nu, column_name AS col, index_type AS method " *
+        for r in execute("SELECT index_name AS name, non_unique AS nu, column_name AS col, index_type AS method, collation AS coll " *
                          "FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? " *
                          "ORDER BY index_name, seq_in_index", [table])
             name = String(r[:name])
             col = r[:col] === nothing || r[:col] === missing ? "" : String(r[:col])
             prev = get(out, name, nothing)
+            ord = r[:coll] == "D" ? "DESC" : "ASC"
             if name in keyed                           # the index behind a key constraint
-                out[name] = merge(prev, (index = true, type = index_type(String(r[:method]))))
+                out[name] = merge(prev, (index = true, type = index_type(String(r[:method])), orders = [prev.orders; ord]))
             elseif prev === nothing
-                out[name] = entry([col]; pk = name == "PRIMARY", unique = r[:nu] == 0, index = true, type = index_type(String(r[:method])))
+                out[name] = entry([col]; pk = name == "PRIMARY", unique = r[:nu] == 0, index = true, type = index_type(String(r[:method])),
+                                  orders = [ord])
             else
-                out[name] = merge(prev, (columns = [prev.columns; col],))
+                out[name] = merge(prev, (columns = [prev.columns; col], orders = [prev.orders; ord]))
             end
         end
     end

@@ -26,7 +26,11 @@ index_code(i::Index) = "Index($(jl(i.columns)); name = $(jl(i.name))" * (i.uniqu
                        (isempty(i.expressions) ? "" : ", expressions = [" * join(["($(jl(f)), $(jl(c)))" for (f, c) in i.expressions], ", ") * "]") *
                        (i.condition === nothing ? "" : ", condition = " * Juango.q_code(i.condition)) *
                        (isempty(i.include) ? "" : ", include = $(jl(i.include))") *
-                       (isempty(i.opclasses) ? "" : ", opclasses = $(jl(i.opclasses))") * ")"
+                       (isempty(i.opclasses) ? "" : ", opclasses = $(jl(i.opclasses))") *
+                       (isempty(i.exprs) ? "" : ", expression_items = Any[" * join(Juango.index_item_code.(i.exprs), ", ") * "]") *
+                       (isempty(i.params) ? "" : ", params = Pair{String,Any}[" * join(["$(jl(k)) => $(repr(v))" for (k, v) in i.params], ", ") * "]") *
+                       (i.tablespace === nothing ? "" : ", db_tablespace = $(jl(i.tablespace))") *
+                       (i.suffix == (i.method === :btree ? "idx" : string(i.method)) ? "" : ", suffix = $(jl(i.suffix))") * ")"
 op_code(op::CreateModel) = "CreateModel($(jl(op.table)); model = $(jl(op.model)), columns = [\n" *
     join(["            " * column_code(c) * ",\n" for c in op.columns]) * "        ]" *
     (isempty(op.unique_together) ? "" : ", unique_together = $(jl(op.unique_together))") *

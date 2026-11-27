@@ -235,10 +235,10 @@ end
 module Postgres
 using ..Juango: HStoreField, OpClass, RangeOperators, RangeBoundary, CICharField, SearchVector, SearchQuery, SearchRank, SearchHeadline, SearchConfig, SearchVectorField, Lexeme, quote_lexeme, TrigramSimilarity,
     TrigramWordSimilarity, TrigramStrictWordSimilarity, TrigramDistance, TrigramWordDistance, TrigramStrictWordDistance, TransactionNow, RandomUUID, Unaccent,
-    ExclusionConstraint, GinIndex, GistIndex, BrinIndex, SpGistIndex, HashIndex, BloomIndex
+    ExclusionConstraint, GinIndex, GistIndex, BrinIndex, SpGistIndex, HashIndex, BloomIndex, BTreeIndex
 export HStoreField, OpClass, RangeOperators, RangeBoundary, CICharField, SearchVector, SearchQuery, SearchRank, SearchHeadline, SearchConfig, SearchVectorField, Lexeme, quote_lexeme, TrigramSimilarity,
     TrigramWordSimilarity, TrigramStrictWordSimilarity, TrigramDistance, TrigramWordDistance, TrigramStrictWordDistance, TransactionNow, RandomUUID, Unaccent,
-    ExclusionConstraint, GinIndex, GistIndex, BrinIndex, SpGistIndex, HashIndex, BloomIndex
+    ExclusionConstraint, GinIndex, GistIndex, BrinIndex, SpGistIndex, HashIndex, BloomIndex, BTreeIndex
 end
 
 public Testing, GIS, Postgres, Functions, Migrations

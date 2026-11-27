@@ -50,13 +50,13 @@ An expression with a PostgreSQL operator class, in a `UniqueConstraint`, an `Exc
 struct OpClass <: Expression
     expr::Any
     name::String
-    OpClass(expr, name::AbstractString) = new(ref(expr), String(name))
+    OpClass(expr, name::AbstractString) = new(expr isa OrderBy ? expr : ref(expr), String(name))   # (Desc(...) too, in an index)
 end
 OpClass(expr; name) = OpClass(expr, name)
 Base.:(==)(a::OpClass, b::OpClass) = a.name == b.name && expr_code(a.expr) == expr_code(b.expr)
 Base.hash(o::OpClass, h::UInt) = hash(o.name, hash(expr_code(o.expr), h))
-compile_expr(c::SQLCompiler, e::OpClass) = compile_expr(c, e.expr)        # (the operator class is DDL only)
-expr_code(e::OpClass) = "OpClass($(expr_code(e.expr)), $(repr(e.name)))"
+compile_expr(c::SQLCompiler, e::OpClass) = compile_expr(c, e.expr isa OrderBy ? e.expr.expr : e.expr)        # (the operator class is DDL only)
+expr_code(e::OpClass) = "OpClass($(e.expr isa OrderBy ? index_item_code(e.expr) : expr_code(e.expr)), $(repr(e.name)))"
 
 """
     CheckConstraint(; condition::Q, name, violation_error_message = nothing, violation_error_code = nothing)

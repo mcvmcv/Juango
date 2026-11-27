@@ -6,7 +6,7 @@
 # django_table_names, installed_models; get_field_type is the type inspectdb gives a column (field_for).
 #
 # Not translated: test_sequence_list (Juango resets sequences itself and lists none), the db_on_delete cases
-# (#228), test_get_relations' remove_field part, and the "orders" of indexes (introspect_constraints has none).
+# (#228), test_get_relations' remove_field part.
 @isdefined(TEST_SETUP_DONE) || include("setup.jl")
 
 @model struct DinCity
@@ -136,10 +136,16 @@ din_desc(T) = Juango.introspect_columns(Juango.modelmeta(T).table)
     cons = introspect_constraints("din_article")
     @test only(c.type for c in values(cons) if c.columns == ["headline", "pub_date"]) == "idx"
     @test only(c.type for c in values(cons) if c.columns == ["headline", "response_to_id", "pub_date", "reporter_id"]) == "idx"
-    # test_get_constraints_unique_indexes_orders (without the orders)
+    # test_get_constraints_indexes_orders (the foreign keys' own indexes too: Juango indexes them everywhere)
+    for c in values(cons)
+        c.index && !(c.primary_key || c.unique) || continue
+        @test c.columns in (["headline", "pub_date"], ["headline", "response_to_id", "pub_date", "reporter_id"], ["reporter_id"], ["response_to_id"])
+        @test c.orders == fill("ASC", length(c.columns))
+    end
+    # test_get_constraints_unique_indexes_orders
     if !IS_MYSQL                                         # (no partial indexes)
         c = introspect_constraints("din_uniqueconstraintconditionmodel")["cond_name_without_color_uniq"]
-        @test c.unique && c.columns == ["name"]
+        @test c.unique && c.columns == ["name"] && c.orders == ["ASC"]
     end
     # test_get_constraints
     function details(d, cols; primary_key = false, unique = false, index = false, check = false, foreign_key = nothing)
@@ -174,3 +180,8 @@ din_desc(T) = Juango.introspect_columns(Juango.modelmeta(T).table)
     end
     @test isempty(symdiff(Set(keys(constraints)), union(custom, field_constraints)))
 end
+# (Django's UniqueConstraintConditionModel keeps null = true for its condition, which Juango's check fields.W800 warns
+# about: the model goes once its tests have run, so the checks of other files don't see it)
+Juango.execute("DROP TABLE " * Juango.qname(Juango.modelmeta(DinUniqueConstraintConditionModel).table))
+filter!(T -> T !== DinUniqueConstraintConditionModel, PORT_MODELS)
+Juango.unregister_model!(DinUniqueConstraintConditionModel)
