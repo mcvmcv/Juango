@@ -320,7 +320,7 @@ end
 const LK = "\x01"
 lk(lookup) = LK * lookup
 
-const AGG_CALL = r"^(?i:COUNT|SUM|AVG|MIN|MAX|STDDEV_[A-Z]+|STDDEV|VARIANCE|VAR_[A-Z]+|GROUP_CONCAT|STRING_AGG|ARRAY_AGG|JSONB?_AGG|JSON_GROUP_[A-Z]+|JSON_[A-Z]*AGG|BOOL_AND|BOOL_OR|BIT_AND|BIT_OR|BIT_XOR|EVERY|REGR_[A-Z]+|COVAR_[A-Z]+|CORR|PERCENTILE_[A-Z]+)\s*\("
+const AGG_CALL = r"^(?i:COUNT|SUM|AVG|MIN|MAX|STDDEV_[A-Z]+|STDDEV|VARIANCE|VAR_[A-Z]+|GROUP_CONCAT|STRING_AGG|ARRAY_AGG|JSONB?_AGG|JSON_GROUP_[A-Z]+|JSON_[A-Z]*AGG|BOOL_AND|BOOL_OR|BIT_AND|BIT_OR|BIT_XOR|EVERY|REGR_[A-Z]+|COVAR_[A-Z]+|CORR|PERCENTILE_[A-Z]+|ST_EXTENT|ST_COLLECT|ST_MAKELINE)\s*\("
 """
 The table columns (`"alias"."col"`, of one of `aliases`) an SQL fragment reads outside aggregate calls (and their
 FILTER clauses) and subqueries: what a grouped query groups by too, as Django's `get_group_by_cols` (PostgreSQL

@@ -79,6 +79,11 @@ struct Func <: Expression
     name::Symbol
     args::Vector{Any}
 end
+"An expression that converts its own values (`convert_result(e, v)`; GIS functions give geometries, numbers, text)."
+abstract type ConvertedExpression <: Expression end
+function convert_result end
+"A GIS aggregate's value (`Extent`'s box, `Collect`'s geometry; gis.jl)."
+function gis_aggregate_value end
 "Lower-case text."
 Lower(x) = Func(:lower, [ref(x)])
 "Upper-case text."
@@ -991,6 +996,11 @@ function compile_expr(c::SQLCompiler, e::Func)
     n === :trunc && return trunc_expr(b, e.args[2], sqls[1], something(temporal_kind(c, e.args[1]), :datetime)), ps
     n in (:similarity, :word_similarity, :strict_word_similarity, :unaccent) &&
         return uppercase(string(n)) * "(" * join(sqls, ", ") * ")", ps
+    # Reverse of a geometry field: PostGIS's ST_Reverse (Django's GIS Reverse)
+    if n === :reverse
+        of = output_field(c.T, e.args[1])
+        of !== nothing && of.kind === :geometry && return "ST_Reverse($(sqls[1]))", ps
+    end
     sql = function_sql(b, n, sqls, e)                 # functions.jl: Greatest, Replace, Round, Sqrt, ...
     sql === nothing || return sql, ps
     throw(ArgumentError("unknown function $n"))
@@ -1078,6 +1088,9 @@ obsql(order) = isempty(order) ? "" : " ORDER BY " * join(order, ", ")
 function aggregate_sql(::DatabaseBackend, func, arg, order, e; filt = "")
     func == "ARRAY_AGG" && return "CAST(JSON_AGG($arg$(obsql(order)))$filt AS TEXT)"
     func == "STRING_AGG" && return "STRING_AGG(CAST($arg AS TEXT), $(sql_string_literal(e.delimiter))$(obsql(order)))"
+    # GIS's Union aggregate: ST_Union over an array of the geometries (the same, and group_cols doesn't take it for
+    # an aggregate when it's the 2-argument function)
+    func == "ST_UnionAgg" && return "ST_Union(ARRAY_AGG($arg))"
     "$func($arg)"
 end
 function aggregate_sql(::MySQLBackend, func, arg, order, e; filt = "")
@@ -1458,7 +1471,7 @@ end
 Base.@nospecializeinfer output_field(@nospecialize(T), e::Aggregate) =
     e.func in ("MIN", "MAX") && e.arg !== nothing ? output_field(T, e.arg) : nothing
 Base.@nospecializeinfer function output_field(@nospecialize(T), e::Func)
-    e.name in (:coalesce, :greatest, :least, :nullif) || return nothing
+    e.name in (:coalesce, :greatest, :least, :nullif, :reverse) || return nothing
     for a in e.args
         f = output_field(T, a)
         f === nothing || return f
@@ -1496,7 +1509,7 @@ Base.@nospecializeinfer function output_field(@nospecialize(T), e::Subquery)
 end
 
 "Field kinds a computed value is converted to through its `output_field` (the text and numbers some backends give back)."
-const TYPED_OUTPUT_KINDS = (:date, :datetime, :time, :uuid, :bool, :duration, :array)   # (:array: F(:field__0_2), a slice)
+const TYPED_OUTPUT_KINDS = (:date, :datetime, :time, :uuid, :bool, :duration, :array, :geometry)   # (:array: F(:field__0_2), a slice)
 
 """
 A computed value (annotation or aggregate) as Julia sees it: through its `output_field` for
@@ -1515,6 +1528,7 @@ Base.@nospecializeinfer function typed_output(@nospecialize(T), @nospecialize(e)
 end
 Base.@nospecializeinfer function expr_value(@nospecialize(T), e, v, of::Union{Nothing,Field})
     v === nothing && return nothing
+    e isa ConvertedExpression && return convert_result(e, v)
     e isa Union{RawSQL,ExpressionWrapper} && e.output isa Field && e.output.kind === :bool && return v isa Bool ? v : v != 0
     e isa ExpressionWrapper && e.output === nothing && return expr_value(T, e.expr, v, typed_output(T, e.expr))
     e isa Union{Exists,Condition,LookupExpr,NegatedExpr} && return v isa Bool ? v : v != 0          # SQLite and MySQL give 0/1
@@ -1546,6 +1560,7 @@ Base.@nospecializeinfer function expr_value(@nospecialize(T), e, v, of::Union{No
             return v isa Real ? Float64(v) : parse(Float64, string(v))
         end
     end
+    e isa Aggregate && startswith(e.func, "ST_") && return gis_aggregate_value(e, v)
     of === nothing || return from_db(of, v)
     e isa Func && e.name === :jsonobject && return v isa AbstractString ? JSON.parse(v) : v
     if e isa Union{CombinedExpression,Aggregate} || (e isa Func && e.name === :trunc)
@@ -1698,7 +1713,8 @@ The name Django gives an aggregate passed without one: `Avg(:age)` is `:age__avg
 function default_alias(e::Aggregate)
     e.arg isa F || throw(ArgumentError("Complex aggregates require an alias: give $(repr(e)) a name (name = ...)"))
     f = Dict("STDDEV_POP" => "stddev", "STDDEV_SAMP" => "stddev", "VAR_POP" => "variance", "VAR_SAMP" => "variance",
-             "GROUP_CONCAT" => "stringagg", "STRING_AGG" => "stringagg", "ARRAY_AGG" => "arrayagg")
+             "GROUP_CONCAT" => "stringagg", "STRING_AGG" => "stringagg", "ARRAY_AGG" => "arrayagg",
+             "ST_Extent" => "extent", "ST_Collect" => "collect", "ST_MakeLine" => "makeline", "ST_UnionAgg" => "union")
     Symbol(replace(e.arg.name, "." => "__"), "__", get(f, e.func, lowercase(e.func)))
 end
 default_alias(e) = throw(ArgumentError("Complex aggregates require an alias: give $(repr(e)) a name (name = ...)"))

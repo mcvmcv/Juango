@@ -340,11 +340,13 @@ Base.@nospecializeinfer function write_values(@nospecialize(M::Type), fields, da
             isempty(c.joins) || throw(ArgumentError("Joined field references are not permitted in this query ($(f.name) = $(repr(v)))"))
             push!(phs, "($sql)"); append!(vals, ps)
         else
-            push!(phs, "?"); push!(vals, to_db(f, v))
+            push!(phs, f.kind === :geometry ? geometry_placeholder(f, v) : "?"); push!(vals, to_db(f, v))
         end
     end
     phs, vals
 end
+"A geometry value's placeholder (gis.jl: in another SRID, transformed to the column's, as Django's)."
+function geometry_placeholder end
 "An INSERT's `?` placeholders, in order, replaced by `phs` (expressions' SQL, or `?`)."
 function fill_placeholders(sql::AbstractString, phs::Vector{String})
     all(==("?"), phs) && return String(sql)

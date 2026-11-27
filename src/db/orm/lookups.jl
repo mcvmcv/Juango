@@ -48,7 +48,9 @@ const LOOKUPS = Set(["exact", "iexact", "contains", "icontains", "startswith", "
                      "ne", "regex", "iregex", "contained_by", "overlap", "has_key", "has_keys",
                      "fully_lt", "fully_gt", "not_lt", "not_gt", "adjacent_to", "isempty", "lower_inc", "lower_inf", "upper_inc", "upper_inf",
                      "has_any_keys", "search", "intersects", "within", "covers", "coveredby", "disjoint", "touches",
-                     "crosses", "overlaps", "equals", "distance_lt", "distance_lte", "distance_gt", "distance_gte", "dwithin"])
+                     "crosses", "overlaps", "equals", "distance_lt", "distance_lte", "distance_gt", "distance_gte", "dwithin", "isvalid", "geom_type",
+                     "contains_properly", "relate", "bbcontains", "bboverlaps", "contained", "left", "right", "overlaps_left",
+                     "overlaps_right", "overlaps_above", "overlaps_below", "strictly_above", "strictly_below", "same_as"])
 
 # --- custom lookups and transforms ---------------------------------------------------------------
 

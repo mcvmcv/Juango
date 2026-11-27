@@ -704,7 +704,7 @@ Base.@nospecializeinfer function special_lookup(c::SQLCompiler, f::Field, col, l
     b = backend()
     k = f.kind
     if k === :geometry
-        return spatial_lookup(f, col, lookup, value)
+        return spatial_lookup(c, f, col, lookup, value)
     elseif lookup == "search"
         # dialogue__search = SearchQuery(...) (or F, Lexemes): the column's vector in the query's configuration
         if value isa Union{SearchQueryLike,Expression,LexemeLike}

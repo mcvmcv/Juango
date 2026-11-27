@@ -101,8 +101,11 @@ function serialize(format::Symbol, objs; fields = nothing, natural_foreign = fal
 end
 const SERIAL_FORMATS = (:json, :jsonl, :yaml, :xml)
 "The serialization format of a fixture file, from its extension."
-fixture_format(path::AbstractString) = endswith(path, ".jsonl") ? :jsonl : endswith(path, ".yaml") || endswith(path, ".yml") ? :yaml :
+fixture_format(path::AbstractString) = endswith(path, ".gz") ? fixture_format(path[1:end-3]) : endswith(path, ".jsonl") ? :jsonl : endswith(path, ".yaml") || endswith(path, ".yml") ? :yaml :
                                        endswith(path, ".xml") ? :xml : :json
+
+"A fixture file's text (a `.gz` one decompressed, as Django's compressed fixtures)."
+fixture_text(path::AbstractString) = endswith(path, ".gz") ? String(transcode(CodecZlib.GzipDecompressor, read(path))) : read(path, String)
 
 "An object read by `deserialize`: `save!` it to write it with its many-to-many values."
 struct DeserializedObject
@@ -392,8 +395,11 @@ function find_fixture(name::AbstractString, db::AbstractString = current_alias()
     isfile(name) && return [abspath(name)]
     exts = (".json", ".jsonl", ".yaml", ".yml", ".xml")
     found = String[]
-    # name.json, or name.<database>.json for the database loaded into only (Django's database-specific fixtures)
-    cands = any(e -> endswith(name, e), exts) ? [name] : vcat([name * e for e in exts], [name * "." * db * e for e in exts])
+    # name.json, or name.<database>.json for the database loaded into only (Django's database-specific fixtures);
+    # name.json.gz too (compressed)
+    bare = endswith(name, ".gz") ? name[1:end-3] : name
+    cands = any(e -> endswith(bare, e), exts) ? (bare == name ? [name, name * ".gz"] : [name]) :
+        [c * z for c in vcat([name * e for e in exts], [name * "." * db * e for e in exts]) for z in ("", ".gz")]
     for dir in fixture_dirs()
         here = [joinpath(dir, c) for c in cands if isfile(joinpath(dir, c))]
         # one name in two formats in one directory: ambiguous (Django's CommandError)
@@ -414,8 +420,8 @@ end
     loaddata(fixtures...) -> Int
 
 Load fixture files (paths, or names found in `fixture_dirs()`: `\"initial_data\"` finds
-`initial_data.json`, `.jsonl`, `.yaml`, `.yml` or `.xml`; one name in two formats in one directory is an
-error) in one transaction; returns the number of objects. `ignorenonexistent = true` skips fields and models the
+`initial_data.json`, `.jsonl`, `.yaml`, `.yml` or `.xml`, or one of those gzipped (`.json.gz`); one name in two
+formats in one directory is an error) in one transaction; returns the number of objects. `ignorenonexistent = true` skips fields and models the
 fixture names that don't exist (Django's `--ignorenonexistent`), `false` refuses them; by default an unknown field is
 skipped and an unknown model refused. Objects with a primary key replace the row with
 that key. `exclude` skips apps or `"app.Model"`s (Django's `--exclude`). On PostgreSQL the id sequences of
@@ -442,7 +448,7 @@ function loaddata_here(names::AbstractString...; exclude = String[], ignorenonex
             try
                 for name in names, f in find_fixture(name, db)
                     files += 1
-                    items = serial_items(fixture_format(f), read(f, String); ignorenonexistent)
+                    items = serial_items(fixture_format(f), fixture_text(f); ignorenonexistent)
                     here = 0
                     for item in items
                         d = deserialize_one(item; ignorenonexistent)

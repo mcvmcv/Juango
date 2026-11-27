@@ -153,6 +153,24 @@ end
             names = [d["model"] for d in JSON.parse(dumpdata(lowercase(Juango.modelmeta(DseArticle).app); exclude = [art, cats]))]   # test_dumpdata_with_excludes
             @test !(art in names) && cat_ in names && auth in names
             @test loaddata("fixture2") == 1 && get(DseArticle; id = 4).headline == "Django conquers world!"   # (a YAML fixture)
+            # test_compressed_loading_gzip / test_compress_format_loading / test_compressed_specified_loading: a gzipped
+            # fixture, by its name with or without the format and the compression
+            gz(s) = transcode(Juango.CodecZlib.GzipCompressor, Vector{UInt8}(s))
+            write(joinpath(dir, "fixture5.json.gz"), gz("""[{"model": "$art", "pk": 5, "fields": {"author": 1,
+                "headline": "WoW subscribers now outnumber readers", "pub_date": "2006-06-16T16:00:00"}}]"""))
+            @test loaddata("fixture5.json.gz") == 1 && get(DseArticle; id = 5).headline == "WoW subscribers now outnumber readers"
+            @test loaddata("fixture5.json") == 1 && loaddata("fixture5") == 1
+            write(joinpath(dir, "fixture6.yaml.gz"), gz("""
+                - model: $art
+                  pk: 6
+                  fields: {author: 1, headline: Gzipped YAML, pub_date: '2006-06-16T17:00:00'}
+                """))
+            @test loaddata("fixture6") == 1 && get(DseArticle; id = 6).headline == "Gzipped YAML"
+            # test_ambiguous_compressed_fixture
+            write(joinpath(dir, "fixture6.json"), "[]")
+            e = try loaddata("fixture6") catch e; e end
+            @test e isa ArgumentError && occursin("Multiple fixtures named 'fixture6'", e.msg)
+            rm(joinpath(dir, "fixture6.json"))
             new = save!(DseArticle(author = get(DseAuthor; id = 1), headline = "after", pub_date = DateTime(2007)))   # test_db_loading: the sequence moved past the loaded ids
             @test new.id > 4
             n = save!(DseScore(score = 1.0)).id; delete!(objects(DseScore))              # (ids just past the sequence: a collision without the reset)
@@ -191,7 +209,7 @@ end
     finally
         configure!(FIXTURE_DIRS = old)
     end
-    # not translated: compressed fixtures (.gz, .zip, .bz2, .xz), loaddata from stdin, --app, --database,
+    # not translated: .zip, .bz2, .lzma and .xz fixtures (#305; .gz is above), loaddata from stdin, --app, --database,
     # the management command's verbosity and progress output, ignorenonexistent, proxy and
     # multi-table inheritance serialization details
 end
