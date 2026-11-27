@@ -668,11 +668,6 @@ function cmd_help(args)
     end
 end
 
-function cmd_shell(args)
-    println("Juango shell — models and settings are loaded. Start Julia with:")
-    println("    julia --project -i manage.jl")
-    println("(running manage.jl without a command in interactive mode loads your project without doing anything.)")
-end
 
 for (n, h, f) in (
     ("runserver", "Start the development server: runserver [host:]port [--cert cert.pem --key key.pem] [--noreload]", cmd_runserver),
@@ -711,7 +706,8 @@ for (n, h, f) in (
          println("Ran $n task(s).")
      end),
     ("flush", "Delete all data from the database: flush [--noinput]", cmd_flush),
-    ("dbshell", "Open the database's command-line client", _ -> run(dbshell_cmd())),
+    ("dbshell", "Open the database's command-line client: dbshell [-- parameters for the client]",
+     args -> dbshell(String[a for a in (!isempty(args) && first(args) == "--" ? args[2:end] : args)])),
     ("inspectdb", "Write models for existing tables: inspectdb [table ...]", args -> print(inspectdb(isempty(first(parse_flags(args))) ? nothing : first(parse_flags(args))))),
     ("test", "Run the project's tests against a throwaway test database: test [--keepdb] [--failfast] [--reverse] [--shuffle[=SEED]] [-k PATTERN] [file ...]", cmd_test),
     ("dumpdata", "Write the database's objects as a fixture: dumpdata [app[.Model] ...] [--format json|jsonl|yaml|xml] [--indent N] [--output FILE] [--database DB]", cmd_dumpdata),
@@ -778,7 +774,6 @@ for (n, h, f) in (
     end),
     ("clearsessions", "Delete expired sessions", _ -> println("Deleted ", clear_expired_sessions!(), " expired sessions.")),
     ("changepassword", "Change a user's password: changepassword [username] (default: the system user)", cmd_changepassword),
-    ("shell", "How to start an interactive session with the project loaded", cmd_shell),
     ("help", "Show this message", cmd_help))
     COMMANDS[n] = (h, f)
 end

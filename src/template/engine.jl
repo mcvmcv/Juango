@@ -597,10 +597,11 @@ end
 
 Render a template. If `request` is given, context processors run as well.
 """
-function render(t::Template, context = Dict{String,Any}(); request = nothing, autoescape = true, processor_values = nothing)
+function render(t::Template, context = Dict{String,Any}(); request = nothing, autoescape = true, processor_values = nothing,
+                context_processors = nothing)
     base = Dict{String,Any}()
     if request !== nothing
-        for cp in settings.CONTEXT_PROCESSORS
+        for cp in something(context_processors, settings.CONTEXT_PROCESSORS)
             merge!(base, to_context_dict(cp(request)))
         end
     end
@@ -811,15 +812,21 @@ end
 # nothing`; its templates need `render(t, context; request)` and a `name`.
 
 """
-    JuangoTemplates(; dirs = nothing, app_dirs = true)
+    JuangoTemplates(; dirs = nothing, app_dirs = true, autoescape = true, context_processors = nothing)
 
-Juango's template language (Django's): templates from `dirs` (default `TEMPLATE_DIRS`), each
-installed app's `templates/` and Juango's own.
+Juango's template language (Django's DjangoTemplates): templates from `dirs` (default
+`TEMPLATE_DIRS`), each installed app's `templates/` and Juango's own. `from_string(engine, src)`
+and `get_template(engine, name)` give templates that render with the engine's options:
+`autoescape = false` (Django's OPTIONS autoescape) and `context_processors` (default
+`CONTEXT_PROCESSORS`), as Django's engine options.
 """
 Base.@kwdef struct JuangoTemplates
     dirs::Union{Nothing,Vector{String}} = nothing
     app_dirs::Bool = true
+    autoescape::Bool = true
+    context_processors::Union{Nothing,Vector{Any}} = nothing
 end
+JuangoTemplates(dirs, app_dirs) = JuangoTemplates(dirs, app_dirs, true, nothing)
 engine_dirs(e) = vcat(String[abspath(d) for d in something(e.dirs, settings.TEMPLATE_DIRS)], e.app_dirs ? app_dirs("templates") : String[])
 template_engines() = (t = get(settings, :TEMPLATES, nothing); t === nothing ? Any[JuangoTemplates()] : collect(Any, t))
 "Whether templates are read again when their files change: TEMPLATE_CACHE_CHECK_MTIME, or by default only with DEBUG."
@@ -862,6 +869,39 @@ function engine_template(e::JuangoTemplates, name::AbstractString, tried)
         TEMPLATE_BY_NAME[key] = t
         t
     end
+end
+
+"""
+A template from an engine object (`from_string(engine, src)`, `get_template(engine, name)`, as Django's
+backend templates): it renders with the engine's options, and takes a dict as its context.
+"""
+struct EngineTemplate
+    engine::Any
+    template::Any
+end
+Base.getproperty(t::EngineTemplate, s::Symbol) = s in (:engine, :template) ? getfield(t, s) : getproperty(getfield(t, :template), s)
+"""
+    from_string(engine, src) -> template
+
+A template made from source with an engine's options (Django's `engine.from_string`).
+"""
+from_string(e::JuangoTemplates, src::AbstractString) = EngineTemplate(e, Template(src))
+"""
+    get_template(engine, name) -> template
+
+A template found by one engine only, rendering with its options (Django's `engine.get_template`).
+"""
+function get_template(e, name::AbstractString)
+    tried = String[]
+    t = engine_template(e, name, tried)
+    t === nothing && throw(TemplateDoesNotExist(String(name), tried))
+    EngineTemplate(e, t)
+end
+function render(t::EngineTemplate, context = Dict{String,Any}(); request = nothing, kw...)
+    context isa Context && throw(ArgumentError("context must be a dict rather than Context."))
+    e = t.engine
+    e isa JuangoTemplates || return render(t.template, context; request = request, kw...)
+    render(t.template, context; request = request, autoescape = e.autoescape, context_processors = e.context_processors, kw...)
 end
 
 """

@@ -77,28 +77,97 @@ function flush!(; reset_sequences = true)
     length(tables)
 end
 
+"The parts of a database URL (percent-decoded; `nothing` where absent) and its query options."
+function db_url_parts(url::AbstractString)
+    m = match(r"^[A-Za-z][A-Za-z0-9+.-]*://(?:([^:@/]*)(?::([^@/]*))?@)?(\[[^\]]*\]|[^:/?]*)?(?::(\d+))?(?:/([^?]*))?(?:\?(.*))?$", url)
+    m === nothing && throw(ImproperlyConfigured("can't parse the database URL"))
+    dec(x) = x === nothing || isempty(x) ? nothing : URIs.unescapeuri(String(x))
+    query = Dict{String,String}()
+    m[6] === nothing || for kv in split(m[6], '&'; keepempty = false)
+        k, v = occursin('=', kv) ? split(kv, '='; limit = 2) : (kv, "")
+        query[URIs.unescapeuri(String(k))] = URIs.unescapeuri(String(v))
+    end
+    host = dec(m[3])
+    host === nothing || (host = strip(host, ['[', ']']))
+    (user = dec(m[1]), password = dec(m[2]), host = host, port = dec(m[4]), db = dec(m[5]), query = query)
+end
+
 """
-    dbshell_cmd() -> Cmd
+    dbshell_args(backend, parameters = String[]) -> (args, env)
+
+The command line of the database's client (`psql`, `mysql`, `sqlite3`) and the environment variables it
+needs, as Django's `DatabaseClient.settings_to_cmd_args_env`: the password goes in the environment
+(`PGPASSWORD`, `MYSQL_PWD`), never in the arguments other users can see with `ps`. `parameters` are
+passed to the client (`manage.jl dbshell -- --help`). `env` is `nothing` when there's nothing to set.
+"""
+function dbshell_args(b::PostgresBackend, parameters = String[])
+    p = db_url_parts(b.url)
+    args = ["psql"]
+    host = something(get(p.query, "host", nothing), p.host, Some(nothing))
+    p.user === nothing || append!(args, ["-U", p.user])
+    host === nothing || append!(args, ["-h", host])
+    p.port === nothing || append!(args, ["-p", p.port])
+    append!(args, parameters)
+    p.db === nothing || push!(args, p.db)
+    env = Dict{String,String}()
+    p.password === nothing || (env["PGPASSWORD"] = p.password)
+    for (opt, var) in ("sslmode" => "PGSSLMODE", "sslrootcert" => "PGSSLROOTCERT", "sslcert" => "PGSSLCERT", "sslkey" => "PGSSLKEY",
+                       "service" => "PGSERVICE", "passfile" => "PGPASSFILE")
+        haskey(p.query, opt) && (env[var] = p.query[opt])
+    end
+    args, isempty(env) ? nothing : env
+end
+function dbshell_args(b::MySQLBackend, parameters = String[])
+    p = mysql_params(b.url)                    # (the user, host and port Juango connects with)
+    q = db_url_parts(b.url).query
+    args = ["mysql", "--user=$(p.user)"]
+    socket = get(q, "unix_socket", get(q, "socket", nothing))
+    if socket !== nothing
+        push!(args, "--socket=$socket")
+    else
+        append!(args, ["--host=$(p.host)", "--port=$(p.port)"])
+    end
+    haskey(q, "charset") && push!(args, "--default-character-set=$(q["charset"])")
+    for k in ("ca", "cert", "key")
+        v = get(q, "ssl_$k", get(q, "ssl-$k", nothing))
+        v === nothing || push!(args, "--ssl-$k=$v")
+    end
+    isempty(p.db) || push!(args, p.db)
+    append!(args, parameters)
+    args, isempty(p.password) ? nothing : Dict("MYSQL_PWD" => p.password)
+end
+dbshell_args(b::SQLiteBackend, parameters = String[]) = (vcat(["sqlite3", b.path], parameters), nothing)
+dbshell_args(b::DatabaseBackend, parameters = String[]) = throw(ArgumentError("dbshell doesn't know the client for $(vendor(b))"))
+
+"""
+    dbshell_cmd(parameters = String[]) -> Cmd
 
 The command-line client for the current database (`sqlite3`, `psql` or `mysql`), as
-`manage.jl dbshell` runs it.
+`manage.jl dbshell` runs it: its password, if any, is in the command's environment.
 """
-function dbshell_cmd()
-    b = backend()
-    if b isa PostgresBackend
-        `psql $(b.url)`
-    elseif b isa MySQLBackend
-        p = mysql_params(b.url)
-        args = ["-h", p.host, "-P", string(p.port), "-u", p.user]
-        isempty(p.password) || push!(args, "--password=$(p.password)")
-        isempty(p.db) || push!(args, p.db)
-        `mysql $args`
-    elseif b isa SQLiteBackend
-        `sqlite3 $(b.path)`
-    else
-        throw(ArgumentError("dbshell doesn't know the client for $(vendor(b))"))
-    end
+function dbshell_cmd(parameters = String[])
+    args, env = dbshell_args(backend(), collect(String, parameters))
+    c = Cmd(args)
+    env === nothing ? c : addenv(c, env)
 end
+
+"""
+    dbshell(parameters = String[])
+
+Run the database's client (`manage.jl dbshell [-- parameters]`). Ctrl-C goes to the client (to cancel
+a query) rather than to Julia. A client that isn't installed, or that exits with an error, is a
+`CommandError` (which doesn't show the password).
+"""
+function dbshell(parameters = String[])
+    c = dbshell_cmd(parameters)
+    exe = first(c.exec)
+    Sys.which(exe) === nothing && throw(CommandError("You appear not to have the '$exe' program installed or on your path."))
+    p = disable_sigint(() -> run(ignorestatus(c)))      # (ignorestatus: Julia's ProcessFailedException would show the environment)
+    p.exitcode == 0 || throw(CommandError(dbshell_failure(c, p)))
+    nothing
+end
+"dbshell's message for a client that failed: its arguments, not its environment (which holds the password)."
+dbshell_failure(c::Cmd, p) = "\"$(join(c.exec, ' '))\" returned non-zero exit status $(p.exitcode)."
 
 # --- inspectdb ------------------------------------------------------------------------------------------
 

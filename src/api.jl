@@ -140,14 +140,14 @@ public RawQuerySet, log_response, escape_log, reason_phrase, FieldDoesNotExist, 
 public clean, live_snapshot, header, text, render_response!, process_template_response, temporary_file_path, TemporaryUploadedFile,
        MemoryFileUploadHandler, TemporaryFileUploadHandler, upload_file, sse_comment, WebSocketView, is_streaming, build_absolute_uri, handle_request
 # templates
-public render_form, TemplateFormRenderer, JuangoTemplates, MustacheTemplates, LocMemTemplates, engine_template
+public render_form, TemplateFormRenderer, JuangoTemplates, MustacheTemplates, LocMemTemplates, engine_template, from_string, EngineTemplate
 # models, files, querysets
 public uuid4, FieldFile, FileSystemStorage, InMemoryStorage, storages, default_storage, save_file, delete_file, image_size, listdir, get_available_name, get_modified_time, get_created_time, filepath_to_uri,
        register_lookup, register_transform, deferred_fields, PoolTimeout, pool_status,
        get_for_model, get_for_id, get_for_models, clear_contenttype_cache!, content_type_name, app_labeled_name, GenericPrefetch, model_class, natural_key, get_by_natural_key, manager, default_queryset,
        DatabaseBackend, register_backend!, execute, db_for_read, db_for_write, allow_migrate, allow_relation
 # migrations and database tools
-public showmigrations, sqlmigrate, squashmigrations, optimizemigration, flush!, inspectdb, introspect_tables, introspect_columns, introspect_constraints, introspect_relations, introspect_primary_key_column, introspect_primary_key_columns, introspect_comments, django_table_names, installed_models, dbshell_cmd,
+public showmigrations, sqlmigrate, squashmigrations, optimizemigration, flush!, inspectdb, introspect_tables, introspect_columns, introspect_constraints, introspect_relations, introspect_primary_key_column, introspect_primary_key_columns, introspect_comments, django_table_names, installed_models, dbshell_cmd, dbshell_args, dbshell,
        serialize, deserialize, dumpdata, loaddata, load_fixtures
 # forms
 public management_form, empty_form, deleted_forms, ordered_forms, clean_form
