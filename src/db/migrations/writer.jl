@@ -45,6 +45,8 @@ op_code(op::AlterModelTableComment) = "AlterModelTableComment($(jl(op.table)), $
 op_code(op::AddIndex) = "AddIndex($(jl(op.table)), $(index_code(op.index)))"
 op_code(op::AddConstraint) = "AddConstraint($(jl(op.table)), $(Juango.constraint_code(op.constraint)))"
 op_code(op::RemoveConstraint) = "RemoveConstraint($(jl(op.table)), $(jl(op.name)))"
+op_code(op::AddConstraintNotValid) = "AddConstraintNotValid($(jl(op.table)), $(Juango.constraint_code(op.constraint)))"
+op_code(op::ValidateConstraint) = "ValidateConstraint($(jl(op.table)), $(jl(op.name)))"
 op_code(op::RemoveIndex) = "RemoveIndex($(jl(op.table)), $(jl(op.name)))"
 op_code(op::AddIndexConcurrently) = "AddIndexConcurrently($(jl(op.table)), $(index_code(op.index)))"
 op_code(op::RemoveIndexConcurrently) = "RemoveIndexConcurrently($(jl(op.table)), $(jl(op.name)))"
@@ -122,6 +124,10 @@ name_fragment(op::Union{RemoveIndex,RemoveIndexConcurrently}) = "remove_" * op.t
 name_fragment(op::AddConstraint) = op.table * "_" * op.constraint.name
 name_fragment(op::RemoveConstraint) = "remove_" * op.table * "_" * op.name
 name_fragment(op::CreateExtension) = "create_extension_" * op.name
+name_fragment(op::CreateCollation) = "create_collation_" * lowercase(op.name)
+name_fragment(op::RemoveCollation) = "remove_collation_" * lowercase(op.name)
+name_fragment(op::AddConstraintNotValid) = op.table * "_" * op.constraint.name * "_not_valid"
+name_fragment(op::ValidateConstraint) = op.table * "_validate_" * lowercase(op.name)
 
 """
 `makemigrations(update = true)`: fold the model changes into the app's latest migration (which
@@ -170,7 +176,7 @@ function write_file(app, number, name, m::Migration; dry_run = false, log = prin
     log("Migrations for '$app':")
     log("  $(relpath_or_abs(path))")
     for op in m.operations
-        log("    - " * describe(op))
+        log("    " * formatted_description(op))
     end
     if !dry_run
         mkpath(dir)
@@ -388,9 +394,14 @@ function reduce_field_ops(ops::Vector{Operation})
                 prev.old == op.new ? deleteat!(out, i) : (out[i] = RenameModel(prev.old, op.new; model = something(op.model, prev.model, Some(nothing))))
                 continue
             end
-        elseif op isa Union{RemoveIndex,RemoveConstraint}
-            add = op isa RemoveIndex ? AddIndex : AddConstraint
-            i = findlast(x -> x isa add && x.table == op.table && (x isa AddIndex ? x.index.name : x.constraint.name) == op.name, out)
+        elseif op isa Union{RemoveIndex,RemoveIndexConcurrently,RemoveConstraint}
+            add = op isa RemoveConstraint ? Union{AddConstraint,AddConstraintNotValid} : Union{AddIndex,AddIndexConcurrently}
+            i = findlast(x -> x isa add && x.table == op.table && (x isa Union{AddIndex,AddIndexConcurrently} ? x.index.name : x.constraint.name) == op.name, out)
+            if i !== nothing
+                deleteat!(out, i); continue
+            end
+        elseif op isa RemoveCollation                                  # (whatever its locale, as Django)
+            i = findlast(x -> x isa CreateCollation && x.name == op.name, out)
             if i !== nothing
                 deleteat!(out, i); continue
             end

@@ -2,6 +2,8 @@
 
 run_action(a::AbstractString) = execute(a)
 run_action(f::Function) = Base.invokelatest(f)   # defined in a migration file loaded after this code was compiled
+run_action(a::NotInTransaction) = Juango.in_atomic() &&
+    throw(Juango.NotSupportedError("The $(a.op) operation cannot be executed inside a transaction (set atomic = False on the migration)."))
 
 """
 Tables of Juango's `User` (and its many-to-many join tables) when `AUTH_USER_MODEL` names
@@ -66,7 +68,7 @@ function settle_deferred_triggers(actions)
                 continue
             end
             occursin(r"^\s*(UPDATE|INSERT|DELETE)\b"i, a) && (dirty = true)
-        else
+        elseif !(a isa NotInTransaction)
             dirty = true                       # RunPython and other functions can write rows
         end
         push!(out, a)
@@ -342,6 +344,7 @@ function sqlmigrate(app, name; backwards = false)
     k = resolve_name(g, app, name)
     parts = String[]
     for a in migration_actions(g, k; backwards = backwards)
+        a isa NotInTransaction && continue
         push!(parts, a isa AbstractString ? a * ";" : "-- (Julia function $(a))")
     end
     join(parts, "\n")

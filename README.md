@@ -702,7 +702,7 @@ order_by(annotate(Post; sim = TrigramSimilarity(:title, "julia")), "-sim")    # 
 ```
 
 - `ExclusionConstraint` (GiST or SP-GiST, with an optional `condition`) is enforced by Postgres only. `full_clean` checks it there when the operators are `=` and `&&`. `=` on a plain column inside GiST needs the `btree_gist` extension.
-- The trigram lookups and expressions need `pg_trgm`, and `unaccent` needs the `unaccent` extension. Create extensions in a migration with `CreateExtension("name")` or `HStoreExtension()`, `TrigramExtension()`, `UnaccentExtension()`, `BtreeGistExtension()`, `BtreeGinExtension()`, `CITextExtension()`. These operations do nothing on other databases.
+- The trigram lookups and expressions need `pg_trgm`, and `unaccent` needs the `unaccent` extension. Create extensions in a migration with `CreateExtension("name")` or `HStoreExtension()`, `TrigramExtension()`, `UnaccentExtension()`, `BtreeGistExtension()`, `BtreeGinExtension()`, `CITextExtension()`, `BloomExtension()`, `CryptoExtension()`. Other PostgreSQL operations: `CreateCollation(name, locale; provider, deterministic)` / `RemoveCollation`, and `AddConstraintNotValid(table, check)` (existing rows aren't checked) followed later by `ValidateConstraint(table, name)`. These operations do nothing on other databases.
 
 Computed attributes for templates (and `obj.name` in Julia) use `tattr`, and `tattr!` makes one settable, in assignments and constructors (`Sample(well = "B3")`, `create`, `bulk_create`):
 

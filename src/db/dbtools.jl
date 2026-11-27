@@ -197,9 +197,10 @@ function introspect_columns(table)
         "WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = $schema AND tc.table_name = ?", [table]))
     rows = execute("SELECT column_name AS c, data_type AS t, character_maximum_length AS l, is_nullable AS n, " *
                    "numeric_precision AS np, numeric_scale AS ns" *
-                   (b isa MySQLBackend ? ", column_type AS ct" : "") *
+                   (b isa MySQLBackend ? ", column_type AS ct" : b isa PostgresBackend ? ", udt_name AS u" : "") *
                    " FROM information_schema.columns WHERE table_schema = $schema AND table_name = ? ORDER BY ordinal_position", [table])
-    [(name = String(r[:c]), type = lowercase(String(b isa MySQLBackend ? r[:ct] : r[:t])),
+    # (an extension's type, hstore or citext, is PostgreSQL's "USER-DEFINED": its own name instead)
+    [(name = String(r[:c]), type = lowercase(String(b isa MySQLBackend ? r[:ct] : b isa PostgresBackend && r[:t] == "USER-DEFINED" ? r[:u] : r[:t])),
       max_length = r[:l] === nothing ? nothing : Int(r[:l]), null = String(r[:n]) == "YES", pk = String(r[:c]) in pks,
       precision = r[:np] === nothing ? nothing : Int(r[:np]), scale = r[:ns] === nothing ? nothing : Int(r[:ns])) for r in rows]
 end
@@ -346,6 +347,9 @@ end
 
 model_name_for(table) = join(uppercasefirst.(split(replace(table, r"[^A-Za-z0-9]+" => "_"), '_'; keepempty = false)))
 
+"PostgreSQL's range types and their fields (Django's inspectdb)."
+const PG_RANGE_FIELDS = Dict("int4range" => "IntegerRangeField", "int8range" => "BigIntegerRangeField", "numrange" => "DecimalRangeField",
+                             "tstzrange" => "DateTimeRangeField", "tsrange" => "DateTimeRangeField", "daterange" => "DateRangeField")
 "The field definition for an introspected column (and a note when the type is a guess)."
 function field_for(col)
     t = col.type
@@ -353,6 +357,8 @@ function field_for(col)
     m !== nothing && return "CharField(max_length = $(something(col.max_length, m[1] === nothing ? nothing : parse(Int, m[1]), 255)))", ""
     occursin(r"^tinyint\(1\)|^bool", t) && return "BooleanField()", ""
     t == "interval" && return "DurationField()", ""               # before "int"
+    haskey(PG_RANGE_FIELDS, t) && return PG_RANGE_FIELDS[t] * "()", ""   # (int4range: before "int" too)
+    t == "hstore" && return "HStoreField()", ""
     if occursin(r"int|serial", t)
         pos = occursin("unsigned", t)                       # MySQL
         occursin(r"^(smallint|int2|smallserial|tinyint|mediumint)", t) && return (pos ? "PositiveSmallIntegerField()" : "SmallIntegerField()"), ""

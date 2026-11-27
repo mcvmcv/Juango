@@ -27,7 +27,8 @@ using ..Juango: Column, Table, Index, ConstraintSpec, Q, F, Value, CombinedExpre
 
 export Migration, CreateModel, DeleteModel, RenameModel, AddField, RemoveField, AlterField, RenameField,
        AlterUniqueTogether, AlterPrimaryKey, AddIndex, RemoveIndex, AddIndexConcurrently, RemoveIndexConcurrently, AddConstraint, RemoveConstraint, RunSQL, RunJulia, SeparateDatabaseAndState, Column, Index,
-       AlterModelTableComment, CreateExtension, HStoreExtension, TrigramExtension, UnaccentExtension, BtreeGistExtension, BtreeGinExtension, CITextExtension,
+       AlterModelTableComment, CreateExtension, HStoreExtension, TrigramExtension, UnaccentExtension, BtreeGistExtension, BtreeGinExtension, CITextExtension, BloomExtension, CryptoExtension,
+       CreateCollation, RemoveCollation, AddConstraintNotValid, ValidateConstraint, formatted_description,
        ConstraintSpec, Q, F, Value, CombinedExpression, Func, get_model, objects, save!, create, update!,
        Decimal, @dec_str, OpClass, Asc, Desc, Lower, Upper, Cast, Collate, SearchVector, ValueRange
 

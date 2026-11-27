@@ -753,8 +753,9 @@ Base.@nospecializeinfer function special_lookup(c::SQLCompiler, f::Field, col, l
         lookup == "overlap" && return array_op_sql(b, "&&", col, f, value)
         lookup == "exact" && value !== nothing && return array_op_sql(b, "=", col, f, value)
     elseif k in RANGE_KINDS
-        # dates__contains = F(:inner): the other side compiled (a range or an element column)
-        if value isa Expression && haskey(RANGE_OPS, lookup)
+        # dates__contains = F(:inner) on PostgreSQL: the other side compiled (a range or an element column); a Value is
+        # a plain value
+        if b isa PostgresBackend && value isa Expression && !(value isa Value) && haskey(RANGE_OPS, lookup)
             vsql, vps = compile_expr(c, value)
             return "$col $(RANGE_OPS[lookup]) ($vsql)", vps
         end

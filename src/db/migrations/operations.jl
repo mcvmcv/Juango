@@ -174,13 +174,104 @@ UnaccentExtension() = CreateExtension("unaccent")
 BtreeGistExtension() = CreateExtension("btree_gist")
 BtreeGinExtension() = CreateExtension("btree_gin")
 CITextExtension() = CreateExtension("citext")
+BloomExtension() = CreateExtension("bloom")
+CryptoExtension() = CreateExtension("pgcrypto")
 state_forwards!(::CreateExtension, st, app) = st
+# (only when it isn't installed yet, as Django: CREATE EXTENSION needs privileges an installed one doesn't)
 forwards(op::CreateExtension, b, from, to, deferred) =
-    b isa Juango.PostgresBackend ? ["CREATE EXTENSION IF NOT EXISTS " * quote_name(b, op.name)] : String[]
+    b isa Juango.PostgresBackend ? ["DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = " * sql_string(op.name) *
+                                    ") THEN CREATE EXTENSION IF NOT EXISTS " * quote_name(b, op.name) * "; END IF; END \$\$"] : String[]
 backwards(op::CreateExtension, b, from, to, deferred) =
     b isa Juango.PostgresBackend ? ["DROP EXTENSION IF EXISTS " * quote_name(b, op.name)] : String[]
-describe(op::CreateExtension) = "Create extension $(op.name)"
+describe(op::CreateExtension) = "Creates extension $(op.name)"
 op_code(op::CreateExtension) = "CreateExtension($(jl(op.name)))"
+sql_string(s) = "'" * replace(s, "'" => "''") * "'"
+
+"""
+    CreateCollation(name, locale; provider = "libc", deterministic = true)    RemoveCollation(name, locale; ...)
+
+Create (or drop) a PostgreSQL collation, as Django's: `CreateCollation("case_insensitive",
+"und-u-ks-level2"; provider = "icu", deterministic = false)` makes one that compares text
+ignoring case, for `CharField(db_collation = "case_insensitive")`. A no-op on other databases.
+"""
+struct CreateCollation <: Operation
+    name::String
+    locale::String
+    provider::String
+    deterministic::Bool
+end
+"See `CreateCollation`."
+struct RemoveCollation <: Operation
+    name::String
+    locale::String
+    provider::String
+    deterministic::Bool
+end
+for C in (:CreateCollation, :RemoveCollation)
+    @eval begin
+        $C(name, locale; provider = "libc", deterministic = true) = $C(string(name), string(locale), string(provider), Bool(deterministic))
+        $C(name; locale, provider = "libc", deterministic = true) = $C(name, locale; provider = provider, deterministic = deterministic)
+        state_forwards!(::$C, st, app) = st
+        op_code(op::$C) = $(string(C)) * "(" * jl(op.name) * ", " * jl(op.locale) *
+            (op.provider == "libc" && op.deterministic ? "" : "; " * join([op.provider == "libc" ? String[] : ["provider = " * jl(op.provider)];
+                                                                     op.deterministic ? String[] : ["deterministic = false"]], ", ")) * ")"
+    end
+end
+function create_collation_sql(b, op)
+    b isa Juango.PostgresBackend || return String[]
+    args = ["locale=" * quote_name(b, op.locale)]
+    op.provider == "libc" || push!(args, "provider=" * quote_name(b, op.provider))
+    op.deterministic || push!(args, "deterministic=false")
+    ["CREATE COLLATION $(quote_name(b, op.name)) ($(join(args, ", ")))"]
+end
+drop_collation_sql(b, op) = b isa Juango.PostgresBackend ? ["DROP COLLATION $(quote_name(b, op.name))"] : String[]
+forwards(op::CreateCollation, b, from, to, deferred) = create_collation_sql(b, op)
+backwards(op::CreateCollation, b, from, to, deferred) = drop_collation_sql(b, op)
+forwards(op::RemoveCollation, b, from, to, deferred) = drop_collation_sql(b, op)
+backwards(op::RemoveCollation, b, from, to, deferred) = create_collation_sql(b, op)
+describe(op::CreateCollation) = "Create collation $(op.name)"
+describe(op::RemoveCollation) = "Remove collation $(op.name)"
+
+"""
+    AddConstraintNotValid(table, constraint)
+
+Add a check constraint with PostgreSQL's `NOT VALID`: new and changed rows are checked, the
+rows already there aren't (so it doesn't lock the table while it reads them all). Check them
+later with `ValidateConstraint`. Elsewhere it's a plain `AddConstraint`.
+"""
+struct AddConstraintNotValid <: Operation
+    table::String
+    constraint::ConstraintSpec
+    function AddConstraintNotValid(table, c::ConstraintSpec)
+        c.kind === :check || throw(ArgumentError("AddConstraintNotValid.constraint must be a check constraint."))
+        new(string(table), c)
+    end
+end
+AddConstraintNotValid(table; constraint) = AddConstraintNotValid(table, constraint)
+state_forwards!(op::AddConstraintNotValid, st, app) = state_forwards!(AddConstraint(op.table, op.constraint), st, app)
+function forwards(op::AddConstraintNotValid, b, from, to, deferred)
+    sql = forwards(AddConstraint(op.table, op.constraint), b, from, to, deferred)
+    b isa Juango.PostgresBackend ? [s * " NOT VALID" for s in sql_list(sql)] : sql
+end
+backwards(op::AddConstraintNotValid, b, from, to, deferred) = backwards(AddConstraint(op.table, op.constraint), b, from, to, deferred)
+describe(op::AddConstraintNotValid) = "Create not valid constraint $(op.constraint.name) on $(op.table)"
+
+"""
+    ValidateConstraint(table, name)
+
+Check the rows a `NOT VALID` constraint (`AddConstraintNotValid`) skipped (PostgreSQL's
+`VALIDATE CONSTRAINT`); fails if one breaks it. Undoing it does nothing. A no-op elsewhere.
+"""
+struct ValidateConstraint <: Operation
+    table::String
+    name::String
+end
+ValidateConstraint(table; name) = ValidateConstraint(string(table), string(name))
+state_forwards!(::ValidateConstraint, st, app) = st
+forwards(op::ValidateConstraint, b, from, to, deferred) =
+    b isa Juango.PostgresBackend ? ["ALTER TABLE $(quote_name(b, op.table)) VALIDATE CONSTRAINT $(quote_name(b, op.name))"] : String[]
+backwards(op::ValidateConstraint, b, from, to, deferred) = String[]
+describe(op::ValidateConstraint) = "Validate constraint $(op.name) on $(op.table)"
 
 """
     RunSQL(forward, backward=nothing)
@@ -494,10 +585,33 @@ create_concurrently(v, b) = b isa Juango.PostgresBackend ?
     [replace(s, r"^CREATE (UNIQUE )?INDEX " => s"CREATE \1INDEX CONCURRENTLY "; count = 1) for s in sql_list(v)] : v
 drop_concurrently(v, b) = b isa Juango.PostgresBackend ?
     [replace(s, r"^DROP INDEX " => "DROP INDEX CONCURRENTLY "; count = 1) for s in sql_list(v)] : v
-forwards(op::AddIndexConcurrently, b, from, to, deferred) = create_concurrently(forwards(AddIndex(op.table, op.index), b, from, to, deferred), b)
-backwards(op::AddIndexConcurrently, b, from, to, deferred) = drop_concurrently(backwards(AddIndex(op.table, op.index), b, from, to, deferred), b)
-forwards(op::RemoveIndexConcurrently, b, from, to, deferred) = drop_concurrently(forwards(RemoveIndex(op.table, op.name), b, from, to, deferred), b)
-backwards(op::RemoveIndexConcurrently, b, from, to, deferred) = create_concurrently(backwards(RemoveIndex(op.table, op.name), b, from, to, deferred), b)
+"An action that refuses to run inside a transaction (Django's NotInTransactionMixin): `op` names the operation."
+struct NotInTransaction
+    op::String
+end
+not_in_transaction(op, v, b) = b isa Juango.PostgresBackend ? Any[NotInTransaction(string(nameof(typeof(op)))); v...] : v
+forwards(op::AddIndexConcurrently, b, from, to, deferred) =
+    not_in_transaction(op, create_concurrently(forwards(AddIndex(op.table, op.index), b, from, to, deferred), b), b)
+backwards(op::AddIndexConcurrently, b, from, to, deferred) =
+    not_in_transaction(op, drop_concurrently(backwards(AddIndex(op.table, op.index), b, from, to, deferred), b), b)
+forwards(op::RemoveIndexConcurrently, b, from, to, deferred) =
+    not_in_transaction(op, drop_concurrently(forwards(RemoveIndex(op.table, op.name), b, from, to, deferred), b), b)
+backwards(op::RemoveIndexConcurrently, b, from, to, deferred) =
+    not_in_transaction(op, create_concurrently(backwards(RemoveIndex(op.table, op.name), b, from, to, deferred), b), b)
+
+"""
+    formatted_description(op)
+
+`describe(op)` behind Django's category mark, as `makemigrations` lists it: `+` adds, `-`
+removes, `~` alters, `s` is SQL, `p` is code (`RunJulia`), `?` is mixed.
+"""
+formatted_description(op) = op_category(op) * " " * describe(op)
+op_category(op) = "?"
+op_category(::Union{CreateModel,AddField,AddIndex,AddIndexConcurrently,AddConstraint,AddConstraintNotValid,CreateExtension,CreateCollation}) = "+"
+op_category(::Union{DeleteModel,RemoveField,RemoveIndex,RemoveIndexConcurrently,RemoveConstraint,RemoveCollation}) = "-"
+op_category(::Union{RenameModel,AlterField,RenameField,AlterUniqueTogether,AlterPrimaryKey,AlterModelTableComment,ValidateConstraint}) = "~"
+op_category(::RunSQL) = "s"
+op_category(::RunJulia) = "p"
 describe(op::AddConstraint) = "Create constraint $(op.constraint.name) on $(op.table)"
 describe(op::RemoveConstraint) = "Remove constraint $(op.name) from $(op.table)"
 describe(op::RunSQL) = "Raw SQL operation"

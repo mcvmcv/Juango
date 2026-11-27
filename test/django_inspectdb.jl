@@ -117,3 +117,23 @@ end
         execute("DROP VIEW inspectdb_people_view")
     end
 end
+
+# Django's postgres_tests test_introspection (InspectDBTests): range and hstore columns read back as their fields
+Juango.backend() isa Juango.PostgresBackend && @testset "django postgres_tests test_introspection: InspectDBTests" begin
+    execute("CREATE EXTENSION IF NOT EXISTS hstore")
+    execute("CREATE TABLE inspectdb_rangesmodel (id serial PRIMARY KEY, ints int4range, bigints int8range, decimals numrange, " *
+            "timestamps tstzrange, timestamps_inner tsrange, dates daterange)")
+    execute("CREATE TABLE inspectdb_hstoremodel (id serial PRIMARY KEY, field hstore)")
+    try
+        out = inspectdb(["inspectdb_rangesmodel"])                                   # test_range_fields
+        for line in ["ints = IntegerRangeField(blank = true, null = true)", "bigints = BigIntegerRangeField(blank = true, null = true)",
+                     "decimals = DecimalRangeField(blank = true, null = true)", "timestamps = DateTimeRangeField(blank = true, null = true)",
+                     "timestamps_inner = DateTimeRangeField(blank = true, null = true)", "dates = DateRangeField(blank = true, null = true)"]
+            @test occursin(line, out)
+        end
+        @test occursin("field = HStoreField(blank = true, null = true)", inspectdb(["inspectdb_hstoremodel"]))  # test_hstore_field
+    finally
+        execute("DROP TABLE inspectdb_rangesmodel")
+        execute("DROP TABLE inspectdb_hstoremodel")
+    end
+end
