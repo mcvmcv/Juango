@@ -576,6 +576,14 @@ range_type(::DatabaseBackend, kind) = kind === :intrange ? "INT8RANGE" : kind ==
 range_elem_type(b::DatabaseBackend, kind) = column_type(b, range_elem_kind(kind), nothing)
 const RANGE_OPS = Dict("contains" => "@>", "contained_by" => "<@", "overlap" => "&&", "exact" => "=", "fully_lt" => "<<",
                        "fully_gt" => ">>", "not_lt" => "&>", "not_gt" => "&<", "adjacent_to" => "-|-")
+"""
+    RangeBoundary(; inclusive_lower = true, inclusive_upper = false)
+
+A range's bounds (`'[)'`) as an expression, for building a range in SQL: `SQLFunction("TSTZRANGE", :start, :stop,
+RangeBoundary())` (Django's `RangeBoundary`).
+"""
+RangeBoundary(; inclusive_lower::Bool = true, inclusive_upper::Bool = false) =
+    Value((inclusive_lower ? "[" : "(") * (inclusive_upper ? "]" : ")"))
 "Lookups on a range field besides contains, contained_by, overlap and exact (Django's RangeField lookups)."
 const RANGE_LOOKUPS = ("fully_lt", "fully_gt", "not_lt", "not_gt", "adjacent_to", "isempty", "lower_inc", "lower_inf",
                        "upper_inc", "upper_inf", "startswith", "endswith")
@@ -745,6 +753,11 @@ Base.@nospecializeinfer function special_lookup(c::SQLCompiler, f::Field, col, l
         lookup == "overlap" && return array_op_sql(b, "&&", col, f, value)
         lookup == "exact" && value !== nothing && return array_op_sql(b, "=", col, f, value)
     elseif k in RANGE_KINDS
+        # dates__contains = F(:inner): the other side compiled (a range or an element column)
+        if value isa Expression && haskey(RANGE_OPS, lookup)
+            vsql, vps = compile_expr(c, value)
+            return "$col $(RANGE_OPS[lookup]) ($vsql)", vps
+        end
         lookup in ("contains", "contained_by", "overlap") && return range_lookup_sql(b, lookup, col, k, value)
         lookup in RANGE_LOOKUPS && return range_lookup_sql(b, lookup, col, k, value)
         lookup == "exact" && value !== nothing && return range_lookup_sql(b, "exact", col, k, value)

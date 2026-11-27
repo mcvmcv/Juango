@@ -88,6 +88,17 @@ end
 "The value of a field with `db_default` until the row is saved and the database has filled it in."
 struct DatabaseDefault end
 const DB_DEFAULT = DatabaseDefault()
+"Field kinds whose `db_default` value isn't a column DEFAULT (Juango writes it on INSERT instead)."
+const JULIA_DEFAULT_KINDS = (:json, :hstore, :array, :intrange, :daterange, :datetimerange, :decimalrange, :uuid)
+"Put the `db_default` value of each such field left to the database (`DB_DEFAULT`) in an object's data."
+Base.@nospecializeinfer function fill_julia_defaults!(@nospecialize(M::Type), data::Dict{Symbol,Any})
+    for f in modelmeta(M).fields
+        dv = f.db_default isa Value ? f.db_default.value : f.db_default
+        f.kind in JULIA_DEFAULT_KINDS && get(data, attname(f), nothing) === DB_DEFAULT && !(dv isa Expression) || continue
+        data[attname(f)] = dv
+    end
+    data
+end
 Base.show(io::IO, ::DatabaseDefault) = print(io, "DB_DEFAULT")
 
 """

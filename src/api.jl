@@ -43,7 +43,7 @@ export Model, @model, @abstract_model, Field, CharField, TextField, EmailField, 
        validate_unicode_slug, validate_ipv4_address, validate_ipv6_address, validate_ipv46_address, int_list_validator,
        validate_comma_separated_integer_list, validate_integer, validate_image_file_extension,
        MaxFileSizeValidator, ForeignKey, OneToOneField, ManyToManyField, ForeignObject, GeneratedField,
-       DB_DEFAULT, CompositePrimaryKey, CheckConstraint, UniqueConstraint, Index, get_absolute_url, connection_queries, reset_queries!, check_constraints, constraint_checks_disabled, absolute_url,
+       DB_DEFAULT, CompositePrimaryKey, CheckConstraint, UniqueConstraint, Deferrable, Index, get_absolute_url, connection_queries, reset_queries!, check_constraints, constraint_checks_disabled, absolute_url,
        Decimal, @dec_str, @choices, Choice, ChoiceSet, IntegerChoices, TextChoices, get_display
 export ContentType, GenericForeignKey, GenericRelation
 # querysets
@@ -215,12 +215,12 @@ using ..Juango: Lower, Upper, Length, Coalesce, Concat, Cast, Now, Greatest, Lea
     Substr, Left, Right, Trim, LTrim, RTrim, LPad, RPad, Repeat, Reverse, StrIndex, MD5, SHA256, SHA1, SHA224, SHA384, SHA512, Random, Chr, Ord, Abs,
     Round, Ceil, Floor, Mod, Power, Sqrt, Sign, Ln, Log, Exp, Sin, Cos, Tan, Cot, ASin, ACos, ATan, ATan2,
     Degrees, Radians, Pi, StdDev, Variance, ArrayAgg, JSONBAgg, StringAgg, BoolAnd, BoolOr, BitAnd, BitOr, BitXor,
-    StatAggregate, Corr, CovarPop, RegrAvgX, RegrAvgY, RegrCount, RegrIntercept, RegrR2, RegrSlope, RegrSXX, RegrSXY, RegrSYY
+    StatAggregate, Corr, CovarPop, RegrAvgX, RegrAvgY, RegrCount, RegrIntercept, RegrR2, RegrSlope, RegrSXX, RegrSXY, RegrSYY, SQLFunction
 export Lower, Upper, Length, Coalesce, Concat, Cast, Now, Greatest, Least, NullIf, Collate, Replace,
     Substr, Left, Right, Trim, LTrim, RTrim, LPad, RPad, Repeat, Reverse, StrIndex, MD5, SHA256, SHA1, SHA224, SHA384, SHA512, Random, Chr, Ord, Abs,
     Round, Ceil, Floor, Mod, Power, Sqrt, Sign, Ln, Log, Exp, Sin, Cos, Tan, Cot, ASin, ACos, ATan, ATan2,
     Degrees, Radians, Pi, StdDev, Variance, ArrayAgg, JSONBAgg, StringAgg, BoolAnd, BoolOr, BitAnd, BitOr, BitXor,
-    StatAggregate, Corr, CovarPop, RegrAvgX, RegrAvgY, RegrCount, RegrIntercept, RegrR2, RegrSlope, RegrSXX, RegrSXY, RegrSYY
+    StatAggregate, Corr, CovarPop, RegrAvgX, RegrAvgY, RegrCount, RegrIntercept, RegrR2, RegrSlope, RegrSXX, RegrSXY, RegrSYY, SQLFunction
 end
 
 module GIS
@@ -233,10 +233,10 @@ export GeometryField, PointField, LineStringField, PolygonField, MultiPointField
 end
 
 module Postgres
-using ..Juango: HStoreField, CICharField, SearchVector, SearchQuery, SearchRank, SearchHeadline, SearchConfig, SearchVectorField, Lexeme, quote_lexeme, TrigramSimilarity,
+using ..Juango: HStoreField, OpClass, RangeOperators, RangeBoundary, CICharField, SearchVector, SearchQuery, SearchRank, SearchHeadline, SearchConfig, SearchVectorField, Lexeme, quote_lexeme, TrigramSimilarity,
     TrigramWordSimilarity, TrigramStrictWordSimilarity, TrigramDistance, TrigramWordDistance, TrigramStrictWordDistance, TransactionNow, RandomUUID, Unaccent,
     ExclusionConstraint, GinIndex, GistIndex, BrinIndex, SpGistIndex, HashIndex, BloomIndex
-export HStoreField, CICharField, SearchVector, SearchQuery, SearchRank, SearchHeadline, SearchConfig, SearchVectorField, Lexeme, quote_lexeme, TrigramSimilarity,
+export HStoreField, OpClass, RangeOperators, RangeBoundary, CICharField, SearchVector, SearchQuery, SearchRank, SearchHeadline, SearchConfig, SearchVectorField, Lexeme, quote_lexeme, TrigramSimilarity,
     TrigramWordSimilarity, TrigramStrictWordSimilarity, TrigramDistance, TrigramWordDistance, TrigramStrictWordDistance, TransactionNow, RandomUUID, Unaccent,
     ExclusionConstraint, GinIndex, GistIndex, BrinIndex, SpGistIndex, HashIndex, BloomIndex
 end

@@ -969,6 +969,7 @@ function compile_expr(c::SQLCompiler, e::Func)
     # PostgreSQL has MOD only for integers and numeric: other operands go through numeric, as Django casts them
     n === :mod && b isa PostgresBackend && !all(a -> integer_expr(c, a), e.args) &&
         return "MOD(CAST($(sqls[1]) AS NUMERIC), CAST($(sqls[2]) AS NUMERIC))", ps
+    n === :sqlfunction && return e.args[1] * "(" * join(sqls, ", ") * ")", ps
     n === :lower && return "LOWER($(sqls[1]))", ps
     n === :upper && return "UPPER($(sqls[1]))", ps
     n === :length && return "$(length_function(b))($(sqls[1]))", ps

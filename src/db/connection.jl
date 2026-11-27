@@ -337,13 +337,17 @@ Rewrite `?` placeholders as `placeholder(b, i)`, leaving `?` inside '…' string
 """
 function rewrite_placeholders(b::DatabaseBackend, sql::AbstractString)
     placeholder(b, 1) == "?" && return String(sql)
+    n = Ref(0)
+    replace_placeholders(() -> placeholder(b, n[] += 1), sql)
+end
+"`sql` with each `?` placeholder (outside quotes and comments) replaced by `next()`."
+function replace_placeholders(next, sql::AbstractString)
     s = String(sql)
     occursin('?', s) || return s
     # The characters that matter (quotes, comments, ?) are ASCII, so scan bytes and copy runs.
     cu = codeunits(s)
     len = length(cu)
     io = IOBuffer(; sizehint = len + 16)
-    n = 0
     start = 1                       # first byte not yet copied
     i = 1
     @inbounds while i <= len
@@ -368,8 +372,7 @@ function rewrite_placeholders(b::DatabaseBackend, sql::AbstractString)
             i = j + 2
         elseif c == UInt8('?')
             write(io, view(cu, start:i-1))
-            n += 1
-            print(io, placeholder(b, n))
+            print(io, next())
             i += 1
             start = i
         else

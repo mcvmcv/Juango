@@ -400,6 +400,7 @@ end
 "Write the columns of one table (`M`'s own fields) for an object's data; true if it INSERTed the row."
 Base.@nospecializeinfer function save_table!(@nospecialize(M::Type), data, root::Bool, fresh::Bool = false)
     meta = modelmeta(M)
+    fill_julia_defaults!(M, data)
     # a key part left to a plain db_default ("en"): that's its value, so the object knows its key (Django reads
     # it back with RETURNING); an expression db_default stays the database's
     if is_composite(M) && data[:id] === nothing

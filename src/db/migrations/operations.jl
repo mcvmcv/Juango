@@ -379,7 +379,7 @@ function state_forwards!(op::RenameField, st, app)
                               ix.condition, ren.(ix.include), ix.opclasses) for ix in t.indexes]
     t.constraints = [Juango.ConstraintSpec(c.kind, c.name, ren.(c.columns),
                                            [c.kind === :exclusion ? (ren(f), x) : (f, ren(x)) for (f, x) in c.expressions],
-                                           c.condition, c.index_type) for c in t.constraints]
+                                           c.condition, c.index_type, c.opclasses, ren.(c.include), c.deferrable) for c in t.constraints]
     st
 end
 state_forwards!(::Union{RunSQL,RunJulia}, st, app) = st

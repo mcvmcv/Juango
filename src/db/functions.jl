@@ -101,6 +101,18 @@ ATan2(y, x) = fn(:atan2, ref(y), ref(x))
 Degrees(x) = fn(:degrees, ref(x))
 Radians(x) = fn(:radians, ref(x))
 Pi() = fn(:pi)
+"""
+    SQLFunction(name, args...)
+
+A call of an SQL function Juango has no wrapper for (Django's `Func(function = "...")`), e.g. PostgreSQL's
+`SQLFunction("TSTZRANGE", :start, :stop, RangeBoundary())`. Names are fields (`F`); other arguments are values.
+`name` must be a plain identifier (it is written into the SQL).
+"""
+function SQLFunction(name::AbstractString, args...)
+    occursin(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$", name) ||
+        throw(ArgumentError("SQLFunction: '$name' is not a function name"))
+    Func(:sqlfunction, Any[String(name), (ref(a) for a in args)...])
+end
 
 const TEXT_FUNCS = (:replace, :substr, :trim, :ltrim, :rtrim, :lpad, :rpad, :repeat, :reverse, :md5, :sha256, :chr, :left, :right,
                     :sha1, :sha224, :sha384, :sha512)

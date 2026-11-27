@@ -45,6 +45,20 @@ Base.@nospecializeinfer function model_check_issues(@nospecialize(T::Type))
     end
     for c in model_constraints(T)
         c isa UniqueConstraint && append!(out, meta_field_issues(T, "constraints", c.fields))
+        if c isa ExclusionConstraint
+            # the fields its expressions name: own fields only (a transform after one is fine, a relation followed isn't)
+            paths = String[]
+            foreach(x -> expr_paths(x[1], paths), c.expressions)
+            for p in unique(paths)
+                parts = split(p, "__")
+                f = own_field(T, parts[1])
+                if f === nothing
+                    append!(out, meta_field_issues(T, "constraints", [parts[1]]))
+                elseif length(parts) > 1 && f.kind in (:fk, :o2o)
+                    push!(out, CheckMessage(:error, "$label: 'constraints' refers to the joined field '$p'."; id = "models.E041"))
+                end
+            end
+        end
     end
     # ordering (models.E015): each name as the ORM resolves it
     for o in m.ordering

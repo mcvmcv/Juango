@@ -268,7 +268,7 @@ function column_state(f::Field)
     f.db_default === nothing || (d = db_default_value(f.db_default))
     gen = f.generated === nothing ? nothing : GeneratedSpec(expr_to_columns(f.model, f.generated[1]), f.generated[2])
     gen === nothing || (d = nothing)
-    d !== nothing && f.kind in (:json, :hstore, :array, :intrange, :daterange, :datetimerange, :decimalrange, :uuid) && (d = nothing)  # set by Julia, not the DB
+    d !== nothing && f.kind in JULIA_DEFAULT_KINDS && (d = nothing)  # set by Julia, not the DB (fill_julia_defaults!)
     ref = f.kind !== :fk || !f.db_constraint ? nothing : f.related === :__user_model__ ? "__user_model__" : modelmeta(related_model(f)).table
     f.kind === :fk && is_composite(related_model(f)) && !natural_pk(related_model(f)) &&
         throw(ArgumentError("$(nameof(f.model)).$(f.name): foreign keys to $(nameof(related_model(f))) has a composite primary key; point at it with ForeignObject(...; from_fields = ...)"))
@@ -487,7 +487,7 @@ returned on their own so they can run once every table exists.
 function create_table_sql(b::DatabaseBackend, t::Table; if_not_exists = false)
     ine = if_not_exists ? "IF NOT EXISTS " : ""
     stmts = unique(String[s for c in t.columns for s in column_prereqs(b, c.kind)])
-    checks = [check_clause(b, c) for c in t.constraints if c.kind === :check]
+    checks = [check_clause(b, c, t.name) for c in t.constraints if c.kind === :check]
     defs = [column_sql(b, c) for c in t.columns]
     t.pk === :composite ? push!(defs, "PRIMARY KEY (" * join([quote_name(b, x) for x in t.pk_columns], ", ") * ")") :
                           pushfirst!(defs, pk_column_sql(b, t))

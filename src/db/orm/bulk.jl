@@ -95,6 +95,7 @@ function bulk_create_here(objs::AbstractVector{T}; batch_size = nothing, ignore_
         return objs
     end
     tbl = qname(meta.table)
+    foreach(o -> fill_julia_defaults!(concrete_model(T), (getfield(o, :_data)::Dict{Symbol,Any})), objs)
     isdef(o, f) = get((getfield(o, :_data)::Dict{Symbol,Any}), attname(f), nothing) === DB_DEFAULT
     for with_id in (true, false)
         group = [o for o in objs if ((getfield(o, :_data)::Dict{Symbol,Any})[:id] !== nothing) == with_id]

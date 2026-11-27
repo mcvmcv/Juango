@@ -286,8 +286,30 @@ end
     dm_insert("tcmp_pony", :pink => 1, :weight => 4.0); dm_insert("tcmp_pony", :pink => 1, :weight => 4.0); dm_insert("tcmp_pony", :pink => 1, :weight => 6.0)
     @test dm_fails(() -> dm_insert("tcmp_pony", :pink => 1, :weight => 7.0)) != dm_mysql()
     dm_run!(Juango.SchemaState(), op; backwards = true)
-    # test_create_model_with_deferred_unique_constraint, test_create_model_with_covering_unique_constraint (#232)
-    @test_broken :deferrable in fieldnames(Juango.ConstraintSpec)
+    # test_create_model_with_deferred_unique_constraint: PostgreSQL checks it at commit (a plain unique index elsewhere)
+    du = Juango.ConstraintSpec(:unique, "deferrable_pink_constraint"; columns = ["pink"], deferrable = "deferred")
+    op = DM.CreateModel("tcmd_pony"; columns = [dmcol("pink"), dmcol("weight", :float)], constraints = [du])
+    @test occursin("deferrable = \"deferred\"", Juango.constraint_code(du))
+    dm_run!(Juango.SchemaState(), op)
+    dm_insert("tcmd_pony", :pink => 1, :weight => 4.0)
+    @test dm_fails(() -> dm_insert("tcmd_pony", :pink => 1, :weight => 4.0))
+    if Juango.backend() isa Juango.PostgresBackend
+        Juango.atomic() do                                       # (a duplicate fixed before the commit)
+            dm_insert("tcmd_pony", :pink => 2, :weight => 1.0); dm_insert("tcmd_pony", :pink => 2, :weight => 2.0)
+            Juango.execute("DELETE FROM tcmd_pony WHERE weight = 2.0")
+        end
+        @test dm_count("tcmd_pony") == 2
+        @test dm_fails(() -> (dm_insert("tcmd_pony", :pink => 3, :weight => 1.0); dm_insert("tcmd_pony", :pink => 3, :weight => 2.0);
+                              Juango.execute("SET CONSTRAINTS \"deferrable_pink_constraint\" IMMEDIATE")))
+    end
+    dm_run!(Juango.SchemaState(), op; backwards = true)
+    # test_create_model_with_covering_unique_constraint (INCLUDE on PostgreSQL)
+    cu = Juango.ConstraintSpec(:unique, "covering_pink_constraint"; columns = ["pink"], include = ["weight"])
+    op = DM.CreateModel("tcmc2_pony"; columns = [dmcol("pink"), dmcol("weight", :float)], constraints = [cu])
+    dm_run!(Juango.SchemaState(), op)
+    dm_insert("tcmc2_pony", :pink => 1, :weight => 4.0)
+    @test dm_fails(() -> dm_insert("tcmc2_pony", :pink => 1, :weight => 4.0))
+    dm_run!(Juango.SchemaState(), op; backwards = true)
     # test_delete_model
     with_ponies("tdm") do st
         op = DM.DeleteModel("tdm_pony")
@@ -1164,6 +1186,6 @@ end
     end
     # not translated: the m2m tests (join tables are tables, covered above); proxy, o2o-to-autofield,
     # db_on_delete and ForeignObject tests; the array, JSON, collation and generated-field tests (in
-    # migrations.jl and db.jl); nulls_distinct, deferrable and covering constraints (#232); changing a
+    # migrations.jl and db.jl); nulls_distinct (#232); changing a
     # primary key's type (#259); tests of the schema editor's Python API (context manager, deferred SQL)
 end
