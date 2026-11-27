@@ -405,7 +405,7 @@ function find_fixture(name::AbstractString, db::AbstractString = current_alias()
         parts = rsplit(basename(name), '.'; limit = 2)
         length(parts) == 2 && !any(e -> e == "." * parts[2], exts) && any(d -> isfile(joinpath(d, name)), fixture_dirs()) &&
             throw(ArgumentError("Problem installing fixture '$(parts[1])': $(parts[2]) is not a known serialization format."))
-        throw(ArgumentError("no fixture named '$name' (looked in: $(join(fixture_dirs(), ", ")))"))
+        throw(ArgumentError("No fixture named '$(first(splitext(basename(name))))' found. (Looked in: $(join(fixture_dirs(), ", ")))"))
     end
     found
 end

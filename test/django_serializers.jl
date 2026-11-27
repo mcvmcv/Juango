@@ -163,7 +163,7 @@ end
             e = try loaddata("fixture3") catch e; e end                                   # test_ambiguous_compressed_fixture (here: two formats)
             @test e isa ArgumentError && occursin("Multiple fixtures named 'fixture3'", e.msg)
             e = try loaddata("this_fixture_doesnt_exist") catch e; e end                  # test_loaddata_not_existent_fixture_file
-            @test e isa ArgumentError && occursin("no fixture named 'this_fixture_doesnt_exist'", e.msg)
+            @test e isa ArgumentError && occursin("No fixture named 'this_fixture_doesnt_exist' found.", e.msg)
             e = try loaddata("bad") catch e; e end                                        # test_loaddata_error_message
             @test e isa Juango.DeserializationError && occursin("($art:pk=9) field_value was 'not a date'", e.msg)
             @test !exists(filter(objects(DseArticle); id = 9))

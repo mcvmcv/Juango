@@ -2355,7 +2355,8 @@ const FINDER151_FILE = Ref("")
     @test Juango.Migrations.needs_no_transaction(op, b) == IS_POSTGRES
     if IS_POSTGRES
         sqls = Juango.Migrations.forwards(op, b, nothing, nothing, nothing)
-        @test startswith(only(sqls), "CREATE INDEX CONCURRENTLY") && occursin("c151", Juango.Migrations.op_code(op))
+        @test first(sqls) isa Juango.Migrations.NotInTransaction                # (refuses a transaction)
+        @test startswith(only(filter(x -> x isa AbstractString, sqls)), "CREATE INDEX CONCURRENTLY") && occursin("c151", Juango.Migrations.op_code(op))
     end
 end
 

@@ -541,15 +541,14 @@ function cmd_flush(args)
     println("Emptied $n table(s).")
 end
 
-# test [--keepdb] [--failfast] [--reverse] [--shuffle[=SEED]] [-k PATTERN ...] [file ...]
 """
-Run the project's tests (test/runtests.jl, or tests/test_*.jl, or the files given) against a
-throwaway test database. Each file runs even when an earlier one fails, unless `--failfast`; the
-command fails when any did. `-k PATTERN` (repeatable) keeps the files whose path contains a
-pattern; `--reverse` and `--shuffle[=SEED]` change the order, to catch tests that depend on
-others (the seed is printed, so a failing order can be repeated).
+    test_plan(args; root = ".") -> (files, flags, seed)
+
+What `manage.jl test args...` runs, in order: the files given, else `test/runtests.jl`, else `tests/test*.jl`
+(sorted), under `root`; those whose path contains a `-k` pattern; reversed with `--reverse`; shuffled with
+`--shuffle[=SEED]` (`seed` is the one used, else `nothing`). `flags` has the other `--name[=value]` options.
 """
-function cmd_test(args)
+function test_plan(args; root::AbstractString = ".")
     files, patterns = String[], String[]
     flags = Dict{String,String}()
     i = 1
@@ -569,20 +568,35 @@ function cmd_test(args)
         i += 1
     end
     if isempty(files)
-        files = if isfile(joinpath("test", "runtests.jl"))
-            [joinpath("test", "runtests.jl")]
+        tests = joinpath(root, "tests")
+        files = if isfile(joinpath(root, "test", "runtests.jl"))
+            [joinpath(root, "test", "runtests.jl")]
         else
-            sort([joinpath("tests", f) for f in (isdir("tests") ? readdir("tests") : String[]) if startswith(f, "test") && endswith(f, ".jl")])
+            sort([joinpath(tests, f) for f in (isdir(tests) ? readdir(tests) : String[]) if startswith(f, "test") && endswith(f, ".jl")])
         end
     end
     isempty(patterns) || filter!(f -> any(p -> occursin(p, f), patterns), files)
-    isempty(files) && return println("No tests found (test/runtests.jl or tests/test_*.jl$(isempty(patterns) ? "" : " matching -k")).")
     haskey(flags, "reverse") && reverse!(files)
+    seed = nothing
     if haskey(flags, "shuffle")
         seed = flags["shuffle"] == "true" ? Int(rand(RandomDevice(), UInt16)) : parse(Int, flags["shuffle"])
-        println("Shuffling the test files with seed $seed (--shuffle=$seed repeats this order)")
         shuffle!(MersenneTwister(seed), files)
     end
+    files, flags, seed
+end
+
+# test [--keepdb] [--failfast] [--reverse] [--shuffle[=SEED]] [-k PATTERN ...] [file ...]
+"""
+Run the project's tests (test/runtests.jl, or tests/test_*.jl, or the files given) against a
+throwaway test database. Each file runs even when an earlier one fails, unless `--failfast`; the
+command fails when any did. `-k PATTERN` (repeatable) keeps the files whose path contains a
+pattern; `--reverse` and `--shuffle[=SEED]` change the order, to catch tests that depend on
+others (the seed is printed, so a failing order can be repeated).
+"""
+function cmd_test(args)
+    files, flags, seed = test_plan(args)
+    isempty(files) && return println("No tests found (test/runtests.jl or tests/test_*.jl$(any(==("-k"), args) ? " matching -k" : "")).")
+    seed === nothing || println("Shuffling the test files with seed $seed (--shuffle=$seed repeats this order)")
     # --coverage: run the tests again in a process that records coverage, then summarise it
     haskey(flags, "coverage") && return test_with_coverage(args)
     haskey(flags, "update-snapshots") && (ENV["JUANGO_UPDATE_SNAPSHOTS"] = "1")
@@ -659,7 +673,11 @@ end
 function cmd_loaddata(args)
     pos, flags = parse_flags(args)
     isempty(pos) && error("usage: loaddata <fixture> [fixture ...]")
-    n, total, files = loaddata_counts(pos...; database = get(flags, "database", nothing))
+    n, total, files = try
+        loaddata_counts(pos...; database = get(flags, "database", nothing))
+    catch e                                   # (a fixture that isn't there, or isn't a format: Django's CommandError)
+        e isa ArgumentError ? throw(CommandError(e.msg)) : rethrow()
+    end
     println(cmd_stdout(), n == total ? "Installed $n object(s) from $files fixture(s)" : "Installed $n object(s) (of $total) from $files fixture(s)")
 end
 

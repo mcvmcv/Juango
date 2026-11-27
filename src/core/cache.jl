@@ -172,7 +172,8 @@ raw_clear(::DummyCache) = nothing
 #     Vector, Dict, Tuple, NamedTuple, Pair, Set      recursively (element types kept when simple)
 #     Symbol, Char, other integer and float types, BigInt, Rational, NaN/Inf
 #     Date, DateTime, Time, ZonedDateTime, periods, UUID, Decimal, SafeString, Vector{UInt8}
-#     model instances (their field values, as the database stores them) and HttpResponse
+#     model instances (their field values, as the database stores them, and annotations) and HttpResponse
+#     a QuerySet: its results, as a Vector (as Django's pickle evaluates a queryset)
 #
 # Anything else is an error when it's stored. `:serializer => :serialization` in a cache's
 # settings uses Julia's Serialization instead, which stores any value but, like Django's pickle,
@@ -250,11 +251,25 @@ function cache_encode(m::Model)
         a = attname(f)
         haskey(data, a) || continue                       # deferred: loaded from the database on access
         v = data[a]
-        fields[string(a)] = v === nothing ? nothing : cache_encode(to_db(f, v))
+        # (bytes stay bytes: to_db would give PostgreSQL's hex text for them)
+        fields[string(a)] = if v === nothing
+            nothing
+        elseif v isa Vector{UInt8}
+            cache_encode(v)
+        else
+            cache_encode(to_db(f, v))
+        end
     end
-    Dict{String,Any}(JT => "model", "model" => model_label(T), "id" => cache_encode(data[:id]),
-                     "fields" => fields, "db" => cache_encode(instance_db(m)))
+    out = Dict{String,Any}(JT => "model", "model" => model_label(T), "id" => cache_encode(data[:id]),
+                           "fields" => fields, "db" => cache_encode(instance_db(m)))
+    # annotations and extra values the row has (`annotate(qs; n = Count(:books))`), kept as Django's pickle keeps them
+    names = Set(attname(f) for f in all_fields(T))
+    extra = Dict{String,Any}(string(k) => cache_encode(v) for (k, v) in data if k !== :id && !(k in names))
+    isempty(extra) || (out["extra"] = extra)
+    out
 end
+# a QuerySet is stored as its results (Django's pickle evaluates it): it comes back as a Vector
+cache_encode(@nospecialize(qs::QuerySet)) = cache_encode(collect(qs))
 function cache_encode(r::HttpResponse)
     is_streaming(r) && throw(CacheSerializationError("can't store a streaming response in the cache"))
     Dict{String,Any}(JT => "response", "status" => r.status, "headers" => Any[Any[k, v] for (k, v) in r.headers],
@@ -303,6 +318,9 @@ function cache_decode(d::AbstractDict)
         for f in all_fields(T)
             a = string(attname(f))
             haskey(d["fields"], a) && (data[attname(f)] = from_db(f, cache_decode(d["fields"][a])))
+        end
+        for (k, v) in get(d, "extra", Dict{String,Any}())
+            data[Symbol(k)] = cache_decode(v)
         end
         db = cache_decode(d["db"])
         return T(data, db === nothing ? Dict{Symbol,Any}() : Dict{Symbol,Any}(:__db => db))

@@ -5,6 +5,8 @@
 # Django's work on models and fields, and they carry no model options, managers or bases (an
 # inheritance parent is a table). Each test keeps its Django name in a comment; tests about
 # things Juango's migrations don't have are listed at the end of each testset.
+# migrations2 and custom_migration_operations are fixtures of these tests (a second app's migrations, operations
+# defined in a project), not tests of their own: the tests that use them are translated here, or listed as not.
 @isdefined(TEST_SETUP_DONE) || include("setup.jl")
 
 const DM = Juango.Migrations

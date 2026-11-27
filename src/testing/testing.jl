@@ -43,6 +43,67 @@ function rollback_after(f)
 end
 
 """
+    serialize_database(; database = nothing) -> String
+
+The data in every table of the database's models, as JSON (Django's `serialize_db_to_string`, which the test
+runner calls after migrating). `deserialize_database!` puts it back.
+"""
+function serialize_database(; database = nothing)
+    with_db(database) do
+        b = backend()
+        models = [T for T in all_models() if !modelmeta(T).proxy && model_in_use(T) && !(T <: AutoThrough) &&
+                                             table_exists(b, modelmeta(T).table)]
+        objs = Any[]
+        for T in dependency_order(models)
+            append!(objs, collect(order_by(base_objects(T), "pk")))
+        end
+        serialize(:json, objs)
+    end
+end
+
+"""
+    deserialize_database!(data; database = nothing) -> Int
+
+Load what `serialize_database` returned, in one transaction, as `loaddata` does (Django's
+`deserialize_db_from_string`). Returns the number of objects.
+"""
+function deserialize_database!(data::AbstractString; database = nothing)
+    path, io = mktemp(); close(io)
+    json = path * ".json"
+    mv(path, json)
+    try
+        write(json, data)
+        loaddata(json; database = database)
+    finally
+        rm(json; force = true)
+    end
+end
+
+"""
+    serialized_rollback(f; database = nothing)
+
+Run `f()`, which may commit and may empty the database (`flush!`), then put the data back as it was before:
+the database is flushed and its earlier data loaded again (Django's `TransactionTestCase` with
+`serialized_rollback = True`, which keeps the data that migrations loaded). Returns `f()`'s value.
+
+    serialized_rollback() do
+        flush!()
+        with_live_server() do ... end      # (committed data, seen by other connections)
+    end
+    count(objects(Book))                   # the books from before, again
+"""
+function serialized_rollback(f; database = nothing)
+    data = serialize_database(; database = database)
+    try
+        f()
+    finally
+        with_db(() -> flush!(; inhibit_post_migrate = true), database)   # (the content types come back with the data)
+        deserialize_database!(data; database = database)
+        with_db(() -> lock(() -> empty!(CT_CACHE), CT_LOCK), database)
+    end
+end
+
+"""
     capture_on_commit_callbacks(f; execute = false) -> (result, callbacks)
 
 Run `f()` and return the `on_commit` callbacks it registered (like Django's

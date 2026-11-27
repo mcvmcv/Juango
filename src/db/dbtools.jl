@@ -20,6 +20,20 @@ function flush_sql(; reset_sequences = true)
         return vcat(["SET FOREIGN_KEY_CHECKS = 0"], [reset_sequences ? "TRUNCATE TABLE $(q(t))" : "DELETE FROM $(q(t))" for t in tables],
                     ["SET FOREIGN_KEY_CHECKS = 1"])
     end
+    # SQLite: also the tables that reference these (transitively), as PostgreSQL's TRUNCATE ... CASCADE and Django's
+    # sql_flush(allow_cascade): a row left pointing at a deleted one would fail the deferred foreign key check
+    seen = Set(lowercase.(tables))
+    refs = Dict(t => Set(lowercase(String(r[:table])) for r in execute("PRAGMA foreign_key_list($(q(t)))"))
+                for t in introspect_tables())
+    grew = true
+    while grew
+        grew = false
+        for (t, to) in refs
+            if !(lowercase(t) in seen) && !isempty(intersect(to, seen))
+                push!(tables, t); push!(seen, lowercase(t)); grew = true
+            end
+        end
+    end
     out = ["DELETE FROM $(q(t))" for t in tables]
     if reset_sequences && table_exists(b, "sqlite_sequence")
         push!(out, "DELETE FROM sqlite_sequence WHERE name IN (" * join([sql_string_literal(b, t) for t in tables], ", ") * ")")
@@ -49,13 +63,14 @@ function sequence_reset_sql(apps = nothing; models = nothing)
 end
 
 """
-    flush!(; reset_sequences = true) -> Int
+    flush!(; reset_sequences = true, inhibit_post_migrate = false) -> Int
 
 Delete every row of every table Juango manages (not the record of applied migrations), then
-recreate content types and permissions; returns the number of tables emptied. Ids start
+recreate content types and permissions (not with `inhibit_post_migrate = true`, as Django's: when the
+data that comes back next has its own); returns the number of tables emptied. Ids start
 from 1 again where the database allows.
 """
-function flush!(; reset_sequences = true)
+function flush!(; reset_sequences = true, inhibit_post_migrate::Bool = false)
     b = backend()
     stmts = flush_sql(; reset_sequences = reset_sequences)
     isempty(stmts) && return 0
@@ -72,8 +87,10 @@ function flush!(; reset_sequences = true)
     end
     tables = [t for t in managed_tables() if table_exists(b, t)]
     lock(() -> empty!(CT_CACHE), CT_LOCK)
-    update_contenttypes!()
-    update_permissions!()
+    if !inhibit_post_migrate
+        update_contenttypes!()
+        update_permissions!()
+    end
     length(tables)
 end
 

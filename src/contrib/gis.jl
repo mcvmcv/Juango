@@ -202,11 +202,116 @@ end
 
 # --- distances -------------------------------------------------------------------------------------------
 
-"A distance for spatial lookups: `D(km=5)`, `D(m=300)`, `D(mi=2)`; stored in metres."
-struct D
-    m::Float64
+# D and A are Django's measure objects (django.contrib.gis.measure.Distance and Area: Juango's Distance and Area
+# are the database functions): a length or an area in one of many units, kept in metres (square metres), that
+# remembers the unit it was given in: `D(km = 5).mi`, `D(mi = 2) + D(km = 1)`, `D(m = 3) * D(m = 4) == A(sq_m = 12)`.
+
+const DISTANCE_UNITS = Dict{String,Float64}(
+    "chain" => 20.1168, "chain_benoit" => 20.116782, "chain_sears" => 20.1167645,
+    "british_chain_benoit" => 20.1167824944, "british_chain_sears" => 20.1167651216,
+    "british_chain_sears_truncated" => 20.116756, "cm" => 0.01, "british_ft" => 0.304799471539,
+    "british_yd" => 0.914398414616, "clarke_ft" => 0.3047972654, "clarke_link" => 0.201166195164,
+    "fathom" => 1.8288, "ft" => 0.3048, "furlong" => 201.168, "german_m" => 1.0000135965,
+    "gold_coast_ft" => 0.304799710181508, "indian_yd" => 0.914398530744, "inch" => 0.0254, "km" => 1000.0,
+    "link" => 0.201168, "link_benoit" => 0.20116782, "link_sears" => 0.20116765, "m" => 1.0, "mi" => 1609.344,
+    "mm" => 0.001, "nm" => 1852.0, "nm_uk" => 1853.184, "rod" => 5.0292, "sears_yd" => 0.91439841,
+    "survey_ft" => 0.304800609601, "um" => 0.000001, "yd" => 0.9144)
+# the names of units in spatial reference systems' WKT
+const DISTANCE_ALIAS = Dict{String,String}(
+    "centimeter" => "cm", "foot" => "ft", "inches" => "inch", "kilometer" => "km", "kilometre" => "km",
+    "meter" => "m", "metre" => "m", "micrometer" => "um", "micrometre" => "um", "millimeter" => "mm",
+    "millimetre" => "mm", "mile" => "mi", "yard" => "yd", "British chain (Benoit 1895 B)" => "british_chain_benoit",
+    "British chain (Sears 1922)" => "british_chain_sears", "British chain (Sears 1922 truncated)" => "british_chain_sears_truncated",
+    "British foot (Sears 1922)" => "british_ft", "British foot" => "british_ft", "British yard (Sears 1922)" => "british_yd",
+    "British yard" => "british_yd", "Clarke's Foot" => "clarke_ft", "Clarke's link" => "clarke_link",
+    "Chain (Benoit)" => "chain_benoit", "Chain (Sears)" => "chain_sears", "Foot (International)" => "ft",
+    "Furrow Long" => "furlong", "German legal metre" => "german_m", "Gold Coast foot" => "gold_coast_ft",
+    "Indian yard" => "indian_yd", "Link (Benoit)" => "link_benoit", "Link (Sears)" => "link_sears",
+    "Nautical Mile" => "nm", "Nautical Mile (UK)" => "nm_uk", "US survey foot" => "survey_ft", "U.S. Foot" => "survey_ft",
+    "Yard (Indian)" => "indian_yd", "Yard (Sears)" => "sears_yd")
+const AREA_UNITS = merge(Dict{String,Float64}("sq_" * k => v^2 for (k, v) in DISTANCE_UNITS), Dict("ha" => 10000.0))
+const AREA_ALIAS = merge(Dict{String,String}(k => "sq_" * v for (k, v) in DISTANCE_ALIAS), Dict("hectare" => "ha"))
+
+abstract type Measure end
+"A distance: `D(km = 5)`, `D(m = 300)`, `D(mi = 2)`, `D(survey_ft = 10)`; `d.km`, `d.mi` in other units (Django's D)."
+struct D <: Measure
+    m::Float64                 # the length in metres
+    unit::String               # the unit it shows in
 end
-D(; m = 0, km = 0, mi = 0, ft = 0, nm = 0) = D(Float64(m + 1000km + 1609.344mi + 0.3048ft + 1852nm))
+"An area: `A(sq_km = 5)`, `A(ha = 2)`, `A(sq_mi = 1)`; `a.sq_m`, `a.ha` in other units (Django's A)."
+struct A <: Measure
+    sq_m::Float64
+    unit::String
+end
+measure_units(::Type{D}) = DISTANCE_UNITS
+measure_units(::Type{A}) = AREA_UNITS
+measure_alias(::Type{D}) = DISTANCE_ALIAS
+measure_alias(::Type{A}) = AREA_ALIAS
+standard_unit(::Type{D}) = "m"
+standard_unit(::Type{A}) = "sq_m"
+standard(x::Measure) = getfield(x, 1)
+
+"""
+    unit_attname(D, unit) -> String
+
+The unit's name as `D` knows it (Django's `unit_attname`): `"metre"` → `"m"`, `"Nautical Mile"` → `"nm"`.
+"""
+function unit_attname(::Type{T}, unit::AbstractString) where {T<:Measure}
+    units, lower = measure_units(T), lowercase(unit)
+    haskey(units, unit) && return String(unit)
+    haskey(units, lower) && return lower
+    for (k, v) in measure_alias(T)
+        lowercase(k) == lower && return v
+    end
+    throw(ArgumentError("Unknown unit type: $unit"))
+end
+# the amount and unit of keyword arguments (Django's default_units): exact names, then aliases, then either ignoring case
+function measure_value(::Type{T}, kw) where {T<:Measure}
+    val, unit = 0.0, standard_unit(T)
+    units, alias = measure_units(T), measure_alias(T)
+    for (k, v) in kw
+        k = string(k)
+        u = haskey(units, k) ? k : haskey(alias, k) ? alias[k] : unit_attname(T, k)
+        val += units[u] * Float64(v)
+        unit = u
+    end
+    val, unit
+end
+function (::Type{T})(; default_unit = nothing, kw...) where {T<:Measure}
+    v, u = measure_value(T, kw)
+    T(v, default_unit isa AbstractString ? String(default_unit) : u)
+end
+D(m::Real) = D(Float64(m), "m")
+A(sq_m::Real) = A(Float64(sq_m), "sq_m")
+
+function Base.getproperty(x::T, name::Symbol) where {T<:Measure}
+    name in fieldnames(T) && return getfield(x, name)
+    name === :standard && return standard(x)
+    units = measure_units(T)
+    haskey(units, string(name)) || throw(ArgumentError("Unknown unit type: $name"))
+    standard(x) / units[string(name)]
+end
+Base.propertynames(x::T) where {T<:Measure} = (fieldnames(T)..., Symbol.(keys(measure_units(T)))...)
+# `D(m=100.0)` as code, "100.0 m" as text (Django's repr and str)
+Base.show(io::IO, x::T) where {T<:Measure} = print(io, nameof(T), "(", x.unit, "=", getproperty(x, Symbol(x.unit)), ")")
+Base.print(io::IO, x::Measure) = print(io, getproperty(x, Symbol(x.unit)), " ", x.unit)
+Base.:(==)(a::T, b::T) where {T<:Measure} = standard(a) == standard(b)
+Base.hash(x::Measure, h::UInt) = hash(standard(x), hash(typeof(x), h))
+Base.isless(a::T, b::T) where {T<:Measure} = standard(a) < standard(b)
+Base.:+(a::T, b::T) where {T<:Measure} = T(standard(a) + standard(b), a.unit)
+Base.:-(a::T, b::T) where {T<:Measure} = T(standard(a) - standard(b), a.unit)
+Base.:-(a::T) where {T<:Measure} = T(-standard(a), a.unit)
+Base.:*(a::T, n::Real) where {T<:Measure} = T(standard(a) * n, a.unit)
+Base.:*(n::Real, a::Measure) = a * n
+Base.:*(a::D, b::D) = A(a.m * b.m, "sq_" * a.unit)             # a distance times a distance is an area
+Base.:/(a::T, n::Real) where {T<:Measure} = T(standard(a) / n, a.unit)
+Base.:/(a::D, b::D) = a.m / b.m                                # (a ratio)
+Base.:/(::A, ::A) = throw(ArgumentError("A must be divided by a number"))
+Base.:*(::A, ::A) = throw(ArgumentError("A must be multiplied with a number"))
+Base.iszero(x::Measure) = iszero(standard(x))
+Base.:+(::T, ::Any) where {T<:Measure} = throw(ArgumentError("$(nameof(T)) must be added with $(nameof(T))"))
+Base.:-(::T, ::Any) where {T<:Measure} = throw(ArgumentError("$(nameof(T)) must be subtracted from $(nameof(T))"))
+
 meters(d::D) = d.m
 meters(x::Real) = Float64(x)
 

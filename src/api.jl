@@ -205,14 +205,16 @@ using ..Juango: Client, RequestFactory, request, post, put, patch, delete, head,
     assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx,
     live_test, live_event!, live_info!, live_flush!, setup_test_database, teardown_test_database, consume_stream!,
     assert_html_equal, assert_html_not_equal, assert_in_html, assert_not_in_html, assert_json_equal, assert_json_not_equal,
-    assert_queryset_equal, assert_formset_error, assert_field_output, assert_matches_snapshot, RedirectCycleError, redirect_chain
+    assert_queryset_equal, assert_formset_error, assert_field_output, assert_matches_snapshot, RedirectCycleError, redirect_chain,
+    serialized_rollback, serialize_database, deserialize_database!
 export Client, RequestFactory, request, post, put, patch, delete, head, options, trace, force_login!, text, outbox, rollback_after,
     capture_on_commit_callbacks, with_live_server, live_server_url, override_settings, modify_settings, assert_contains,
     assert_not_contains, assert_redirects, assert_template_used, assert_template_not_used,
     assert_num_queries, assert_form_error, count_queries, dummy_results, assert_htmx,
     live_test, live_event!, live_info!, live_flush!, setup_test_database, teardown_test_database, consume_stream!,
     assert_html_equal, assert_html_not_equal, assert_in_html, assert_not_in_html, assert_json_equal, assert_json_not_equal,
-    assert_queryset_equal, assert_formset_error, assert_field_output, assert_matches_snapshot, RedirectCycleError, redirect_chain
+    assert_queryset_equal, assert_formset_error, assert_field_output, assert_matches_snapshot, RedirectCycleError, redirect_chain,
+    serialized_rollback, serialize_database, deserialize_database!
 end
 
 module Functions
@@ -231,10 +233,10 @@ end
 module GIS
 using ..Juango: GeometryField, PointField, LineStringField, PolygonField, MultiPointField,
     MultiLineStringField, MultiPolygonField, Point, LineString, Polygon, MultiPoint, MultiLineString,
-    MultiPolygon, D, Distance, Area, GeoLength, AsGeoJSON, geojson, from_geojson, wkt, ewkt, parse_wkt, parse_wkb
+    MultiPolygon, D, A, unit_attname, Distance, Area, GeoLength, AsGeoJSON, geojson, from_geojson, wkt, ewkt, parse_wkt, parse_wkb
 export GeometryField, PointField, LineStringField, PolygonField, MultiPointField,
     MultiLineStringField, MultiPolygonField, Point, LineString, Polygon, MultiPoint, MultiLineString,
-    MultiPolygon, D, Distance, Area, GeoLength, AsGeoJSON, geojson, from_geojson, wkt, ewkt, parse_wkt, parse_wkb
+    MultiPolygon, D, A, unit_attname, Distance, Area, GeoLength, AsGeoJSON, geojson, from_geojson, wkt, ewkt, parse_wkt, parse_wkb
 end
 
 module Postgres
