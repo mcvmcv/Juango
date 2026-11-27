@@ -722,6 +722,47 @@ function cmd_help(args)
     nothing
 end
 
+"The options of a command for completion: (long name, takes a value), its own and the common ones."
+function command_options(name)
+    decl = get(DECLARED_COMMANDS, name, nothing)
+    entry = get(all_commands(), name, nothing)
+    args = decl !== nothing && entry !== nothing && COMMANDS[name] === entry ? vcat(decl.arguments, COMMON_ARGS) : COMMON_ARGS
+    opts = [(minimum(a.names), a.action in (:store, :append)) for a in args if !a.positional]
+    if decl === nothing && entry !== nothing     # (a command without declared arguments: the --options its help names)
+        append!(opts, [(String(m.match), false) for m in eachmatch(r"--[a-z][a-z0-9-]*", entry[1])])
+    end
+    unique(first, opts)
+end
+
+"""
+    autocomplete(comp_words, comp_cword; io = stdout)
+
+Completions for bash (Django's ManagementUtility.autocomplete): the commands starting with the word
+being typed, or that command's options (`=` after one that takes a value) and, for dumpdata,
+sqlmigrate, sqlsequencereset and test, the app labels. `manage.jl` runs it when JUANGO_AUTO_COMPLETE
+(or DJANGO_AUTO_COMPLETE) is set, with bash's COMP_WORDS and COMP_CWORD:
+
+    _manage_jl() { COMPREPLY=( \$(COMP_WORDS="\${COMP_WORDS[*]}" COMP_CWORD=\$COMP_CWORD JUANGO_AUTO_COMPLETE=1 julia --project manage.jl 2>/dev/null) ); }
+    complete -F _manage_jl -o default manage.jl
+"""
+function autocomplete(comp_words::AbstractString, comp_cword::Integer; io::IO = cmd_stdout())
+    cwords = split(comp_words)[2:end]
+    curr = 1 <= comp_cword <= length(cwords) ? cwords[comp_cword] : ""
+    subcommands = unique(vcat(collect(keys(all_commands())), ["help"]))
+    if comp_cword == 1
+        println(io, join(sort(filter(x -> startswith(x, curr), subcommands)), " "))
+    elseif !isempty(cwords) && cwords[1] in subcommands && cwords[1] != "help"
+        options = Tuple{String,Bool}[("--help", false)]
+        cwords[1] in ("dumpdata", "sqlmigrate", "sqlsequencereset", "test") && append!(options, [(a.label, false) for a in installed_apps()])
+        append!(options, command_options(cwords[1]))
+        prev = Set(first(split(x, '=')) for x in cwords[2:min(comp_cword - 1, length(cwords))])
+        for (k, v) in sort([o for o in options if !(o[1] in prev) && startswith(o[1], curr)])
+            println(io, v ? k * "=" : k)
+        end
+    end
+    nothing
+end
+
 "Python's difflib.get_close_matches: the candidates at least `cutoff` similar to `word`, most similar first."
 close_matches(word, candidates; n = 3, cutoff = 0.6) =
     first([c for (r, c) in sort([(similarity(word, c), c) for c in candidates]; by = first, rev = true) if r >= cutoff], n)
@@ -852,6 +893,11 @@ end
 Entry point used by a project's `manage.jl`.
 """
 function execute_from_command_line(args = ARGS)
+    if haskey(ENV, "JUANGO_AUTO_COMPLETE") || haskey(ENV, "DJANGO_AUTO_COMPLETE")     # (bash completion: see autocomplete)
+        autocomplete(get(ENV, "COMP_WORDS", ""), something(tryparse(Int, get(ENV, "COMP_CWORD", "0")), 0))
+        isinteractive() || exit(0)
+        return nothing
+    end
     if isempty(args)
         isinteractive() && return nothing
         return cmd_help(args)

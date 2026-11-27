@@ -2311,6 +2311,13 @@ Juango.get_by_natural_key(::Type{Tag}, name) = get(Tag; name = name)
 
 `runserver [host:]port`, `makemigrations`, `migrate`, `showmigrations`, `sqlmigrate`, `createsuperuser`, `changepassword`, `showurls`, `sqlschema`, `check`, `clearsessions`, `dumpdata`, `loaddata`, `flush`, `dbshell`, `inspectdb`, `squashmigrations`, `optimizemigration`, `diffsettings`, `sendtestemail`, `findstatic`, `remove_stale_contenttypes`, `test`, `shell`, `help`. Add your own with `Juango.register_command!("name", "help", args -> ...)`.
 
+Bash can complete commands and their options: add this to `~/.bashrc` (manage.jl answers when `JUANGO_AUTO_COMPLETE` is set, as Django's `DJANGO_AUTO_COMPLETE`; Julia's start-up makes it take a second or two):
+
+```bash
+_manage_jl() { COMPREPLY=( $(COMP_WORDS="${COMP_WORDS[*]}" COMP_CWORD=$COMP_CWORD JUANGO_AUTO_COMPLETE=1 julia --project manage.jl 2>/dev/null) ); }
+complete -F _manage_jl -o default manage.jl
+```
+
 `call_command("createsuperuser", "--noinput", "--username=admin", "--email=a@b.c")` runs a command from code or a test, as Django's. Its prompts read lines from `stdin = "..."`, and `getpass = ["pw", "pw"]` answers its password prompts. Its output goes to `stdout` and `stderr` (IOBuffers by default). A command fails by throwing `CommandError("message")`. `call_command` lets that through; on the command line it prints `CommandError: message` and exits with status 1. For input and output inside your own commands, use `Juango.command_io()`, which has `stdin`, `stdout`, `stderr` and `getpass`.
 
 - `createsuperuser` works as Django's. It asks for whatever is missing: the username (suggesting your system user name), the email, and the password twice. It asks a question again when the answer isn't valid, and offers to bypass the password validators. With `--noinput`, values come from the flags or from `JUANGO_SUPERUSER_USERNAME`, `JUANGO_SUPERUSER_EMAIL` and `JUANGO_SUPERUSER_PASSWORD`; without a password, the user gets an unusable one. Off a terminal it does nothing. Define `Juango.required_fields(::Type{Member}) = (:email, :phone)` to have it ask for more fields.

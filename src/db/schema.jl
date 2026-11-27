@@ -74,16 +74,19 @@ struct Column
     decimal_places::Union{Nothing,Int}
     collation::Union{Nothing,String} # db_collation
     ref_column::Union{Nothing,String} # a foreign key with a to_field: the referenced column (else "id", #220)
+    db_type::Union{Nothing,String,Dict{String,String}} # a custom field's own SQL type (by vendor, in a Dict)
 end
 Column(name, kind::Symbol; null = false, default = nothing, unique = false, index = false,
        max_length = nothing, references = nothing, of = nothing, generated = nothing, comment = nothing,
-       max_digits = nothing, decimal_places = nothing, collation = nothing, ref_column = nothing) =
+       max_digits = nothing, decimal_places = nothing, collation = nothing, ref_column = nothing, db_type = nothing) =
     Column(string(name), kind, null, default, unique, index && !unique, max_length,
            references === nothing ? nothing : string(references), of === nothing ? nothing : Symbol(of),
            generated === nothing || generated isa GeneratedSpec ? generated : GeneratedSpec(generated...),
            comment === nothing ? nothing : string(comment), max_digits === nothing ? nothing : Int(max_digits),
            decimal_places === nothing ? nothing : Int(decimal_places), collation === nothing ? nothing : check_collation(collation),
-           ref_column === nothing || ref_column == "id" ? nothing : string(ref_column))
+           ref_column === nothing || ref_column == "id" ? nothing : string(ref_column),
+           db_type === nothing || db_type isa Dict{String,String} ? db_type : db_type isa AbstractString ? String(db_type) :
+                                                 Dict{String,String}(lowercase(string(k)) => string(v) for (k, v) in db_type))
 
 "A collation name (`\"C\"`, `\"en-x-icu\"`, `\"utf8mb4_bin\"`, `\"NOCASE\"`), checked: it goes into SQL as it is."
 check_collation(c) = (s = string(c); occursin(r"^[A-Za-z0-9_.@-]+$", s) || throw(ArgumentError("invalid collation name '$s'")); s)
@@ -97,7 +100,7 @@ function with_column(c::Column; name = c.name, kw...)
     attrs = merge((null = c.null, default = c.default, unique = c.unique, index = c.index,
                    max_length = c.max_length, references = c.references, of = c.of, generated = c.generated,
                    comment = c.comment, max_digits = c.max_digits, decimal_places = c.decimal_places,
-                   collation = c.collation, ref_column = c.ref_column), NamedTuple(kw))
+                   collation = c.collation, ref_column = c.ref_column, db_type = c.db_type), NamedTuple(kw))
     Column(name, c.kind; attrs...)
 end
 
@@ -358,7 +361,7 @@ function column_state(f::Field)
            index = f.db_index, max_length = schema_kind(f.kind) in (:string, :citext, :binary) || (f.kind === :array && f.related === :string) ? f.max_length : nothing,
            references = ref, of = of, generated = gen, comment = f.db_comment,
            max_digits = f.kind === :decimal ? f.max_digits : nothing, decimal_places = f.kind === :decimal ? f.decimal_places : nothing,
-           collation = f.db_collation)
+           collation = f.db_collation, db_type = field_hook(f, :db_type))
 end
 
 "The column default for a field's `db_default`: a value, or SQL for `Now()`."
@@ -482,6 +485,8 @@ full_column_type(b::DatabaseBackend, c::Column) =
 
 "The SQL type of a snapshot column."
 function column_type_for(b::DatabaseBackend, c::Column)
+    c.db_type isa String && return c.db_type
+    c.db_type isa Dict && haskey(c.db_type, lowercase(vendor(b))) && return c.db_type[lowercase(vendor(b))]
     c.kind === :decimal && return decimal_column_type(b, c.max_digits, c.decimal_places)
     c.kind === :array && return array_column_type(b, c.of, c.max_length)
     c.kind === :geometry && return geometry_column_type(b, c.of)
