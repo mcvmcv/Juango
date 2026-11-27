@@ -1018,7 +1018,7 @@ end
     @test r.status === :successful && r.return_value == 10 && r.started_at !== nothing
     r = redirect_stderr(() -> enqueue(failing_task, "x"), devnull)
     @test r.status === :failed && occursin("task failed: x", r.error) && r.queue_name == "mail" && r.priority == 5
-    @test_throws ArgumentError enqueue(add_numbers, 1, 2; run_after = now() + Hour(1))
+    @test_throws InvalidTask enqueue(add_numbers, 1, 2; run_after = now() + Hour(1))   # (the immediate backend can't delay)
 
     override_settings(TASKS = Dict("default" => Dict("backend" => :dummy))) do
         empty!(dummy_results())
@@ -1026,7 +1026,7 @@ end
         @test r.status === :ready && dummy_results() == [r] && r.return_value === nothing
     end
     override_settings(TASKS = Dict("default" => Dict("backend" => :dummy, "queues" => ["default"]))) do
-        @test_throws ArgumentError enqueue(failing_task, "y")              # not one of the backend's queues
+        @test_throws InvalidTask enqueue(failing_task, "y")                # not one of the backend's queues
     end
 
     old_apps = settings.INSTALLED_APPS

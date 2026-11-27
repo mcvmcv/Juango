@@ -128,7 +128,8 @@ export send_mail, mail_admins, mail_managers, EmailMessage, EmailMultiAlternativ
 # apps, contrib apps, tasks
 export App, get_model, lookup_value, concrete_fields, many_to_many, attname, column, is_relation, is_primary_key, related_model,
        value_from_object, value_to_json, value_from_json, Admin, Sitemap, sitemap_urls, Feed, FlatPage, Site, get_current_site,
-       @background, enqueue, get_result, TaskResult
+       @background, enqueue, get_result, TaskResult, using_task, TaskResultStatus, TaskContext, task_backends, default_task_backend,
+       InvalidTask, InvalidTaskBackend, TaskResultDoesNotExist, TaskResultMismatch
 # server and commands
 export runserver, execute_from_command_line, call_command, CommandError
 public RawQuerySet, log_response, escape_log, reason_phrase, FieldDoesNotExist, command_io, required_fields, parse_cookies, urlencode, hasheader, accepts, MediaType, accepted_types, accepted_types_by_precedence, accepted_type, get_preferred_type, iri_to_uri, save_session!, load_session
@@ -175,7 +176,10 @@ public cache, incr, decr, incr_version, decr_version, create_cache_table, CacheS
 # admin log, contrib apps, tasks
 public LogEntry, log_action!, ADDITION, CHANGE, DELETION, admindocs_urls, XViewMiddleware, sitemap_view,
        sitemap_index_view, flatpage, flatpage_urls, FlatpageFallbackMiddleware, flatpage_sitemap, add_domain, RequestSite,
-       clear_site_cache!, CurrentSiteMiddleware, CurrentSiteManager, check_current_site_manager, check_site_id, create_default_site!, Redirect, RedirectFallbackMiddleware, background, TaskDef, db_worker
+       clear_site_cache!, CurrentSiteMiddleware, CurrentSiteManager, check_current_site_manager, check_site_id, create_default_site!, Redirect, RedirectFallbackMiddleware, background, TaskDef, db_worker,
+       TaskError, exception_class, TaskBackend, ImmediateBackend, DummyBackend, DatabaseTaskBackend, validate_task, call_task,
+       supports_priority, supports_defer, supports_get_result, task_enqueued, task_started, task_finished,
+       DEFAULT_TASK_QUEUE_NAME, DEFAULT_TASK_PRIORITY, TASK_MAX_PRIORITY, TASK_MIN_PRIORITY, dummy_results
 # apps, settings, commands
 public build, build_workload, project_include, on_reload!, CheckMessage, register_check!, run_checks, diffsettings, sendtestemail, findstatic,
        remove_stale_contenttypes, installed_apps, is_installed, get_app, model_label, model_label_lower, get_field, get_fields, RelatedObject, related_objects, app_models, static_dirs, default_settings,

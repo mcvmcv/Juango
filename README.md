@@ -1948,6 +1948,8 @@ r = enqueue(send_welcome, user.id; greeting = "Hello")          # a TaskResult: 
 
 `TASKS` picks the backend: `:immediate` (the default) runs the task at once. `:dummy` only records it (`dummy_results()`, for tests). `:database` (add `"juango.tasks"` to `INSTALLED_APPS`) stores it for `manage.jl db_worker` to run, with `run_after`, priorities and queues; arguments must be JSON-friendly, and `get_result(id)` / `refresh!(result)` read the outcome. Several workers can run at once on PostgreSQL and MySQL. Calling the function directly still just runs it.
 
+This follows Django 6's `django.tasks`. `using_task(send_welcome; priority = 10, queue_name = "mail", run_after = t, backend = "other")` is Django's `Task.using`. It returns a copy of the task, checked against its backend (`InvalidTask` for a priority outside -100..100 or one the backend can't honour, a queue not in the backend's `QUEUES`, or a `run_after` it can't delay to). `r.status == TaskResultStatus.SUCCESSFUL`, `r.is_finished`, `r.attempts` and `r.errors` (`TaskError`s; `exception_class(r.errors[1])` is the exception's type) describe the outcome, and `get_result(task, id)` finds a result again. `@background takes_context = true function f(context, ...)` gets a `TaskContext` first (`context.task_result`, `context.attempt`). The signals `task_enqueued`, `task_started` and `task_finished` fire with `task_result`, and `juango.tasks` logs each step. `TASKS` entries take Django's keys too (`"BACKEND"`, `"QUEUES"`, `"OPTIONS"`), and a backend of your own is a `TaskBackend` subtype (see its docstring).
+
 ### Sitemaps
 
 ```julia
