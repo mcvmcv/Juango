@@ -205,7 +205,7 @@ function dm_run!(st, ops...; backwards = false, app = "testapp")
     end
     deferred, actions = String[], Any[]
     for i in (backwards ? (length(ops):-1:1) : (1:length(ops)))
-        append!(actions, (backwards ? DM.backwards : DM.forwards)(ops[i], b, states[i], states[i+1], deferred))
+        append!(actions, DM.op_actions(ops[i], b, states[i], states[i+1], deferred; back = backwards, app = app))   # (as the routers allow)
     end
     append!(actions, deferred)
     b isa Juango.PostgresBackend && (actions = DM.settle_deferred_triggers(actions))
@@ -635,6 +635,56 @@ book(cols...; kw...) = DM.CreateModel("book"; model = "Book", columns = collect(
 aname = Juango.Column("name", :string; max_length = 200)
 bauthor = dmcol("author_id", :fk; references = "author")
 btitle = Juango.Column("title", :string; max_length = 200)
+
+# test_multidb's routers
+struct DmAgnosticRouter end
+Juango.allow_migrate(::DmAgnosticRouter, db, app; model = nothing, kw...) = nothing
+struct DmMigrateNothingRouter end
+Juango.allow_migrate(::DmMigrateNothingRouter, db, app; model = nothing, kw...) = false
+struct DmMigrateEverythingRouter end
+Juango.allow_migrate(::DmMigrateEverythingRouter, db, app; model = nothing, kw...) = true
+struct DmMigrateWhenFooRouter end
+Juango.allow_migrate(::DmMigrateWhenFooRouter, db, app; model = nothing, kw...) = get(kw, :foo, false)
+
+@testset "django migrations: test_multidb (MultiDBOperationTests: the routers' allow_migrate per operation, #300)" begin
+    function create_model(app, should_run, routers)
+        t = "$(app)_pony"
+        op = DM.CreateModel(t; columns = [dmcol("pink"; default = 3)])
+        override_settings(DATABASE_ROUTERS = Any[routers...]) do
+            @test !(t in dm_tables())
+            st = dm_run!(Juango.SchemaState(), op; app = app)
+            @test (t in dm_tables()) == should_run
+            dm_run!(st, op; app = app, backwards = true)
+            @test !(t in dm_tables())
+        end
+    end
+    create_model("test_mltdb_crmo", true, [DmAgnosticRouter()])                       # test_create_model
+    create_model("test_mltdb_crmo2", false, [DmMigrateNothingRouter()])               # test_create_model2
+    create_model("test_mltdb_crmo3", true, [DmMigrateEverythingRouter()])             # test_create_model3
+    create_model("test_mltdb_crmo4", true, [DmAgnosticRouter(), DmAgnosticRouter()])  # test_create_model4
+    create_model("test_mltdb_crmo4", false, [DmMigrateNothingRouter(), DmMigrateEverythingRouter()])
+    create_model("test_mltdb_crmo4", true, [DmMigrateEverythingRouter(), DmMigrateNothingRouter()])
+    # test_run_sql_* and test_run_python_* (RunJulia): run only when the router allows, by the operation's hints
+    for (app, should_run, routers, hints) in (("test_mltdb_runsql", false, [DmMigrateNothingRouter()], (;)),
+                                              ("test_mltdb_runsql2", false, [DmMigrateWhenFooRouter()], (;)),
+                                              ("test_mltdb_runsql3", true, [DmMigrateWhenFooRouter()], (foo = true,)))
+        for julia in (false, true)
+            p = julia ? replace(app, "runsql" => "runpython") : app
+            with_ponies(p) do st
+                t = Juango.quote_name(Juango.backend(), "$(p)_pony")
+                op = julia ? DM.RunJulia(() -> (dm_insert("$(p)_pony", :pink => 1, :weight => 3.55); dm_insert("$(p)_pony", :weight => 5.0)); hints = hints) :
+                             DM.RunSQL("INSERT INTO $t (pink, weight) VALUES (1, 3.55);\nINSERT INTO $t (pink, weight) VALUES (3, 5.0);"; hints = hints)
+                c = Juango.copy_state(st)
+                @test DM.state_forwards!(op, c, p) === c && keys(c) == keys(st)            # (the state is unchanged)
+                @test dm_count("$(p)_pony") == 0
+                override_settings(DATABASE_ROUTERS = Any[routers...]) do
+                    dm_run!(st, op; app = p)
+                end
+                @test dm_count("$(p)_pony") == (should_run ? 2 : 0)
+            end
+        end
+    end
+end
 
 @testset "django migrations: test_autodetector" begin
     # test_new_model

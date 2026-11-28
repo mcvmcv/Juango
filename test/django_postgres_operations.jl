@@ -6,8 +6,8 @@
 # models, so their descriptions name the table. Writing, optimizing and the operations' categories run
 # on every database; running them, on PostgreSQL (elsewhere they're no-ops or plain AddIndex/AddConstraint).
 #
-# Not translated: the routers' allow_migrate with an operation's hints (test_no_allow_migrate,
-# test_allow_migrate_based_on_hints: Juango's routers decide per migration, #300); the query counts of
+# The routers' allow_migrate with an operation's hints (test_no_allow_migrate, test_allow_migrate_based_on_hints)
+# runs on every database: the operation's actions are kept off (or not). Not translated: the query counts of
 # CreateExtension (psycopg's type handlers), and test_reduce_add_rename (RenameIndex, #257).
 #
 # Also not translated, the rest of postgres_tests: test_apps (psycopg type handlers, the migration serializer registry),
@@ -31,11 +31,20 @@ function dpo_run!(st, ops...; backwards = false, atomic = true)
     end
     actions = Any[]
     for i in (backwards ? (length(ops):-1:1) : (1:length(ops)))
-        append!(actions, (backwards ? DPO.backwards : DPO.forwards)(ops[i], b, states[i], states[i+1], String[]))
+        append!(actions, DPO.op_actions(ops[i], b, states[i], states[i+1], String[]; back = backwards, app = "testapp"))
     end
     atomic ? Juango.schema_atomic(() -> foreach(DPO.run_action, actions)) : foreach(DPO.run_action, actions)
     backwards ? st : states[end]
 end
+# (routers for #300: Django's NoMigrationRouter and MigrateWhenHinted)
+struct DpoNoMigration end
+Juango.allow_migrate(::DpoNoMigration, db, app; model = nothing, kw...) = false
+struct DpoWhenHinted end
+Juango.allow_migrate(::DpoWhenHinted, db, app; model = nothing, kw...) = get(kw, :a_hint, false)
+struct DpoPlainRouter end
+Juango.allow_migrate(::DpoPlainRouter, db, app; model = nothing) = nothing
+struct DpoModelRouter end
+Juango.allow_migrate(::DpoModelRouter, db, app; model = nothing) = model === nothing ? nothing : false
 "The SQL statements an operation runs (forwards or backwards)."
 dpo_sql(op; backwards = false, st = Juango.SchemaState()) =
     [a for a in (backwards ? DPO.backwards : DPO.forwards)(op, Juango.backend(), st, DPO.state_forwards!(op, Juango.copy_state(st), "testapp"), String[])
@@ -265,5 +274,43 @@ port_block() do
         @test DPO.formatted_description(DPO.RunSQL("SELECT 1", "")) == "s Raw SQL operation"
         @test DPO.formatted_description(DPO.RunJulia(() -> nothing)) == "p Raw Julia operation"
         @test DPO.formatted_description(DPO.SeparateDatabaseAndState()) == "? Custom state/database change combination"
+    end
+
+    @testset "django postgres_tests test_operations: the routers' allow_migrate per operation, with hints (#300)" begin
+        b, st = Juango.backend(), Juango.SchemaState()
+        acts(op; back = false, app = "testapp") = DPO.op_actions(op, b, st, st, String[]; back = back, app = app)
+        # test_allow_migrate_based_on_hints: the hints an operation keeps
+        @test DPO.CreateExtension("tablefunc").hints == (;)
+        hinted = DPO.CreateExtension("tablefunc"; hints = Dict(:a_hint => true))
+        @test hinted.hints == (a_hint = true,)
+        @test DPO.op_code(hinted) == "CreateExtension(\"tablefunc\"; hints = (a_hint = true,))"
+        @test DPO.op_code(DPO.CreateCollation("C_test", "C"; hints = (a_hint = true,))) == "CreateCollation(\"C_test\", \"C\"; hints = (a_hint = true,))"
+        @test DPO.op_code(DPO.RunSQL("SELECT 1", ""; hints = (a_hint = true,))) == "RunSQL(Any[\"SELECT 1\"], Any[]; hints = (a_hint = true,))"
+        @test DPO.op_code(DPO.RunSQL("SELECT 1", "")) == "RunSQL(Any[\"SELECT 1\"], Any[])"
+        @test DPO.RunJulia(() -> nothing; hints = (a_hint = true,)).hints == (a_hint = true,)
+        sql = DPO.RunSQL("SELECT 1", "SELECT 2")
+        @test !isempty(acts(sql))                                                       # (no routers: everything runs)
+        # test_no_allow_migrate (CreateExtensionTests, CreateCollationTests, RemoveCollationTests): nothing, either way
+        override_settings(DATABASE_ROUTERS = Any[DpoNoMigration()]) do
+            for op in (DPO.CreateExtension("tablefunc"), DPO.CreateCollation("C_test", "C"), DPO.RemoveCollation("C_test", "C"), sql)
+                @test isempty(acts(op)) && isempty(acts(op; back = true))
+            end
+        end
+        override_settings(DATABASE_ROUTERS = Any[DpoWhenHinted()]) do
+            @test isempty(acts(sql)) && isempty(acts(DPO.CreateExtension("tablefunc")))
+            @test !isempty(acts(DPO.RunSQL("SELECT 1", "SELECT 2"; hints = (a_hint = true,))))
+            @test !isempty(acts(DPO.RunSQL("SELECT 1", "SELECT 2"; hints = (a_hint = true,)); back = true))
+            DPO_PG && @test !isempty(acts(hinted))
+        end
+        override_settings(DATABASE_ROUTERS = Any[DpoPlainRouter()]) do                 # (a router taking no hints is asked without them)
+            @test !isempty(acts(DPO.RunSQL("SELECT 1", "SELECT 2"; hints = (a_hint = true,))))
+        end
+        # (an operation on a model's table asks with the model, as Django's allow_migrate_model)
+        T = first(Juango.all_models()); m = Juango.modelmeta(T)
+        @test DPO.op_model(DPO.RemoveIndex(m.table, "x"), m.app) === T && DPO.op_model(sql, m.app) === nothing
+        override_settings(DATABASE_ROUTERS = Any[DpoModelRouter()]) do
+            @test isempty(acts(DPO.RemoveIndex(m.table, "x"); app = m.app))
+            @test !isempty(acts(sql; app = m.app))
+        end
     end
 end

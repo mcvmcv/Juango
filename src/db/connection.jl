@@ -514,7 +514,11 @@ db_for_write(router, model) = nothing
 db_for_write(router, model, hints) = db_for_write(router, model)
 "Whether objects `a` and `b` may be related (`nothing`: no opinion). See `db_for_read`."
 allow_relation(router, a, b) = nothing
-"Whether migrations of `app_label` (or `model`) run on database `db` (`nothing`: no opinion). See `db_for_read`."
+"""
+Whether migrations of `app_label` (or `model`) run on database `db` (`nothing`: no opinion). See `db_for_read`.
+A migration operation's `hints` (`RunSQL(sql; hints = (...))`) come as more keywords, to a method that takes them:
+`Juango.allow_migrate(::R, db, app; model = nothing, kw...) = get(kw, :analytics, false) ? db == "analytics" : nothing`.
+"""
 allow_migrate(router, db, app_label; model = nothing) = nothing
 
 routers() = get(settings, :DATABASE_ROUTERS, Any[])
@@ -532,7 +536,15 @@ function route_with(f, T, instance)
     hints = instance === nothing ? (;) : (instance = instance,)
     string(something(ask_routers(f, T, hints), instance === nothing ? nothing : instance_db(instance), "default"))
 end
-migrate_allowed(db, app; model = nothing) = something(ask_routers(allow_migrate, db, app; model = model), true)
+function migrate_allowed(db, app; model = nothing, hints...)
+    isempty(hints) && return something(ask_routers(allow_migrate, db, app; model = model), true)
+    for r in routers()       # (an operation's hints, to the routers whose allow_migrate takes them)
+        a = hasmethod(allow_migrate, Tuple{typeof(r),Any,Any}, Tuple(keys(hints))) ?
+            allow_migrate(r, db, app; model = model, hints...) : allow_migrate(r, db, app; model = model)
+        a === nothing || return a
+    end
+    true
+end
 
 """
 The database for an operation on model `T` when nothing more specific says: the enclosing

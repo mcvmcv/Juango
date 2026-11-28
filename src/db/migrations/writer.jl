@@ -60,7 +60,7 @@ op_code(op::AlterField) = "AlterField($(jl(op.table)), $(column_code(op.column))
 op_code(op::RenameField) = "RenameField($(jl(op.table)), $(jl(op.old)), $(jl(op.new)))"
 op_code(op::SeparateDatabaseAndState) = "SeparateDatabaseAndState(database_operations = [" *
     join(op_code.(op.database_operations), ", ") * "], state_operations = [" * join(op_code.(op.state_operations), ", ") * "])"
-op_code(op::RunSQL) = "RunSQL($(jl(op.forward)), $(op.backward === nothing ? "nothing" : jl(op.backward)))"
+op_code(op::RunSQL) = "RunSQL($(jl(op.forward)), $(op.backward === nothing ? "nothing" : jl(op.backward))$(hints_code(op.hints, true)))"
 
 function migration_code(m::Migration)
     deps = isempty(m.dependencies) ? "[]" :

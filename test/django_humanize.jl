@@ -48,7 +48,7 @@ end
     end
     for (delta, want) in ((Second(30), "30$(nb)seconds from now"), (Minute(2) + Second(5), "2$(nb)minutes from now"),
                           (Hour(1) + Minute(30) + Second(30), "an hour from now"), (Day(2) + Hour(6) + Second(30), "2$(nb)days, 6$(nb)hours from now"))
-        @test Juango.naturaltime(now() + delta) == want
+        @test Juango.naturaltime(now() + delta + Millisecond(500)) == want   # (the margin for the tick before naturaltime's now)
     end
     @test Juango.naturaltime(now() - Millisecond(600)) in ("now", "a second ago")                # (part of a second is "now")
     @test Juango.naturaltime(now() + Millisecond(1)) == "now"

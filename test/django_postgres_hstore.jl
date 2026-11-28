@@ -90,7 +90,7 @@ end
         # test_key_sql_injection: the key is a parameter (or a quoted literal), never SQL
         @test !exists(filter(M; Symbol("field__test' = 'a') OR 1 = 1 OR ('d") => "x"))
         qs = filter(annotate(M; value = Subquery(values(filter(M; pk = OuterRef(:pk)), :field))), value__a = "b")   # test_obj_subquery_lookup
-        @test_broken (try dhs_ids(qs) == ids(1:2) catch; false end)          # (key lookups on a JSON/hstore annotation: #297)
+        @test dhs_ids(qs) == ids(1:2)                                                        # (key lookups on an hstore annotation: #297)
     end
 end
 

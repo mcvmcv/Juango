@@ -438,14 +438,54 @@ function inclusion_tag!(f::Function, lib::TagLibrary, name, template; takes_cont
     end)
 end
 
+"An engine's library: a `TagLibrary`, or a registered library's name (`nothing` for Juango's built-in ones, always loaded)."
+function engine_library(v)
+    v isa TagLibrary && return v
+    name = string(v)
+    haskey(TAG_LIBRARIES, name) && return TAG_LIBRARIES[name]
+    name in BUILTIN_LIBRARIES && return nothing
+    throw(ArgumentError("Invalid template library: '$name' is not a registered tag library"))
+end
+
+"""
+    engine_libraries(engine) -> Dict{String,TagLibrary}
+
+The libraries `{% load %}` finds in an engine's templates (Django's `engine.libraries`): the registered
+ones, then the engine's own `libraries` (which take precedence).
+"""
+function engine_libraries(e::JuangoTemplates)
+    d = copy(TAG_LIBRARIES)
+    for (k, v) in e.libraries
+        l = engine_library(v)
+        l === nothing ? delete!(d, k) : (d[k] = l)
+    end
+    d
+end
+"`engine_builtins(engine)`: the libraries an engine's templates have without `{% load %}` (Django's `engine.builtins`, after its default tags and filters)."
+engine_builtins(e::JuangoTemplates) = TagLibrary[l for l in (engine_library(b) for b in e.builtins) if l !== nothing]
+
+add_engine_builtins!(p, filters, e) = nothing
+function add_engine_builtins!(p, filters, e::JuangoTemplates)
+    isempty(e.builtins) && return nothing
+    tags = get!(Dict{String,Function}, p.extra, :tags)
+    for l in engine_builtins(e)
+        merge!(tags, l.tags)
+        merge!(filters, l.filters)
+    end
+    nothing
+end
+
 "`{% load lib1 lib2 %}` or `{% load name1 name2 from lib %}`: make a library's tags and filters available in this template."
 function load_libraries!(p::Parser, t::Token)
     bits = split_contents(t.contents)[2:end]
     tags = get!(Dict{String,Function}, p.extra, :tags)
     filters = LOADED_FILTERS[]
-    lib(name) = haskey(TAG_LIBRARIES, name) ? TAG_LIBRARIES[name] : name in BUILTIN_LIBRARIES ? nothing :
+    e = PARSE_ENGINE[]
+    own = e isa JuangoTemplates ? e.libraries : Dict{String,Any}()
+    lib(name) = haskey(own, name) ? engine_library(own[name]) : haskey(TAG_LIBRARIES, name) ? TAG_LIBRARIES[name] :
+        name in BUILTIN_LIBRARIES ? nothing :
         throw(TemplateSyntaxError("'$name' is not a registered tag library. Known: " *
-                                  join(sort!(collect(union(keys(TAG_LIBRARIES), BUILTIN_LIBRARIES))), ", ")))
+                                  join(sort!(collect(union(keys(TAG_LIBRARIES), BUILTIN_LIBRARIES, keys(own)))), ", ")))
     if length(bits) >= 3 && bits[end-1] == "from"
         libname = bits[end]
         l = lib(libname)

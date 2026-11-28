@@ -562,6 +562,33 @@ function array_index_expr(b::DatabaseBackend, col, is::Vector{Int})
     sql, ps = array_index_sql(b, col, is)
     isempty(ps) ? sql : replace(sql, "?" => sql_string_literal(b, ps[1]); count = 1)
 end
+const ARRAY_COMPARE_OPS = Dict("gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=")
+"""
+An array column compared with array `v` as PostgreSQL compares arrays (`field__gt = [0]`): item by item, the first
+different item deciding, and a shorter array that's the start of the other before it. For databases that keep arrays as
+JSON (#296): the comparison is written out for each of `v`'s items.
+"""
+function array_compare_sql(b::DatabaseBackend, op::String, col, f::Field, v::AbstractVector)
+    item = array_item_field(f, 1)
+    it(i) = array_item_expr(b, array_index_expr(b, col, [i]), item)
+    len = array_len_sql(b, col)
+    n, lt, strict = length(v), op in ("<", "<="), op in ("<", ">")
+    parts, ps = String[], Any[]
+    eqs(i) = (for j in 0:i-1; push!(ps, v[j+1]); end; String["$(it(j)) = ?" for j in 0:i-1])
+    for i in 0:n-1
+        cs = eqs(i)
+        push!(cs, lt ? "($len = $i OR $(it(i)) < ?)" : "($len > $i AND $(it(i)) > ?)")
+        push!(ps, v[i+1])
+        push!(parts, "(" * join(cs, " AND ") * ")")
+    end
+    # (equal on all of v's items: decided by the lengths)
+    if !(lt && strict)
+        cs = eqs(n)
+        push!(cs, lt ? "$len = $n" : strict ? "$len > $n" : "$len >= $n")
+        push!(parts, "(" * join(cs, " AND ") * ")")
+    end
+    "($col IS NOT NULL AND (" * (isempty(parts) ? sql_false(b) : join(parts, " OR ")) * "))", ps
+end
 "The field of an array's items `n` levels down (its base field, the base's base, ...)."
 function array_item_field(f::Field, n::Int)
     for _ in 1:n
@@ -754,6 +781,9 @@ Base.@nospecializeinfer function special_lookup(c::SQLCompiler, f::Field, col, l
         lookup == "contained_by" && return array_op_sql(b, "<@", col, f, value)
         lookup == "overlap" && return array_op_sql(b, "&&", col, f, value)
         lookup == "exact" && value !== nothing && return array_op_sql(b, "=", col, f, value)
+        # (PostgreSQL compares its arrays item by item; elsewhere they're JSON text: compared item by item here, #296)
+        haskey(ARRAY_COMPARE_OPS, lookup) && !(b isa PostgresBackend) && value isa AbstractVector &&
+            return array_compare_sql(b, ARRAY_COMPARE_OPS[lookup], col, f, value)
     elseif k in RANGE_KINDS
         # dates__contains = F(:inner) on PostgreSQL: the other side compiled (a range or an element column); a Value is
         # a plain value

@@ -2188,6 +2188,11 @@ end
     @test values_list(order_by(annotate(gq; l = KT("data__list__0")), "id"), :l; flat = true) == ["10", "30"]
     @test values_list(annotate(filter(gq; id = g1.id); m = KT("data__missing")), :m; flat = true) == [nothing]
     @test_throws Juango.LookupError collect(annotate(gq; k = KT("nick__x")))
+    # key paths through an annotation that's a JSON value (a Subquery of the field: #297)
+    sq = annotate(gq; d = Subquery(values(filter(Gadget; pk = OuterRef(:pk)), :data)))
+    @test [g.id for g in filter(sq; d__meta__by = "bob")] == [g2.id]
+    @test [g.id for g in filter(sq; d__run__gt = 5)] == [g2.id]
+    @test Set(g.id for g in filter(sq; d__missing__isnull = true)) == Set([g1.id, g2.id])
 end
 
 @testset "annotate after filter on the same multi-valued relation reuses its join (#132)" begin

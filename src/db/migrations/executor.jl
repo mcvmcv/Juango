@@ -33,7 +33,7 @@ function migration_actions(g::Graph, k; backwards = false)
         for i in length(m.operations):-1:1
             skips_database(m.operations[i], swapped) && continue
             Base.ScopedValues.with(Juango.STATE_USER_TABLE => Juango.state_user_table(states[i+1])) do
-                append!(actions, Migrations.backwards(m.operations[i], b, states[i], states[i+1], deferred))
+                append!(actions, op_actions(m.operations[i], b, states[i], states[i+1], deferred; back = true, app = m.app))
             end
         end
     else
@@ -41,12 +41,34 @@ function migration_actions(g::Graph, k; backwards = false)
             skips_database(op, swapped) && continue
             # (a reference to the user model is to its table as this point in history names it, #252)
             Base.ScopedValues.with(Juango.STATE_USER_TABLE => Juango.state_user_table(states[i])) do
-                append!(actions, forwards(op, b, states[i], states[i+1], deferred))
+                append!(actions, op_actions(op, b, states[i], states[i+1], deferred; app = m.app))
             end
         end
     end
     append!(actions, deferred)
     b isa Juango.PostgresBackend ? settle_deferred_triggers(actions) : actions
+end
+
+"""
+An operation's actions (`back`: undoing it) on the current database, or none when the routers' `allow_migrate`
+keeps it off: asked with its `hints`, and `model = T` for an operation on a model's table (Django's
+`allow_migrate` with hints, `allow_migrate_model`).
+"""
+function op_actions(op, b, before, after, deferred; back = false, app = "")
+    op_allowed(op, app) || return Any[]
+    (back ? Migrations.backwards : forwards)(op, b, before, after, deferred)
+end
+op_hints(op) = hasfield(typeof(op), :hints) ? getfield(op, :hints) : (;)
+function op_allowed(op, app)
+    isempty(Juango.routers()) && return true
+    Juango.migrate_allowed(Juango.current_alias(), app; model = op_model(op, app), op_hints(op)...)
+end
+"The model whose table an operation works on (one in use today), or `nothing`."
+function op_model(op, app)
+    t = op isa RenameModel ? op.new : hasfield(typeof(op), :table) ? getfield(op, :table) : nothing
+    t isa AbstractString || return nothing
+    i = findfirst(T -> modelmeta(T).table == t && modelmeta(T).app == app, all_models())
+    i === nothing ? nothing : all_models()[i]
 end
 
 """

@@ -157,17 +157,18 @@ struct RenameField <: Operation
 end
 
 """
-    CreateExtension(name)
+    CreateExtension(name; hints = (;))
 
 Install a PostgreSQL extension (`CREATE EXTENSION IF NOT EXISTS`); a no-op on other
-databases. Reversing it drops the extension. `HStoreExtension()`, `TrigramExtension()`,
+databases. Reversing it drops the extension. `hints` go to the routers' `allow_migrate` (see `RunSQL`). `HStoreExtension()`, `TrigramExtension()`,
 `UnaccentExtension()`, `BtreeGistExtension()`, `BtreeGinExtension()` and `CITextExtension()`
 name the common ones.
 """
 struct CreateExtension <: Operation
     name::String
+    hints::NamedTuple
+    CreateExtension(name; hints = (;)) = new(string(name), (; hints...))
 end
-CreateExtension(name::Symbol) = CreateExtension(string(name))
 HStoreExtension() = CreateExtension("hstore")
 TrigramExtension() = CreateExtension("pg_trgm")
 UnaccentExtension() = CreateExtension("unaccent")
@@ -184,7 +185,9 @@ forwards(op::CreateExtension, b, from, to, deferred) =
 backwards(op::CreateExtension, b, from, to, deferred) =
     b isa Juango.PostgresBackend ? ["DROP EXTENSION IF EXISTS " * quote_name(b, op.name)] : String[]
 describe(op::CreateExtension) = "Creates extension $(op.name)"
-op_code(op::CreateExtension) = "CreateExtension($(jl(op.name)))"
+op_code(op::CreateExtension) = "CreateExtension($(jl(op.name))$(hints_code(op.hints, true)))"
+"An operation's `hints` keyword in migration code (`first`: the first keyword argument)."
+hints_code(h, first) = isempty(h) ? "" : (first ? "; " : ", ") * "hints = " * repr(h)
 sql_string(s) = "'" * replace(s, "'" => "''") * "'"
 
 """
@@ -193,12 +196,14 @@ sql_string(s) = "'" * replace(s, "'" => "''") * "'"
 Create (or drop) a PostgreSQL collation, as Django's: `CreateCollation("case_insensitive",
 "und-u-ks-level2"; provider = "icu", deterministic = false)` makes one that compares text
 ignoring case, for `CharField(db_collation = "case_insensitive")`. A no-op on other databases.
+`hints` go to the routers' `allow_migrate` (see `RunSQL`).
 """
 struct CreateCollation <: Operation
     name::String
     locale::String
     provider::String
     deterministic::Bool
+    hints::NamedTuple
 end
 "See `CreateCollation`."
 struct RemoveCollation <: Operation
@@ -206,15 +211,18 @@ struct RemoveCollation <: Operation
     locale::String
     provider::String
     deterministic::Bool
+    hints::NamedTuple
 end
 for C in (:CreateCollation, :RemoveCollation)
     @eval begin
-        $C(name, locale; provider = "libc", deterministic = true) = $C(string(name), string(locale), string(provider), Bool(deterministic))
-        $C(name; locale, provider = "libc", deterministic = true) = $C(name, locale; provider = provider, deterministic = deterministic)
+        $C(name, locale; provider = "libc", deterministic = true, hints = (;)) =
+            $C(string(name), string(locale), string(provider), Bool(deterministic), (; hints...))
+        $C(name; locale, provider = "libc", deterministic = true, hints = (;)) =
+            $C(name, locale; provider = provider, deterministic = deterministic, hints = hints)
         state_forwards!(::$C, st, app) = st
-        op_code(op::$C) = $(string(C)) * "(" * jl(op.name) * ", " * jl(op.locale) *
-            (op.provider == "libc" && op.deterministic ? "" : "; " * join([op.provider == "libc" ? String[] : ["provider = " * jl(op.provider)];
-                                                                     op.deterministic ? String[] : ["deterministic = false"]], ", ")) * ")"
+        op_code(op::$C) = (kws = [op.provider == "libc" ? String[] : ["provider = " * jl(op.provider)];
+                                  op.deterministic ? String[] : ["deterministic = false"]; isempty(op.hints) ? String[] : ["hints = " * repr(op.hints)]];
+                           $(string(C)) * "(" * jl(op.name) * ", " * jl(op.locale) * (isempty(kws) ? "" : "; " * join(kws, ", ")) * ")")
     end
 end
 function create_collation_sql(b, op)
@@ -280,11 +288,18 @@ Raw SQL. Each of `forward` and `backward` is a string, which may hold several st
 separated by `;` (they're run one by one), or a vector whose items are statements or
 `(sql, params)` pairs with `?` placeholders: `("UPDATE t SET x = ? WHERE id = ?", [1, 2])`
 (as Django's). Without `backward` the migration can't be unapplied; pass `\"\"` for a no-op reverse.
+
+`hints = (key = value, ...)` (on RunSQL, RunJulia, CreateExtension and the collations) are passed to the
+routers' `allow_migrate(router, db, app_label; model = nothing, kw...)`, which decides whether this operation
+runs on the database being migrated (Django's hints): `RunSQL(sql; hints = (analytics = true,))`. A router
+whose method takes no such keywords is asked without them. Operations on a model's table ask with
+`model = T` (Django's `allow_migrate_model`).
 """
 struct RunSQL <: Operation
     forward::Vector{Any}                      # SQL strings and (sql, params) tuples
     backward::Union{Nothing,Vector{Any}}
-    RunSQL(forward, backward = nothing) = new(sqllist(forward), backward === nothing ? nothing : sqllist(backward))
+    hints::NamedTuple
+    RunSQL(forward, backward = nothing; hints = (;)) = new(sqllist(forward), backward === nothing ? nothing : sqllist(backward), (; hints...))
 end
 sqllist(x::AbstractString) = Any[s for s in split_sql(x)]
 sqllist(x) = Any[sql_item(s) for s in x]
@@ -349,12 +364,14 @@ model structs, whose fields may since have changed):
                          p.slug = lowercase(p.title); save!(p)
                      end)
 
-A function of no arguments just runs (e.g. `Juango.execute` with raw SQL).
+A function of no arguments just runs (e.g. `Juango.execute` with raw SQL). `hints = (...)` go to the
+routers' `allow_migrate` (see `RunSQL`).
 """
 struct RunJulia <: Operation
     forward::Function
     backward::Union{Nothing,Function}
-    RunJulia(forward, backward = nothing) = new(forward, backward)
+    hints::NamedTuple
+    RunJulia(forward, backward = nothing; hints = (;)) = new(forward, backward, (; hints...))
 end
 
 """

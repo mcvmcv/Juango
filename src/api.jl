@@ -140,7 +140,7 @@ public RawQuerySet, log_response, escape_log, reason_phrase, FieldDoesNotExist, 
 public clean, live_snapshot, header, text, render_response!, process_template_response, temporary_file_path, TemporaryUploadedFile,
        MemoryFileUploadHandler, TemporaryFileUploadHandler, upload_file, sse_comment, WebSocketView, is_streaming, build_absolute_uri, handle_request
 # templates
-public render_form, TemplateFormRenderer, JuangoTemplates, MustacheTemplates, LocMemTemplates, engine_template, from_string, EngineTemplate
+public render_form, TemplateFormRenderer, JuangoTemplates, MustacheTemplates, LocMemTemplates, engine_template, from_string, EngineTemplate, engine_libraries, engine_builtins
 # models, files, querysets
 public uuid4, FieldFile, FileSystemStorage, InMemoryStorage, storages, default_storage, save_file, delete_file, image_size, listdir, get_available_name, get_modified_time, get_created_time, filepath_to_uri,
        register_lookup, register_transform, deferred_fields, PoolTimeout, pool_status,

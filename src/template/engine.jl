@@ -502,10 +502,17 @@ function parse_nodes(p::Parser, until::Vector{String} = String[])
     nodes, nothing
 end
 
+"The engine whose templates are being parsed (its `libraries` and `builtins`), or `nothing`."
+const PARSE_ENGINE = Base.ScopedValues.ScopedValue{Any}(nothing)
+"Parse with an engine's tag libraries and builtins."
+with_parse_engine(f, e) = Base.ScopedValues.with(f, PARSE_ENGINE => e)
+
 function Template(src::AbstractString; name = "<string>", origin = nothing)
     p = Parser(tokenize(src), 1, name, nothing, Dict{Symbol,Any}(:origin => origin, :source => src))
     # {% load %} adds library filters for this template only (not for templates it includes or extends)
-    nodes, _ = Base.ScopedValues.with(() -> parse_nodes(p), LOADED_FILTERS => Dict{String,TemplateFilter}())
+    filters = Dict{String,TemplateFilter}()
+    add_engine_builtins!(p, filters, PARSE_ENGINE[])
+    nodes, _ = Base.ScopedValues.with(() -> parse_nodes(p), LOADED_FILTERS => filters)
     Template(name, nodes, origin)
 end
 
@@ -819,14 +826,25 @@ Juango's template language (Django's DjangoTemplates): templates from `dirs` (de
 and `get_template(engine, name)` give templates that render with the engine's options:
 `autoescape = false` (Django's OPTIONS autoescape) and `context_processors` (default
 `CONTEXT_PROCESSORS`), as Django's engine options.
+
+Django's OPTIONS `libraries` and `builtins`, for this engine's templates only:
+- `libraries = Dict("name" => lib)`: more `{% load name %}` names, each a `TagLibrary` or the name of a
+  registered one (an alias); they take precedence over the registered libraries of the same name.
+- `builtins = [lib, ...]`: libraries (or their names) whose tags and filters every template has without
+  `{% load %}`.
+`engine_libraries(engine)` and `engine_builtins(engine)` list them.
 """
 Base.@kwdef struct JuangoTemplates
     dirs::Union{Nothing,Vector{String}} = nothing
     app_dirs::Bool = true
     autoescape::Bool = true
     context_processors::Union{Nothing,Vector{Any}} = nothing
+    libraries::Dict{String,Any} = Dict{String,Any}()
+    builtins::Vector{Any} = Any[]
 end
-JuangoTemplates(dirs, app_dirs) = JuangoTemplates(dirs, app_dirs, true, nothing)
+JuangoTemplates(dirs, app_dirs) = JuangoTemplates(dirs, app_dirs, true, nothing, Dict{String,Any}(), Any[])
+"Whether an engine parses its templates differently from the others (its own libraries or builtins)."
+own_libraries(e::JuangoTemplates) = !isempty(e.libraries) || !isempty(e.builtins)
 engine_dirs(e) = vcat(String[abspath(d) for d in something(e.dirs, settings.TEMPLATE_DIRS)], e.app_dirs ? app_dirs("templates") : String[])
 template_engines() = (t = get(settings, :TEMPLATES, nothing); t === nothing ? Any[JuangoTemplates()] : collect(Any, t))
 "Whether templates are read again when their files change: TEMPLATE_CACHE_CHECK_MTIME, or by default only with DEBUG."
@@ -853,7 +871,8 @@ function get_template(name::AbstractString)
     throw(TemplateDoesNotExist(String(name), tried))
 end
 function engine_template(e::JuangoTemplates, name::AbstractString, tried)
-    key = string(objectid(e.dirs), ":", name)
+    own = own_libraries(e)
+    key = string(objectid(own ? e : e.dirs), ":", name)
     if !check_template_mtime()
         t = lock(() -> get(TEMPLATE_BY_NAME, key, nothing), TEMPLATE_LOCK)
         t === nothing || return t
@@ -862,10 +881,11 @@ function engine_template(e::JuangoTemplates, name::AbstractString, tried)
     p === nothing && return nothing
     mt = mtime(p)
     lock(TEMPLATE_LOCK) do
-        c = get(TEMPLATE_CACHE, p, nothing)
+        ck = own ? string(objectid(e), "|", p) : p          # (parsed with the engine's libraries)
+        c = get(TEMPLATE_CACHE, ck, nothing)
         c !== nothing && c[1] == mt && return c[2]
-        t = Template(read(p, String); name = String(name), origin = p)
-        TEMPLATE_CACHE[p] = (mt, t)
+        t = with_parse_engine(() -> Template(read(p, String); name = String(name), origin = p), own ? e : nothing)
+        TEMPLATE_CACHE[ck] = (mt, t)
         TEMPLATE_BY_NAME[key] = t
         t
     end
@@ -885,7 +905,7 @@ Base.getproperty(t::EngineTemplate, s::Symbol) = s in (:engine, :template) ? get
 
 A template made from source with an engine's options (Django's `engine.from_string`).
 """
-from_string(e::JuangoTemplates, src::AbstractString) = EngineTemplate(e, Template(src))
+from_string(e::JuangoTemplates, src::AbstractString) = EngineTemplate(e, with_parse_engine(() -> Template(src), e))
 """
     get_template(engine, name) -> template
 

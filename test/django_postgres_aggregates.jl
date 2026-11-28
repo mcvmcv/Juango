@@ -77,7 +77,7 @@ dag_agg(qs, a) = aggregate(qs; agg = a)[:agg]
         a1, a2 = create(M), create(M)                                                                          # test_array_agg_lookups
         foreach(((r, i),) -> create(S; related_field = r, int1 = i, int2 = 0), [(a1, 1), (a1, 2), (a2, 3), (a2, 4)])
         qs = values_list(filter(annotate(values(S, :related_field); array = ArrayAgg(:int1)), array__overlap = [2]), :array; flat = true)
-        @test_broken (try sort(only(collect(qs))) == [1, 2] catch; false end)   # (lookups on an ArrayAgg annotation: #297)
+        @test sort(only(collect(qs))) == [1, 2]                                  # (lookups on an ArrayAgg annotation: #297)
         delete!(filter(S)); delete!(a1); delete!(a2)
         @test dag_agg(objects(M), BoolAnd(:boolean_field)) == false                                            # test_bool_and_general
         @test dag_agg(objects(M), BoolAnd(Q(integer_field__gt = 2))) == false                                  # test_bool_and_q_object

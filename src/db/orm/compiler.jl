@@ -472,14 +472,37 @@ Base.@nospecializeinfer function compile_lookup(c::SQLCompiler, alias, @nospecia
         # the same condition reads other annotations too: they are columns of the wrapped query
         push!(c.qualify, Symbol(fname))
         col = qname(fname)
+        a = c.annotations[Symbol(fname)]
+        (of = annotation_container_field(c, a)) === nothing || (f = of; col = annotation_container_sql(a, of, col))   # (array__overlap: #297)
     elseif alias == c.base && isempty(rest) && haskey(c.annotations, Symbol(fname))
         a = c.annotations[Symbol(fname)]
         contains_aggregate(a) && (c.uses_aggregate = true)
         sql, colps = compile_expr(c, a)
+        wrap_array_agg!(c, a, fname) && ((sql, colps) = (qname(fname), Any[]))
         col = "($sql)"
         kind = expr_kind(c, a)               # (custom lookups for its kind: trigram_similar on a Concat)
         # search = "cadeaux" on a SearchVector annotation: a plain query in the vector's configuration, as Django's
         a isa SearchVector && lookup == "exact" && value !== nothing && (value = as_search_query(value, search_vector_config(a)))
+        # an annotation that's a JSON, hstore, array or range value takes that field's lookups (array__overlap on an ArrayAgg: #297)
+        (of = annotation_container_field(c, a)) === nothing || (f = of; col = annotation_container_sql(a, of, col))
+    elseif alias == c.base && !isempty(rest) && haskey(c.annotations, Symbol(fname)) &&
+           (of = annotation_container_field(c, c.annotations[Symbol(fname)])) !== nothing &&
+           (of.kind in (:json, :hstore, :array) || rest in (["startswith"], ["endswith"]))
+        # value__a = "b" on a Subquery of a JSON or hstore field, array__0 on an ArrayAgg: the field's key paths and
+        # transforms over the annotation's value, as Django's (#297)
+        a = c.annotations[Symbol(fname)]
+        contains_aggregate(a) && (c.uses_aggregate = true)
+        sql, aps = compile_expr(c, a)
+        wrap_array_agg!(c, a, fname) && ((sql, aps) = (qname(fname), Any[]))
+        if of.kind === :hstore && length(rest) == 1 && !(rest[1] in ("keys", "values")) && lookup != "isnull"
+            value = value isa Number ? string(value) : value isa AbstractVector ? Any[x isa Number ? string(x) : x for x in value] : value
+        end
+        tr = transform_column(of, annotation_container_sql(a, of, "($sql)"), rest, lookup, value)
+        tr === nothing && throw(LookupError("unsupported lookup '$(join(rest, "__"))' on $(of.kind) annotation '$fname'"))
+        col, colps = tr[1], vcat(aps, tr[2])
+        lookup == "isnull" && of.kind in (:json, :hstore) && return truthy(value) ? (col, colps) : ("NOT " * col, colps)
+        f = of.kind === :array && (af = array_transform(backend(), of, "", rest)) !== nothing && af[2] isa Field && af[2].kind === :array ? af[2] :
+            of.kind === :hstore && length(rest) == 1 && rest[1] in ("keys", "values") ? hstore_array_field() : nothing
     elseif fname == "id" && is_composite(T)
         isempty(rest) || throw(LookupError("'pk' is not a relation; unsupported lookup '$(join(rest, "__"))'"))
         fs = pk_fields(T)
@@ -816,6 +839,35 @@ end
 
 const TEXT_LOOKUPS = ("iexact", "contains", "icontains", "startswith", "istartswith", "endswith", "iendswith", "regex", "iregex")
 const TEXT_KINDS = (:char, :text, :email, :slug, :url, :file, :image, :filepath, :citext)
+"The field an annotation's value is when it's a JSON, hstore, array or range one (its output field), else nothing."
+Base.@nospecializeinfer function annotation_container_field(c, @nospecialize(a))
+    if a isa Aggregate && a.func == "ARRAY_AGG"         # (an array of its argument's field)
+        base = a.arg === nothing ? nothing : (try output_field(c.T, a.arg) catch; nothing end)
+        return ArrayField(base isa Field && !(base.kind in (:array, :json, :hstore)) && !(base.kind in RANGE_KINDS) ? base : TextField())
+    end
+    of = try output_field(c.T, a) catch; nothing end
+    of isa Field && (of.kind in (:json, :hstore, :array) || of.kind in RANGE_KINDS) ? of : nothing
+end
+"""
+SQLite can't read an aggregate inside the subqueries its array lookups use (json_each), so a condition on an
+ArrayAgg annotation wraps the query, as one on a window annotation does, and reads its column: true when the
+column is to be read (on the second pass).
+"""
+function wrap_array_agg!(c, @nospecialize(a), fname)
+    backend() isa SQLiteBackend && a isa Aggregate && a.func == "ARRAY_AGG" && c.scope isa Int && c.scope > 0 || return false
+    c.uses_window = true
+    c.qualify === nothing && return false
+    push!(c.qualify, Symbol(fname))
+    true
+end
+"""
+An annotation's SQL as the container field `of` takes it: an ArrayAgg on PostgreSQL is JSON text (as everywhere,
+read the same way), so it becomes a typed array for the array lookups.
+"""
+Base.@nospecializeinfer function annotation_container_sql(@nospecialize(a), of, sql)
+    a isa Aggregate && a.func == "ARRAY_AGG" && backend() isa PostgresBackend || return sql
+    "CAST(ARRAY(SELECT x FROM json_array_elements_text(CAST($sql AS json)) AS x) AS $(array_cast(backend(), of)))"
+end
 const COMPARISON_OPS = Dict("exact" => "=", "ne" => "!=", "gt" => ">", "gte" => ">=", "lt" => "<", "lte" => "<=")
 
 """

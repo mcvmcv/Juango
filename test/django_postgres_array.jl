@@ -145,12 +145,17 @@ end
         else
             @test dpa_ids(filter(DpaNestedIntegerArrayModel; field__0 = [1, 2])) == [n.id]
         end
-        if Juango.backend() isa Juango.PostgresBackend
-            @test dpa_ids(filter(M; field__gt = [0])) == ids(1:4)                           # test_gt
-            @test dpa_ids(filter(M; field__lt = [2])) == ids(1:1)                           # test_lt
-        else
-            @test_broken false      # arrays compared item by item (lexicographically) need PostgreSQL's arrays (#296)
-        end
+        @test dpa_ids(filter(M; field__gt = [0])) == ids(1:4)                               # test_gt
+        @test dpa_ids(filter(M; field__lt = [2])) == ids(1:1)                               # test_lt
+        # (item by item, on every database: #296; a shorter array that starts the other comes first)
+        cmp_objs = [create(M; field = [2, 3]), create(M; field = [10]), create(M; field = [9]), create(M; field = [2])]
+        cids = [o.id for o in cmp_objs]
+        cmpset(; kw...) = Set(o.id for o in filter(M; id__in = cids, kw...))
+        @test cmpset(field__lt = [2, 3]) == Set(cids[[4]]) && cmpset(field__lte = [2, 3]) == Set(cids[[1, 4]])
+        @test cmpset(field__gt = [2]) == Set(cids[[1, 2, 3]]) && cmpset(field__gte = [9]) == Set(cids[[2, 3]])
+        @test cmpset(field__lt = [9]) == Set(cids[[1, 4]]) && cmpset(field__gt = [9, 0]) == Set(cids[[2]])
+        @test cmpset(field__gte = Int[]) == Set(cids) && isempty(cmpset(field__lt = Int[]))
+        foreach(delete!, cmp_objs)
         more = [create(M; field = [1, 637]), create(M; field = [2, 1]), create(M; field = [3, -98123]), create(M; field = [4, 2])]
         # test_order_by_index (Django's order puts NULL last, as PostgreSQL sorts ascending)
         got = [o.id for o in order_by(filter(M; field__1__isnull = false), "field__1")]
