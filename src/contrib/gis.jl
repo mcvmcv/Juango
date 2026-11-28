@@ -421,8 +421,9 @@ function geometry_column_type(::PostgresBackend, of)
     "$(geog ? "geography" : "geometry")($t, $s)"
 end
 
-decode_geometry(v::Geometry) = v
-decode_geometry(v::AbstractString) = occursin(r"^[0-9A-Fa-f]+$", v) ? parse_wkb(v) : parse_wkt(v)
+decode_geometry(v::Geometry; srid = 4326) = v
+"A geometry from the database or a fixture: (E)WKB hex or (E)WKT, in `srid` unless it says (a field's SRID)."
+decode_geometry(v::AbstractString; srid = 4326) = occursin(r"^[0-9A-Fa-f]+$", v) ? parse_wkb(v; srid = srid) : parse_wkt(v; srid = srid)
 encode_geometry(g::Geometry) = ewkt(g)
 
 "A geometry parameter in the field's SRID, as SQL."
@@ -432,13 +433,37 @@ function geom_param(f::Field, g::Geometry)
 end
 geometry_placeholder(f::Field, v) =
     v isa Geometry && v.srid != geo_spec(f)[2] && v.srid != 0 ? "ST_Transform(ST_GeomFromEWKT(?), $(geo_spec(f)[2]))" : "?"
-is_geodetic(f::Field) = (s = geo_spec(f); s[3] || s[2] == 4326)
+"""
+Whether an SRID is geodetic (longitude/latitude, as 4326 and 4269), and the metres in one of its units (a projected
+SRID's: 1 for metres, 0.3048006 for US survey feet), from PostGIS's spatial_ref_sys; remembered.
+"""
+function srid_info(srid::Integer)
+    srid == 4326 && return (true, 1.0)
+    srid <= 0 && return (false, 1.0)
+    lock(SRID_LOCK) do
+        get!(SRID_INFO, Int(srid)) do
+            rows = backend() isa PostgresBackend ?
+                collect(execute("SELECT proj4text FROM spatial_ref_sys WHERE srid = ?", Any[Int(srid)])) : []
+            p = isempty(rows) || rows[1][:proj4text] === nothing ? "" : string(rows[1][:proj4text])
+            m = match(r"\+to_meter=([0-9.eE+-]+)", p)
+            factor = m !== nothing ? parse(Float64, m[1]) : occursin("+units=us-ft", p) ? 1200 / 3937 :
+                     occursin("+units=ft", p) ? 0.3048 : 1.0
+            (occursin("+proj=longlat", p) || occursin("+proj=latlong", p), factor)
+        end
+    end
+end
+const SRID_INFO = Dict{Int,Tuple{Bool,Float64}}()
+const SRID_LOCK = ReentrantLock()
+srid_is_geodetic(srid) = srid_info(srid)[1]
+"Whether a geometry field's distances and areas are on the earth (metres): a geography field, or a geodetic SRID."
+is_geodetic(f::Field) = (s = geo_spec(f); s[3] || srid_is_geodetic(s[2]))
 as_geom(f::Field, col) = geo_spec(f)[3] ? "CAST($col AS geometry)" : col
 
 const SPATIAL_FUNCS = Dict("intersects" => "ST_Intersects", "within" => "ST_Within", "contains" => "ST_Contains",
                            "covers" => "ST_Covers", "coveredby" => "ST_CoveredBy", "disjoint" => "ST_Disjoint",
                            "touches" => "ST_Touches", "crosses" => "ST_Crosses", "overlaps" => "ST_Overlaps",
                            "equals" => "ST_Equals", "exact" => "ST_Equals", "contains_properly" => "ST_ContainsProperly")
+const WGS84_SPHEROID = "'SPHEROID[\"WGS 84\",6378137,298.257223563]'"
 # PostGIS's bounding box operators (Django's bbcontains, contained, left, strictly_above, ...) and ~= (same_as)
 const BBOX_OPS = Dict("bbcontains" => "~", "bboverlaps" => "&&", "contained" => "@", "left" => "<<", "right" => ">>",
                       "overlaps_left" => "&<", "overlaps_right" => "&>", "overlaps_above" => "|&>", "overlaps_below" => "&<|",
@@ -454,6 +479,10 @@ function geom_rhs(c::SQLCompiler, f::Field, lookup, value)
         value = occursin(r"^[0-9A-Fa-f]+$", t) ? parse_wkb(t; srid = geo_spec(f)[2]) : parse_wkt(t; srid = geo_spec(f)[2])
     end
     value isa Geometry && return geom_param(f, value)
+    if value isa Union{F,OuterRef} && !geo_spec(f)[3]           # (another geometry field, maybe in another SRID)
+        sql, ps = compile_expr(c, value)
+        return "ST_Transform($sql, $(geo_spec(f)[2]))", ps
+    end
     value isa Expression && return compile_expr(c, value)
     value isa QuerySet && return compile_expr(c, Subquery(value))     # (point__within = values(qs, :mpoly))
     throw(LookupError("spatial lookup '$lookup' needs a geometry, got $(typeof(value))"))
@@ -487,53 +516,46 @@ function spatial_lookup(c::SQLCompiler, f::Field, col, lookup, value)
         return value ? sql : "NOT $sql", Any[]
     end
     lookup == "geom_type" && return "GeometryType($(as_geom(f, col))) = ?", Any[uppercase(string(value))]
+    # (geometry, distance[, "spheroid"]): the distance a D, a number in the field's units (metres when it's geodetic),
+    # or an expression (F(:radius) * 2); the geometry anything geom_rhs takes
     if lookup in ("distance_lt", "distance_lte", "distance_gt", "distance_gte", "dwithin")
-        (value isa Tuple && length(value) == 2 && value[1] isa Geometry) ||
-            throw(LookupError("'$lookup' takes (geometry, distance), e.g. (Point(1, 2), D(km = 5))"))
-        g, ps = geom_param(f, value[1])
-        d = meters(value[2])
-        a, bsql = is_geodetic(f) ? ("CAST($col AS geography)", "CAST($g AS geography)") : (col, g)
-        lookup == "dwithin" && return "ST_DWithin($a, $bsql, $d)", ps
+        (value isa Tuple && length(value) in (2, 3, 4)) || throw(ArgumentError("2, 3, or 4-element tuple required for '$lookup' lookup."))
+        length(value) == 4 && value[4] != "spheroid" &&
+            throw(ArgumentError("For 4-element tuples the last argument must be the 'spheroid' directive."))
+        spheroid = length(value) >= 3 && value[end] == "spheroid"
+        g, ps = geom_rhs(c, f, lookup, value[1])
+        _, srid, geog = geo_spec(f)
+        geodetic = is_geodetic(f)
+        d = value[2]
+        dsql, dps = if d isa Expression
+            compile_expr(c, d)
+        elseif d isa D
+            geo_literal(geodetic ? d.m : d.m / srid_info(srid)[2]), Any[]
+        elseif d isa Real
+            geo_literal(d), Any[]
+        else
+            throw(ArgumentError("'$lookup' takes a distance (D(km = 5), a number or an expression), got $(repr(d))"))
+        end
+        ps = vcat(ps, dps)
+        if lookup == "dwithin"
+            return (geodetic ? "ST_DWithin(CAST($col AS geography), CAST($g AS geography), $dsql)" : "ST_DWithin($col, $g, $dsql)"), ps
+        end
         op = Dict("distance_lt" => "<", "distance_lte" => "<=", "distance_gt" => ">", "distance_gte" => ">=")[lookup]
-        return "ST_Distance($a, $bsql) $op $d", ps
+        lhs = geog ? "ST_Distance($col, CAST($g AS geography))" :
+              geodetic ? (spheroid ? "ST_DistanceSpheroid($col, $g, $WGS84_SPHEROID)" : "ST_DistanceSphere($col, $g)") :
+              "ST_Distance($col, $g)"
+        return "$lhs $op $dsql", ps
     end
     nothing
 end
 
 # --- expressions --------------------------------------------------------------------------------------------
 
-"`Distance(:location, point)`: distance in metres (geodetic for SRID 4326/geography), else SRID units."
-struct Distance <: Expression
-    field::String
-    geom::Geometry
-end
-Distance(f, g::Geometry) = Distance(string(f), g)
-"`Area(:region)`: square metres for SRID 4326/geography, else SRID units."
-struct Area <: Expression
-    field::String
-end
-Area(f::Union{Symbol,AbstractString}) = Area(string(f))
-"`GeoLength(:route)`: length in metres for SRID 4326/geography."
-struct GeoLength <: Expression
-    field::String
-end
-GeoLength(f::Union{Symbol,AbstractString}) = GeoLength(string(f))
-
 function geo_field(c::SQLCompiler, name)
     col, f = resolve_path(c, c.base, c.T, name)
     (f === nothing || f.kind !== :geometry) && throw(LookupError("'$name' is not a geometry field"))
     col, f
 end
-function compile_expr(c::SQLCompiler, e::Distance)
-    col, f = geo_field(c, e.field)
-    g, ps = geom_param(f, e.geom)
-    (is_geodetic(f) ? "ST_Distance(CAST($col AS geography), CAST($g AS geography))" : "ST_Distance($col, $g)"), ps
-end
-compile_expr(c::SQLCompiler, e::Area) = ((col, f) = geo_field(c, e.field);
-    (is_geodetic(f) ? "ST_Area(CAST($col AS geography))" : "ST_Area($col)", Any[]))
-compile_expr(c::SQLCompiler, e::GeoLength) = ((col, f) = geo_field(c, e.field);
-    (is_geodetic(f) ? "ST_Length(CAST($col AS geography))" : "ST_Length($col)", Any[]))
-
 # --- GIS functions (Django's django.contrib.gis.db.models.functions) ------------------------------------------
 #
 #     annotate(objects(Country); c = Centroid(:mpoly), n = NumPoints(:mpoly), kml = AsKML(:mpoly))
@@ -566,6 +588,10 @@ function GeoFunc(name, func, geoms, params = Any[]; output::Symbol = :geometry, 
     end
     GeoFunc(String(name), String(func), gs, Any[params...], output, srid === nothing ? nothing : Int(srid))
 end
+# (what the query compiler asks of an expression: an aggregate inside groups the query, as Centroid(Collect(...)))
+contains_aggregate(e::GeoFunc) = any(contains_aggregate, e.geoms) || any(contains_aggregate, e.params)
+contains_window(e::GeoFunc) = any(contains_window, e.geoms) || any(contains_window, e.params)
+refs_columns(e::GeoFunc) = any(a -> a isa AbstractString || refs_columns(a), e.geoms) || any(refs_columns, e.params)
 Base.:(==)(a::GeoFunc, b::GeoFunc) = all(getfield(a, f) == getfield(b, f) for f in fieldnames(GeoFunc))
 Base.hash(e::GeoFunc, h::UInt) = hash((e.func, e.geoms, e.params, e.srid), h)
 
@@ -614,16 +640,36 @@ function compile_expr(c::SQLCompiler, e::GeoFunc)
     end
     sqls, ps = first.(parts), reduce(vcat, last.(parts); init = Any[])
     e.func == "<->" && return "($(sqls[1]) <-> $(sqls[2]))", ps
-    # a perimeter of a geodetic field in metres, as Area's and GeoLength's
-    if e.func == "ST_Perimeter" && e.geoms[1] isa Union{AbstractString,F}
-        col, f = geo_field(c, e.geoms[1] isa F ? e.geoms[1].name : e.geoms[1])
-        is_geodetic(f) && return "ST_Perimeter(CAST($col AS geography))", ps
+    # measurements: in metres when the first argument is geodetic (Django's sphere or spheroid; a geography's
+    # spheroid), else in its SRID's units
+    if startswith(e.func, "ST_Distance") || e.func in ("ST_Area", "ST_Length", "ST_Perimeter")
+        geodetic, geog = geo_arg_kind(c, e, e.geoms[1])
+        if startswith(e.func, "ST_Distance")
+            sph = e.func == "ST_Distance+spheroid" ? true : e.func == "ST_Distance-spheroid" ? false : nothing
+            geog && return "ST_Distance(CAST($(sqls[1]) AS geography), CAST($(sqls[2]) AS geography)$(sph === false ? ", false" : ""))", ps
+            geodetic && return (sph === true ? "ST_DistanceSpheroid($(sqls[1]), $(sqls[2]), $WGS84_SPHEROID)" :
+                                "ST_DistanceSphere($(sqls[1]), $(sqls[2]))"), ps
+            return "ST_Distance($(sqls[1]), $(sqls[2]))", ps
+        end
+        return (geodetic ? "$(e.func)(CAST($(sqls[1]) AS geography))" : "$(e.func)($(sqls[1]))"), ps
     end
     if e.func == "ST_AsGML"                                   # (the version comes first)
         return "ST_AsGML($(sqls[2]), $(sqls[1]), $(sqls[3]))", ps
     end
     e.func * "(" * join(sqls, ", ") * ")", ps
 end
+"Whether a geometric argument is geodetic (its measurements in metres), and whether it's a geography field."
+function geo_arg_kind(c::SQLCompiler, e::GeoFunc, a)
+    if a isa Union{AbstractString,F}
+        _, f = geo_field(c, a isa F ? a.name : a)
+        return (is_geodetic(f), geo_spec(f)[3])
+    end
+    s = geo_arg_srid(c, e, 1, a)
+    (s !== nothing && srid_is_geodetic(s), false)
+end
+"`Length(:path)` of a geometry field (expressions.jl's Length: the same function as the text one's, as Django's)."
+geometry_length_sql(f::Field, sql) = is_geodetic(f) ? "ST_Length(CAST($sql AS geography))" : "ST_Length($sql)"
+
 "Literal SQL among a GIS function's arguments."
 struct SQLFragment
     sql::String
@@ -701,7 +747,21 @@ NumDimensions(g) = GeoFunc("NumDimensions", "ST_NDims", [g]; output = :int)
 NumGeometries(g) = GeoFunc("NumGeometries", "ST_NumGeometries", [g]; output = :int)
 "`NumPoints(geom)`: the number of points."
 NumPoints(g) = GeoFunc("NumPoints", "ST_NPoints", [g]; output = :int)
-"`Perimeter(geom)`: in metres for SRID 4326 and geography, else in the SRID's units."
+"""
+    Distance(a, b; spheroid = nothing)
+
+The distance between two geometries (fields, geometries, GIS functions). In metres when the first is geodetic
+(SRID 4326 and other longitude/latitude systems: on a sphere, or on the WGS 84 spheroid with `spheroid = true`; a
+geography field: on the spheroid, on a sphere with `spheroid = false`), else in the first's SRID's units.
+A number, not Django's `D` (#306).
+"""
+Distance(a, b; spheroid::Union{Nothing,Bool} = nothing) =
+    GeoFunc("Distance", spheroid === nothing ? "ST_Distance" : spheroid ? "ST_Distance+spheroid" : "ST_Distance-spheroid", [a, b]; output = :float)
+"`Area(geom)`: in square metres when it's geodetic (SRID 4326, geography), else in its SRID's units (a number, #306)."
+Area(g) = GeoFunc("Area", "ST_Area", [g]; output = :float)
+"`GeoLength(geom)`, or `Length(:path)`: in metres when it's geodetic, else in its SRID's units (a number, #306)."
+GeoLength(g) = GeoFunc("Length", "ST_Length", [g]; output = :float)
+"`Perimeter(geom)`: in metres when it's geodetic (SRID 4326, geography), else in the SRID's units."
 Perimeter(g) = GeoFunc("Perimeter", "ST_Perimeter", [g]; output = :float)
 "`PointOnSurface(geom)`: a point certain to lie on it."
 PointOnSurface(g) = GeoFunc("PointOnSurface", "ST_PointOnSurface", [g])
@@ -747,6 +807,11 @@ MakeLine(x; filter = nothing) = Aggregate("ST_MakeLine", ref(x), false, filter)
 "`GeoUnion(:poly)`, one argument: the union of the geometries (an aggregate: Django's Union aggregate)."
 GeoUnion(x; filter = nothing) = Aggregate("ST_UnionAgg", ref(x), false, filter)
 
+function gis_aggregate_arg(c::SQLCompiler, a, sql)
+    a isa F || return sql
+    _, f = resolve_path(c, c.base, c.T, a.name)
+    f !== nothing && f.kind === :geometry && geo_spec(f)[3] ? "CAST($sql AS geometry)" : sql
+end
 function gis_aggregate_value(e::Aggregate, v)
     if e.func == "ST_Extent"
         m = match(r"BOX\(([-+0-9.eE]+) ([-+0-9.eE]+),([-+0-9.eE]+) ([-+0-9.eE]+)\)", string(v))

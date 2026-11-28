@@ -496,7 +496,7 @@ function from_db_extra(f::Field, v)
     k in RANGE_KINDS && return decode_range(f, v)
     k === :uuid && return v isa UUID ? v : UUID(string(v))
     k === :citext && return String(string(v))
-    k === :geometry && return decode_geometry(v)
+    k === :geometry && return decode_geometry(v; srid = geo_spec(f)[2])
     k in (:file, :image) && return file_from_db(f, v)
     NOTFOUND
 end

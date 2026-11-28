@@ -82,6 +82,10 @@ end
 "An expression that converts its own values (`convert_result(e, v)`; GIS functions give geometries, numbers, text)."
 abstract type ConvertedExpression <: Expression end
 function convert_result end
+"The SQL of `Length(:path)` of a geometry field (gis.jl)."
+function geometry_length_sql end
+"A GIS aggregate's argument SQL (gis.jl: a geography field cast to geometry, as Django's)."
+function gis_aggregate_arg end
 "A GIS aggregate's value (`Extent`'s box, `Collect`'s geometry; gis.jl)."
 function gis_aggregate_value end
 "Lower-case text."
@@ -977,7 +981,12 @@ function compile_expr(c::SQLCompiler, e::Func)
     n === :sqlfunction && return e.args[1] * "(" * join(sqls, ", ") * ")", ps
     n === :lower && return "LOWER($(sqls[1]))", ps
     n === :upper && return "UPPER($(sqls[1]))", ps
-    n === :length && return "$(length_function(b))($(sqls[1]))", ps
+    if n === :length
+        # of a geometry field: its length (Django's GIS Length), in metres when it's geodetic
+        of = output_field(c.T, e.args[1])
+        of !== nothing && of.kind === :geometry && return geometry_length_sql(of, sqls[1]), ps
+        return "$(length_function(b))($(sqls[1]))", ps
+    end
     n === :coalesce && return "COALESCE($(join(sqls, ", ")))", ps
     if n === :jsonobject                               # keys are literals (PostgreSQL can't type a parameter here)
         keys_ = [sql_string_literal(b, string(e.args[i])) for i in 1:2:length(e.args)]
@@ -1001,6 +1010,7 @@ function compile_expr(c::SQLCompiler, e::Func)
         of = output_field(c.T, e.args[1])
         of !== nothing && of.kind === :geometry && return "ST_Reverse($(sqls[1]))", ps
     end
+
     sql = function_sql(b, n, sqls, e)                 # functions.jl: Greatest, Replace, Round, Sqrt, ...
     sql === nothing || return sql, ps
     throw(ArgumentError("unknown function $n"))
@@ -1047,6 +1057,7 @@ function compile_expr(c::SQLCompiler, e::Aggregate)
         M !== nothing && multi_pk(M) && throw(NotSupportedError("COUNT(DISTINCT) doesn't support composite primary keys"))
     end
     arg, ps = e.arg === nothing ? ("*", Any[]) : compile_expr(c, e.arg)
+    startswith(e.func, "ST_") && (arg = gis_aggregate_arg(c, e.arg, arg))     # (a geography field as a geometry)
     filt, fps = "", Any[]
     if e.filter !== nothing
         cond, cps = expr_condition(c, e.filter)
