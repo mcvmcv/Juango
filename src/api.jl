@@ -232,14 +232,14 @@ end
 
 module GIS
 using ..Juango: GeometryField, PointField, LineStringField, PolygonField, MultiPointField,
-    MultiLineStringField, MultiPolygonField, Point, LineString, Polygon, MultiPoint, MultiLineString,
+    MultiLineStringField, MultiPolygonField, GeometryCollectionField, Point, LineString, Polygon, MultiPoint, MultiLineString,
     MultiPolygon, GeometryCollection, D, A, unit_attname, Distance, Area, GeoLength, AsGeoJSON, geojson, from_geojson, wkt, ewkt, parse_wkt, parse_wkb,
     coords, num_points, extent, GeoFunc, AsGML, AsKML, AsSVG, AsWKB, AsWKT, Azimuth, BoundingCircle, Centroid, ClosestPoint,
     Difference, Envelope, ForcePolygonCW, FromWKB, FromWKT, GeoHash, GeometryDistance, GeometryType, Intersection, IsEmpty,
     IsValid, LineLocatePoint, MakeValid, MemSize, NumDimensions, NumGeometries, NumPoints, Perimeter, PointOnSurface,
     Rotate, Scale, SnapToGrid, SymDifference, Transform, Translate, GeoUnion, Extent, Collect, MakeLine
 export GeometryField, PointField, LineStringField, PolygonField, MultiPointField,
-    MultiLineStringField, MultiPolygonField, Point, LineString, Polygon, MultiPoint, MultiLineString,
+    MultiLineStringField, MultiPolygonField, GeometryCollectionField, Point, LineString, Polygon, MultiPoint, MultiLineString,
     MultiPolygon, GeometryCollection, D, A, unit_attname, Distance, Area, GeoLength, AsGeoJSON, geojson, from_geojson, wkt, ewkt, parse_wkt, parse_wkb,
     coords, num_points, extent, GeoFunc, AsGML, AsKML, AsSVG, AsWKB, AsWKT, Azimuth, BoundingCircle, Centroid, ClosestPoint,
     Difference, Envelope, ForcePolygonCW, FromWKB, FromWKT, GeoHash, GeometryDistance, GeometryType, Intersection, IsEmpty,

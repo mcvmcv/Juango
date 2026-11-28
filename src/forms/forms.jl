@@ -677,7 +677,8 @@ function to_julia(fld::Field, raw)
         try
             return parse_geometry_input(fld, s), nothing
         catch e
-            return nothing, e isa ArgumentError && startswith(e.msg, "Expected") ? e.msg : gettext("Enter a valid geometry (WKT or GeoJSON).")
+            e isa GeometryFormError || rethrow()
+            return nothing, [field_message(fld, e.code, gettext(GEOMETRY_FORM_MESSAGES[e.code]))]
         end
     elseif k === :uuid             # (with or without hyphens, as Django's)
         v = tryparse(UUID, s)
@@ -757,9 +758,10 @@ The checks of a form field's converted value: required (a list must have an item
 checkbox must be checked, as Django's), then the field's own checks and validators.
 """
 function form_value_errors(fld::Field, v)
-    required() = [field_message(fld, "required", gettext("This field is required."))]
+    required() = [field_message(fld, "required", fld.kind === :geometry ? gettext("No geometry value provided.") : gettext("This field is required."))]
     fld.kind in MULTI_KINDS && return isempty(v) && !fld.blank ? required() : validator_errors(fld, v)
     fld.kind === :bool && v === false && !fld.blank && return required()
+    fld.kind === :geometry && v === nothing && !fld.blank && return required()      # ("No geometry value provided.")
     validate_field(fld, v isa Model ? v.id : v)
 end
 
@@ -1116,6 +1118,12 @@ function changed_fields(f::Form)
         # an hstore's initial value as the field reads it (JSON text, or a map whose values become text), as Django's
         fld.kind === :hstore && (init = init isa AbstractString ? first(to_julia(fld, init)) : init isa AbstractDict ? hstore_dict(init) : init)
         fld.kind === :m2m && init === nothing && (init = Any[])
+        # a geometry: the same within a millionth (the browser's copy may differ that much), as Django's
+        if fld.kind === :geometry && err === nothing && v !== nothing && init !== nothing
+            iv = init isa AbstractString ? first(to_julia(fld, init)) : init
+            (iv === nothing || !isapprox(v, iv; atol = 1e-6)) && push!(out, fld.name)
+            continue
+        end
         (err !== nothing || !isequal(normalized(v), normalized(init))) && push!(out, fld.name)
     end
     out

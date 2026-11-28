@@ -402,6 +402,7 @@ PolygonField(; kw...) = GeometryField(; geom_type = :POLYGON, kw...)
 MultiPointField(; kw...) = GeometryField(; geom_type = :MULTIPOINT, kw...)
 MultiLineStringField(; kw...) = GeometryField(; geom_type = :MULTILINESTRING, kw...)
 MultiPolygonField(; kw...) = GeometryField(; geom_type = :MULTIPOLYGON, kw...)
+GeometryCollectionField(; kw...) = GeometryField(; geom_type = :GEOMETRYCOLLECTION, kw...)
 
 geo_spec(f::Field) = f.related::Tuple{Symbol,Int,Bool}
 function geo_of(f::Field)
@@ -824,13 +825,50 @@ end
 
 # --- forms and the admin map widget --------------------------------------------------------------------------
 
-"Parse form input for a geometry field: WKT, EWKT or GeoJSON."
+"A geometry form field's error (Django's codes: invalid_geom, invalid_geom_type, transform_error)."
+struct GeometryFormError <: Exception
+    code::String
+end
+const GEOMETRY_FORM_MESSAGES = Dict("invalid_geom" => "Invalid geometry value.", "invalid_geom_type" => "Invalid geometry type.",
+    "transform_error" => "An error occurred when transforming the geometry to the SRID of the geometry form field.")
+"Whether GeoJSON names a coordinate reference system by URL (Django refuses it: SuspiciousOperation)."
+geojson_external_crs(d) = d isa AbstractDict && ((haskey(d, "crs") && d["crs"] isa AbstractDict && (get(d["crs"], "type", "") == "link" ||
+    (get(d["crs"], "properties", nothing) isa AbstractDict && haskey(d["crs"]["properties"], "href")))) ||
+    any(geojson_external_crs, (v for (k, v) in d if k != "crs")) ) || d isa AbstractVector && any(geojson_external_crs, d)
+
+"""
+Parse form input for a geometry field: WKT, EWKT, (E)WKB hex or GeoJSON, in the field's SRID unless the input says;
+of the field's type (`GeometryFormError("invalid_geom_type")`); transformed to the field's SRID by PostGIS when it's
+in another (as Django's GeometryField.clean).
+"""
 function parse_geometry_input(f::Field, s::AbstractString)
     t, srid, _ = geo_spec(f)
-    g = startswith(strip(s), "{") ? from_geojson(s) : parse_wkt(s; srid = srid)
-    (t === :GEOMETRY || geom_type(g) == string(t)) ||
-        throw(ArgumentError("Expected a $(lowercase(string(t))), got a $(lowercase(geom_type(g)))."))
+    s = strip(s)
+    g = try
+        if startswith(s, "{")
+            d = JSON.parse(s)
+            geojson_external_crs(d) && throw(BadRequest("GeoJSON input specified an external CRS."))
+            from_geojson(d)
+        elseif occursin(r"^[0-9A-Fa-f]+$", s)
+            parse_wkb(s; srid = srid)
+        else
+            parse_wkt(s; srid = srid)
+        end
+    catch e
+        e isa BadRequest && rethrow()
+        throw(GeometryFormError("invalid_geom"))
+    end
+    (t === :GEOMETRY || geom_type(g) == string(t)) || throw(GeometryFormError("invalid_geom_type"))
+    g.srid == srid || g.srid == 0 || (g = form_transform(g, srid))
     g
+end
+function form_transform(g::Geometry, srid)
+    backend() isa PostgresBackend || throw(GeometryFormError("transform_error"))
+    try
+        parse_wkt(only(collect(execute("SELECT ST_AsEWKT(ST_Transform(ST_GeomFromEWKT(?), $(Int(srid)))) AS r", Any[ewkt(g)])))[:r])
+    catch
+        throw(GeometryFormError("transform_error"))
+    end
 end
 
 const LEAFLET = "https://unpkg.com/leaflet@1.9.4/dist"
@@ -841,16 +879,21 @@ function geometry_widget(name, id, f::Field, val)
     g = val isa Geometry ? val : nothing
     text = g === nothing ? (val === nothing ? "" : string(val)) : ewkt(g)
     gjs = g === nothing ? "null" : JSON.json(geojson(g))
+    # where an empty map starts: the widget's default_lat, default_lon, default_zoom attrs (Django's OSMWidget's;
+    # formfield_overrides = Dict(:geometry => Dict(:widget => Widget(attrs = Dict("default_lat" => 55, ...)))))
+    wa = f.widget isa Widget ? f.widget.attrs : Dict{String,String}()
+    num(k, d) = (v = tryparse(Float64, get(wa, k, "")); v === nothing ? d : v)
+    lat, lon, zoom = num("default_lat", 0.0), num("default_lon", 0.0), num("default_zoom", 1.0)
     """<div class="geo-widget">
     <div id="$(id)_map" class="geo-map" style="height:300px;margin-bottom:6px;border:1px solid var(--border, #ccc)"
-         data-geom-type="$(t)" data-srid="$(srid)"></div>
+         data-geom-type="$(t)" data-srid="$(srid)" data-default-lat="$(fmtnum(lat))" data-default-lon="$(fmtnum(lon))" data-default-zoom="$(fmtnum(zoom))"></div>
     <textarea name="$name" id="$id" rows="3" cols="60" placeholder="WKT (POINT(lon lat)) or GeoJSON">$(escape_html(text))</textarea>
     <link rel="stylesheet" href="$LEAFLET/leaflet.css">
     <script src="$LEAFLET/leaflet.js"></script>
     <script>(function(){
       var ta = document.getElementById("$id"), el = document.getElementById("$(id)_map");
       if (!window.L) { el.style.display = "none"; return; }
-      var map = L.map(el).setView([0, 0], 1), layer = null;
+      var map = L.map(el).setView([+el.dataset.defaultLat, +el.dataset.defaultLon], +el.dataset.defaultZoom), layer = null;
       L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {maxZoom: 19, attribution: "&copy; OpenStreetMap"}).addTo(map);
       function show(gj) { if (layer) map.removeLayer(layer); if (!gj) return; layer = L.geoJSON(gj).addTo(map);
         var b = layer.getBounds(); if (b.isValid()) map.fitBounds(b, {maxZoom: 14}); }

@@ -909,7 +909,7 @@ end
     f = PointField()
     @test Juango.parse_geometry_input(f, "POINT(1 2)") == Point(1, 2)
     @test Juango.parse_geometry_input(f, "{\"type\": \"Point\", \"coordinates\": [1, 2]}") == Point(1, 2)
-    @test_throws ArgumentError Juango.parse_geometry_input(f, "LINESTRING(0 0, 1 1)")
+    @test_throws Juango.GeometryFormError Juango.parse_geometry_input(f, "LINESTRING(0 0, 1 1)")
 
     if !IS_POSTGRES
         @test_throws Juango.ImproperlyConfigured Juango.geometry_column_type(Juango.backend(), :POINT)
@@ -970,7 +970,7 @@ end
             fm = ModelForm(City; data = Dict("name" => "Nelson", "location" => "POINT(173.284 -41.2706)"))
             @test is_valid(fm) && save!(fm).location == Point(173.284, -41.2706)
             bad = ModelForm(City; data = Dict("name" => "x", "location" => "LINESTRING(0 0, 1 1)"))
-            @test !is_valid(bad) && occursin("Expected a point", only(bad.errors[:location]))
+            @test !is_valid(bad) && only(bad.errors[:location]) == "Invalid geometry type."
             html = string(as_p(ModelForm(City; instance = wlg)))
             @test occursin("leaflet", html) && occursin("geo-map", html) && occursin("SRID=4326;POINT(174.7762 -41.2865)", html)
         finally

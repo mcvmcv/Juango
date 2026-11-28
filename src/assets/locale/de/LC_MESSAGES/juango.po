@@ -96,8 +96,14 @@ msgid "Enter a comma-separated list of valid values."
 msgstr "Bitte eine kommagetrennte Liste gültiger Werte eingeben."
 
 #: forms.jl
-msgid "Enter a valid geometry (WKT or GeoJSON)."
-msgstr "Bitte eine gültige Geometrie (WKT oder GeoJSON) eingeben."
+msgid "Invalid geometry value."
+msgstr "Ungültiger geometrischer Wert."
+
+msgid "Invalid geometry type."
+msgstr "Ungültiger geometrischer Typ."
+
+msgid "No geometry value provided."
+msgstr "Kein geometrischer Wert gegeben."
 
 #: forms.jl
 msgid "Enter a valid UUID."

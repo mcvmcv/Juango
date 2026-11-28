@@ -437,8 +437,9 @@ model_name_for(table) = join(uppercasefirst.(split(replace(table, r"[^A-Za-z0-9]
 const PG_RANGE_FIELDS = Dict("int4range" => "IntegerRangeField", "int8range" => "BigIntegerRangeField", "numrange" => "DecimalRangeField",
                              "tstzrange" => "DateTimeRangeField", "tsrange" => "DateTimeRangeField", "daterange" => "DateRangeField")
 "The field definition for an introspected column (and a note when the type is a guess)."
-function field_for(col)
+function field_for(col; table = nothing)
     t = col.type
+    t in ("geometry", "geography") && table !== nothing && return geometry_field_for(table, col.name, t == "geography")
     m = match(r"^(?:character varying|varchar|nvarchar|char|character)\s*(?:\((\d+)\))?", t)
     m !== nothing && return "CharField(max_length = $(something(col.max_length, m[1] === nothing ? nothing : parse(Int, m[1]), 255)))", ""
     occursin(r"^tinyint\(1\)|^bool", t) && return "BooleanField()", ""
@@ -467,6 +468,24 @@ function field_for(col)
     occursin(r"^(bytea|blob|longblob|mediumblob|tinyblob|binary|varbinary)", t) && return "BinaryField()", ""
     t == "inet" && return "GenericIPAddressField()", ""
     "TextField()", "  # TODO: check the type (was $(t))"
+end
+
+"""
+A PostGIS column's field, from geometry_columns / geography_columns (Django's PostGIS introspection):
+`PointField()`, `PolygonField(srid = 2276)`, `PointField(geography = true)`; `GeometryField()` when the type isn't known.
+"""
+function geometry_field_for(table, column, geography::Bool)
+    view, col = geography ? ("geography_columns", "f_geography_column") : ("geometry_columns", "f_geometry_column")
+    rows = collect(execute("SELECT type, srid FROM $view WHERE f_table_schema = current_schema() AND f_table_name = ? AND $col = ?", Any[table, column]))
+    isempty(rows) && return "GeometryField()", ""
+    typ, srid = uppercase(String(rows[1][:type])), Int(rows[1][:srid])
+    cls = Dict("POINT" => "PointField", "LINESTRING" => "LineStringField", "POLYGON" => "PolygonField", "MULTIPOINT" => "MultiPointField",
+               "MULTILINESTRING" => "MultiLineStringField", "MULTIPOLYGON" => "MultiPolygonField",
+               "GEOMETRYCOLLECTION" => "GeometryCollectionField")
+    opts = String[]
+    srid == 4326 || srid == 0 || push!(opts, "srid = $srid")
+    geography && push!(opts, "geography = true")
+    get(cls, typ, "GeometryField") * "(" * join(opts, ", ") * ")", ""
 end
 
 const JULIA_KEYWORDS = Set(["baremodule", "begin", "break", "catch", "const", "continue", "do", "else", "elseif", "end", "export",
@@ -557,7 +576,7 @@ function inspectdb(tables = nothing; app_label = "project", table_name_filter = 
                 println(io, "    ", name, " = ", kind, "(", target, "; on_delete = :DO_NOTHING",
                         isempty(opts) ? "" : ", " * join(opts, ", "), ")", isempty(notes) ? "" : "  # " * join(notes, " "))
             else
-                def, note = field_for(c)
+                def, note = field_for(c; table = t)
                 c.pk && length(pkcols) == 1 && push!(opts, "primary_key = true")
                 c.name in unique_cols && push!(opts, "unique = true")
                 c.null && push!(opts, "blank = true", "null = true")
@@ -578,5 +597,9 @@ function inspectdb(tables = nothing; app_label = "project", table_name_filter = 
         println(io, "    Meta(", meta, ")")
         println(io, "end\n")
     end
-    String(take!(io))
+    out = String(take!(io))
+    # (GIS fields: Juango.GIS's)
+    occursin(r"= (Geometry|Point|LineString|Polygon|MultiPoint|MultiLineString|MultiPolygon|GeometryCollection)Field\(", out) &&
+        (out = replace(out, "using Juango\n" => "using Juango, Juango.GIS\n"; count = 1))
+    out
 end
