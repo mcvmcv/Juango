@@ -55,7 +55,12 @@ Django's InlineModelAdmin options too:
 - `classes = ["collapse"]`: CSS classes on the inline's group;
 - `has_view_permission`, `has_add_permission`, `has_change_permission`,
   `has_delete_permission = (req, obj) -> Bool` (`obj` is the parent, or `nothing` on the add page);
-  by default the model permissions. Without change permission the objects are shown read-only.
+  by default the model permissions. Without change permission the objects are shown read-only;
+- `fieldsets = ["" => [:a, :b], "More" => [:c]]` (or the `get_fieldsets = (req, obj) -> ...` hook): the fields, and a
+  stacked inline's groups;
+- `form = (; data, instance, prefix, initial) -> form`: each row's form (as `modelformset_factory`'s), and
+  `get_formset = (req, obj; options...) -> formset factory` (e.g. `inlineformset_factory(Parent, Model; options..., widgets)`);
+- `raw_id_fields`, `autocomplete_fields`: foreign keys as an id box or a search box, as the change form's.
 """
 struct InlineAdmin
     model::Any
@@ -72,7 +77,8 @@ end
 admin_ordering_terms(xs) = Any[x isa Union{AbstractString,Symbol} ? string(x) : x for x in xs]
 const INLINE_OPTIONS = (:exclude, :readonly_fields, :get_exclude, :get_readonly_fields, :min_num, :get_extra, :get_min_num, :get_max_num,
                         :verbose_name, :verbose_name_plural, :show_change_link, :classes, :view_on_site,
-                        :has_view_permission, :has_add_permission, :has_change_permission, :has_delete_permission, :generic)
+                        :has_view_permission, :has_add_permission, :has_change_permission, :has_delete_permission, :generic,
+                        :fieldsets, :get_fieldsets, :form, :get_formset, :raw_id_fields, :autocomplete_fields)
 Base.@nospecializeinfer function TabularInline(@nospecialize(T); fields = nothing, extra = 1, can_delete = true, fk = nothing, max_num = 1000,
                                                ordering = (), style = :tabular, kw...)
     for k in keys(kw)
@@ -81,6 +87,10 @@ Base.@nospecializeinfer function TabularInline(@nospecialize(T); fields = nothin
     o = Dict{Symbol,Any}(kw)
     haskey(o, :exclude) && (o[:exclude] = Symbol.(collect(o[:exclude])))
     haskey(o, :readonly_fields) && (o[:readonly_fields] = Symbol.(collect(o[:readonly_fields])))
+    for k in (:raw_id_fields, :autocomplete_fields)
+        haskey(o, k) && (o[k] = Symbol.(collect(o[k])))
+    end
+    haskey(o, :fieldsets) && (o[:fieldsets] = inline_fieldset_pairs(o[:fieldsets]))
     InlineAdmin(T, fields === nothing ? nothing : Symbol.(fields), extra, can_delete, fk === nothing ? nothing : Symbol(fk), max_num, Symbol(style),
                 admin_ordering_terms(ordering), o)
 end
@@ -96,6 +106,12 @@ GenericTabularInline(T; ct_field = :content_type, ct_fk_field = :object_id, kw..
     TabularInline(T; kw..., generic = (Symbol(ct_field), Symbol(ct_fk_field)))
 GenericStackedInline(T; kw...) = GenericTabularInline(T; kw..., style = :stacked)
 inline_option(ia::InlineAdmin, k::Symbol, default = nothing) = get(ia.options, k, default)
+inline_fieldset_pairs(xs) = Pair{String,Vector{Symbol}}[string(something(k, "")) => Symbol.(collect(v)) for (k, v) in xs]
+"The inline's fieldsets (Django's InlineModelAdmin.get_fieldsets): the `get_fieldsets` hook's, else `fieldsets`; empty: none."
+Base.@nospecializeinfer inline_fieldsets(ia::InlineAdmin, req, @nospecialize(obj)) =
+    (h = inline_option(ia, :get_fieldsets); h === nothing ? inline_option(ia, :fieldsets, Pair{String,Vector{Symbol}}[]) : inline_fieldset_pairs(h(req, obj)))
+"The inline's fields: the fieldsets' when it has fieldsets (Django's get_formset, flatten_fieldsets), else `fields` (`nothing`: the model's)."
+inline_base_fields(ia::InlineAdmin, fsets) = isempty(fsets) ? ia.fields : unique!(reduce(vcat, (last(x) for x in fsets); init = Symbol[]))
 "The inline's verbose names, as Django's: its own, else the model's (a `verbose_name` alone gets an \"s\")."
 function inline_verbose_names(ia::InlineAdmin)
     m = modelmeta(ia.model)
@@ -1614,11 +1630,17 @@ Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecial
         ro = inline_readonly(ia, req, obj)
         ex = inline_exclude(ia, req, obj)
         editable(f) = !(f in ro) && !(f in ex)
-        fields = ia.fields === nothing ? nothing : filter(editable, ia.fields)
+        fsets = inline_fieldsets(ia, req, obj)
+        base = inline_base_fields(ia, fsets)
+        fields = base === nothing ? nothing : filter(editable, base)
         gen = inline_option(ia, :generic)
-        factory(; kw...) = gen === nothing ? inlineformset_factory(ma.model, M; fk = ia.fk, kw...) :
-                                           Juango.generic_inlineformset_factory(M; ct_field = gen[1], fk_field = gen[2], kw...)
-        FS = factory(; fields = fields, exclude = fields === nothing ? vcat(ex, ro) : Symbol[],
+        # (the inline's form, raw_id_fields and autocomplete_fields; get_formset = (req, obj; options...) -> formset, as Django's)
+        callback = inline_formfield_callback(ia, req)
+        factory(; kw...) = (h = inline_option(ia, :get_formset); h !== nothing ? h(req, obj; kw...) :
+                            gen === nothing ? inlineformset_factory(ma.model, M; fk = ia.fk, kw...) :
+                            Juango.generic_inlineformset_factory(M; ct_field = gen[1], fk_field = gen[2], kw...))
+        FS = factory(; fields = fields, exclude = fields === nothing ? vcat(ex, ro) : Symbol[], form = inline_option(ia, :form),
+                       formfield_callback = callback,
                                    extra = can_add ? inline_num(ia, :extra, ia.extra, req, obj) : 0,
                                    min_num = can_add ? inline_num(ia, :min_num, inline_option(ia, :min_num, 0), req, obj) : 0,
                                    can_delete = can_change && ia.can_delete && inline_can(req, ia, :delete, obj; parent = ma.model),
@@ -1631,27 +1653,51 @@ Base.@nospecializeinfer function inline_formsets(ma::ModelAdmin, req, @nospecial
         pfx = prefixes[p0] == 1 ? p0 : "$p0-$(prefixes[p0])"
         if can_change
             fs = isempty(ia.ordering) ? FS(data; instance = obj, prefix = pfx, save_as_new) : FS(data; instance = obj, queryset = qs, prefix = pfx, save_as_new)
-            push!(out, (ia, fs, (readonly = ro, existing = Any[], shown = Symbol[], can_change = true, can_add = can_add)))
+            push!(out, (ia, fs, (readonly = ro, existing = Any[], shown = Symbol[], can_change = true, can_add = can_add, fieldsets = fsets)))
         else
             # (no change permission: the objects are shown as values, outside the formset, so a POST can't change
             # them; the formset has just the new ones the user may add, as Django's)
             fs = FS(data; instance = obj, queryset = Juango.none(qs), prefix = pfx)
             existing = obj === nothing ? Any[] : gen !== nothing ? collect(filter(qs, Q(gen[1] => Juango.get_for_model(typeof(obj))), Q(gen[2] => obj.pk))) :
                        collect(filter(qs, Q(attname(fs.fk) => Juango.target_value(fs.fk, obj))))
-            push!(out, (ia, fs, (readonly = ro, existing = existing, shown = inline_shown_fields(ia, fs, ex), can_change = false, can_add = can_add)))
+            push!(out, (ia, fs, (readonly = ro, existing = existing, shown = inline_shown_fields(ia, fs, ex; fields = base), can_change = false,
+                                can_add = can_add, fieldsets = fsets)))
         end
     end
     out
 end
 
-"The fields a view-only inline shows: its `fields`, else the model's editable ones but the key to the parent."
-Base.@nospecializeinfer function inline_shown_fields(ia::InlineAdmin, fs, ex)
-    ia.fields !== nothing && return filter(!in(ex), ia.fields)
+"The fields a view-only inline shows: its fieldsets' or `fields`, else the model's editable ones but the key to the parent."
+Base.@nospecializeinfer function inline_shown_fields(ia::InlineAdmin, fs, ex; fields = ia.fields)
+    fields !== nothing && return filter(!in(ex), fields)
     skip = fs.fk !== nothing ? (fs.fk.name,) : something(inline_option(ia, :generic), ())
     [f.name for f in Juango.all_fields(ia.model) if f.editable && !(f.name in skip) && !(f.name in ex)]
 end
 
-function inline_context(req, ia::InlineAdmin, fs, info = (readonly = Symbol[], existing = Any[], shown = Symbol[], can_change = true, can_add = true))
+"""
+The inline's form fields as a ModelForm's `formfield_callback`: `raw_id_fields` as an id box with its lookup link,
+`autocomplete_fields` as a search box (as the change form's, Django's InlineModelAdmin.formfield_for_dbfield). `nothing`
+when the inline has neither.
+"""
+function inline_formfield_callback(ia::InlineAdmin, req)
+    raw = inline_option(ia, :raw_id_fields, Symbol[])
+    auto = inline_option(ia, :autocomplete_fields, Symbol[])
+    isempty(raw) && isempty(auto) && return nothing
+    function (f)
+        if f.kind in (:fk, :o2o, :m2m)
+            if f.name in raw
+                f.widget = :raw_id
+                wrap_widget!(f, raw_id_links(req, f))
+            elseif f.name in auto
+                f.widget = :autocomplete
+            end
+        end
+        f
+    end
+end
+
+function inline_context(req, ia::InlineAdmin, fs, info = (readonly = Symbol[], existing = Any[], shown = Symbol[], can_change = true, can_add = true,
+                                                          fieldsets = Pair{String,Vector{Symbol}}[]))
     forms = Juango.build_forms!(fs)
     ef = Juango.empty_form(fs)
     names = [f.name for f in ef.fields if f.name !== :id]
@@ -1665,6 +1711,12 @@ function inline_context(req, ia::InlineAdmin, fs, info = (readonly = Symbol[], e
     headers = Any[n === :DELETE ? "Delete?" : label(only(filter(f -> f.name === n, ef.fields))) for n in names if n !== :DELETE]
     append!(headers, [rofield(n) for n in ro])
     :DELETE in names && push!(headers, "Delete?")
+    # (a stacked inline's fieldsets: each form's rows grouped under the fieldsets' names, read-only fields among them)
+    fsets = get(info, :fieldsets, Pair{String,Vector{Symbol}}[])
+    groups(f) = isempty(fsets) ? nothing :
+        [Dict{String,Any}("name" => name, "rows" => [n in ro ? Dict{String,Any}("readonly" => Dict("label" => rofield(n), "value" => rovalue(f.instance, n))) :
+                                                     Dict{String,Any}("field" => f[n]) for n in ns if n in ro || n in names])
+         for (name, ns) in fsets]
     Dict{String,Any}("style" => string(ia.style), "verbose_name_plural" => vnp, "verbose_name" => vn,
                      "classes" => join(string.(inline_option(ia, :classes, String[])), " "),
                      "management_form" => management_form(fs), "non_form_errors" => fs.non_form_errors,
@@ -1676,6 +1728,7 @@ function inline_context(req, ia::InlineAdmin, fs, info = (readonly = Symbol[], e
                                                   "view_on_site" => f.instance === nothing || f.instance.pk === nothing ? nothing :
                                                                     view_on_site_link(inline_option(ia, :view_on_site, true), f.instance),
                                                   "fields" => [f[n] for n in names if n !== :DELETE],
+                                                  "fieldsets" => groups(f),
                                                   "readonly" => [Dict("label" => rofield(n), "value" => rovalue(f.instance, n)) for n in ro],
                                                   "delete" => :DELETE in names ? f[:DELETE] : nothing) for f in forms],
                      "can_add" => info.can_add,

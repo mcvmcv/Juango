@@ -1,6 +1,7 @@
 # Django's admin_inlines tests, ported (#227, part): tests/admin_inlines (TestInlinePermissions,
 # TestReadOnlyChangeViewInlinePermissions, TestVerboseNameInlineForms, and TestInline's options:
-# can_delete, readonly fields, min_num/get_extra, show_change_link).
+# can_delete, readonly fields, min_num/get_extra, show_change_link, fieldsets, raw id and autocomplete fields, the inline's
+# form and get_formset).
 # julia --project=test test/django_admin_inlines.jl   (see setup.jl)
 #
 # Django's tests read the change form's HTML (and the inline admin formset in the context); these read the
@@ -38,8 +39,14 @@ end
     Meta(table = "dai_question")
 end
 Base.show(io::IO, q::DaiQuestion) = print(io, q.text)
+@model struct DaiCredit
+    note = CharField(max_length = 40, blank = true)
+    holder = ForeignKey(DaiHolder2, on_delete = :CASCADE)
+    book = ForeignKey(DaiBook, on_delete = :CASCADE)
+    Meta(table = "dai_credit")
+end
 redirect_stdout(devnull) do
-    ms = [DaiBook, DaiAuthor, through(DaiAuthor, :books), DaiHolder2, DaiInner2, DaiPoll, DaiQuestion]
+    ms = [DaiBook, DaiAuthor, through(DaiAuthor, :books), DaiHolder2, DaiInner2, DaiPoll, DaiQuestion, DaiCredit]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
     Juango.update_permissions!(ms)
 end
@@ -209,10 +216,47 @@ end
             reg()
             @test occursin("<h2>Dai inner2s</h2>", text(get(c, url)))
             @test_throws ArgumentError Admin.TabularInline(DaiInner2; no_such_option = 1)
+            # fieldsets: a stacked inline's groups, read-only fields among them; the fields they leave out aren't on the form
+            Admin.register!(DaiHolder2; inlines = [Admin.StackedInline(DaiInner2; fieldsets = ["Numbers" => [:dummy]])])
+            t = text(get(c, url))
+            @test occursin("<h3>Numbers</h3>", t) && occursin("name=\"daiinner2_set-0-dummy\"", t)
+            Admin.register!(DaiHolder2; inlines = [Admin.StackedInline(DaiInner2; get_fieldsets = (req, obj) -> [nothing => [:dummy]],
+                                                                       readonly_fields = [:dummy])])
+            t = text(get(c, url))
+            @test occursin("<div class=\"readonly\">42</div>", t) && !occursin("<h3>", t)
+            book = create(DaiBook; name = "Ulysses")
+            create(DaiCredit; note = "first", holder = holder, book = book)
+            creg(; kw...) = Admin.register!(DaiHolder2; inlines = [Admin.TabularInline(DaiCredit; kw...)])
+            creg(; fieldsets = ["" => [:book]])
+            t = text(get(c, url))
+            @test occursin("daicredit_set-0-book", t) && !occursin("daicredit_set-0-note", t)
+            # raw_id_fields: an id box with the object's name, and the lookup link when the model is in the admin
+            Admin.register!(DaiBook)
+            creg(; raw_id_fields = [:book])
+            t = text(get(c, url))
+            @test occursin(Regex("<input type=\"text\" name=\"daicredit_set-0-book\"[^>]*value=\"$(book.id)\""), t)
+            @test occursin("/admin/project/daibook/$(book.id)/change/\">Ulysses</a></strong>", t) && occursin("/admin/project/daibook/?_to_field=id", t)
+            # autocomplete_fields: a search box holding the current choice
+            creg(; autocomplete_fields = [:book])
+            t = text(get(c, url))
+            @test occursin(Regex("<select name=\"daicredit_set-0-book\"[^>]*data-autocomplete=\"project/daibook\""), t)
+            Admin.unregister!(DaiBook)
+            # form, get_formset: the rows' own form, the formset the hook makes
+            creg(; form = (; data, instance, prefix, initial) -> ModelForm(DaiCredit; data, instance, prefix, initial, fields = [:note, :book],
+                                                                           labels = Dict(:note => "Remark")))
+            @test occursin(">Remark</th>", text(get(c, url)))
+            creg(; get_formset = (req, obj; kw...) -> Juango.inlineformset_factory(DaiHolder2, DaiCredit; kw..., labels = Dict(:note => "Memo")))
+            @test occursin(">Memo</th>", text(get(c, url)))
+            # (a post through the custom form saves)
+            creg(; form = (; data, instance, prefix, initial) -> ModelForm(DaiCredit; data, instance, prefix, initial, fields = [:note, :book]))
+            cr = only(objects(DaiCredit))
+            r = post(c, url, Dict("dummy" => "13", "daicredit_set-TOTAL_FORMS" => "1", "daicredit_set-INITIAL_FORMS" => "1",
+                                  "daicredit_set-0-id" => string(cr.id), "daicredit_set-0-note" => "changed", "daicredit_set-0-book" => string(book.id)))
+            @test r.status == 302 && get(DaiCredit; id = cr.id).note == "changed"
         finally
             Admin.unregister!(DaiHolder2)
         end
-        # not translated: the custom ModelForm and formset classes, inline media, the JavaScript (Playwright) tests,
+        # not translated: inline media, the JavaScript (Playwright) tests,
         # the CSS classes and ids of Django's own templates, two inlines of the same model on one page
     end
 end

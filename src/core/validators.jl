@@ -391,8 +391,9 @@ function validator_errors(f, x)
             e
         end
         if r isa ValidationError
-            for (_, ms) in r.errors, m in ms
-                push!(errs, r.code === nothing ? m : field_message(f, r.code, m))
+            # (each message by its own code, nested ones too, with its params, as Django's run_validators)
+            for d in error_details(r)
+                push!(errs, d.code === nothing ? error_text(d) : field_message(f, d.code, d.message, d.params))
             end
         elseif r isa AbstractString
             push!(errs, r)

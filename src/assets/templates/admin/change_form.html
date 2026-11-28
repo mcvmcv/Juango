@@ -82,8 +82,11 @@
     {% for f in inline.forms %}
     <fieldset class="inline-related"><legend>{{ inline.verbose_name|capfirst }}: {% if f.title %}{{ f.title }}{% if f.change_link %} <a href="{{ f.change_link }}" class="inlinechangelink">{% translate "Change" %}</a>{% endif %}{% if f.view_on_site %} <a href="{{ f.view_on_site }}" class="inlineviewlink">{% translate "View on site" %}</a>{% endif %}{% else %}{% translate "New" %}{% endif %}</legend>
       {{ f.hidden }}
+      {% if f.fieldsets %}{% for g in f.fieldsets %}<fieldset class="module">{% if g.name %}<h3>{{ g.name }}</h3>{% endif %}
+      {% for r in g.rows %}{% if r.field %}{% with bf=r.field %}<div class="form-row field-{{ bf.name }}">{{ bf.label_tag }}<div>{% if bf.errors %}<ul class="errorlist">{% for e in bf.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}{{ bf }}</div></div>{% endwith %}{% else %}<div class="form-row"><label>{{ r.readonly.label }}:</label><div class="readonly">{{ r.readonly.value }}</div></div>{% endif %}{% endfor %}
+      </fieldset>{% endfor %}{% else %}
       {% for bf in f.fields %}<div class="form-row field-{{ bf.name }}">{{ bf.label_tag }}<div>{% if bf.errors %}<ul class="errorlist">{% for e in bf.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}{{ bf }}</div></div>{% endfor %}
-      {% for r in f.readonly %}<div class="form-row"><label>{{ r.label }}:</label><div class="readonly">{{ r.value }}</div></div>{% endfor %}
+      {% for r in f.readonly %}<div class="form-row"><label>{{ r.label }}:</label><div class="readonly">{{ r.value }}</div></div>{% endfor %}{% endif %}
       {% if f.delete %}<div class="form-row delete">{{ f.delete.label_tag }}<div>{{ f.delete }}</div></div>{% endif %}
     </fieldset>
     {% endfor %}

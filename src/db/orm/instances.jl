@@ -759,30 +759,62 @@ end
 Raised by validation hooks such as a model's `Juango.clean` (and accepted from form `clean`
 functions). A message on its own belongs to the whole object (`:__all__`); a Dict names fields.
 From a validator, `code` lets a field's `error_messages` replace the message, and `params` fill
-in its `%(name)s` placeholders.
+in its `%(name)s` placeholders. Each message keeps its template, code and params (`e.details`, Django's
+`error_list`/`error_dict`), nested ones too: a field's `error_messages` replace them by code, and two errors
+are equal when those are, in any order.
 """
 struct ValidationError <: Exception
     errors::Dict{Symbol,Vector{String}}
     code::Union{Nothing,String}       # for one message: a field's error_messages can replace it by this code
+    details::Dict{Symbol,Vector{Any}} # field => ErrorDetail per message (template, code, params), as Django's error_list
 end
-ValidationError(errors::Dict{Symbol,Vector{String}}) = ValidationError(errors, nothing)
-ValidationError(msg::AbstractString; code = nothing, params = nothing) =
-    ValidationError(Dict(:__all__ => [params === nothing ? String(msg) : interpolate(msg, params)]), code === nothing ? nothing : string(code))
+"One message of a ValidationError as Django keeps it: the template, its code and its params."
+struct ErrorDetail
+    message::String
+    code::Union{Nothing,String}
+    params::Any
+end
+detail_key(d::ErrorDetail) = (d.message, something(d.code, ""), params_key(d.params))
+Base.:(==)(a::ErrorDetail, b::ErrorDetail) = detail_key(a) == detail_key(b)
+Base.hash(d::ErrorDetail, h::UInt) = hash(detail_key(d), hash(:ErrorDetail, h))
+error_text(d::ErrorDetail) = d.params === nothing ? d.message : interpolate(d.message, d.params)
+function ValidationError(errors::Dict{Symbol,Vector{String}}, code = nothing)
+    c = code === nothing ? nothing : string(code)
+    ValidationError(errors, c, Dict{Symbol,Vector{Any}}(k => Any[ErrorDetail(m, c, nothing) for m in v] for (k, v) in errors))
+end
+"A ValidationError made of details: field => ErrorDetails."
+function error_from_details(details::Dict{Symbol,Vector{Any}}; code = nothing)
+    ValidationError(Dict{Symbol,Vector{String}}(k => String[error_text(d) for d in v] for (k, v) in details), code, details)
+end
+function ValidationError(msg::AbstractString; code = nothing, params = nothing)
+    c = code === nothing ? nothing : string(code)
+    error_from_details(Dict{Symbol,Vector{Any}}(:__all__ => Any[ErrorDetail(String(msg), c, params)]); code = c)
+end
+"A ValidationError's messages as details, all of its fields' together (Django's error_list of an error_dict)."
+error_details(e::ValidationError) = Any[d for k in sort!(collect(keys(e.details))) for d in validation_details(e)[k]]
+"The details of `e`, kept in step with its messages (a message added to `e.errors` afterwards has no template of its own)."
+function validation_details(e::ValidationError)
+    ds, es = getfield(e, :details), getfield(e, :errors)
+    Dict{Symbol,Vector{Any}}(k => (haskey(ds, k) && String[error_text(d) for d in ds[k]] == v ? ds[k] : Any[ErrorDetail(m, getfield(e, :code), nothing) for m in v])
+                             for (k, v) in es)
+end
 # (a dict in the list adds its messages, as Django's)
-ValidationError(msgs::AbstractVector) =
-    ValidationError(Dict(:__all__ => String[s for m in msgs for s in (m isa AbstractDict ? ValidationError(m).messages :
-                                                                      m isa ValidationError ? m.messages : (string(m),))]))
+item_details(m) = m isa ValidationError ? error_details(m) : m isa AbstractDict ? error_details(ValidationError(m)) : Any[ErrorDetail(string(m), nothing, nothing)]
+ValidationError(msgs::AbstractVector) = error_from_details(Dict{Symbol,Vector{Any}}(:__all__ => Any[d for m in msgs for d in item_details(m)]))
 # (a field's messages: a string, a ValidationError, or a list of them, as Django's)
 validation_messages(v) = v isa AbstractString ? String[String(v)] : v isa ValidationError ? v.messages :
                          String[m for x in v for m in (x isa ValidationError ? x.messages : (string(x),))]
-ValidationError(d::AbstractDict) =
-    ValidationError(Dict{Symbol,Vector{String}}(Symbol(k) => validation_messages(v) for (k, v) in d))
+field_details(v) = v isa AbstractString || v isa ValidationError ? item_details(v) : Any[d for x in v for d in item_details(x)]
+ValidationError(d::AbstractDict) = error_from_details(Dict{Symbol,Vector{Any}}(Symbol(k) => field_details(v) for (k, v) in d))
 # e.messages: all the messages, as Django's ValidationError.messages
 Base.getproperty(e::ValidationError, s::Symbol) =
-    s === :messages ? String[m for k in sort!(collect(keys(getfield(e, :errors)))) for m in getfield(e, :errors)[k]] : getfield(e, s)
-Base.propertynames(::ValidationError) = (:errors, :code, :messages)
-# (equal when their code and each field's messages are, in any order, as Django's: #311 for the params and nested codes)
-validation_key(e::ValidationError) = (getfield(e, :code), sort!([k => sort(v) for (k, v) in getfield(e, :errors) if !isempty(v)]; by = first))
+    s === :messages ? String[m for k in sort!(collect(keys(getfield(e, :errors)))) for m in getfield(e, :errors)[k]] :
+    s === :details ? validation_details(e) : getfield(e, s)
+Base.propertynames(::ValidationError) = (:errors, :code, :messages, :details)
+# (equal when each field's messages are, with their templates, codes and params, in any order, as Django's)
+params_key(p) = p === nothing ? "" : p isa AbstractDict ? repr(sort!([string(k) => v for (k, v) in p]; by = first)) : repr(p)
+validation_key(e::ValidationError) =
+    sort!([k => sort!([detail_key(d) for d in v]) for (k, v) in validation_details(e) if !isempty(v)]; by = first)
 Base.:(==)(a::ValidationError, b::ValidationError) = validation_key(a) == validation_key(b)
 Base.hash(e::ValidationError, h::UInt) = hash(validation_key(e), hash(:ValidationError, h))
 Base.showerror(io::IO, e::ValidationError) =
