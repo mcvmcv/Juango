@@ -104,6 +104,11 @@ function register_command!(handle::Function, name::AbstractString; help::Abstrac
 end
 
 argerror(msg) = throw(CommandError("Error: " * msg))
+choice_error(label, v, choices) = argerror("argument $label: invalid choice: $(repr(v)) (choose from $(join(repr.(choices), ", ")))")
+"The DATABASES aliases, \"default\" first: the choices of every command's --database (Django's)."
+database_aliases() = sort!(collect(keys(database_settings())); by = a -> (a != "default", a))
+"Refuse a --database that isn't a DATABASES alias, with argparse's message (#303)."
+check_database_option(v) = (v === nothing || v in database_aliases() || choice_error("--database", v, database_aliases()); v)
 arg_label(a::CommandArg) = a.positional ? string(a.dest) : join(a.names, "/")
 
 function convert_value(a::CommandArg, v)
@@ -121,8 +126,9 @@ function convert_value(a::CommandArg, v)
             argerror("argument $(arg_label(a)): invalid $(t) value: '$v'")
         end
     end
-    a.choices === nothing || x in a.choices ||
-        argerror("argument $(arg_label(a)): invalid choice: $(repr(v isa AbstractString ? v : string(v))) (choose from $(join(repr.(a.choices), ", ")))")
+    # (choices may be a function, called when parsing: DATABASES' aliases for --database)
+    ch = a.choices isa Function ? a.choices() : a.choices
+    ch === nothing || x in ch || choice_error(arg_label(a), v isa AbstractString ? v : string(v), ch)
     x
 end
 

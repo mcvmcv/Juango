@@ -517,6 +517,8 @@ function json_key_sql(::DatabaseBackend, col, keys, numeric::Bool; boolean = fal
     sql = "($col #>> CAST(? AS TEXT[]))"
     (numeric ? "CAST($sql AS NUMERIC)" : sql), Any[pg_array_literal(keys)]
 end
+"A JSON key path's value as text, with the keys written in (KT, Django's KeyTextTransform): PostgreSQL's #>>."
+json_text_sql(b::DatabaseBackend, col, keys) = "($col #>> " * sql_string_literal(b, pg_array_literal(keys)) * ")"
 json_key_isnull_sql(::DatabaseBackend, col, keys) = "($col #> CAST(? AS TEXT[])) IS NULL", Any[pg_array_literal(keys)]
 json_contains_sql(::DatabaseBackend, col, v) = "$col @> CAST(? AS JSONB)", Any[JSON.json(json_scalar_tree(v))]
 json_contained_by_sql(::DatabaseBackend, col, v) = "$col <@ CAST(? AS JSONB)", Any[JSON.json(json_scalar_tree(v))]

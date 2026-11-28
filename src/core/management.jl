@@ -115,6 +115,7 @@ function parse_flags(args)
         end
         i += 1
     end
+    haskey(flags, "database") && check_database_option(flags["database"])
     positional, flags
 end
 

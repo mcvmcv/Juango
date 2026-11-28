@@ -290,7 +290,7 @@ Base.show(io::IO, v::DavVillain) = print(io, v.name)
 @model struct DavSuperVillain <: DavVillain
     Meta(table = "dav_supervillain")
 end
-Base.show(io::IO, v::DavSuperVillain) = print(io, v.name)
+# (DavSuperVillain shows as its parent does: #294)
 @model struct DavPlotV
     name = CharField(max_length = 100)
     team_leader = ForeignKey(DavVillain, on_delete = :CASCADE, related_name = :lead_plots)

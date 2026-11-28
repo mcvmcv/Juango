@@ -2179,6 +2179,15 @@ end
     @test [d[:data__meta] for d in values(order_by(gq, "id"), :data__meta)] == [Dict("by" => "ann"), Dict("by" => "bob")]
     @test [g.id for g in order_by(gq, "-data__run")] == [g2.id, g1.id]          # numbers sort as numbers
     @test [g.id for g in order_by(gq, "data__meta__by")] == [g1.id, g2.id]
+    # KT: a key's value as text (Django's KeyTextTransform, #299): text lookups, ordering, numbers as text
+    @test [g.k for g in order_by(annotate(gq; k = KT("data__meta__by")), "id")] == ["ann", "bob"]
+    @test [g.id for g in filter(annotate(gq; k = KT("data__meta__by")); k__startswith = "b")] == [g2.id]
+    @test [g.id for g in filter(annotate(gq; k = KeyTextTransform("by", "data__meta")); k__iexact = "ANN")] == [g1.id]
+    @test values_list(order_by(annotate(gq; r = KT("data__run")), "id"), :r; flat = true) == ["2", "10"]
+    @test [g.id for g in order_by(gq, Desc(KT("data__meta__by")))] == [g2.id, g1.id]
+    @test values_list(order_by(annotate(gq; l = KT("data__list__0")), "id"), :l; flat = true) == ["10", "30"]
+    @test values_list(annotate(filter(gq; id = g1.id); m = KT("data__missing")), :m; flat = true) == [nothing]
+    @test_throws Juango.LookupError collect(annotate(gq; k = KT("nick__x")))
 end
 
 @testset "annotate after filter on the same multi-valued relation reuses its join (#132)" begin

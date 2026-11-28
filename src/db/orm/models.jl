@@ -902,7 +902,30 @@ Base.@nospecializeinfer function Base.copy(@nospecialize(m::Model))
     c
 end
 Base.@nospecializeinfer Base.hash(@nospecialize(m::Model), h::UInt) = (k = set_pk(m); k === nothing ? objectid(m) ⊻ h : hash((concrete_model(typeof(m)), k), h))
-Base.show(io::IO, m::Model) = print(io, nameof(typeof(m)), " object (", something(m.id, "unsaved"), ")")
+"""
+A model's text: the nearest ancestor's own `show` for a proxy or a multi-table child (Django's subclass inherits
+`__str__`: #294), shown on an instance of that model made from the object's values; else "Name object (id)".
+"""
+function Base.show(io::IO, m::Model)
+    a = show_ancestor(m)
+    a === nothing ? print(io, nameof(typeof(m)), " object (", something(m.id, "unsaved"), ")") : show(io, a)
+end
+const GENERIC_MODEL_SHOW = Tuple{typeof(show),IO,Model}
+"An instance of the nearest proxied or table-parent model with a `show` of its own, from `m`'s values; or `nothing`."
+Base.@nospecializeinfer function show_ancestor(@nospecialize(m::Model))
+    T = typeof(m)
+    P = concrete_model(T) === T ? table_parent(T) : concrete_model(T)
+    while P !== nothing
+        if which(show, Tuple{IO,P}).sig !== GENERIC_MODEL_SHOW
+            d = getfield(m, :_data)::Dict{Symbol,Any}
+            keep = Set{Symbol}(attname(f) for f in all_fields(P))
+            push!(keep, :id)
+            return P(Dict{Symbol,Any}(k => v for (k, v) in d if k in keep), Dict{Symbol,Any}())
+        end
+        P = table_parent(P)
+    end
+    nothing
+end
 function Base.show(io::IO, ::MIME"text/plain", m::Model)
     print(io, "<", nameof(typeof(m)), ": ")
     show(io, m)

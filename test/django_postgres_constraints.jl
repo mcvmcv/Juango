@@ -346,10 +346,9 @@ port_block() do
             dco_add!(DcoScene, c)
             @test haskey(dco_constraints(DcoScene), "scene_left_equal")
         end
-        # (Django's KeyTextTransform: Juango has no key-as-text yet, #299; the key's JSON cast to text)
         dco_case() do                                                                                 # test_expressions_with_key_transform
             c = ExclusionConstraint(name = "exclude_overlapping_reservations_smoking",
-                                    expressions = [(F(:datespan), RangeOperators.OVERLAPS), (Cast(F("requirements__smoking"), :text), RangeOperators.EQUAL)])
+                                    expressions = [(F(:datespan), RangeOperators.OVERLAPS), (KeyTextTransform("smoking", "requirements"), RangeOperators.EQUAL)])
             dco_add!(DcoHotelReservation, c)
             @test haskey(dco_constraints(DcoHotelReservation), "exclude_overlapping_reservations_smoking")
         end

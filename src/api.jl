@@ -60,7 +60,7 @@ export run_async, sync_to_async, aget, acreate, acount, aexists, afirst, alast, 
        aupdate_or_create, abulk_create, abulk_update, aaggregate, ain_bulk, aupdate!, adelete!, asave!,
        arefresh!, aauthenticate, aiterator
 # expressions
-export F, Value, Count, Sum, Avg, Min, Max, Lower, Upper, Length, Coalesce, Concat, Cast, Now,
+export F, Value, Count, Sum, Avg, Min, Max, Lower, Upper, Length, Coalesce, Concat, Cast, Now, KT, KeyTextTransform,
        Extract, ExtractYear, ExtractQuarter, ExtractMonth, ExtractWeek, ExtractWeekDay, ExtractIsoWeekDay,
        ExtractIsoYear, ExtractDay, ExtractHour, ExtractMinute, ExtractSecond, Trunc, TruncYear,
        TruncQuarter, TruncMonth, TruncWeek, TruncDay, TruncDate, TruncTime, TruncHour, TruncMinute,

@@ -94,6 +94,16 @@ function gis_aggregate_arg end
 function gis_aggregate_value end
 "Lower-case text."
 Lower(x) = Func(:lower, [ref(x)])
+"""
+    KT("data__owner__name")
+    KeyTextTransform("name", "data__owner")
+
+A JSON field's key (or key path) as text, as Django's `KT` / `KeyTextTransform`: `F("data__owner__name")` is the key's
+JSON value; this is its text (`->>` / `#>>` on PostgreSQL and SQLite, `JSON_UNQUOTE(JSON_EXTRACT(...))` on MySQL), for text
+lookups, ordering, indexes and constraints. The path may go through relations first (`author__data__name`).
+"""
+KT(path) = Func(:keytext, Any[F(string(path))])
+KeyTextTransform(key, of) = KT(string(of) * "__" * string(key))
 "Upper-case text."
 Upper(x) = Func(:upper, [ref(x)])
 "Length of text."
@@ -684,7 +694,7 @@ function expr_kind(c, @nospecialize(e))
         return trunc_output(e.args[2], something(ink, :datetime))
     end
     # text functions give text (Concat(Value("I'm "), F(:name)) takes text lookups: trigram_similar, unaccent)
-    e isa Func && (e.name in (:concat, :lower, :upper, :unaccent) || e.name in TEXT_FUNCS) && return :text
+    e isa Func && (e.name in (:concat, :lower, :upper, :unaccent, :keytext) || e.name in TEXT_FUNCS) && return :text
     e isa Value && e.value isa Date && return :date
     e isa Value && e.value isa DateTime && return :datetime
     e isa Value && e.value isa AbstractString && return :char
@@ -863,6 +873,15 @@ function compile_expr(c::SQLCompiler, e::F)
     col, _ = resolve_path(c, c.base, c.T, e.name)
     col, Any[]
 end
+"KT(path): the JSON field the path reaches first, and the rest of the path as its keys, read as text."
+function keytext_sql(c::SQLCompiler, e::F)
+    segs = split(e.name, "__")
+    for i in 1:length(segs)-1
+        col, f = resolve_path(c, c.base, c.T, join(segs[1:i], "__"))
+        f isa Field && f.kind === :json && return json_text_sql(backend(), col, String.(segs[i+1:end])), Any[]
+    end
+    throw(LookupError("KT() takes a key path inside a JSONField: '$(e.name)'"))
+end
 # F(:pk) of a composite key inside another expression: refused with Django's message
 cpk_arg(c::SQLCompiler, @nospecialize(a)) = a isa F && a.name == "pk" && multi_pk(c.T)
 cpk_refuse(c::SQLCompiler, @nospecialize(e), label) =
@@ -976,6 +995,7 @@ datetime_diff_sql(::DatabaseBackend, ka, a, kb, b) = ka === :date && kb === :dat
 function compile_expr(c::SQLCompiler, e::Func)
     any(a -> cpk_arg(c, a), e.args) && cpk_refuse(c, e, uppercasefirst(string(e.name)))
     b = backend()
+    e.name === :keytext && return keytext_sql(c, e.args[1]::F)
     parts = [compile_expr(c, a) for a in e.args if a isa Expression]
     sqls, ps = first.(parts), reduce(vcat, last.(parts); init = Any[])
     n = e.name

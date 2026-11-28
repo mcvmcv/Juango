@@ -4,8 +4,8 @@
 #
 # Not translated: the settings-module classes (DjangoAdmin*Settings, Manage*Settings: Juango's settings are the
 # project's configure! call, not a module named on the command line), ManageRunserver's migration and database
-# checks, StartProject (Juango's startproject makes a Julia project), and CommandDBOptionChoiceTests (Juango's
-# --database options aren't choices yet, #303).
+# checks, StartProject (Juango's startproject makes a Julia project). CommandDBOptionChoiceTests covers the commands
+# that take --database in Juango (check, migrate, dumpdata, loaddata).
 @isdefined(TEST_SETUP_DONE) || include("setup.jl")
 
 "What `f()` printed to stdout."
@@ -229,4 +229,14 @@ end
     @test strip(das_run("das_base_command", "testlabel", "-a", "x", "--settings=alternate_settings")) == expected()       # test_short_option_then_setting
     @test strip(das_run("das_base_command", "testlabel", "--option_a=x", "--settings=alternate_settings", "--option_b=y")) ==  # test_option_then_setting_then_option
           expected("\"y\"")
+end
+
+@testset "django admin_scripts: CommandDBOptionChoiceTests" begin
+    # test_invalid_choice_db_option: an alias that isn't in DATABASES fails before anything runs (#303)
+    override_settings(DATABASES = Dict("default" => Juango.settings.DATABASE, "other" => Juango.settings.DATABASE)) do
+        @test Juango.database_aliases() == ["default", "other"]
+        for (cmd, args) in (("check", ()), ("migrate", ()), ("dumpdata", ()), ("loaddata", ("nothing.json",)))
+            @test_throws "Error: argument --database: invalid choice: \"deflaut\" (choose from \"default\", \"other\")" call_command(cmd, args..., "--database", "deflaut")
+        end
+    end
 end

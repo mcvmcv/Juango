@@ -5829,15 +5829,28 @@ end
 @model struct DmiGrandChild <: DmiChild
     Meta(table = "dmi_grandchild")
 end
+Base.show(io::IO, g::DmiGrandParent) = print(io, g.first_name, " ", g.last_name)
+@model struct DmiProxyGrandParent <: DmiGrandParent
+    Meta(proxy = true)
+end
 redirect_stdout(devnull) do
     ms = [DmiWorker, DmiStudent, DmiPost, DmiComment, DmiLink, DmiChef, DmiPlace, DmiRestaurant, DmiItalianRestaurant,
-          DmiSupplier, through(DmiSupplier, :customers), DmiCustomSupplier, DmiParkingLot, DmiGrandParent, DmiParent, DmiChild, DmiGrandChild]
+          DmiSupplier, through(DmiSupplier, :customers), DmiCustomSupplier, DmiParkingLot, DmiGrandParent, DmiParent, DmiChild, DmiGrandChild,
+          DmiProxyGrandParent]
     Juango.sync_models!(ms); append!(PORT_MODELS, ms)
 end
 
 @testset "django model_inheritance" begin
   port_block() do
     tr(f) = try f() catch err; err end
+    # (a child, a grandchild and a proxy show as the nearest model with a show of its own does, as Django's inherited
+    # __str__: #294; a model with none, as "Name object (id)")
+    gc = create(DmiGrandChild; first_name = "Ada", last_name = "King")
+    @test repr(gc) == "Ada King" && repr(get(DmiChild; id = gc.id)) == "Ada King" && repr(get(DmiProxyGrandParent; id = gc.id)) == "Ada King"
+    @test repr(DmiGrandChild(first_name = "Unsaved", last_name = "One")) == "Unsaved One"
+    r = create(DmiRestaurant; name = "Demon Dogs")
+    @test repr(r) == "DmiRestaurant object ($(r.id))"
+    delete!(gc); delete!(r)
     nq(f) = Juango.count_queries(f)
     names(qs) = [x.name for x in qs]
     # abstract base models: fields and ordering inherited, the subclass's own Meta replacing it

@@ -127,7 +127,7 @@ register_command!("check"; help = "Checks the entire Juango project for potentia
                                arg("--deploy"; action = :store_true, help = "Check deployment settings."),
                                arg("--fail-level"; default = "ERROR", choices = ["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
                                    help = "Message level that will cause the command to exit with a non-zero status. Default is ERROR."),
-                               arg("--database"; action = :append, dest = :databases, help = "Run database related checks against these aliases.")]) do opts
+                               arg("--database"; action = :append, dest = :databases, choices = database_aliases, help = "Run database related checks against these aliases.")]) do opts
     if opts.list_tags
         println(cmd_stdout(), join(sort!(string.(collect(tags_available(; deploy = opts.deploy)))), "\n"))
         return CheckMessage[]
