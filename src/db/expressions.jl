@@ -1433,13 +1433,106 @@ Base.@nospecializeinfer function values_list_of(@nospecialize(qs::QuerySet), fie
     end
     flat && isempty(fields) && (fields = Any[:id])      # as Django: the first field, the primary key (#213)
     flat && isempty(fields) && multi_pk(T) && (fields = Any[:pk])
-    fs = isempty(fields) ? Any[(multi_pk(T) ? Symbol[] : [:id]); [attname(f) for f in all_fields(T)];          # the annotations too, as Django
-                               [p.first for p in qs.annotations if !is_filtered_relation(p.second) && !(p.first in qs.aliases)]] : fields
+    # (the annotations too, as Django; extra()'s selects first, as Django's)
+    fs = isempty(fields) ? Any[[p.first for p in qs.annotations if p.second isa ExtraSelect]; (multi_pk(T) ? Symbol[] : [:id]); [attname(f) for f in all_fields(T)];
+                               [p.first for p in qs.annotations if !is_filtered_relation(p.second) && !(p.first in qs.aliases) && !(p.second isa ExtraSelect)]] : fields
     vq = values(qs, fs...)
     length(vq.values_fields) == length(fs) || error("values_list: asked for $(length(fs)) fields, got $(length(vq.values_fields))")
     chain(vq; values_mode = flat ? :flat : named ? :named : :tuple)
 end
 values_list(@nospecialize(T::Type{<:Model}), fields::Union{Symbol,AbstractString,Expression}...; kw...) = values_list(objects(T), fields...; kw...)
+
+# QuerySet.extra() ----------------------------------------------------------------------------------------------------
+"An `extra(select = ...)` column: raw SQL selected under a name (as an annotation, with Django's extra() rules)."
+struct ExtraSelect <: Expression
+    raw::RawSQL
+end
+"An `extra(where = ...)` condition (raw SQL), with `extra(tables = ...)`'s tables joined to the query's FROM."
+struct ExtraWhere <: Expression
+    raw::RawSQL
+    tables::Vector{String}
+end
+"""
+An extra select's SQL. On PostgreSQL its numbers and booleans are cast to their types: Juango's driver sends parameters
+untyped, so `SELECT \$1` would come back as text (psycopg sends them typed).
+"""
+function compile_expr(c::SQLCompiler, e::ExtraSelect)
+    sql, ps = compile_expr(c, e.raw)
+    backend() isa PostgresBackend || return sql, ps
+    i = 0
+    sql = replace(sql, "?" => _ -> (i += 1; p = i <= length(ps) ? ps[i] : nothing;
+        p isa Bool ? "?::boolean" : p isa Integer ? "?::bigint" : p isa AbstractFloat ? "?::double precision" : "?"))
+    sql, ps
+end
+function compile_expr(c::SQLCompiler, e::ExtraWhere)
+    for t in e.tables
+        j = " CROSS JOIN " * qname(t)
+        j in c.joins || push!(c.joins, j)
+    end
+    compile_expr(c, e.raw)
+end
+refs_columns(::Union{ExtraSelect,ExtraWhere}) = true
+
+"""
+    extra(qs; select = nothing, select_params = nothing, where = nothing, params = nothing, tables = nothing,
+          order_by = nothing)
+
+Django's `QuerySet.extra()`, the legacy escape hatch of raw SQL (prefer `annotate(RawSQL(...))` and
+`filter(RawSQL(...))`):
+
+* `select`: names and SQL selected as attributes (pairs or a NamedTuple, in order: a `Dict` has none), with
+  `select_params` for their `%s` placeholders, in order. Selecting a name again replaces it. After `values(fields...)`
+  the extra selects are ignored (as Django's); after an empty `values()`/`values_list()` they're included, first.
+* `where`: SQL conditions (ANDed, each in parentheses), with `params` for their `%s` placeholders.
+* `tables`: more tables in the FROM clause (`CROSS JOIN`s, to be related by `where`).
+* `order_by`: the ordering (names of extra selects or fields, `-` for descending, or `"table.column"`).
+"""
+Base.@nospecializeinfer function extra(@nospecialize(qs::QuerySet); select = nothing, where = nothing, params = nothing, tables = nothing,
+                                       order_by = nothing, select_params = nothing)
+    assert_unsliced(qs, "extra")
+    assert_uncombined(qs, "extra")
+    grab!(ps::Vector{Any}, sql) = (n = count("%s", sql);
+        length(ps) >= n || throw(ArgumentError("extra(): fewer parameters than %s placeholders in $(repr(sql))"));
+        out = ps[1:n]; deleteat!(ps, 1:n); out)
+    if select !== nothing
+        sp = collect(Any, something(select_params, Any[]))
+        anns = copy(qs.annotations)
+        for (k, v) in (select isa NamedTuple ? pairs(select) : select)
+            sql = string(v)
+            e = ExtraSelect(RawSQL(sql, grab!(sp, sql)))
+            name = Symbol(k)
+            i = findfirst(p -> p.first === name, anns)
+            i === nothing ? push!(anns, name => e) : (anns[i] = name => e)
+        end
+        T = model_of(qs)
+        vf = qs.values_fields
+        if vf === nothing
+            qs = chain(qs; annotations = anns)
+        elseif issetequal(vf, vcat(multi_pk(T) ? String[] : ["id"], [string(attname(f)) for f in all_fields(T)],
+                                   [string(p.first) for p in qs.annotations if !is_filtered_relation(p.second) && !(p.first in qs.aliases)]))
+            ex = [string(p.first) for p in anns if p.second isa ExtraSelect]
+            qs = chain(qs; annotations = anns, values_fields = vcat(ex, filter(f -> !(f in ex), vf)))
+        end
+    end
+    if where !== nothing || tables !== nothing
+        ps = collect(Any, something(params, Any[]))
+        tbl = String[string(t) for t in something(tables, String[])]
+        ws = Any[ExtraWhere(RawSQL(string(w), grab!(ps, string(w))), tbl) for w in something(where, String[])]
+        isempty(ws) && push!(ws, ExtraWhere(RawSQL("1=1"), tbl))
+        qs = filter(qs, ws...)
+    end
+    if order_by !== nothing
+        os = Any[]
+        for o in order_by
+            s = string(o)
+            b = lstrip(s, '-')
+            push!(os, occursin('.', b) ? (startswith(s, "-") ? Desc(RawSQL(b)) : Asc(RawSQL(b))) : s)
+        end
+        qs = chain(qs; order = os)
+    end
+    qs
+end
+Base.@nospecializeinfer extra(@nospecialize(T::Type{<:Model}); kw...) = extra(objects(T); kw...)
 
 """
     aggregate(qs; name = Aggregate(...), ...) -> Dict{Symbol,Any}
