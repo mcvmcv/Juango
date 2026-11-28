@@ -120,11 +120,11 @@ Base.copy(q::QueryDict) = QueryDict(copy(q.data))
 """
     urlencode(q::QueryDict; safe = "")
 
-Re-encode as a query string, keys in their order, as Django's: characters in `safe` (e.g. "/")
-are left as they are.
+Re-encode as a query string, keys in their order, as Django's: spaces as `+`; or, with characters in `safe` (e.g.
+"/") left as they are, quoted as Python's `quote` (spaces as `%20`).
 """
 function urlencode(q::QueryDict; safe::AbstractString = "")
-    enc(s) = (e = urlquote(s); isempty(safe) ? e : foldl((t, c) -> replace(t, urlquote(string(c)) => string(c)), safe; init = e))
+    enc(s) = isempty(safe) ? quote_plus(s) : py_quote(s, safe)            # (Django's: urlencode, or quote(s, safe))
     join([enc(k) * "=" * enc(v) for (k, vs) in q.data for v in vs], "&")
 end
 
@@ -521,31 +521,300 @@ function get_port(req::Request)
     m === nothing ? (is_secure(req) ? "443" : "80") : String(m[1])
 end
 
+const MAX_URL_LENGTH = 2048
+const MAX_HEADER_LENGTH = 10_000
+
+"""
+Python's `urlsplit` (3.12): `(scheme, netloc)` with the scheme lowercased (empty strings when there are none), or
+nothing for an invalid IPv6 netloc. Leading control characters and spaces, and tabs and newlines anywhere, are
+dropped first, as browsers do.
+"""
+function py_urlsplit(url::AbstractString)
+    u = replace(lstrip(c -> c <= ' ', url), r"[\t\r\n]" => "")
+    scheme = ""
+    i = findfirst(':', u)
+    if i !== nothing && i > 1 && isascii(u[1]) && isletter(u[1]) &&
+       all(c -> isascii(c) && (isletter(c) || isdigit(c) || c in "+-."), u[1:prevind(u, i)])
+        scheme, u = lowercase(u[1:prevind(u, i)]), u[nextind(u, i):end]
+    end
+    netloc = ""
+    if startswith(u, "//")
+        rest = u[3:end]
+        j = findfirst(c -> c in "/?#", rest)
+        netloc = j === nothing ? rest : rest[1:prevind(rest, j)]
+        (occursin('[', netloc) != occursin(']', netloc)) && return nothing
+        if occursin('[', netloc)
+            m = match(r"\[([^\]]*)\]", netloc)
+            (m === nothing || (!is_valid_ipv6_address(m[1]) && !occursin(r"^v[0-9A-Fa-f]+\.", m[1]))) && return nothing
+        end
+    end
+    (scheme, netloc)
+end
+
+function _url_has_allowed_host_and_scheme(url::AbstractString, allowed_hosts, require_https::Bool)
+    (startswith(url, "///") || length(url) > MAX_URL_LENGTH) && return false
+    parts = py_urlsplit(url)
+    parts === nothing && return false
+    scheme, netloc = parts
+    isempty(netloc) && !isempty(scheme) && return false
+    Base.Unicode.category_code(url[1]) in (Base.Unicode.UTF8PROC_CATEGORY_CC, Base.Unicode.UTF8PROC_CATEGORY_CF,
+        Base.Unicode.UTF8PROC_CATEGORY_CS, Base.Unicode.UTF8PROC_CATEGORY_CO, Base.Unicode.UTF8PROC_CATEGORY_CN) && return false
+    isempty(scheme) && !isempty(netloc) && (scheme = "http")
+    (isempty(netloc) || netloc in allowed_hosts) && (isempty(scheme) || scheme in (require_https ? ("https",) : ("http", "https")))
+end
+
 """
     url_has_allowed_host_and_scheme(url, allowed_hosts; require_https = false) -> Bool
 
-Whether redirecting to `url` (from a `next` parameter, say) is safe: a path on this site, or an
-absolute http(s) URL on one of `allowed_hosts`. As Django's, it refuses what browsers would read
-as another site: `//evil.example`, `/\\evil.example`, `/\t/evil.example`, `https:evil.example`,
-`javascript:...`.
+Whether redirecting to `url` (from a `next` parameter, say) is safe, as Django's: a path on this site, or an http(s)
+URL whose host (with its port and any `user:pass@`, as written) is one of `allowed_hosts` (a collection, a string, or
+nothing). It refuses what browsers would read as another site, checking the URL as written and with `\\` read as `/`:
+`//evil.example`, `/\\evil.example`, `https:evil.example`, `javascript:...`, a leading control character, URLs over 2048
+characters.
 """
 function url_has_allowed_host_and_scheme(url, allowed_hosts; require_https::Bool = false)
     url === nothing && return false
     u = strip(string(url))
     isempty(u) && return false
-    any(c -> c < ' ' || c == '\x7f', u) && return false           # browsers drop tabs and newlines
-    u = replace(u, '\\' => '/')                                     # and read \ as /
-    startswith(u, "///") && return false
-    m = match(r"^(?:([a-zA-Z][a-zA-Z0-9+.-]*):)?(?://([^/?#]*))?", u)
-    scheme, netloc = m[1], m[2]
-    if netloc === nothing
-        return scheme === nothing                                    # a path; "javascript:", "https:evil" aren't
+    hosts = allowed_hosts === nothing ? Set{String}() : allowed_hosts isa AbstractString ? Set([String(allowed_hosts)]) :
+            Set{String}(string(h) for h in allowed_hosts)
+    _url_has_allowed_host_and_scheme(u, hosts, require_https) && _url_has_allowed_host_and_scheme(replace(u, '\\' => '/'), hosts, require_https)
+end
+
+"""
+    int_to_base36(i) / base36_to_int(s)
+
+Django's: a non-negative integer as base 36 text (`818469960` is `"django"`), and back (at most 13 characters).
+"""
+function int_to_base36(i::Integer)
+    i < 0 && throw(ArgumentError("Negative base36 conversion input."))
+    string(i; base = 36)
+end
+function base36_to_int(s::AbstractString)
+    length(s) > 13 && throw(ArgumentError("Base36 input too large"))
+    n = tryparse(Int, s; base = 36)
+    (n === nothing || !all(c -> isascii(c) && (isdigit(c) || isletter(c)), s)) &&
+        throw(ArgumentError("invalid literal for int() with base 36: '$s'"))
+    n
+end
+
+"Django's `urlsafe_base64_encode`: bytes as URL-safe base64 text, without the trailing `=`."
+urlsafe_base64_encode(b) = rstrip(replace(Base64.base64encode(b), '+' => '-', '/' => '_'), ['=', '\n'])
+"Django's `urlsafe_base64_decode`: the bytes back (the `=` restored); an `ArgumentError` for what isn't base64."
+function urlsafe_base64_decode(s::AbstractString)
+    t = replace(String(s), '-' => '+', '_' => '/')
+    t = rpad(t, length(t) + length(t) % 4, '=')
+    try Base64.base64decode(t) catch e; throw(ArgumentError("Invalid base64-encoded string: $(sprint(showerror, e))")) end
+end
+
+"""
+    split_header_value(value, sep = ",") -> Vector{String}
+
+Django's: a header's token list split at `sep`, each part stripped, empty ones dropped (`" no-store , max-age=0 "` →
+`["no-store", "max-age=0"]`). Not for headers with quoted strings.
+"""
+split_header_value(value::AbstractString, sep::AbstractString = ",") = String[strip(p) for p in split(value, sep) if !isempty(strip(p))]
+
+"Django's `split_directive_names`: a header's directive names, lowercased, without their values (`private=\"x\"` → `private`)."
+split_directive_names(value::AbstractString) = String[lowercase(strip(first(split(p, '='; limit = 2)))) for p in split_header_value(value)]
+
+"Django's `escape_leading_slashes`: `//example.com` as `/%2Fexample.com`, so a browser doesn't read it as another host."
+escape_leading_slashes(url::AbstractString) = startswith(url, "//") ? "/%2F" * url[3:end] : String(url)
+
+"`content_disposition_header(as_attachment, filename)`: Django's name for `content_disposition`."
+content_disposition_header(as_attachment::Bool, filename) = content_disposition(filename; attachment = as_attachment)
+
+# (Python's email header parameters, which Django's parse_header_parameters uses)
+function email_parseparams(s::AbstractString)
+    s = ";" * s
+    out = String[]
+    while startswith(s, ";")
+        s = s[2:end]
+        stop = findfirst(';', s)
+        quotes(k) = count(==('"'), s[1:prevind(s, k)]) - length(findall("\\\"", s[1:prevind(s, k)]))
+        while stop !== nothing && stop > 1 && isodd(quotes(stop))
+            stop = findnext(';', s, stop + 1)
+        end
+        f = stop === nothing ? s : s[1:prevind(s, stop)]
+        if (k = findfirst('=', f)) !== nothing
+            f = lowercase(strip(f[1:prevind(f, k)])) * "=" * strip(f[nextind(f, k):end])
+        end
+        push!(out, strip(f))
+        s = stop === nothing ? "" : s[stop:end]
     end
-    scheme === nothing || lowercase(scheme) in (require_https ? ("https",) : ("http", "https")) || return false
-    host = host_name(String(last(split(netloc, '@'))))               # without user:password@
-    host === nothing && return false
-    hosts = Set(something(host_name(string(h)), "") for h in (allowed_hosts isa AbstractString ? [allowed_hosts] : allowed_hosts))
-    host in hosts
+    out
+end
+email_unquote(v::AbstractString) = length(v) > 1 && startswith(v, '"') && endswith(v, '"') ?
+    replace(replace(v[2:prevind(v, lastindex(v))], "\\\\" => "\\"), "\\\"" => "\"") :
+    length(v) > 1 && startswith(v, '<') && endswith(v, '>') ? v[2:prevind(v, lastindex(v))] : String(v)
+"Bytes in a charset Python's codecs know (the common ones), or nothing for a charset it doesn't."
+function decode_charset(b::Vector{UInt8}, charset::AbstractString)
+    c = replace(lowercase(charset), '_' => '-')
+    c in ("utf-8", "utf8", "u8", "utf") && return String(copy(b))
+    c in ("us-ascii", "ascii", "646") && return join(x < 0x80 ? Char(x) : '�' for x in b)
+    c in ("iso-8859-1", "iso8859-1", "latin-1", "latin1", "l1", "8859", "cp819", "iso-ir-100") && return join(Char(x) for x in b)
+    nothing
+end
+
+"""
+    parse_header_parameters(line; max_length = 10_000) -> (main, Dict)
+
+Django's: a Content-Type-like header's main value (lowercased) and its parameters (`'attachment; filename="a;b.txt"'` →
+`("attachment", Dict("filename" => "a;b.txt"))`), quoted values unquoted, RFC 2231 ones (`title*=UTF-8''foo-%c3%a4`)
+decoded; an unknown charset is an `ArgumentError` ("Invalid encoding"), as is a line over `max_length` (nothing: no limit).
+"""
+function parse_header_parameters(line; max_length = MAX_HEADER_LENGTH)
+    (line === nothing || isempty(line)) && return ("", Dict{String,String}())
+    max_length !== nothing && length(line) > max_length && throw(ArgumentError("Unable to parse header parameters (value too long)."))
+    occursin(';', line) || return (lowercase(strip(line)), Dict{String,String}())
+    params = Tuple{String,String}[]
+    for p in email_parseparams(line)
+        name, val = occursin('=', p) ? Tuple(split(p, '='; limit = 2)) : (p, "")
+        push!(params, (String(strip(name)), String(strip(val))))
+    end
+    key = lowercase(params[1][1])
+    pdict = Dict{String,String}()
+    continued = Dict{String,Vector{Tuple{Int,String,Bool}}}()
+    order = String[]
+    for (name, value) in params[2:end]
+        isempty(name) && continue
+        encoded = endswith(name, "*")
+        value = email_unquote(value)
+        m = match(r"^(\w+)\*(?:([0-9]+)\*?)?$", name)
+        if m === nothing
+            pdict[name] = value
+        else
+            haskey(continued, m[1]) || push!(order, m[1])
+            push!(get!(continued, m[1], Tuple{Int,String,Bool}[]), (m[2] === nothing ? -1 : parse(Int, m[2]), value, encoded))
+        end
+    end
+    for name in order
+        parts = sort(continued[name]; by = first)
+        extended = any(p -> p[3], parts)
+        # (an encoded part: percent-decoded as Latin-1, one character per byte)
+        text = join(p[3] ? join(Char(b) for b in py_unquote_bytes(p[2])) : p[2] for p in parts)
+        if extended
+            ticks = split(text, '\''; limit = 3)
+            charset, value = length(ticks) <= 2 ? ("", text) : (ticks[1], ticks[3])
+            bytes = UInt8[UInt8(min(Int(c), 255)) for c in value]
+            if !isempty(charset)
+                dec = decode_charset(bytes, charset)
+                dec === nothing && throw(ArgumentError("Invalid encoding '$charset' for RFC 2231 param."))
+                pdict[name] = dec
+            else
+                pdict[name] = something(decode_charset(bytes, "us-ascii"), value)
+            end
+        else
+            pdict[name] = text
+        end
+    end
+    (key, pdict)
+end
+"Python's `unquote_to_bytes`: %XX escapes as their bytes, the rest as its UTF-8."
+function py_unquote_bytes(s::AbstractString)
+    out = UInt8[]
+    i = 1
+    cu = codeunits(s)
+    while i <= length(cu)
+        if cu[i] == UInt8('%') && i + 2 <= length(cu) && all(b -> b in UInt8('0'):UInt8('9') || b in UInt8('a'):UInt8('f') || b in UInt8('A'):UInt8('F'), cu[i+1:i+2])
+            push!(out, parse(UInt8, String(cu[i+1:i+2]); base = 16)); i += 3
+        else
+            push!(out, cu[i]); i += 1
+        end
+    end
+    out
+end
+
+# --- django.utils.ipv6 -----------------------------------------------------------------------------------------------
+
+const MAX_IPV6_ADDRESS_LENGTH = 39
+"""
+An IPv6 address's 128 bits, as Python's `IPv6Address(text)` reads it (eight hextets, or fewer with one `::`; the last
+two may be a dotted IPv4 address; a `%zone` is dropped), or nothing.
+"""
+function ipv6_int(s)
+    s isa AbstractString || return nothing
+    s = String(s)
+    occursin('%', s) && (s = s[1:prevind(s, findfirst('%', s))])
+    parts = String.(split(s, ':'))
+    length(parts) < 3 && return nothing
+    if occursin('.', parts[end])
+        o = split(pop!(parts), '.')
+        (length(o) == 4 && all(x -> occursin(r"^[0-9]{1,3}$", x) && parse(Int, x) <= 255 && !(length(x) > 1 && x[1] == '0'), o)) || return nothing
+        v4 = foldl((a, x) -> (a << 8) | parse(UInt32, x), o; init = UInt32(0))
+        push!(parts, string(v4 >> 16; base = 16), string(v4 & 0xffff; base = 16))
+    end
+    length(parts) > 9 && return nothing
+    skip = nothing
+    for i in 2:length(parts)-1
+        if isempty(parts[i])
+            skip === nothing || return nothing
+            skip = i
+        end
+    end
+    if skip !== nothing
+        hi, lo = skip - 1, length(parts) - skip
+        if isempty(parts[1]); hi -= 1; hi == 0 || return nothing; end
+        if isempty(parts[end]); lo -= 1; lo == 0 || return nothing; end
+        skipped = 8 - (hi + lo)
+        skipped < 1 && return nothing
+    else
+        (length(parts) == 8 && !isempty(parts[1]) && !isempty(parts[end])) || return nothing
+        hi, lo, skipped = 8, 0, 0
+    end
+    hextet(x) = occursin(r"^[0-9a-fA-F]{1,4}$", x) ? parse(UInt128, x; base = 16) : nothing
+    n = UInt128(0)
+    for x in parts[1:hi]
+        h = hextet(x); h === nothing && return nothing
+        n = (n << 16) | h
+    end
+    n <<= 16 * skipped
+    for x in parts[end-lo+1:end]
+        h = hextet(x); h === nothing && return nothing
+        n = (n << 16) | h
+    end
+    n
+end
+"An IPv6 address as Python writes it (RFC 5952: lowercase, the longest run of zero hextets as `::`)."
+function ipv6_text(n::UInt128)
+    hs = [string((n >> (16 * (8 - i))) & 0xffff; base = 16) for i in 1:8]
+    best, bestlen, cur, curlen = 0, 0, 0, 0
+    for (i, h) in enumerate(hs)
+        if h == "0"
+            curlen == 0 && (cur = i)
+            curlen += 1
+            curlen > bestlen && ((best, bestlen) = (cur, curlen))
+        else
+            curlen = 0
+        end
+    end
+    bestlen > 1 || return join(hs, ":")
+    left, right = join(hs[1:best-1], ":"), join(hs[best+bestlen:end], ":")
+    left * "::" * right
+end
+ipv4_text(n::UInt128) = join((Int((n >> s) & 0xff) for s in (24, 16, 8, 0)), ".")
+
+"""
+    is_valid_ipv6_address(s) -> Bool
+
+Django's: whether `s` is text naming an IPv6 address (at most 39 characters).
+"""
+is_valid_ipv6_address(s) = s isa AbstractString && length(s) <= MAX_IPV6_ADDRESS_LENGTH && ipv6_int(s) !== nothing
+
+"""
+    clean_ipv6_address(s; unpack_ipv4 = false, error_message = "This is not a valid IPv6 address.", max_length = 39)
+
+Django's: an IPv6 address in its normal form (`DEAD::0:BEEF` → `dead::beef`; an IPv4-mapped one as `::ffff:10.10.10.10`,
+or with `unpack_ipv4` just `10.10.10.10`). Anything else is a `ValidationError` with `error_message`.
+"""
+function clean_ipv6_address(s; unpack_ipv4::Bool = false, error_message = gettext("This is not a valid IPv6 address."),
+                            max_length::Integer = MAX_IPV6_ADDRESS_LENGTH)
+    n = s isa AbstractString && length(s) <= max_length ? ipv6_int(s) : nothing
+    n === nothing && throw(ValidationError(string(error_message); code = "invalid"))
+    if n >> 32 == 0xffff
+        return unpack_ipv4 ? ipv4_text(n) : "::ffff:" * ipv4_text(n)
+    end
+    ipv6_text(n)
 end
 """
     MediaType(line)

@@ -19,9 +19,18 @@ Base.:(==)(a::AbstractString, b::SafeString) = a == b.s
 Base.isempty(s::SafeString) = isempty(s.s)
 Base.length(s::SafeString) = length(s.s)
 Base.:*(a::SafeString, b::SafeString) = SafeString(a.s * b.s)
+# (as Django's: safe text joined to unsafe text is unsafe)
+Base.:*(a::SafeString, b::AbstractString) = a.s * b
+Base.:*(a::AbstractString, b::SafeString) = a * b.s
 
-"Mark `s` as safe HTML that must not be escaped by templates."
-mark_safe(s) = SafeString(string(s))
+"""
+    mark_safe(s)
+
+Mark `s` as safe HTML that must not be escaped by templates. As Django's, a value that renders itself as HTML (has an
+`__html__` method) is returned as it is, and a function is wrapped so that what it returns is marked safe.
+"""
+mark_safe(s) = __html__(s) !== nothing ? s : SafeString(string(s))
+mark_safe(f::Function) = (args...; kw...) -> mark_safe(f(args...; kw...))
 
 const HTML_ESCAPES = ('&' => "&amp;", '<' => "&lt;", '>' => "&gt;", '"' => "&quot;", '\'' => "&#x27;")
 
@@ -100,6 +109,7 @@ replaced by the arguments, HTML-escaped unless they're already safe; `fmt` itsel
     format_html("<a href=\"{}\">{}</a>", url, title)
 """
 function format_html(fmt::AbstractString, args...; kwargs...)
+    isempty(args) && isempty(kwargs) && throw(ArgumentError("args or kwargs must be provided."))   # (Django's: an f-string isn't escaped)
     kw = Dict(string(k) => v for (k, v) in kwargs)
     i = 0
     out = replace(fmt, r"\{(\w*)\}" => function (m)
@@ -110,9 +120,13 @@ function format_html(fmt::AbstractString, args...; kwargs...)
     SafeString(out)
 end
 
-"`format_html_join(sep, fmt, rows)`: `format_html(fmt, row...)` for each row (a tuple or a value), joined by `sep`."
+"""
+`format_html_join(sep, fmt, rows)`: `format_html(fmt, row...)` for each row (a tuple or a value), or
+`format_html(fmt; row...)` for a dictionary's (`{id}`), joined by `sep`.
+"""
 format_html_join(sep::AbstractString, fmt::AbstractString, rows) =
-    SafeString(join([format_html(fmt, (r isa Tuple ? r : (r,))...).s for r in rows], escape_html(sep)))
+    SafeString(join([(r isa AbstractDict ? format_html(fmt; (Symbol(k) => v for (k, v) in r)...) :
+                      format_html(fmt, (r isa Tuple ? r : (r,))...)).s for r in rows], escape_html(sep)))
 
 "How values are turned into text in templates."
 display_string(::Nothing) = ""
@@ -144,12 +158,63 @@ function consteq(a, b)
     r == 0
 end
 
-"Convert to ASCII slug: `\"Hello, World!\"` → `\"hello-world\"`."
-function slugify(s)
-    s = lowercase(Base.Unicode.normalize(string(s), stripmark = true))
-    s = replace(s, r"[^\w\s-]" => "")
-    s = replace(strip(s), r"[-\s]+" => "-")
-    String(strip(s, '-'))
+"""
+    slugify(s; allow_unicode = false)
+
+A slug, as Django's: `"Hello, World!"` → `"hello-world"`. Lowercased, accents dropped (with `allow_unicode`, kept: NFKC),
+anything but letters, digits, `_`, `-` and whitespace taken out, runs of whitespace and dashes made one dash, and dashes
+and underscores stripped from the ends. (Other non-ASCII letters are kept, where Django's default drops them: #310.)
+"""
+function slugify(s; allow_unicode::Bool = false)
+    s = allow_unicode ? Base.Unicode.normalize(string(s), :NFKC) : Base.Unicode.normalize(string(s), compat = true, stripmark = true)
+    s = replace(lowercase(s), r"[^\w\s-]" => "")
+    s = replace(s, r"[-\s]+" => "-")
+    String(strip(s, ['-', '_']))
+end
+
+"Django's `normalize_newlines`: `\\r\\n` and `\\r` made `\\n`."
+normalize_newlines(s) = replace(String(display_string(s)), "\r\n" => "\n", "\r" => "\n")
+
+const SMART_SPLIT_RE = r"""((?:[^\s'"]*(?:(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')[^\s'"]*)+)|\S+)"""
+"""
+    smart_split(text) -> Vector{String}
+
+Django's `smart_split`: `text` split at whitespace, but not inside quotes (`'a "b c" d'` → `["a", "\"b c\"", "d"]`); the
+quotes stay, and a backslash escapes a quote within them.
+"""
+smart_split(text) = String[m.match for m in eachmatch(SMART_SPLIT_RE, String(display_string(text)))]
+
+"Python's `repr` of a string."
+function py_str_repr(s::AbstractString)
+    q = occursin('\'', s) && !occursin('"', s) ? '"' : '\''
+    string(q, replace(s, "\\" => "\\\\", string(q) => string('\\', q)), q)
+end
+
+"""
+    unescape_string_literal(s)
+
+Django's `unescape_string_literal`: a quoted string literal's text (`"'ab\\\'c'"` → `"ab'c"`), only `\\'` (or `\\"`) and `\\\\`
+being escapes. Anything not quoted at both ends is an `ArgumentError`.
+"""
+function unescape_string_literal(s)
+    s = String(display_string(s))
+    (isempty(s) || !(s[1] in "\"'") || s[end] != s[1]) && throw(ArgumentError("Not a string literal: " * py_str_repr(s)))
+    q = s[1]
+    replace(replace(s[nextind(s, 1):prevind(s, lastindex(s))], "\\" * q => string(q)), "\\\\" => "\\")   # (one after the other, as Python's)
+end
+
+"""
+    get_valid_filename(name)
+
+Django's `get_valid_filename`: spaces made underscores, and anything but letters, digits, `-`, `_` and `.` taken out.
+What leaves nothing (or `.`, `..`) is refused (a 400, Django's SuspiciousFileOperation). The storages' `get_valid_name`
+goes further (no directories, no leading dots).
+"""
+function get_valid_filename(name)
+    s = replace(strip(String(display_string(name))), ' ' => '_')
+    s = replace(s, r"[^-\w.]" => "")
+    s in ("", ".", "..") && throw(BadRequest("Could not derive file name from '$(display_string(name))'"))
+    String(s)
 end
 
 urlquote(s) = URIs.escapeuri(string(s))
@@ -193,18 +258,96 @@ function filepath_to_uri(path)
               b in codeunits("_.-~/!*()'")
     join(keep(b) ? string(Char(b)) : "%" * uppercase(string(b; base = 16, pad = 2)) for b in codeunits(s))
 end
+iri_to_uri(::Nothing) = nothing
+filepath_to_uri(::Nothing) = nothing
 
-"Encode a dict / pairs as `application/x-www-form-urlencoded`."
-function urlencode(data)
+"""
+    repercent_broken_unicode(bytes) -> Vector{UInt8}
+
+Django's (RFC 3987 3.2 step 3): bytes with each octet that isn't part of valid UTF-8 percent-encoded again (`\\xfc` →
+`%FC`).
+"""
+function repercent_broken_unicode(path::AbstractVector{UInt8})
+    io = IOBuffer()
+    for c in String(copy(path))
+        if isvalid(c)
+            print(io, c)
+        else
+            for b in codeunits(string(c))
+                print(io, '%', uppercase(string(b; base = 16, pad = 2)))
+            end
+        end
+    end
+    take!(io)
+end
+
+"""
+    uri_to_iri(uri) -> String
+
+Django's (RFC 3987 3.2): a URI with its percent-encoded UTF-8 decoded (`/%E2%99%A5/` → `/♥/`), but not the escapes of
+reserved or other unsafe ASCII (`%20`, `%25`, digits) nor broken UTF-8, which stay encoded. Nothing gives nothing.
+"""
+function uri_to_iri(uri)
+    uri === nothing && return nothing
+    b = Vector{UInt8}(codeunits(string(uri)))
+    out = UInt8[]
+    hexval(x) = UInt8('0') <= x <= UInt8('9') ? x - UInt8('0') : UInt8('a') <= x <= UInt8('f') ? x - UInt8('a') + 0x0a :
+                UInt8('A') <= x <= UInt8('F') ? x - UInt8('A') + 0x0a : nothing
+    i = 1
+    while i <= length(b)
+        if b[i] == UInt8('%') && i + 2 <= length(b) && (h = hexval(b[i+1])) !== nothing && (l = hexval(b[i+2])) !== nothing
+            v = h * 0x10 + l
+            # (Django's: letters, -._~, and everything from 0x80, as their bytes)
+            if v >= 0x80 || (UInt8('A') <= v <= UInt8('Z')) || (UInt8('a') <= v <= UInt8('z')) || v in codeunits("-._~")
+                push!(out, v); i += 3
+                continue
+            end
+        end
+        push!(out, b[i]); i += 1
+    end
+    String(repercent_broken_unicode(out))
+end
+
+"Django's `escape_uri_path`: a URI's path with what's unsafe in one percent-encoded (`/foo#bar` → `/foo%23bar`)."
+escape_uri_path(path::AbstractString) = py_quote(path, "/:@&+\$,-_.!~*'()")
+
+"""
+    urlencode(data; doseq = true)
+
+A dict, NamedTuple or pairs as `application/x-www-form-urlencoded` text, as Django's `urlencode`: keys and values quoted
+(spaces as `+`), bytes as text. A value that's `nothing` is refused (an `ArgumentError`, Django's TypeError). With
+`doseq`, each of a vector's (tuple's, range's, ...) values becomes its own `key=value`; without, the vector is written as
+Python prints it (`[1, 2]`). (Django's `doseq` defaults to false: Juango's to true, as Julia's vectors have no
+meaningful text.)
+"""
+function urlencode(data; doseq::Bool = true)
     parts = String[]
+    none(k) = throw(ArgumentError("Cannot encode None for key '$(display_string(k))' in a query string. Did you mean to pass an empty string or omit the value?"))
+    q(x) = quote_plus(x isa AbstractVector{UInt8} ? String(copy(x)) : display_string(x))
+    seq(v) = !(v isa AbstractString) && !(v isa AbstractVector{UInt8}) &&
+             (v isa AbstractVector || v isa Tuple || v isa AbstractSet || v isa AbstractRange || v isa Base.Generator)
     for (k, v) in pairs_of(data)
-        vals = v isa AbstractVector ? v : [v]
-        for x in vals
-            push!(parts, urlquote(string(k)) * "=" * urlquote(x === nothing ? "" : string(x)))
+        v === nothing && none(k)
+        if doseq && seq(v)
+            for x in v
+                x === nothing && none(k)
+                push!(parts, q(k) * "=" * q(x))
+            end
+        else
+            push!(parts, q(k) * "=" * q(seq(v) ? py_str(v) : v))
         end
     end
     join(parts, "&")
 end
+"Python's `quote_plus`: as `quote(s, safe = \"\")`, spaces as `+`."
+quote_plus(s::AbstractString) = replace(py_quote(s, " "), " " => "+")
+"Python's `str` of a list, tuple or range (`[1, 'a']`, `(1, 2)`, `range(0, 2)`); of anything else, its text."
+py_str(v::AbstractRange) = step(v) == 1 ? "range($(first(v)), $(last(v) + 1))" : "range($(first(v)), $(last(v) + step(v)), $(step(v)))"
+py_str(v::AbstractVector) = "[" * join((py_elem(x) for x in v), ", ") * "]"
+py_str(v::Tuple) = "(" * join((py_elem(x) for x in v), ", ") * (length(v) == 1 ? ",)" : ")")
+py_str(v) = display_string(v)
+py_elem(x::AbstractString) = py_str_repr(x)
+py_elem(x) = py_str(x)
 pairs_of(d::AbstractDict) = pairs(d)
 pairs_of(d::NamedTuple) = pairs(d)
 pairs_of(d) = d
@@ -237,6 +380,21 @@ function within(root::AbstractString, p::AbstractString)
     r = rstrip(normpath(root), ('/', '\\'))
     p = normpath(p)
     p == r || startswith(p, r * Base.Filesystem.path_separator) || (Sys.iswindows() && startswith(p, r * "/"))
+end
+
+"""
+    safe_join(base, paths...) -> String
+
+Django's `safe_join`: the absolute path of `paths` joined onto `base`, refusing (a 400, Django's SuspiciousFileOperation)
+one that ends up outside `base` (`"../def"`).
+"""
+function safe_join(base::AbstractString, paths::AbstractString...)
+    pyabs(p) = (a = normpath(abspath(p)); length(a) > 1 ? rstrip(a, '/') : a)        # (Python's abspath: no trailing /)
+    final, b = pyabs(joinpath(base, paths...)), pyabs(base)
+    sep = Base.Filesystem.path_separator
+    (startswith(final, b * sep) || final == b || dirname(b) == b) ||
+        throw(BadRequest("The joined path ($final) is located outside of the base path component ($b)"))
+    String(final)
 end
 
 "`Vector{Any}` with `v`'s elements, compiled once for every element type."

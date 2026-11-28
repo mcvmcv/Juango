@@ -145,9 +145,9 @@ end
 
 Run the app on a real HTTP server for the duration of `f(server)`, like Django's
 `LiveServerTestCase`, for browser automation or any external HTTP client. `port = 0` picks a
-free port; `server.url` (also `live_server_url()`) is the address. With `static = true`
-static files are served even when `DEBUG` is off (`StaticLiveServerTestCase`), and `host` is
-added to `ALLOWED_HOSTS` for the block.
+free port; `server.url` (also `live_server_url()`) is the address. Uploads (MEDIA_ROOT) are served; with
+`static = true` static files are found as in DEBUG (`StaticLiveServerTestCase`), without it only the collected
+STATIC_ROOT is served (`LiveServerTestCase`). `host` is added to `ALLOWED_HOSTS` for the block.
 
 The server answers requests in other tasks, so on PostgreSQL and MySQL it sees only
 committed data: create test data outside `rollback_after` (and clean up afterwards).
@@ -163,14 +163,15 @@ function with_live_server(f; host::AbstractString = "127.0.0.1", port::Integer =
     extra = "*" in hosts || host in hosts ? nothing : vcat(hosts, String[host])
     server = runserver(host, port; block = false, quiet = true)
     url = "http://" * (occursin(':', host) ? "[$host]" : host) * ":$port"
-    old_static, old_url = LIVE_SERVER_STATIC[], LIVE_SERVER_URL[]
+    old_static, old_url, old_running = LIVE_SERVER_STATIC[], LIVE_SERVER_URL[], LIVE_SERVER_RUNNING[]
     LIVE_SERVER_STATIC[] = static
     LIVE_SERVER_URL[] = url
+    LIVE_SERVER_RUNNING[] = true
     try
         extra === nothing ? f(LiveServer(url, host, port, server)) :
             override_settings(() -> f(LiveServer(url, host, port, server)); ALLOWED_HOSTS = extra)
     finally
-        LIVE_SERVER_STATIC[], LIVE_SERVER_URL[] = old_static, old_url
+        LIVE_SERVER_STATIC[], LIVE_SERVER_URL[], LIVE_SERVER_RUNNING[] = old_static, old_url, old_running
         close(server)
     end
 end

@@ -237,17 +237,22 @@ end
 
 "Set while a `with_live_server(; static = true)` block runs: static files are served even without DEBUG."
 const LIVE_SERVER_STATIC = Ref(false)
+"Set while a `with_live_server` block runs: uploads (MEDIA_ROOT) are served, and without `static`, STATIC_ROOT (Django's LiveServerTestCase)."
+const LIVE_SERVER_RUNNING = Ref(false)
 
 function handle_request_inner(req::Request)
     try
         # in DEBUG, uploads are served as they are, unless a URL pattern of the project's takes the path
         # (protected_media(), a login check): its route wins, as Django's opt-in static() lets it (#226)
-        if settings.DEBUG && !isempty(string(settings.MEDIA_ROOT)) && startswith(req.path, settings.MEDIA_URL) &&
+        if (settings.DEBUG || LIVE_SERVER_RUNNING[]) && !isempty(string(settings.MEDIA_ROOT)) && startswith(req.path, settings.MEDIA_URL) &&
            resolve(req.path_info) === nothing
             return serve_media(req)
         end
         if (settings.DEBUG || LIVE_SERVER_STATIC[]) && startswith(req.path, settings.STATIC_URL) && !isempty(static_dirs())
             return serve_static(req)
+        end
+        if LIVE_SERVER_RUNNING[] && !LIVE_SERVER_STATIC[] && startswith(req.path, settings.STATIC_URL) && !isempty(string(settings.STATIC_ROOT))
+            return serve_static_root(req)                # (a LiveServerTestCase serves the collected files: no finders)
         end
         if !settings.DEBUG && get(SETTINGS, :SERVE_STATIC, false) === true && startswith(req.path, settings.STATIC_URL) &&
            !isempty(string(settings.STATIC_ROOT))

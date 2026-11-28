@@ -95,17 +95,17 @@ function sqlite_temporal(v)
     v isa Union{DateTime,Date,Dates.Time} && return v
     s = string(v)
     occursin(r"^\d{4}-\d{2}-\d{2}$", s) && return Date(s)
-    occursin(r"^\d{1,2}:\d{2}", s) && return parse_time(s)
+    occursin(r"^\d{1,2}:\d{2}", s) && return tryparse_time(s)
     something(todatetime(s), Some(nothing))
 end
-tz_local(dt::DateTime, tz) = isempty(tz) ? dt : DateTime(TimeZones.astimezone(TimeZones.ZonedDateTime(dt, TimeZones.tz"UTC"), TimeZones.TimeZone(tz)))
+tz_local(dt::DateTime, tz) = isempty(tz) ? dt : DateTime(TimeZones.astimezone(TimeZones.ZonedDateTime(dt, TimeZones.tz"UTC"), tz_named(tz)))
 function tz_utc(dt::DateTime, tz)
     isempty(tz) && return dt
     z = try
-        TimeZones.ZonedDateTime(dt, TimeZones.TimeZone(tz))
+        TimeZones.ZonedDateTime(dt, tz_named(tz))
     catch e
-        e isa TimeZones.AmbiguousTimeError ? TimeZones.ZonedDateTime(dt, TimeZones.TimeZone(tz), 1) :
-        e isa TimeZones.NonExistentTimeError ? TimeZones.ZonedDateTime(dt + Dates.Hour(1), TimeZones.TimeZone(tz)) : rethrow()
+        e isa TimeZones.AmbiguousTimeError ? TimeZones.ZonedDateTime(dt, tz_named(tz), 1) :
+        e isa TimeZones.NonExistentTimeError ? TimeZones.ZonedDateTime(dt + Dates.Hour(1), tz_named(tz)) : rethrow()
     end
     DateTime(TimeZones.astimezone(z, TimeZones.tz"UTC"))
 end

@@ -176,10 +176,10 @@ function SplitDateTimeField(; error_messages = nothing, kw...)
     bad_time() = throw(ValidationError(gettext("Enter a valid time."); code = "invalid"))
     MultiValueField([DateField(error_messages = date_msgs),
                      Field(:char; max_length = 8, widget = Widget(:time),
-                           validators = Any[t -> parse_time(t) !== nothing || bad_time()], error_messages = time_msgs)];
+                           validators = Any[t -> tryparse_time(t) !== nothing || bad_time()], error_messages = time_msgs)];
     compress = vs -> begin
         d, t = vs
-        tm = parse_time(t)
+        tm = tryparse_time(t)
         tm === nothing && throw(ArgumentError(gettext("Enter a valid time.")))
         dt = DateTime(d) + Dates.Hour(tm) + Dates.Minute(tm) + Dates.Second(tm)
         settings.USE_TZ ? make_aware(dt) : dt

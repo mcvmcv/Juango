@@ -91,27 +91,36 @@ cp_csp(req) = Dict("csp_nonce" => CspNonce(req))
 
 """
     csp_header(policy, nonce) -> String
+    build_policy(policy; nonce = nothing) -> String
 
-A policy `Dict` (directive => source list, a string, or `true` for a bare directive such as
-`"upgrade-insecure-requests"`) as a header value. `CSP.NONCE` becomes `'nonce-...'`, or is
-left out when no nonce was used.
+A policy `Dict` (directive => source list, set, a string, or `true` for a bare directive such as
+`"upgrade-insecure-requests"`; `false`, `nothing` and an empty list leave it out) as a header value, as Django's
+`build_policy`. `CSP.NONCE` becomes `'nonce-...'`, or is left out when no nonce was used; a directive with no other
+source is then `'none'`, so the policy fails closed.
 """
 function csp_header(policy, nonce)
     parts = String[]
     for (d, v) in sort!(collect(pairs(policy)); by = p -> string(first(p)))
         (v === false || v === nothing) && continue
-        if v === true || (v isa AbstractVector && isempty(v))
+        if v === true
             push!(parts, string(d))
             continue
         end
-        srcs = String[]
-        for x in (v isa AbstractString ? split(v) : v)
-            x == CSP.NONCE ? (nonce === nothing || push!(srcs, "'nonce-$nonce'")) : push!(srcs, string(x))
+        vals = v isa AbstractSet ? sort!(collect(String, v)) : v isa Union{AbstractVector,Tuple} ? collect(String, v) : String[string(v)]
+        if CSP.NONCE in vals
+            if nonce !== nothing && !isempty(string(nonce))
+                vals = [x == CSP.NONCE ? "'nonce-$nonce'" : x for x in vals]
+            else
+                vals = filter(!=(CSP.NONCE), vals)
+                isempty(vals) && (vals = [CSP.NONE])
+            end
         end
-        isempty(srcs) || push!(parts, string(d) * " " * join(unique(srcs), " "))
+        isempty(vals) && continue
+        push!(parts, string(d) * " " * join(unique(vals), " "))
     end
     join(parts, "; ")
 end
+build_policy(policy; nonce = nothing) = csp_header(policy, nonce)
 
 """
     ContentSecurityPolicyMiddleware

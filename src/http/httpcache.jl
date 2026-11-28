@@ -132,18 +132,52 @@ http_utc(t::DateTime) = t
 http_utc(t::Date) = DateTime(t)
 http_utc(t::TimeZones.ZonedDateTime) = DateTime(TimeZones.astimezone(t, UTC_TZ))
 http_utc(t::Real) = Dates.unix2datetime(t)
-function parse_http_date(s)
+const HTTP_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+const RFC1123_DATE = r"^\w{3}, (?<day>[0-9]{2}) (?<mon>\w{3}) (?<year>[0-9]{4}) (?<hour>[0-9]{2}):(?<min>[0-9]{2}):(?<sec>[0-9]{2}) GMT$"
+const RFC850_DATE = r"^\w{6,9}, (?<day>[0-9]{2})-(?<mon>\w{3})-(?<year>[0-9]{2}) (?<hour>[0-9]{2}):(?<min>[0-9]{2}):(?<sec>[0-9]{2}) GMT$"
+const ASCTIME_DATE = r"^\w{3} (?<mon>\w{3}) (?<day>[ 0-9][0-9]) (?<hour>[0-9]{2}):(?<min>[0-9]{2}):(?<sec>[0-9]{2}) (?<year>[0-9]{4})$"
+"""
+    parse_http_date(s; now = Dates.now(Dates.UTC)) -> DateTime or nothing
+
+A date in one of HTTP's three formats (RFC 9110: `Sun, 06 Nov 1994 08:49:37 GMT`, `Sunday, 06-Nov-94 08:49:37 GMT`,
+`Sun Nov  6 08:49:37 1994`), as Django's, in UTC. A two-digit year is the one within 50 years of `now`'s. Nothing for
+anything else (Django's `parse_http_date_safe`; its `parse_http_date` raises).
+"""
+function parse_http_date(s; now::DateTime = Dates.now(Dates.UTC))
     s === nothing && return nothing
-    s = strip(replace(s, r"\s*GMT\s*$" => ""))
-    for f in (Dates.RFC1123Format, dateformat"e, dd-u-yy HH:MM:SS", dateformat"e u d HH:MM:SS yyyy")
-        d = tryparse(DateTime, s, f)
-        d === nothing || return d
+    s = String(s)
+    m = nothing
+    for re in (RFC1123_DATE, RFC850_DATE, ASCTIME_DATE)
+        m = match(re, s)
+        m === nothing || break
     end
-    nothing
+    m === nothing && return nothing
+    year = parse(Int, m[:year])
+    if year < 100
+        cy = Dates.year(now)
+        century = cy - cy % 100
+        year += year - cy % 100 > 50 ? century - 100 : century
+    end
+    mon = findfirst(==(lowercase(m[:mon])), HTTP_MONTHS)
+    mon === nothing && return nothing
+    try
+        DateTime(year, mon, parse(Int, strip(m[:day])), parse(Int, m[:hour]), parse(Int, m[:min]), parse(Int, m[:sec]))
+    catch
+        nothing
+    end
 end
 
-quote_etag(e::AbstractString) = occursin(r"^(W/)?\".*\"$", e) ? String(e) : "\"" * replace(e, "\"" => "\\\"") * "\""
-parse_etags(s) = [String(strip(m.match)) for m in eachmatch(r"(?:W/)?\"[^\"]*\"", s)]
+const ETAG_MATCH = r"^((?:W/)?\"[^\"]*\")$"
+"Django's `quote_etag`: an ETag as it is when it's quoted already (`W/\"x\"`), else in quotes, a strong one."
+quote_etag(e::AbstractString) = occursin(ETAG_MATCH, e) ? String(e) : "\"" * e * "\""
+"""
+Django's `parse_etags`: an If-None-Match or If-Match header's ETags, as written (quoted, `W/` for weak ones), or `["*"]`;
+those that aren't valid ETags (RFC 9110: no quotes inside) are left out.
+"""
+function parse_etags(s)
+    strip(s) == "*" && return ["*"]
+    String[m[1] for m in (match(ETAG_MATCH, e) for e in split_header_value(s)) if m !== nothing]
+end
 strip_weak(e) = startswith(e, "W/") ? e[3:end] : e
 etag_matches_weak(etag, header) = strip(header) == "*" || any(e -> strip_weak(e) == strip_weak(etag), parse_etags(header))
 etag_matches_strong(etag, header) = strip(header) == "*" ||

@@ -49,6 +49,54 @@ const SIGNER_HMACS = Dict{String,Function}("sha1" => SHA.hmac_sha1, "sha224" => 
                                            "sha384" => SHA.hmac_sha384, "sha512" => SHA.hmac_sha512)
 signing_key_bytes(k) = k isa AbstractVector{UInt8} ? Vector{UInt8}(k) : Vector{UInt8}(codeunits(string(k)))
 
+# django.utils.crypto: salted_hmac, pbkdf2, constant_time_compare -------------------------------------------
+
+const CRYPTO_HASHES = Dict{String,Function}("sha1" => SHA.sha1, "sha224" => SHA.sha224, "sha256" => SHA.sha256,
+                                            "sha384" => SHA.sha384, "sha512" => SHA.sha512)
+function crypto_hash(algorithm::AbstractString)
+    haskey(CRYPTO_HASHES, algorithm) || throw(InvalidAlgorithm("'$algorithm' is not an algorithm accepted by the hashlib module."))
+    CRYPTO_HASHES[algorithm], SIGNER_HMACS[algorithm]
+end
+
+"""
+    salted_hmac(key_salt, value; secret = SECRET_KEY, algorithm = "sha1") -> Vector{UInt8}
+
+Django's `salted_hmac`: the HMAC of `value` under a key derived from `key_salt` and `secret` (the hash of the two), so
+different uses of the one secret give unrelated signatures. `bytes2hex` of it is Django's `hexdigest()`. An algorithm
+SHA.jl hasn't (blake2b, ...) is an `InvalidAlgorithm`.
+"""
+function salted_hmac(key_salt, value; secret = nothing, algorithm::AbstractString = "sha1")
+    h, mac = crypto_hash(algorithm)
+    key = h(vcat(signing_key_bytes(key_salt), signing_key_bytes(something(secret, settings.SECRET_KEY))))
+    mac(Vector{UInt8}(key), signing_key_bytes(value))
+end
+
+"""
+    pbkdf2(password, salt, iterations; dklen = 0, digest = "sha256") -> Vector{UInt8}
+
+Django's `pbkdf2` (PBKDF2-HMAC, RFC 8018): `dklen` bytes (0: the digest's length) derived from `password` and `salt`.
+"""
+function pbkdf2(password, salt, iterations::Integer; dklen::Integer = 0, digest::AbstractString = "sha256")
+    _, mac = crypto_hash(digest)
+    pw, sl = signing_key_bytes(password), signing_key_bytes(salt)
+    hlen = length(mac(UInt8[], UInt8[]))
+    n = dklen == 0 ? hlen : Int(dklen)
+    out = UInt8[]
+    for block in 1:cld(n, hlen)
+        u = mac(pw, vcat(sl, reverse(reinterpret(UInt8, [UInt32(block)]))))
+        t = copy(u)
+        for _ in 2:iterations
+            u = mac(pw, u)
+            t .⊻= u
+        end
+        append!(out, t)
+    end
+    out[1:n]
+end
+
+"Django's `constant_time_compare`: whether two strings (or byte strings) are equal, in time that doesn't depend on where they differ."
+constant_time_compare(a, b) = consteq(signing_key_bytes(a), signing_key_bytes(b))
+
 """
     Signer(; key = SECRET_KEY, sep = ":", salt = "juango.signing.Signer", algorithm = "sha256", fallback_keys = SECRET_KEY_FALLBACKS)
 

@@ -15,6 +15,15 @@
 
 # SecurityMiddleware: see security.jl
 
+"""
+    decorator_from_middleware(middleware) -> (view -> view)
+
+Django's: a view decorator from a middleware factory, so one view gets what the middleware does for every request
+(`cached = decorator_from_middleware(CacheMiddleware)(view)`). A Juango middleware is already `get_response -> handler`,
+so the decorated view is the middleware around it.
+"""
+decorator_from_middleware(middleware) = view -> middleware(view)
+
 "Loads `req.session` from the session cookie and saves it after the view runs."
 function SessionMiddleware(get_response)
     function (req::Request)

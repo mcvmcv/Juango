@@ -97,6 +97,25 @@ rfc822(d) = (z = feed_datetime(d); z === nothing ? "" : Dates.format(DateTime(z)
 "RFC 3339 (Atom), in the datetime's own offset: `2008-01-03T12:30:00+01:00`."
 rfc3339(d) = (z = feed_datetime(d); z === nothing ? "" : Dates.format(DateTime(z), "yyyy-mm-ddTHH:MM:SS") * offset_string(z))
 
+# (django.utils.feedgenerator's: a naive datetime as it is, marked -0000 or Z; a date at midnight)
+"Django's `rfc2822_date`: `Fri, 14 Nov 2008 13:37:00 +0100` (an aware time's offset; `-0000` for a naive one or a date)."
+function rfc2822_date(d)
+    dt = d isa TimeZones.ZonedDateTime ? DateTime(d) : todatetime(d)
+    Dates.format(dt, "e, dd u yyyy HH:MM:SS") * " " * (d isa TimeZones.ZonedDateTime ? replace(offset_string(d), ":" => "") : "-0000")
+end
+"Django's `rfc3339_date`: `2008-11-14T13:37:00+02:00` (an aware time's offset; `Z` for a naive one or a date)."
+function rfc3339_date(d)
+    dt = d isa TimeZones.ZonedDateTime ? DateTime(d) : todatetime(d)
+    Dates.format(dt, "yyyy-mm-ddTHH:MM:SS") * (d isa TimeZones.ZonedDateTime ? offset_string(d) : "Z")
+end
+"Django's `get_tag_uri`: a TagURI for an item's link and date (`tag:example.org,2004-10-25:/foo/bar/headline`)."
+function get_tag_uri(url::AbstractString, date)
+    m = match(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:)?(?://(?:[^@/?#]*@)?(\[[^\]]*\]|[^:/?#]*)(?::\d*)?)?([^?#]*)(?:\?[^#]*)?(?:#(.*))?$", url)
+    host, path, frag = lowercase(something(m[1], "")), m[2], something(m[3], "")
+    d = date === nothing ? "" : "," * Dates.format(Date(todatetime(date)), "yyyy-mm-dd")
+    "tag:$host$d:$path/$frag"
+end
+
 function (f::Feed)(req::Request; kw...)
     obj = f.get_object === nothing ? nothing : f.get_object(req; kw...)
     site = site_domain(req)

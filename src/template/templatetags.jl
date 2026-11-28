@@ -131,10 +131,29 @@ const LOREM_WORDS = split("exercitationem perferendis perspiciatis laborum eveni
     "temporibus repellat veniam architecto est esse mollitia nulla a similique eos alias dolore tenetur deleniti porro facere " *
     "maxime corrupti")
 
-lorem_words(n::Int, common::Bool) = common && n <= length(LOREM_COMMON_WORDS) ? join(LOREM_COMMON_WORDS[1:n], " ") :
-    join(vcat(common ? LOREM_COMMON_WORDS : SubString{String}[], [rand(LOREM_WORDS) for _ in 1:(n - (common ? length(LOREM_COMMON_WORDS) : 0))]), " ")
+"`k` different words, at random (Python's `random.sample`)."
+lorem_sample(k::Int) = String.(shuffle(LOREM_WORDS)[1:k])      # (Random here is the ORM's Random())
+"""
+Django's lorem_ipsum `words`: `n` words, the common ones first (with `common`); past the 19 of them, random different
+words (as many sets as it takes). As Python's slice, a negative `n` is that many fewer common words.
+"""
+function lorem_words(n::Int, common::Bool)
+    wl = common ? String.(LOREM_COMMON_WORDS) : String[]
+    c = length(wl)
+    if n > c
+        n -= c
+        while n > 0
+            k = min(n, length(LOREM_WORDS))
+            n -= k
+            append!(wl, lorem_sample(k))
+        end
+    else
+        wl = wl[1:(n >= 0 ? n : max(0, c + n))]
+    end
+    join(wl, " ")
+end
 function lorem_sentence()
-    sections = [join(rand(LOREM_WORDS, rand(3:12)), " ") for _ in 1:rand(1:5)]
+    sections = [join(lorem_sample(rand(3:12)), " ") for _ in 1:rand(1:5)]
     s = join(sections, ", ")
     uppercasefirst(s) * rand(("?", "."))
 end
@@ -502,15 +521,9 @@ let F(name, f; kw...) = register_filter!(name, f; kw...)
         s = string(abs(n)); k > length(s) ? 0 : parse(Int, s[end-k+1])
     end)
     F("unordered_list", (v, _, ae) -> SafeString(unordered_list_html(to_iterable(v), ae)); needs_autoescape = true)
-    F("escapejs", (v, _) -> join(c in "\\'\"<>&=-;`\u2028\u2029" || c < ' ' ? "\\u" * uppercase(string(UInt32(c), base = 16, pad = 4)) : string(c)
+    F("escapejs", (v, _) -> join(c in "\\'\"<>&=-;`\u2028\u2029" || c < ' ' || '\x7f' <= c <= '\u9f' ? "\\u" * uppercase(string(UInt32(c), base = 16, pad = 4)) : string(c)
                                  for c in str(v)))
-    F("timeuntil", (v, a) -> begin
-        d = v isa TimeZones.ZonedDateTime ? DateTime(TimeZones.astimezone(v, UTC_TZ)) : todatetime(v)
-        d === nothing && return ""
-        ref = a === nothing ? (v isa TimeZones.ZonedDateTime ? now(Dates.UTC) : now()) :
-              a isa TimeZones.ZonedDateTime ? DateTime(TimeZones.astimezone(a, UTC_TZ)) : todatetime(a)
-        timesince(ref, d)
-    end)
+    F("timeuntil", (v, a) -> (r = try timeuntil(v, a) catch; "" end; something(r, "")))
     F("escapeseq", (v, _) -> [SafeString(conditional_escape(x)) for x in to_iterable(v)])
     F("safeseq", (v, _) -> [SafeString(display_string(x)) for x in to_iterable(v)])
     F("pprint", (v, _) -> sprint(show, MIME"text/plain"(), v))

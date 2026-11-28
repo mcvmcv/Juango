@@ -781,6 +781,10 @@ ValidationError(d::AbstractDict) =
 Base.getproperty(e::ValidationError, s::Symbol) =
     s === :messages ? String[m for k in sort!(collect(keys(getfield(e, :errors)))) for m in getfield(e, :errors)[k]] : getfield(e, s)
 Base.propertynames(::ValidationError) = (:errors, :code, :messages)
+# (equal when their code and each field's messages are, in any order, as Django's: #311 for the params and nested codes)
+validation_key(e::ValidationError) = (getfield(e, :code), sort!([k => sort(v) for (k, v) in getfield(e, :errors) if !isempty(v)]; by = first))
+Base.:(==)(a::ValidationError, b::ValidationError) = validation_key(a) == validation_key(b)
+Base.hash(e::ValidationError, h::UInt) = hash(validation_key(e), hash(:ValidationError, h))
 Base.showerror(io::IO, e::ValidationError) =
     print(io, "ValidationError: ", join([k === :__all__ ? join(v, " ") : "$k: " * join(v, " ") for (k, v) in e.errors], "; "))
 

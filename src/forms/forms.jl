@@ -631,7 +631,7 @@ function to_julia(fld::Field, raw)
             return nothing, coded("invalid_choice", gettext("Select a valid choice. %(value)s is not one of the available choices."), Dict("value" => s))
         return String(s), nothing
     elseif k === :time
-        v = opts !== nothing && opts.input_formats !== nothing ? parse_input_datetime(s, :time; formats = opts.input_formats) : parse_time(s)
+        v = opts !== nothing && opts.input_formats !== nothing ? parse_input_datetime(s, :time; formats = opts.input_formats) : tryparse_time(s)
         return v, v === nothing ? gettext("Enter a valid time.") : nothing
     elseif k === :duration
         us = try parse_duration_us(s) catch; nothing end

@@ -1552,9 +1552,9 @@ end
 end
 
 @testset "TimeField and DurationField" begin
-    @test Juango.parse_time("9:05") == Dates.Time(9, 5) && Juango.parse_time("12:30:05.25") == Dates.Time(12, 30, 5, 250)
-    @test Juango.parse_time("24:00") === nothing && Juango.time_string(Dates.Time(1, 2, 3, 4, 5)) == "01:02:03.004005"
-    @test Juango.duration_string(Day(1) + Hour(2) + Minute(3)) == "1 day, 2:03:00" && Juango.duration_string(Second(-90)) == "-0:01:30"
+    @test Juango.tryparse_time("9:05") == Dates.Time(9, 5) && Juango.tryparse_time("12:30:05.25") == Dates.Time(12, 30, 5, 250)
+    @test Juango.tryparse_time("24:00") === nothing && Juango.time_string(Dates.Time(1, 2, 3, 4, 5)) == "01:02:03.004005"
+    @test Juango.duration_string(Day(1) + Hour(2) + Minute(3)) == "1 day, 2:03:00" && Juango.duration_string(Second(-90)) == "-1 day, 23:58:30"   # (Python's: a negative day and the time after)
     @test Juango.duration_string(Day(2) + Millisecond(5); serial = true) == "2 00:00:00.005000"
     @test Juango.parse_duration_us("1 day, 2:03:04") == Juango.parse_duration_us("1 02:03:04") == Juango.duration_us(Day(1) + Hour(2) + Minute(3) + Second(4))
     @test Juango.parse_duration_us("90") == 90_000_000 && Juango.parse_duration_us("P1DT2H0.5S") == 93_600_500_000 &&

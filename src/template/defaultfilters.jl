@@ -305,10 +305,8 @@ let F = register_filter!
         esc = ae && !(v isa SafeString)
         SafeString(join(["$(lpad(i, w, '0')). $(esc ? escape_html(l) : l)" for (i, l) in enumerate(lines)], "\n"))
     end; is_safe = true, needs_autoescape = true)
-    F("truncatechars", (v, a) -> (n = py_int(a); n === nothing ? v : (s = str(v); n <= 0 ? "" : length(s) <= n ? s : first(s, n - 1) * "…"));
-      is_safe = true)
-    F("truncatewords", (v, a) -> (n = py_int(a); n === nothing ? v : (w = split(str(v)); n <= 0 ? "" : length(w) <= n ? join(w, " ") :
-                                                                   join(w[1:n], " ") * " …")); is_safe = true)
+    F("truncatechars", (v, a) -> (n = py_int(a); n === nothing ? v : truncate_chars(str(v), n)); is_safe = true)
+    F("truncatewords", (v, a) -> (n = py_int(a); n === nothing ? v : truncate_words(str(v), n; truncate = " …")); is_safe = true)
     F("wordwrap", (v, a) -> wrap_text(str(v), something(py_int(a), 0)); is_safe = true)
     F("date", (v, a) -> v === nothing || v == "" ? "" : format_date(v, a === nothing ? get_format().date : str(a)))
     F("time", (v, a) -> v === nothing || v == "" ? "" : format_date(v, a === nothing ? "g:i a" : str(a)))
@@ -343,60 +341,6 @@ html_unescape(s::AbstractString) = replace(s, r"&(?:#[xX][0-9a-fA-F]+|#[0-9]+|[A
     end
     get(ENTITIES, e, m)
 end)
-
-const TRUNCATE_VOID_ELEMENTS = Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"])
-
-"""
-HTML truncated after `n` characters or words of its text, as Django's Truncator with `html = True`:
-tags are kept and those left open are closed, entities count as one character, comments go.
-"""
-function truncate_html(text::AbstractString, n::Int; words::Bool)
-    n <= 0 && return ""
-    words || (text = Base.Unicode.normalize(String(text), :NFC))
-    remaining = words ? n : n - 1                          # (room for the ellipsis)
-    out, tags, processed = String[], String[], 0
-    for m in eachmatch(r"<!--.*?-->|<[!?][^>]*>|</?[A-Za-z][^>]*>|[^<]+|<"s, text)
-        tok = m.match
-        if startswith(tok, "<!") || startswith(tok, "<?")
-            continue                                        # comments, doctypes, processing instructions
-        elseif (t = match(r"^</\s*([A-Za-z][\w:-]*)", tok)) !== nothing
-            name = lowercase(t[1])
-            name in TRUNCATE_VOID_ELEMENTS && continue
-            push!(out, "</$name>")
-            !isempty(tags) && tags[end] == name && pop!(tags)
-        elseif (t = match(r"^<([A-Za-z][\w:-]*)", tok)) !== nothing
-            name = lowercase(t[1])
-            push!(out, tok)
-            if endswith(tok, "/>")
-                name in TRUNCATE_VOID_ELEMENTS || push!(out, "</$name>")
-            else
-                name in TRUNCATE_VOID_ELEMENTS || push!(tags, name)
-            end
-        else
-            data = html_unescape(tok)
-            if words
-                units = split(data, r"(?<=\S)\s+(?=\S)")
-                output = escape_html(join(units[1:min(remaining, length(units))], " "))
-            else
-                processed += length(data)
-                if processed == n && sum(length, out; init = 0) + length(data) == length(text)
-                    push!(out, data)                       # (exactly n characters: nothing truncated)
-                    break
-                end
-                units = data
-                output = escape_html(first(data, max(remaining, 0)))
-            end
-            if remaining < length(units)
-                push!(out, output * (words ? " …" : "…"))
-                append!(out, ["</$t>" for t in reverse(tags)])
-                return join(out)
-            end
-            remaining -= length(units)
-            push!(out, output)
-        end
-    end
-    join(out)
-end
 
 const URLIZE_TRAILING = ".,:;!"
 const URLIZE_WRAPPING = (('(', ')'), ('[', ']'))
@@ -472,6 +416,364 @@ function urlize_trim(word::AbstractString)
     lead, middle, join(trail)
 end
 
+# --- strip_tags: Python's HTMLParser's tokenizing (3.14), as Django's strip_tags uses it ---------------------------
+const HP_ENTITYREF = r"\G&([a-zA-Z][-.a-zA-Z0-9]*)[^a-zA-Z0-9]"
+const HP_CHARREF = r"\G&#(?:[0-9]+|[xX][0-9a-fA-F]+)[^0-9a-fA-F]"
+const HP_INCOMPLETE = r"\G&[a-zA-Z#]"
+const HP_INCOMPLETE_CHARREF = r"\G&#(?:[0-9]|[xX][0-9a-fA-F])"
+const HP_STARTTAGOPEN = r"\G<[a-zA-Z]"
+const HP_ENDTAGOPEN = r"\G</[a-zA-Z]"
+const HP_COMMENTCLOSE = r"--!?>"
+const HP_COMMENTABRUPTCLOSE = r"\G-?>"
+const HP_TAGFIND = r"\G([a-zA-Z][^\t\n\r\f />]*)(?:[\t\n\r\f ]|/(?!>))*"
+const HP_ATTRFIND = r"""\G((?<=['"\t\n\r\f /])[^\t\n\r\f />][^\t\n\r\f /=>]*)([\t\n\r\f ]*=[\t\n\r\f ]*('[^']*'|"[^"]*"|(?!['"])[^>\t\n\r\f ]*))?(?:[\t\n\r\f ]|/(?!>))*"""
+const HP_LOCATETAGEND = r"""\G[a-zA-Z][^\t\n\r\f />]*[\t\n\r\f /]*(?:(?<=['"\t\n\r\f /])[^\t\n\r\f />][^\t\n\r\f /=>]*(?:[\t\n\r\f ]*=[\t\n\r\f ]*(?:'[^']*'|"[^"]*"|(?!['"])[^>\t\n\r\f ]*))?[\t\n\r\f /]*)*>?"""
+const HP_CDATA_ELEMENTS = ("script", "style", "xmp", "iframe", "noembed", "noframes")
+const HP_RCDATA_ELEMENTS = ("textarea", "title")
+const STRIP_TAGS_MAX_DEPTH = 50
+const LONG_OPEN_TAG = r"<[a-zA-Z][^>]{1000,}"
+
+hp_at(s::String, i::Int, p::String) = i + ncodeunits(p) - 1 <= ncodeunits(s) && view(codeunits(s), i:i+ncodeunits(p)-1) == codeunits(p)
+hp_end(m::RegexMatch) = m.offset + ncodeunits(m.match)               # (exclusive)
+hp_find(s::String, b::Char, i::Int) = something(findnext(==(UInt8(b)), codeunits(s), i), 0)
+
+"""
+What Python's HTMLParser hands its subclass, as Juango's port of it (`hp_parse`) calls them: `hp_data(h, text)`,
+`hp_entityref(h, name)`, `hp_charref(h, name)`, `hp_starttag(h, tag, text)` (`text`: the tag as written),
+`hp_startendtag(h, tag, text)` (`<br/>`: the start tag then the end tag, by default) and `hp_endtag(h, tag)`. Comments,
+declarations and processing instructions are dropped.
+"""
+abstract type HTMLParseHandler end
+hp_data(::HTMLParseHandler, ::AbstractString) = nothing
+hp_entityref(::HTMLParseHandler, ::AbstractString) = nothing
+hp_charref(::HTMLParseHandler, ::AbstractString) = nothing
+hp_starttag(::HTMLParseHandler, ::AbstractString, ::AbstractString) = nothing
+hp_endtag(::HTMLParseHandler, ::AbstractString) = nothing
+hp_startendtag(h::HTMLParseHandler, tag::AbstractString, text::AbstractString) = (hp_starttag(h, tag, text); hp_endtag(h, tag))
+
+"""
+    hp_parse(h, s; convert_charrefs = true, close = true) -> Int
+
+Python's HTMLParser (3.14) fed `s` (and closed, with `close`), calling `h`'s handlers. With `convert_charrefs`, text comes
+with its references converted (`html_unescape`); otherwise they come as `hp_entityref`/`hp_charref`. Returns the byte
+index the parser stopped at: without `close`, what it was still waiting on (an unfinished tag) starts there.
+"""
+function hp_parse(h::HTMLParseHandler, s::String; convert_charrefs::Bool = true, close::Bool = true)
+    n = ncodeunits(s)
+    sub(a, b) = String(view(codeunits(s), a:b))
+    cdata = nothing                                     # (a script, style, ... element's raw text)
+    escapable = true
+    function data(a, b)
+        a <= b || return
+        t = sub(a, b)
+        hp_data(h, convert_charrefs && escapable ? html_unescape(t) : t)
+    end
+    tagend(i) = (m = match(HP_LOCATETAGEND, s, i); j = hp_end(m); codeunit(s, j - 1) == UInt8('>') ? j : -1)
+    bogus_comment(i) = (p = hp_find(s, '>', i + 2); p == 0 ? -1 : p + 1)
+    function comment(i)
+        m = match(HP_COMMENTCLOSE, s, i + 4)
+        m === nothing && (m = match(HP_COMMENTABRUPTCLOSE, s, i + 4))
+        m === nothing ? -1 : hp_end(m)
+    end
+    function starttag(i)
+        endpos = tagend(i + 1)
+        endpos < 0 && return endpos
+        m = match(HP_TAGFIND, s, i + 1)
+        k = hp_end(m)
+        tag = lowercase(m[1])
+        while k < endpos
+            a = match(HP_ATTRFIND, s, k)
+            a === nothing && break
+            k = hp_end(a)
+        end
+        e = strip(sub(k, endpos - 1))
+        if e != ">" && e != "/>"
+            data(i, endpos - 1)
+        elseif endswith(e, "/>")
+            hp_startendtag(h, tag, sub(i, endpos - 1))
+        else
+            hp_starttag(h, tag, sub(i, endpos - 1))
+            if tag in HP_CDATA_ELEMENTS || tag == "plaintext"
+                cdata, escapable = tag, false
+            elseif tag in HP_RCDATA_ELEMENTS
+                cdata, escapable = tag, true
+            end
+        end
+        endpos
+    end
+    function endtag(i)
+        hp_find(s, '>', i + 2) == 0 && return -1
+        if match(HP_ENDTAGOPEN, s, i) === nothing
+            return hp_at(s, i + 2, ">") ? i + 3 : bogus_comment(i)
+        end
+        j = tagend(i + 2)
+        j < 0 && return -1
+        hp_endtag(h, lowercase(match(HP_TAGFIND, s, i + 2)[1]))
+        cdata, escapable = nothing, true
+        j
+    end
+    function declaration(i)
+        hp_at(s, i, "<!--") && return comment(i)
+        if hp_at(s, i, "<![CDATA[")
+            j = findnext("]]>", s, i + 9)
+            return j === nothing ? -1 : first(j) + 3
+        end
+        if lowercase(String(codeunits(s)[i:min(i + 8, n)])) == "<!doctype"
+            p = hp_find(s, '>', i + 9)
+            return p == 0 ? -1 : p + 1
+        end
+        bogus_comment(i)
+    end
+    i = 1
+    while i <= n
+        if convert_charrefs && cdata === nothing
+            j = hp_find(s, '<', i)
+            if j == 0
+                # (a reference that may be unfinished, in the last 34 characters: waited on)
+                from = max(i, n - 34 < 1 ? 1 : something(prevind(s, n + 1, 34), 1))
+                amp = something(findprev(==(UInt8('&')), codeunits(s), n), 0)
+                !close && amp >= from && match(r"[\t\n\r\f ;]", s, amp) === nothing && break
+                j = n + 1
+            end
+        elseif cdata === nothing
+            j = something(findnext(b -> b == UInt8('<') || b == UInt8('&'), codeunits(s), i), n + 1)
+        else
+            re = cdata == "plaintext" ? r"\z" :
+                 Regex((escapable && !convert_charrefs ? "&|" : "") * "</" * cdata * "(?=[\\t\\n\\r\\f />])", "i")
+            m = match(re, s, i)
+            m === nothing && break
+            j = m.offset
+        end
+        data(i, j - 1)
+        i = j
+        i > n && break
+        if codeunit(s, i) == UInt8('<')
+            k = if match(HP_STARTTAGOPEN, s, i) !== nothing
+                starttag(i)
+            elseif hp_at(s, i, "</")
+                endtag(i)
+            elseif hp_at(s, i, "<!--")
+                comment(i)
+            elseif hp_at(s, i, "<?")
+                p = hp_find(s, '>', i + 2); p == 0 ? -1 : p + 1
+            elseif hp_at(s, i, "<!")
+                declaration(i)
+            elseif i < n || close
+                hp_data(h, "<"); i + 1
+            else
+                break
+            end
+            if k < 0                                    # (unfinished: waited on, or at the close dropped but a bare "</")
+                close || break
+                hp_at(s, i, "</") && i + 1 == n && hp_data(h, "</")
+                k = n + 1
+            end
+            i = k
+        elseif hp_at(s, i, "&#")
+            m = match(HP_CHARREF, s, i)
+            if m !== nothing
+                hp_charref(h, chop(m.match[3:end]))
+                k = hp_end(m)
+                (c = last(m.match)) == ';' || (k -= ncodeunits(c))
+                i = k
+                continue
+            end
+            if match(HP_INCOMPLETE_CHARREF, s, i) !== nothing
+                close || break
+                hp_charref(h, sub(i + 2, n))
+                i = n + 1
+                break
+            elseif i + 2 < n
+                hp_data(h, "&#"); i += 2
+            else
+                break
+            end
+        else
+            m = match(HP_ENTITYREF, s, i)
+            if m !== nothing
+                hp_entityref(h, m[1])
+                k = hp_end(m)
+                (c = last(m.match)) == ';' || (k -= ncodeunits(c))
+                i = k
+                continue
+            end
+            if match(HP_INCOMPLETE, s, i) !== nothing
+                close || break
+                hp_entityref(h, sub(i + 1, n))
+                i = n + 1
+                break
+            elseif i < n
+                hp_data(h, "&"); i += 1
+            else
+                break
+            end
+        end
+    end
+    close && i <= n && (data(i, n); i = n + 1)
+    i
+end
+
+"Django's MLStripper: the text, and references as written (`&name;`, `&#n;`)."
+struct TagStripper <: HTMLParseHandler
+    out::IOBuffer
+end
+hp_data(h::TagStripper, t::AbstractString) = print(h.out, t)
+hp_entityref(h::TagStripper, name::AbstractString) = print(h.out, "&", name, ";")
+hp_charref(h::TagStripper, name::AbstractString) = print(h.out, "&#", name, ";")
+
+"One pass of Python's HTMLParser over `s`, keeping what Django's MLStripper keeps: tags, comments and so on go."
+strip_once(s::String) = (h = TagStripper(IOBuffer()); hp_parse(h, s; convert_charrefs = false); String(take!(h.out)))
+
+"""
+    strip_tags(value)
+
+Django's `strip_tags`: the text with all HTML tags taken out, as Python's HTMLParser finds them, again until no more
+come out. Tags nested 50 deep, or a 1000-character open tag holding 50 `<`, are refused (a 400, as Django's
+SuspiciousOperation).
+"""
+function strip_tags(value)
+    s = String(display_string(value))
+    for m in eachmatch(LONG_OPEN_TAG, s)
+        count(==('<'), m.match) >= STRIP_TAGS_MAX_DEPTH && throw(BadRequest("strip_tags: an open tag too long to strip"))
+    end
+    depth = 0
+    while occursin('<', s) && occursin('>', s)
+        depth >= STRIP_TAGS_MAX_DEPTH && throw(BadRequest("strip_tags: tags nested too deep to strip"))
+        t = strip_once(s)
+        count(==('<'), s) == count(==('<'), t) && break
+        s = t
+        depth += 1
+    end
+    s
+end
+
+"Django's `strip_spaces_between_tags`: the whitespace between `>` and `<` taken out."
+strip_spaces_between_tags(value) = replace(String(display_string(value)), r">\s+<" => "><")
+
+const TRUNCATE_VOID_ELEMENTS = Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"])
+
+"Python's `unicodedata.combining(c) != 0`, near enough: a combining mark (it adds nothing to a text's length)."
+is_combining(c::Char) = Base.Unicode.category_code(c) in (Base.Unicode.UTF8PROC_CATEGORY_MN, Base.Unicode.UTF8PROC_CATEGORY_ME)
+
+"""
+Django's `add_truncation_text`: `truncate` (by default the translated "…") after `text`, unless `text` ends with it
+already; a `truncate` with `%(truncated_text)s` holds the text there instead.
+"""
+function add_truncation_text(text::AbstractString, truncate = nothing)
+    t = truncate === nothing ? pgettext("String to return when truncating text", "%(truncated_text)s…") : String(truncate)
+    occursin("%(truncated_text)s", t) && return replace(t, "%(truncated_text)s" => text)
+    endswith(text, t) ? String(text) : text * t
+end
+
+"How many characters of text `length` leaves room for, with the truncation text after them (Django's)."
+function calculate_truncate_chars_length(length::Int, replacement)
+    n = length
+    for c in add_truncation_text("", replacement)
+        is_combining(c) && continue
+        n -= 1
+        n == 0 && break
+    end
+    n
+end
+
+struct TruncationCompleted <: Exception end
+
+"Django's TruncateCharsHTMLParser and TruncateWordsHTMLParser."
+mutable struct HTMLTruncator <: HTMLParseHandler
+    words::Bool
+    raw::String
+    length::Int
+    remaining::Int
+    replacement::Any
+    processed::Int
+    tags::Vector{String}                 # (open, the last opened at the end)
+    output::Vector{String}
+end
+function hp_starttag(h::HTMLTruncator, tag::AbstractString, text::AbstractString)
+    push!(h.output, text)
+    tag in TRUNCATE_VOID_ELEMENTS || push!(h.tags, tag)
+end
+function hp_startendtag(h::HTMLTruncator, tag::AbstractString, text::AbstractString)
+    hp_starttag(h, tag, text)
+    tag in TRUNCATE_VOID_ELEMENTS || hp_endtag(h, tag)
+end
+function hp_endtag(h::HTMLTruncator, tag::AbstractString)
+    tag in TRUNCATE_VOID_ELEMENTS && return
+    push!(h.output, "</$tag>")
+    !isempty(h.tags) && h.tags[end] == tag && pop!(h.tags)       # (only the last opened: a misnested end tag leaves them)
+end
+function hp_data(h::HTMLTruncator, data::AbstractString)
+    if h.words
+        units = split(data, r"(?<=\S)\s+(?=\S)")
+        n = length(units)
+        out = escape_html(join(units[1:min(max(h.remaining, 0), n)], " "))
+    else
+        h.processed += length(data)
+        if h.processed == h.length && sum(length, h.output; init = 0) + length(data) == length(h.raw)
+            push!(h.output, data)                                   # (exactly `length` characters: nothing cut)
+            throw(TruncationCompleted())
+        end
+        n = length(data)
+        out = escape_html(first(data, max(h.remaining, 0)))
+    end
+    if h.remaining < n
+        h.remaining = 0
+        push!(h.output, add_truncation_text(out, h.replacement))
+        throw(TruncationCompleted())
+    end
+    h.remaining -= n
+    push!(h.output, out)
+end
+
+function truncate_html_text(text::String, n::Int, truncate, words::Bool)
+    h = HTMLTruncator(words, text, n, words ? n : calculate_truncate_chars_length(n, truncate), truncate, 0, String[], String[])
+    try
+        hp_parse(h, text; convert_charrefs = true, close = false)    # (fed, not closed: an unfinished tag at the end goes)
+    catch e
+        e isa TruncationCompleted || rethrow()
+        append!(h.output, ["</$t>" for t in reverse(h.tags)])
+    end
+    join(h.output)
+end
+
+"""
+    truncate_chars(text, num; truncate = nothing, html = false)
+
+Django's `Truncator(text).chars(num, truncate, html)`: the text cut to `num` characters, `truncate` (by default "…")
+included; combining marks count for nothing and stay with their letter. With `html`, only the text between the tags
+counts, the tags are kept, and those left open are closed.
+"""
+function truncate_chars(text, num::Integer; truncate = nothing, html::Bool = false)
+    len = Int(num)
+    len <= 0 && return ""
+    text = Base.Unicode.normalize(String(display_string(text)), :NFC)
+    html && return truncate_html_text(text, len, truncate, false)
+    tl = calculate_truncate_chars_length(len, truncate)
+    s_len, end_index = 0, nothing
+    for (i, c) in pairs(text)
+        is_combining(c) && continue
+        s_len += 1
+        end_index === nothing && s_len > tl && (end_index = i)
+        s_len > len && return add_truncation_text(end_index === nothing ? "" : text[1:prevind(text, end_index)], truncate)
+    end
+    text
+end
+
+"""
+    truncate_words(text, num; truncate = nothing, html = false)
+
+Django's `Truncator(text).words(num, truncate, html)`: the first `num` words, with `truncate` (by default "…") when
+there were more. Without `html`, the whitespace between words becomes one space.
+"""
+function truncate_words(text, num::Integer; truncate = nothing, html::Bool = false)
+    len = Int(num)
+    len <= 0 && return ""
+    text = String(display_string(text))
+    html && return truncate_html_text(text, len, truncate, true)
+    words = split(text)
+    length(words) > len ? add_truncation_text(join(words[1:len], " "), truncate) : join(words, " ")
+end
+
 "Django's urlize: URLs, `www.` and bare domain links and email addresses in text made into links."
 function urlize_text(text, trim_limit = nothing; nofollow::Bool = true, autoescape::Bool = false)
     safe_input = text isa SafeString
@@ -513,8 +815,8 @@ function urlize_text(text, trim_limit = nothing; nofollow::Bool = true, autoesca
 end
 
 let F = register_filter!
-    F("truncatechars_html", (v, a) -> (n = py_int(a); n === nothing ? v : truncate_html(str(v), n; words = false)); is_safe = true)
-    F("truncatewords_html", (v, a) -> (n = py_int(a); n === nothing ? v : truncate_html(str(v), n; words = true)); is_safe = true)
+    F("truncatechars_html", (v, a) -> (n = py_int(a); n === nothing ? v : truncate_chars(str(v), n; html = true)); is_safe = true)
+    F("truncatewords_html", (v, a) -> (n = py_int(a); n === nothing ? v : truncate_words(str(v), n; html = true, truncate = " …")); is_safe = true)
     F("urlize", (v, _, ae) -> SafeString(urlize_text(v; autoescape = ae)); is_safe = true, needs_autoescape = true)
     F("urlizetrunc", (v, a, ae) -> SafeString(urlize_text(v, something(py_int(a), 0); autoescape = ae)); is_safe = true, needs_autoescape = true)
 end

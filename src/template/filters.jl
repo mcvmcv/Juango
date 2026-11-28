@@ -61,11 +61,35 @@ end
 
 "The ISO 8601 year of a date (the year its ISO week belongs to)."
 isoyear(d::Date) = (w = Dates.week(d); m = Dates.month(d); w >= 52 && m == 1 ? Dates.year(d) - 1 : w == 1 && m == 12 ? Dates.year(d) + 1 : Dates.year(d))
-"Format a date with Django `date` filter format characters."
+"A naive time in the default time zone (`TIME_ZONE`), or nothing where it's ambiguous or doesn't exist there (Django's)."
+naive_zone(dt::DateTime) = try TimeZones.ZonedDateTime(dt, default_timezone()) catch; nothing end
+"The Unix time of a naive time read in the default time zone (Python's `time.mktime`, with Django's TZ)."
+naive_epoch(dt::DateTime) = (z = naive_zone(dt); z === nothing && (z = try TimeZones.ZonedDateTime(dt, default_timezone(), 1) catch; nothing end);
+                             z === nothing ? round(Int, datetime2unix(dt)) : round(Int, datetime2unix(DateTime(TimeZones.astimezone(z, UTC_TZ)))))
+zone_offset(z) = Dates.value(Second(z.zone.offset.std + z.zone.offset.dst))
+const RFC5322_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+const RFC5322_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+"Format characters that need a time: a date's format may not have them (Django's TimeFormat's)."
+const TIME_FORMAT_CHARS = "aAefgGhHiOPsTuZ"
+
+"""
+Format a date with Django `date` filter format characters. As Django's, a naive datetime's time zone characters (`O`,
+`T`, `Z`, `I`, `U`, `r`) are its default time zone's (`TIME_ZONE`; none where the time is ambiguous there), and a
+date's format may not have the characters that need a time (an `ArgumentError`, Django's TypeError).
+"""
 function format_date(d, fmt::AbstractString)
     dt = todatetime(d)
     dt === nothing && return ""
     z = d isa PinnedTime ? d.z : d isa TimeZones.ZonedDateTime ? (get(task_local_storage(), :juango_localtime_off, false) ? d : localtime(d)) : nothing
+    tzz = z !== nothing ? z : d isa DateTime ? naive_zone(dt) : nothing        # (the time zone the characters use)
+    if d isa Date
+        esc0 = false
+        for c in fmt
+            esc0 && (esc0 = false; continue)
+            c == '\\' && (esc0 = true; continue)
+            c in TIME_FORMAT_CHARS && throw(ArgumentError("The format for date objects may not contain time-related format specifiers (found '$c')."))
+        end
+    end
     io = IOBuffer()
     esc = false
     for c in fmt
@@ -89,7 +113,7 @@ function format_date(d, fmt::AbstractString)
         elseif c == 'F'; print(io, gettext(monthname(dt)))
         elseif c == 'N'; print(io, pgettext("alt. month", MONTH_ABBR_AP[month(dt)]))
         elseif c == 'y'; print(io, lpad(year(dt) % 100, 2, '0'))
-        elseif c == 'Y'; write_int(io, year(dt))
+        elseif c == 'Y'; write_padded(io, year(dt), 4)
         elseif c == 'H'; write_padded(io, h, 2)
         elseif c == 'G'; print(io, h)
         elseif c == 'h'; write_padded(io, h12, 2)
@@ -98,12 +122,12 @@ function format_date(d, fmt::AbstractString)
         elseif c == 's'; write_padded(io, second(dt), 2)
         elseif c == 'A'; print(io, h < 12 ? "AM" : "PM")
         elseif c == 'a'; print(io, h < 12 ? "a.m." : "p.m.")
-        elseif c == 'U'; print(io, round(Int, datetime2unix(z === nothing ? dt : DateTime(TimeZones.astimezone(z, UTC_TZ)))))
-        elseif c == 'e'; z === nothing || print(io, TimeZones.timezone(z))
-        elseif c == 'T'; z === nothing || print(io, string(z.zone.name))
+        elseif c == 'U'; print(io, z === nothing ? naive_epoch(dt) : round(Int, datetime2unix(DateTime(TimeZones.astimezone(z, UTC_TZ)))))
+        elseif c == 'e'; z === nothing || print(io, (tz = TimeZones.timezone(z); tz isa TimeZones.FixedTimeZone ? tz.name : tz))
+        elseif c == 'T'; tzz === nothing || print(io, string(tzz.zone.name))
         elseif c == 'O'
-            if z !== nothing
-                off = Dates.value(Second(z.zone.offset.std + z.zone.offset.dst))
+            if tzz !== nothing
+                off = zone_offset(tzz)
                 print(io, off < 0 ? "-" : "+", lpad(abs(off) ÷ 3600, 2, '0'), lpad((abs(off) % 3600) ÷ 60, 2, '0'))
             end
         elseif c == 'o'; print(io, isoyear(Date(dt)))
@@ -119,11 +143,21 @@ function format_date(d, fmt::AbstractString)
             print(io, minute(dt) == 0 && h == 0 ? gettext("midnight") : minute(dt) == 0 && h == 12 ? gettext("noon") :
                       string(h12, minute(dt) == 0 ? "" : ":" * lpad(minute(dt), 2, '0'), " ", h < 12 ? "a.m." : "p.m."))
         elseif c == 'Z'
-            z === nothing || print(io, Dates.value(Second(z.zone.offset.std + z.zone.offset.dst)))
+            tzz === nothing || print(io, zone_offset(tzz))
         elseif c == 'I'
-            z === nothing || print(io, Dates.value(z.zone.offset.dst) != 0 ? "1" : "0")
-        elseif c == 'c'; print(io, format_date(d, "Y-m-d\\TH:i:s"), z === nothing ? "" : format_date(d, "O")[1:3] * ":" * format_date(d, "O")[4:5])
-        elseif c == 'r'; print(io, format_date(d, "D, d M Y H:i:s"), z === nothing ? "" : " " * format_date(d, "O"))
+            tzz === nothing || print(io, Dates.value(tzz.zone.offset.dst) != 0 ? "1" : "0")
+        elseif c == 'c'                         # (Python's isoformat: microseconds when there are any, an aware time's offset)
+            ms = Dates.millisecond(dt)
+            print(io, format_date(DateTime(Date(dt), Dates.Time(dt)), "Y-m-d\\TH:i:s"), ms == 0 ? "" : "." * lpad(ms * 1000, 6, '0'))
+            z === nothing || (o = format_date(z, "O"); print(io, o[1:3], ":", o[4:5]))
+        elseif c == 'r'                         # (RFC 5322, in English whatever the language; a date at midnight in TIME_ZONE)
+            rz = z !== nothing ? z : d isa Date ? naive_zone(DateTime(Date(dt))) : tzz
+            print(io, RFC5322_DAYS[Dates.dayofweek(dt)], ", ", lpad(day(dt), 2, '0'), " ", RFC5322_MONTHS[month(dt)], " ", lpad(year(dt), 4, '0'),
+                  " ", lpad(hour(dt), 2, '0'), ":", lpad(minute(dt), 2, '0'), ":", lpad(second(dt), 2, '0'))
+            if rz !== nothing
+                off = zone_offset(rz)
+                print(io, " ", off < 0 ? "-" : "+", lpad(abs(off) ÷ 3600, 2, '0'), lpad((abs(off) % 3600) ÷ 60, 2, '0'))
+            end
         elseif c == 'S'
             dd = day(dt)
             print(io, dd in (11, 12, 13) ? "th" : dd % 10 == 1 ? "st" : dd % 10 == 2 ? "nd" : dd % 10 == 3 ? "rd" : "th")
@@ -134,32 +168,69 @@ function format_date(d, fmt::AbstractString)
     String(take!(io))
 end
 
-function timesince(d, ref = nothing)
-    if d isa TimeZones.ZonedDateTime        # compare aware times in UTC
-        dt = DateTime(TimeZones.astimezone(d, UTC_TZ))
-        ref = ref === nothing ? now(Dates.UTC) : ref isa TimeZones.ZonedDateTime ? DateTime(TimeZones.astimezone(ref, UTC_TZ)) : ref
+const TIME_STRINGS = ["year" => ("%(num)d year", "%(num)d years"), "month" => ("%(num)d month", "%(num)d months"),
+                      "week" => ("%(num)d week", "%(num)d weeks"), "day" => ("%(num)d day", "%(num)d days"),
+                      "hour" => ("%(num)d hour", "%(num)d hours"), "minute" => ("%(num)d minute", "%(num)d minutes")]
+const TIME_CHUNKS = (7 * 86400, 86400, 3600, 60)
+const MONTHS_DAYS = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+
+"""
+    timesince(d, now = nothing; reversed = false, time_strings = nothing, depth = 2) -> String
+
+The time from `d` to `now` (by default the current time), as Django's: `"2\u00a0weeks, 3\u00a0days"`. Up to `depth`
+adjacent units (years, months, weeks, days, hours, minutes; seconds are ignored), each number and unit kept together by a
+no-break space and translated; years and months are calendar ones (from 10 February to 10 March is a month). `d` after
+`now` is `"0\u00a0minutes"`. Aware times are compared in `d`'s time zone. `time_strings` replaces the units' texts: a
+`Dict` from `"year"`, ... to a function of the number. `d` that isn't a date or time gives "".
+"""
+function timesince(d, now = nothing; reversed::Bool = false, time_strings = nothing, depth::Integer = 2)
+    depth <= 0 && throw(ArgumentError("depth must be greater than 0."))
+    unit(name, n) = (f = time_strings === nothing ? nothing : get(time_strings, name, nothing);
+                     t = f === nothing ? (ms = Dict(TIME_STRINGS)[name]; interpolate(ngettext(ms[1], ms[2], n), Dict("num" => n))) : f(n);
+                     replace(t, ' ' => '\u00a0'))
+    local dt::DateTime, nw::DateTime
+    if d isa TimeZones.ZonedDateTime
+        dt = DateTime(d)                                       # (wall times in d's zone)
+        nw = now === nothing ? DateTime(TimeZones.astimezone(TimeZones.now(UTC_TZ), TimeZones.timezone(d))) :
+             now isa TimeZones.ZonedDateTime ? DateTime(TimeZones.astimezone(now, TimeZones.timezone(d))) : todatetime(now)
     else
-        dt = todatetime(d)
-        ref = something(ref, now())
+        x = todatetime(d)
+        x === nothing && return ""
+        dt = x
+        nw = now === nothing ? Dates.now() : now isa TimeZones.ZonedDateTime ? DateTime(TimeZones.astimezone(now, UTC_TZ)) : todatetime(now)
     end
-    dt === nothing && return ""
-    secs = max(0, round(Int, Dates.value(ref - dt) / 1000))
-    units = ((365 * 86400, "year"), (30 * 86400, "month"), (7 * 86400, "week"), (86400, "day"), (3600, "hour"), (60, "minute"))
-    # (as Django's: up to two adjacent units, "4 days, 6 hours", each number and unit kept together by a no-break space)
-    part(k, unit) = "$k\u00a0$(unit)$(k == 1 ? "" : "s")"
-    for (i, (n, unit)) in enumerate(units)
-        secs >= n || continue
-        k = secs ÷ n
-        out = part(k, unit)
-        if i < length(units)
-            n2, unit2 = units[i+1]
-            k2 = (secs - k * n) ÷ n2
-            k2 > 0 && (out *= ", " * part(k2, unit2))
-        end
-        return out
+    reversed && ((dt, nw) = (nw, dt))
+    since = fld(Dates.value(nw - dt), 1000)                    # (microseconds ignored)
+    since <= 0 && return unit("minute", 0)
+    total_months = (year(nw) - year(dt)) * 12 + (month(nw) - month(dt))
+    (day(dt) > day(nw) || (day(dt) == day(nw) && Time(dt) > Time(nw))) && (total_months -= 1)
+    years, months = fldmod(total_months, 12)
+    pivot = if years != 0 || months != 0
+        py, pm = year(dt) + years, month(dt) + months
+        pm > 12 && (pm -= 12; py += 1)
+        DateTime(py, pm, min(MONTHS_DAYS[pm], day(dt)), hour(dt), minute(dt), second(dt))
+    else
+        dt
     end
-    part(0, "minute")
+    remaining = Dates.value(nw - pivot) / 1000
+    partials = Int[years, months]
+    for chunk in TIME_CHUNKS
+        c = floor(Int, remaining / chunk)
+        push!(partials, c)
+        remaining -= chunk * c
+    end
+    i = findfirst(!=(0), partials)
+    i === nothing && return unit("minute", 0)
+    out = String[]
+    while i <= length(TIME_STRINGS) && length(out) < depth && partials[i] != 0
+        push!(out, unit(TIME_STRINGS[i].first, partials[i]))
+        i += 1
+    end
+    join(out, gettext(", "))
 end
+
+"`timeuntil(d, now = nothing; time_strings, depth = 2)`: the time from `now` until `d`, as `timesince` (Django's)."
+timeuntil(d, now = nothing; time_strings = nothing, depth::Integer = 2) = timesince(d, now; reversed = true, time_strings, depth)
 
 function linebreaks_html(s::AbstractString, autoescape::Bool)
     s = replace(s, "\r\n" => "\n", "\r" => "\n")
@@ -178,7 +249,7 @@ function get_text_list(items, last_word::AbstractString = "or")
     xs = [display_string(x) for x in items]
     isempty(xs) && return ""
     length(xs) == 1 && return xs[1]
-    join(xs[1:end-1], ", ") * " " * gettext(String(last_word)) * " " * xs[end]
+    join(xs[1:end-1], gettext(", ")) * " " * gettext(String(last_word)) * " " * xs[end]     # (the separator translated too, "، ")
 end
 
 let F = register_filter!
@@ -190,7 +261,7 @@ let F = register_filter!
     F("safe", (v, _) -> SafeString(str(v)))
     F("escape", (v, _) -> SafeString(conditional_escape(v)))     # already-safe text isn't escaped twice
     F("force_escape", (v, _) -> SafeString(escape_html(str(v))))
-    F("striptags", (v, _) -> replace(str(v), r"<[^>]*>" => ""))
+    F("striptags", (v, _) -> strip_tags(str(v)))
     F("join", join_filter; needs_autoescape = true)
     F("linebreaks", (v, _, ae) -> SafeString(linebreaks_html(str(v), ae && !(v isa SafeString))); needs_autoescape = true)
     F("yesno", (v, a) -> begin

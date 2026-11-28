@@ -12,15 +12,17 @@
 
 const UTC_TZ = TimeZones.tz"UTC"
 
+"A time zone by its IANA name, any of them (TimeZones.jl refuses the legacy links, Europe/Copenhagen, by default; Django takes them)."
+tz_named(name) = TimeZones.TimeZone(String(string(name)), TimeZones.Class(:ALL))
 "The time zone named by TIME_ZONE."
-default_timezone() = TimeZones.TimeZone(string(settings.TIME_ZONE))
+default_timezone() = tz_named(settings.TIME_ZONE)
 "The current time zone: activated for this task, else TIME_ZONE."
 function get_current_timezone()
     tz = get(task_local_storage(), :juango_timezone, nothing)
     tz === nothing ? default_timezone() : tz
 end
 "Make a time zone (or its name) current for this task, e.g. for a user's preference."
-activate_timezone!(tz) = (task_local_storage(:juango_timezone, tz isa TimeZones.TimeZone ? tz : TimeZones.TimeZone(string(tz))); nothing)
+activate_timezone!(tz) = (task_local_storage(:juango_timezone, tz isa TimeZones.TimeZone ? tz : tz_named(tz)); nothing)
 "Back to TIME_ZONE."
 deactivate_timezone!() = (delete!(task_local_storage(), :juango_timezone); nothing)
 "Run `f()` with a time zone current (`nothing`: TIME_ZONE's, as Django's `override(None)`)."
@@ -48,7 +50,7 @@ Attach the current (or given) time zone to a naive DateTime. Across a DST change
 doesn't happen (clocks going forward) is read with the offset from before the change.
 """
 function make_aware(dt::DateTime, tz = get_current_timezone())
-    tz isa TimeZones.TimeZone || (tz = TimeZones.TimeZone(string(tz)))
+    tz isa TimeZones.TimeZone || (tz = tz_named(tz))
     try
         TimeZones.ZonedDateTime(dt, tz; from_utc = false)
     catch e
@@ -185,7 +187,7 @@ function pin(v, tz)
     v isa PinnedTime && (v = v.z)
     v isa TimeZones.ZonedDateTime || v isa DateTime || return ""
     z = try
-        tz = tz isa TimeZones.TimeZone ? tz : TimeZones.TimeZone(string(tz))
+        tz = tz isa TimeZones.TimeZone ? tz : tz_named(tz)
         v isa DateTime ? make_aware(v, default_timezone()) : v
     catch e
         e isa InterruptException && rethrow()
@@ -224,7 +226,7 @@ function TimezoneMiddleware(get_response)
         name = req.session isa Session ? get(req.session, "juango_timezone", nothing) : nothing
         name === nothing && return get_response(req)
         tz = try
-            TimeZones.TimeZone(string(name))
+            tz_named(name)
         catch
             return get_response(req)
         end
@@ -242,7 +244,7 @@ value as wall-clock time in `from_tz` and rewrite it as UTC (on PostgreSQL the c
 become TIMESTAMP WITH TIME ZONE). Run it once, after backing up.
 """
 function convert_naive_datetimes(; from_tz = settings.TIME_ZONE, verbose = true)
-    tz = TimeZones.TimeZone(string(from_tz))
+    tz = tz_named(from_tz)
     b = backend()
     n = 0
     atomic() do

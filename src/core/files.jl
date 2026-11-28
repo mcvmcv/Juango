@@ -474,6 +474,22 @@ function image_size(b::AbstractVector{UInt8})
     nothing
 end
 
+"""
+    get_image_dimensions(file) -> (width, height)
+
+Django's: an image's size, from its bytes, a path or an IO (left where it was); `(nothing, nothing)` when it isn't a
+PNG, GIF, JPEG or WebP image or the file is missing.
+"""
+function get_image_dimensions(b::AbstractVector{UInt8})
+    s = image_size(b)
+    s === nothing ? (nothing, nothing) : s
+end
+get_image_dimensions(path::AbstractString) = isfile(path) ? get_image_dimensions(read(path)) : (nothing, nothing)
+function get_image_dimensions(io::IO)
+    p = position(io)
+    try get_image_dimensions(read(io)) finally seek(io, p) end
+end
+
 # --- serving private uploads in production -------------------------------------------------------------------
 
 "Types a browser shows inline as images and can't run (SVG can hold scripts, so it's an attachment)."
