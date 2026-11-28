@@ -90,16 +90,49 @@ end
 Serialize model instances (a queryset or any collection) as `:json`, `:jsonl`, `:yaml` or
 `:xml` (Django's formats). `indent` applies to JSON and XML.
 """
-function serialize(format::Symbol, objs; fields = nothing, natural_foreign = false, natural_primary = false, indent = nothing)
+function serialize(format::Symbol, objs; fields = nothing, natural_foreign = false, natural_primary = false, indent = nothing,
+                   geometry_field = nothing, id_field = nothing, srid = 4326)
     format in SERIAL_FORMATS || throw(ArgumentError("unknown serialization format :$format (have $(join(SERIAL_FORMATS, ", ")))"))
     objs = collect(objs)
+    format === :geojson && return geojson_serialize(objs; fields, geometry_field, id_field, srid, indent)
     ds = AbstractDict{String,Any}[serialize_object(o; fields = fields === nothing ? nothing : Symbol.(fields),
                                            natural_foreign = natural_foreign, natural_primary = natural_primary) for o in objs]
     format === :json ? (indent === nothing ? JSON.json(ds) : JSON.json(ds; pretty = indent)) :
     format === :jsonl ? join(JSON.json(d) * "\n" for d in ds) :
     format === :yaml ? yaml_dump(ds) : xml_dump(ds, objs; indent = indent)
 end
-const SERIAL_FORMATS = (:json, :jsonl, :yaml, :xml)
+const SERIAL_FORMATS = (:json, :jsonl, :yaml, :xml, :geojson)
+
+"""
+`serialize(:geojson, objects; geometry_field, id_field, srid = 4326, fields)`: a GeoJSON FeatureCollection (Django's
+geojson serializer), one Feature per object: its geometry (`geometry_field`, else the model's first geometry field,
+transformed to `srid` by PostGIS), its `id` (the pk, or `id_field`'s value) and its other fields as properties (with
+"pk"). Serialization only.
+"""
+Base.@nospecializeinfer function geojson_serialize(@nospecialize(objs); fields = nothing, geometry_field = nothing, id_field = nothing,
+                                                   srid = 4326, indent = nothing)
+    sel = fields === nothing ? nothing : Symbol.(collect(fields))
+    gf = geometry_field === nothing ? nothing : Symbol(geometry_field)
+    sel !== nothing && gf !== nothing && !(gf in sel) && (sel = vcat(sel, gf))
+    features = Any[]
+    for o in objs
+        T = typeof(o)
+        g = gf
+        if g === nothing
+            i = findfirst(f -> f.kind === :geometry, all_fields(T))
+            g = i === nothing ? nothing : all_fields(T)[i].name
+        end
+        props = serialize_object(o; fields = sel === nothing ? nothing : filter(!=(g), sel))["fields"]
+        g === nothing || delete!(props, string(g))
+        (sel === nothing || :pk in sel) && !haskey(props, "pk") && (props["pk"] = string(o.pk))
+        geom = g === nothing ? nothing : getproperty(o, g)
+        geom === nothing || geom.srid == srid || (geom = transform_geometry(geom, srid))
+        push!(features, JSON.Object{String,Any}("type" => "Feature", "id" => id_field === nothing ? o.pk : getproperty(o, Symbol(id_field)),
+                                                "properties" => props, "geometry" => geom === nothing ? nothing : geojson(geom)))
+    end
+    d = JSON.Object{String,Any}("type" => "FeatureCollection", "features" => features)
+    indent === nothing ? JSON.json(d) : JSON.json(d; pretty = indent)
+end
 "The serialization format of a fixture file, from its extension."
 fixture_format(path::AbstractString) = endswith(path, ".gz") ? fixture_format(path[1:end-3]) : endswith(path, ".jsonl") ? :jsonl : endswith(path, ".yaml") || endswith(path, ".yml") ? :yaml :
                                        endswith(path, ".xml") ? :xml : :json
@@ -228,6 +261,7 @@ end
 # The objects' dicts of a fixture (deserialize_one makes each an object: loaddata saves each before reading the next,
 # so a natural key may name an object earlier in the file, as Django's lazy deserializer)
 function serial_items(format::Symbol, data::AbstractString; ignorenonexistent::Union{Nothing,Bool} = nothing)
+    format === :geojson && throw(ArgumentError("geojson is a serialization-only serializer"))
     items = try
             format === :json ? JSON.parse(data) :
             format === :jsonl ? [JSON.parse(l) for l in split(data, '\n') if !isempty(strip(l))] :

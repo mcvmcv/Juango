@@ -450,10 +450,11 @@ Base.@nospecializeinfer function update_here!(@nospecialize(qs::QuerySet); kw...
             isempty(c.joins) || throw(ArgumentError("Joined field references are not permitted in this query (update!: expressions can only use the model's own fields)"))
             (c.uses_aggregate || contains_aggregate(v)) &&
                 throw(ArgumentError("update!: aggregate functions are not allowed in an update ($k = $(repr(v)))"))
+            f.kind === :geometry && (sql = geometry_expr_sql(c, f, v, sql))
             push!(sets, qname(column(f)) * " = " * sql)
             append!(ps, p)
         else
-            push!(sets, qname(column(f)) * " = ?")
+            push!(sets, qname(column(f)) * " = " * (f.kind === :geometry ? geometry_placeholder(f, v) : "?"))
             push!(ps, to_db(f, v))
         end
     end

@@ -84,6 +84,10 @@ abstract type ConvertedExpression <: Expression end
 function convert_result end
 "The SQL of `Length(:path)` of a geometry field (gis.jl)."
 function geometry_length_sql end
+"An update's expression for a geometry field, in the field's SRID (gis.jl: ST_Transform when its SRID differs)."
+function geometry_expr_sql end
+"An annotated `Value`'s result when its value says how to read it (gis.jl: a geometry), else nothing."
+value_result(x, v) = nothing
 "A GIS aggregate's argument SQL (gis.jl: a geography field cast to geometry, as Django's)."
 function gis_aggregate_arg end
 "A GIS aggregate's value (`Extent`'s box, `Collect`'s geometry; gis.jl)."
@@ -1540,6 +1544,7 @@ end
 Base.@nospecializeinfer function expr_value(@nospecialize(T), e, v, of::Union{Nothing,Field})
     v === nothing && return nothing
     e isa ConvertedExpression && return convert_result(e, v)
+    e isa Value && (r = value_result(e.value, v)) !== nothing && return r
     e isa Union{RawSQL,ExpressionWrapper} && e.output isa Field && e.output.kind === :bool && return v isa Bool ? v : v != 0
     e isa ExpressionWrapper && e.output === nothing && return expr_value(T, e.expr, v, typed_output(T, e.expr))
     e isa Union{Exists,Condition,LookupExpr,NegatedExpr} && return v isa Bool ? v : v != 0          # SQLite and MySQL give 0/1

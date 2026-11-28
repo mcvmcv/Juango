@@ -59,15 +59,16 @@ struct MultiPolygon <: Geometry
     geoms::Vector{Polygon}
     srid::Int
 end
-MultiPoint(ps; srid::Integer = 4326) = MultiPoint(Point[p isa Point ? p : Point(p[1], p[2]; srid = srid) for p in ps], Int(srid))
-MultiLineString(ls; srid::Integer = 4326) = MultiLineString(LineString[l isa LineString ? l : LineString(l; srid = srid) for l in ls], Int(srid))
-MultiPolygon(ps; srid::Integer = 4326) = MultiPolygon(Polygon[p isa Polygon ? p : Polygon(p; srid = srid) for p in ps], Int(srid))
+MultiPoint(ps; srid::Integer = 4326) = MultiPoint(Point[p isa Point ? with_srid(p, srid) : Point(p[1], p[2]; srid = srid) for p in ps], Int(srid))
+MultiLineString(ls; srid::Integer = 4326) = MultiLineString(LineString[l isa LineString ? with_srid(l, srid) : LineString(l; srid = srid) for l in ls], Int(srid))
+MultiPolygon(ps; srid::Integer = 4326) = MultiPolygon(Polygon[p isa Polygon ? with_srid(p, srid) : Polygon(p; srid = srid) for p in ps], Int(srid))
 "`GeometryCollection([geometry, ...]; srid=4326)`: geometries of any kinds together (PostGIS gives an empty one for an empty result)."
 struct GeometryCollection <: Geometry
     geoms::Vector{Geometry}
     srid::Int
 end
-GeometryCollection(gs; srid::Integer = 4326) = GeometryCollection(Geometry[g for g in gs], Int(srid))
+# (a collection's members are in its SRID, as GEOS's)
+GeometryCollection(gs; srid::Integer = 4326) = GeometryCollection(Geometry[with_srid(g, srid) for g in gs], Int(srid))
 
 Base.:(==)(a::G, b::G) where {G<:Geometry} = all(getfield(a, f) == getfield(b, f) for f in fieldnames(G))
 Base.:(==)(a::Point, b::Point) = a.srid == b.srid && (a.x == b.x && a.y == b.y || isempty(a) && isempty(b))
@@ -113,12 +114,14 @@ collect_points!(ps, g::Point) = isempty(g) ? ps : push!(ps, (g.x, g.y))
 collect_points!(ps, g::LineString) = append!(ps, g.coords)
 collect_points!(ps, g::Polygon) = (foreach(r -> append!(ps, r), g.rings); ps)
 collect_points!(ps, g::Union{MultiPoint,MultiLineString,MultiPolygon,GeometryCollection}) = (foreach(x -> collect_points!(ps, x), g.geoms); ps)
-Base.hash(g::Geometry, h::UInt) = hash(wkt(g), h)
+Base.hash(g::Geometry, h::UInt) = hash(ewkt(g), h)        # (the SRID too, as ==)
 Base.show(io::IO, g::Geometry) = print(io, ewkt(g))
 display_string(g::Geometry) = ewkt(g)
 geom_type(g::Geometry) = uppercase(string(nameof(typeof(g))))
 with_srid(g::Point, s) = Point(g.x, g.y, s)
 with_srid(g::G, s) where {G<:Geometry} = G((getfield(g, f) for f in fieldnames(G)[1:end-1])..., s)
+with_srid(g::G, s) where {G<:Union{MultiPoint,MultiLineString,MultiPolygon,GeometryCollection}} =
+    G(eltype(g.geoms)[with_srid(x, s) for x in g.geoms], Int(s))
 
 # --- WKT --------------------------------------------------------------------------------------------
 
@@ -137,7 +140,7 @@ ewkt(g::Geometry) = "SRID=$(g.srid);" * wkt(g)
 "Parse WKT or EWKT (`SRID=4326;POINT(1 2)`)."
 function parse_wkt(s::AbstractString; srid::Integer = 4326)
     s = strip(s)
-    m = match(r"^SRID=(\d+);(.*)$"is, s)
+    m = match(r"^SRID=(-?[0-9]+);(.*)$"is, s)
     m === nothing || (srid = parse(Int, m[1]); s = strip(m[2]))
     toks = [t.match for t in eachmatch(r"[A-Za-z]+|\(|\)|,|[-+0-9.eE]+", s)]
     i = Ref(1)
@@ -223,6 +226,48 @@ function read_geom(io, srid)
     MultiPolygon(Polygon[with_srid(p, srid) for p in parts], srid)
 end
 
+# --- writing WKB (Django's geom.wkb, .hex, .ewkb, .hexewkb) --------------------------------------------------
+
+wkb_type(::Point) = 1
+wkb_type(::LineString) = 2
+wkb_type(::Polygon) = 3
+wkb_type(::MultiPoint) = 4
+wkb_type(::MultiLineString) = 5
+wkb_type(::MultiPolygon) = 6
+wkb_type(::GeometryCollection) = 7
+function write_wkb(io, g::Geometry, with_srid::Bool)
+    write(io, 0x01)                                               # little-endian (NDR)
+    write(io, htol(UInt32(wkb_type(g)) | (with_srid ? 0x20000000 : 0x00000000)))
+    with_srid && write(io, htol(UInt32(g.srid)))
+    write_wkb_body(io, g)
+end
+wkb_pts(io, cs) = (write(io, htol(UInt32(length(cs)))); foreach(c -> (write(io, htol(c[1])); write(io, htol(c[2]))), cs))
+write_wkb_body(io, g::Point) = (write(io, htol(g.x)); write(io, htol(g.y)))
+write_wkb_body(io, g::LineString) = wkb_pts(io, g.coords)
+write_wkb_body(io, g::Polygon) = (write(io, htol(UInt32(length(g.rings)))); foreach(r -> wkb_pts(io, r), g.rings))
+write_wkb_body(io, g::Union{MultiPoint,MultiLineString,MultiPolygon,GeometryCollection}) =
+    (write(io, htol(UInt32(length(g.geoms)))); foreach(x -> write_wkb(io, x, false), g.geoms))
+"Well-known binary (little-endian, no SRID): Django's `geom.wkb`."
+wkb(g::Geometry) = (io = IOBuffer(); write_wkb(io, g, false); take!(io))
+"Extended WKB, with the SRID (PostGIS's): Django's `geom.ewkb`."
+ewkb(g::Geometry) = (io = IOBuffer(); write_wkb(io, g, true); take!(io))
+"WKB as upper-case hex: Django's `geom.hex`."
+hexwkb(g::Geometry) = uppercase(bytes2hex(wkb(g)))
+"EWKB as upper-case hex (PostGIS's ST_AsHEXEWKB): Django's `geom.hexewkb`."
+hexewkb(g::Geometry) = uppercase(bytes2hex(ewkb(g)))
+"A geometry from WKT, EWKT, (E)WKB hex or GeoJSON text (Django's `fromstr` / `GEOSGeometry(text)`)."
+function parse_geometry(s::AbstractString; srid::Integer = 4326)
+    t = strip(s)
+    isempty(t) && throw(ArgumentError("String input unrecognized as WKT EWKT, and HEXEWKB."))
+    startswith(t, "{") && return from_geojson(t)
+    occursin(r"^[0-9A-Fa-f]+$", t) && return (try parse_wkb(t; srid = srid) catch; throw(ArgumentError("Invalid WKB input.")) end)
+    try
+        parse_wkt(t; srid = srid)
+    catch
+        throw(ArgumentError("String input unrecognized as WKT EWKT, and HEXEWKB."))
+    end
+end
+
 # --- GeoJSON ---------------------------------------------------------------------------------------------
 
 gj(cs::Vector{Coord}) = [[c[1], c[2]] for c in cs]
@@ -237,17 +282,25 @@ geojson(g::GeometryCollection) = Dict{String,Any}("type" => "GeometryCollection"
 
 "Read a GeoJSON geometry (`Dict` or JSON text). GeoJSON is always SRID 4326."
 function from_geojson(d)
-    d isa AbstractString && (d = JSON.parse(d))
-    d["type"] == "GeometryCollection" && return GeometryCollection(Geometry[from_geojson(x) for x in d["geometries"]])
+    d isa AbstractString && (d = JSON.parse(strip(d)))
+    srid = geojson_srid(d)
+    d["type"] == "GeometryCollection" && return GeometryCollection(Geometry[from_geojson(x) for x in d["geometries"]]; srid = srid)
     t, c = d["type"], d["coordinates"]
     cs(x) = Coord[(Float64(p[1]), Float64(p[2])) for p in x]
-    t == "Point" && return Point(c[1], c[2])
-    t == "LineString" && return LineString(cs(c))
-    t == "Polygon" && return Polygon([cs(r) for r in c], 4326)
-    t == "MultiPoint" && return MultiPoint([Point(p[1], p[2]) for p in c])
-    t == "MultiLineString" && return MultiLineString([LineString(cs(l)) for l in c])
-    t == "MultiPolygon" && return MultiPolygon([Polygon([cs(r) for r in p], 4326) for p in c])
+    t == "Point" && return Point(c[1], c[2]; srid = srid)
+    t == "LineString" && return LineString(cs(c); srid = srid)
+    t == "Polygon" && return Polygon([cs(r) for r in c], srid)
+    t == "MultiPoint" && return MultiPoint([Point(p[1], p[2]; srid = srid) for p in c]; srid = srid)
+    t == "MultiLineString" && return MultiLineString([LineString(cs(l); srid = srid) for l in c]; srid = srid)
+    t == "MultiPolygon" && return MultiPolygon([Polygon([cs(r) for r in p], srid) for p in c]; srid = srid)
     throw(ArgumentError("unsupported GeoJSON type '$t'"))
+end
+"A GeoJSON object's SRID: a named CRS's EPSG code (`urn:ogc:def:crs:EPSG::4322`, `EPSG:4322`), else 4326."
+function geojson_srid(d)
+    crs = get(d, "crs", nothing)
+    crs isa AbstractDict && get(crs, "type", "") == "name" || return 4326
+    m = match(r"EPSG:+([0-9]+)$", string(get(get(crs, "properties", Dict()), "name", "")))
+    m === nothing ? 4326 : parse(Int, m[1])
 end
 
 """
@@ -669,6 +722,18 @@ function geo_arg_kind(c::SQLCompiler, e::GeoFunc, a)
     (s !== nothing && srid_is_geodetic(s), false)
 end
 "`Length(:path)` of a geometry field (expressions.jl's Length: the same function as the text one's, as Django's)."
+function geometry_expr_sql(c::SQLCompiler, f::Field, v, sql)
+    s = if v isa F
+        _, g = resolve_path(c, c.base, c.T, v.name)
+        g !== nothing && g.kind === :geometry ? geo_spec(g)[2] : nothing
+    elseif v isa GeoFunc
+        geo_result_srid(c, v)
+    else
+        nothing
+    end
+    s === nothing || s == geo_spec(f)[2] ? sql : "ST_Transform($sql, $(geo_spec(f)[2]))"
+end
+value_result(x::Geometry, v) = v isa Geometry ? v : decode_geometry(string(v); srid = x.srid)
 geometry_length_sql(f::Field, sql) = is_geodetic(f) ? "ST_Length(CAST($sql AS geography))" : "ST_Length($sql)"
 
 "Literal SQL among a GIS function's arguments."
@@ -865,11 +930,14 @@ end
 function form_transform(g::Geometry, srid)
     backend() isa PostgresBackend || throw(GeometryFormError("transform_error"))
     try
-        parse_wkt(only(collect(execute("SELECT ST_AsEWKT(ST_Transform(ST_GeomFromEWKT(?), $(Int(srid)))) AS r", Any[ewkt(g)])))[:r])
+        transform_geometry(g, srid)
     catch
         throw(GeometryFormError("transform_error"))
     end
 end
+"`g` in another SRID, transformed by PostGIS (Django's `geom.transform(srid, clone=True)`)."
+transform_geometry(g::Geometry, srid::Integer) = g.srid == srid ? g :
+    parse_wkt(only(collect(execute("SELECT ST_AsEWKT(ST_Transform(ST_GeomFromEWKT(?), $(Int(srid)))) AS r", Any[ewkt(g)])))[:r])
 
 const LEAFLET = "https://unpkg.com/leaflet@1.9.4/dist"
 

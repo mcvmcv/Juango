@@ -428,10 +428,13 @@ Base.@nospecializeinfer function index_state(@nospecialize(T::Type), ix::Index)
               error("$(m.name): Meta names unknown field '$n'"))
     # ("-field": that column descending)
     cols = [startswith(c, "-") ? "-" * col(c[2:end]) : col(c) for c in ix.columns]
+    # (an index on one geometry field is a spatial (GiST) one, as Django's PostGIS schema editor's)
+    method = ix.method === :btree && length(ix.columns) == 1 &&
+             (f = findfield(m, Symbol(lstrip(ix.columns[1], '-'))); f !== nothing && f.kind === :geometry) ? :gist : ix.method
     Index(cols, something(ix.name, auto_index_name(m.table, cols, ix.suffix;
           # (PostgreSQL's index classes get their longer suffix's extra, as Django's PostgresIndex.max_name_length)
           max_length = ix.suffix == "idx" ? 30 : 27 + length(ix.suffix))),
-          ix.unique, ix.method, Tuple{String,String}[(f, col(x)) for (f, x) in ix.expressions],
+          ix.unique, method, Tuple{String,String}[(f, col(x)) for (f, x) in ix.expressions],
           ix.condition === nothing ? nothing : condition_to_columns(T, ix.condition),
           String[col(c) for c in ix.include], ix.opclasses, ix.exprs, ix.params, ix.tablespace, ix.suffix)
 end
@@ -617,8 +620,11 @@ end
 
 "CREATE INDEX for a `Meta(indexes=...)` entry (nothing where the method isn't supported)."
 function index_spec_sql(b::DatabaseBackend, table, ix::Index; if_not_exists = false)
-    index_supported(b, ix) || return String[]
     pg = b isa PostgresBackend
+    # (a plain Index made spatial by index_state: a plain one elsewhere)
+    !pg && ix.method === :gist && ix.suffix == "idx" && (ix = Index(ix.columns, ix.name, ix.unique, :btree, ix.expressions, ix.condition,
+        ix.include, ix.opclasses, ix.exprs, ix.params, ix.tablespace, ix.suffix))
+    index_supported(b, ix) || return String[]
     using_ = ix.method === :btree ? "" : " USING $(ix.method)"
     io = IOBuffer()
     print(io, "CREATE ", ix.unique ? "UNIQUE " : "", "INDEX ", if_not_exists ? "IF NOT EXISTS " : "",
@@ -670,7 +676,7 @@ function index_item_sql(b::DatabaseBackend, table, e)
     (plain ? sql : "(" * sql * ")") * collation * opclass * order
 end
 drop_index_spec_sql(b::DatabaseBackend, table, ix::Index) =
-    index_supported(b, ix) ? [drop_index_stmt(b, table, ix.name)] : String[]
+    index_supported(b, ix) || !(b isa PostgresBackend) && ix.method === :gist && ix.suffix == "idx" ? [drop_index_stmt(b, table, ix.name)] : String[]
 
 
 drop_table_sql(b::DatabaseBackend, t::Table) = ["DROP TABLE $(quote_name(b, t.name))"]

@@ -16,7 +16,8 @@
          item_guid=nothing, item_guid_is_permalink=nothing, item_categories=nothing, item_comments=nothing,
          item_enclosures=nothing, item_copyright=nothing, get_object=nothing, feed_type=:rss, language=nothing,
          author_name=nothing, author_email=nothing, author_link=nothing, categories=nothing, feed_copyright=nothing,
-         feed_url=nothing, ttl=nothing, title_template=nothing, description_template=nothing)
+         feed_url=nothing, ttl=nothing, title_template=nothing, description_template=nothing,
+         geometry=nothing, item_geometry=nothing, geo_format=:georss)
 
 A syndication feed, usable directly as a view. Feed-level options are values or functions
 (of the object from `get_object`, or of nothing); item options are values, functions of
@@ -24,6 +25,11 @@ the item, or `Symbol`s naming one of its fields. Links may be paths: they are ma
 with the request's host (`add_domain`). `title_template`/`description_template` render each item's title or
 description with `obj` (the item) and `site` (the host) in the context. `item_enclosures` gives
 `(url, length, mime_type)` tuples (RSS allows one per item). Naive datetimes are taken to be in TIME_ZONE.
+
+Geographic feeds (Django's `django.contrib.gis.feeds`): `item_geometry` gives each item a point, line or polygon (a
+GIS geometry in SRID 4326, or `(lon, lat)`), and `geometry` the feed a box (`(xmin, ymin, xmax, ymax)` or
+`((xmin, ymin), (xmax, ymax))`), written as GeoRSS elements (`georss:point`, ...), or, with `geo_format = :w3c`, as
+W3C Geo's `geo:lat`/`geo:lon` (points only, on RSS).
 """
 Base.@kwdef struct Feed
     title::Any
@@ -57,6 +63,9 @@ Base.@kwdef struct Feed
     ttl::Any = nothing
     title_template::Any = nothing
     description_template::Any = nothing
+    geometry::Any = nothing
+    item_geometry::Any = nothing
+    geo_format::Symbol = :georss
 end
 "A copy of a feed with some options changed: `Feed(rss_feed; feed_type = :atom)`."
 Feed(f::Feed; kw...) = Feed(; (k => getfield(f, k) for k in fieldnames(Feed))..., kw...)
@@ -114,8 +123,12 @@ function (f::Feed)(req::Request; kw...)
          author_link = item_attr(f.item_author_link, item), guid = item_attr(f.item_guid, item),
          permalink = item_attr(f.item_guid_is_permalink, item), comments = item_attr(f.item_comments, item),
          enclosures = collect(something(item_attr(f.item_enclosures, item), Any[])),
-         copyright = item_attr(f.item_copyright, item), categories = something(item_attr(f.item_categories, item), String[]))
+         copyright = item_attr(f.item_copyright, item), categories = something(item_attr(f.item_categories, item), String[]),
+         geo = georss_element(item_attr(f.item_geometry, item), f.geo_format === :w3c))
     end
+    geo = f.geometry !== nothing || f.item_geometry !== nothing
+    geo_ns = !geo ? "" : f.geo_format === :w3c ? " xmlns:geo=\"http://www.w3.org/2003/01/geo/wgs84_pos#\"" : " xmlns:georss=\"http://www.georss.org/georss\""
+    feed_geo = georss_element(feed_value(f.geometry, obj), f.geo_format === :w3c)
     # the latest item date (updated, else published), as Django's latest_post_date: the feed's date and Last-Modified
     stamps = [feed_datetime(something(e.updated, e.pubdate)) for e in entries if something(e.updated, e.pubdate, missing) !== missing]
     latest = isempty(stamps) ? nothing : stamps[argmax(utc_of.(stamps))]
@@ -127,7 +140,7 @@ function (f::Feed)(req::Request; kw...)
     cats, copyright, ttl = something(feed_value(f.categories, obj), String[]), feed_value(f.feed_copyright, obj), feed_value(f.ttl, obj)
     if f.feed_type === :atom
         subtitle = something(feed_value(f.subtitle, obj), desc, "")
-        print(io, """<?xml version="1.0" encoding="utf-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom"$(lang === nothing ? "" : " xml:lang=\"$(x(lang))\"")>""")
+        print(io, """<?xml version="1.0" encoding="utf-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom"$(geo_ns)$(lang === nothing ? "" : " xml:lang=\"$(x(lang))\"")>""")
         print(io, "<title>", x(title), "</title><link href=\"", x(link), "\" rel=\"alternate\"/><link href=\"", x(self), "\" rel=\"self\"/>")
         print(io, "<id>", x(link), "</id><updated>", rfc3339(built), "</updated>")
         isempty(string(subtitle)) || print(io, "<subtitle>", x(subtitle), "</subtitle>")
@@ -139,6 +152,7 @@ function (f::Feed)(req::Request; kw...)
         end
         foreach(c -> print(io, "<category term=\"", x(c), "\"/>"), cats)
         copyright === nothing || print(io, "<rights>", x(copyright), "</rights>")
+        print(io, feed_geo)
         for e in entries
             print(io, "<entry><title>", x(e.title), "</title><link href=\"", x(e.link), "\" rel=\"alternate\"/>")
             e.pubdate === nothing || print(io, "<published>", rfc3339(e.pubdate), "</published>")
@@ -156,12 +170,12 @@ function (f::Feed)(req::Request; kw...)
             end
             foreach(c -> print(io, "<category term=\"", x(c), "\"/>"), e.categories)
             e.copyright === nothing || print(io, "<rights>", x(e.copyright), "</rights>")
-            print(io, "</entry>")
+            print(io, e.geo, "</entry>")
         end
         print(io, "</feed>")
         ct = "application/atom+xml; charset=utf-8"
     else
-        print(io, """<?xml version="1.0" encoding="utf-8"?>\n<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel>""")
+        print(io, """<?xml version="1.0" encoding="utf-8"?>\n<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"$(geo_ns)><channel>""")
         print(io, "<title>", x(title), "</title><link>", x(link), "</link><description>", x(something(desc, "")), "</description>")
         print(io, "<atom:link href=\"", x(self), "\" rel=\"self\"/>")
         lang === nothing || print(io, "<language>", x(lang), "</language>")
@@ -169,6 +183,7 @@ function (f::Feed)(req::Request; kw...)
         copyright === nothing || print(io, "<copyright>", x(copyright), "</copyright>")
         print(io, "<lastBuildDate>", rfc822(built), "</lastBuildDate>")
         ttl === nothing || print(io, "<ttl>", ttl, "</ttl>")
+        print(io, feed_geo)
         for e in entries
             print(io, "<item><title>", x(e.title), "</title><link>", x(e.link), "</link>")
             e.description === nothing || print(io, "<description>", x(e.description), "</description>")
@@ -189,7 +204,7 @@ function (f::Feed)(req::Request; kw...)
                 print(io, "<enclosure url=\"", x(abs_(u)), "\" length=\"", x(len), "\" type=\"", x(mime), "\"/>")
             end
             foreach(c -> print(io, "<category>", x(c), "</category>"), e.categories)
-            print(io, "</item>")
+            print(io, e.geo, "</item>")
         end
         print(io, "</channel></rss>")
         ct = "application/rss+xml; charset=utf-8"
@@ -197,4 +212,34 @@ function (f::Feed)(req::Request; kw...)
     resp = HttpResponse(String(take!(io)); content_type = ct)
     latest === nothing || setheader!(resp, "Last-Modified", http_date(utc_of(latest)))
     resp
+end
+
+"GeoRSS coordinates: each `(x, y)` as `lat lon`, Django's \"%f %f\"."
+georss_coords(cs) = join((@sprintf("%f %f", Float64(c[2]), Float64(c[1])) for c in cs), " ")
+georss_point(c, w3c) = w3c ? "<geo:lat>$(@sprintf("%f", Float64(c[2])))</geo:lat><geo:lon>$(@sprintf("%f", Float64(c[1])))</geo:lon>" :
+                       "<georss:point>$(georss_coords((c,)))</georss:point>"
+"""A feed's or an item's geometry as GeoRSS (or W3C Geo) elements (Django's `GeoFeedMixin.add_georss_element`): a
+geometry, `(x, y)`, a box `(xmin, ymin, xmax, ymax)` or `((xmin, ymin), (xmax, ymax))`."""
+function georss_element(geom, w3c::Bool)
+    geom === nothing && return ""
+    if geom isa Union{Tuple,AbstractVector}
+        box = nothing
+        if first(geom) isa Union{Tuple,AbstractVector}
+            length(geom) == 2 || throw(ArgumentError("Only should be two sets of coordinates."))
+            box = geom
+        elseif length(geom) == 2
+            return georss_point(geom, w3c)
+        elseif length(geom) == 4
+            box = ((geom[1], geom[2]), (geom[3], geom[4]))
+        else
+            throw(ArgumentError("Only should be 2 or 4 numeric elements."))
+        end
+        w3c && throw(ArgumentError("Cannot use simple GeoRSS box in W3C Geo feeds."))
+        return "<georss:box>$(georss_coords(box))</georss:box>"
+    end
+    geom isa Point && return georss_point((geom.x, geom.y), w3c)
+    w3c && throw(ArgumentError("W3C Geo only supports Point geometries."))
+    geom isa LineString && return "<georss:line>$(georss_coords(geom.coords))</georss:line>"
+    geom isa Polygon && return "<georss:polygon>$(georss_coords(geom.rings[1]))</georss:polygon>"
+    throw(ArgumentError("Geometry type \"$(geom_type(geom))\" not supported."))
 end
