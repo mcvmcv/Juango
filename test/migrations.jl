@@ -1122,6 +1122,10 @@ end
         end
         f3 = mm()
         n1, n3 = f1[1:end-3], f3[1:end-3]
+        # (an elidable data fix in the second: squashmigrations leaves it out instead of refusing, #258)
+        p2 = joinpath(dir, f2); s2 = read(p2, String)
+        @test occursin("operations = [", s2)
+        write(p2, replace(s2, "operations = [" => "operations = [\n        RunSQL(\"SELECT 1\", \"\"; elidable = true),"; count = 1))
         quiet(() -> migrate(app = "migsq", target = n1))
 
         # squash 0001..0003: both tables were created in the range, so it is two CreateModels
@@ -1130,6 +1134,7 @@ end
         @test basename(p) == "0001_squashed_$n3.jl"
         @test occursin("replaces = [(\"migsq\", \"$n1\"), (\"migsq\", \"$(f2[1:end-3])\"), (\"migsq\", \"$n3\")]", src)
         @test count("CreateModel(", src) == 2 && !occursin("AddField", src) && !occursin("AlterField", src)
+        @test !occursin("RunSQL", src)
         @test occursin("Column(\"label\", :string; max_length = 40)", src) && occursin("initial = true", src)
         sq = basename(p)[1:end-3]
 

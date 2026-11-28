@@ -181,7 +181,15 @@ does_not_optimize(ops; kw...) = optimizes_to(ops, ops; kw...)
     # test_rename_index, test_add_rename_index, test_create_model_rename_index_no_old_fields: RenameIndex (#257)
     @test_broken isdefined(DM, :RenameIndex)
     # test_optimize_elidable_operation: elidable RunSQL/RunJulia (#258)
-    @test_broken :elidable in fieldnames(DM.RunSQL)
+    el = DM.RunSQL("UPDATE foo SET name = 'x'", ""; elidable = true)
+    @test optimizes_to([el, DM.CreateModel("foo"; model = "Foo", columns = [dmstr("name")]), el, DM.CreateModel("bar"; columns = [dmcol("size")]), el,
+                        DM.RenameModel("foo", "phou"), DM.DeleteModel("bar"), el],
+                       [DM.CreateModel("phou"; model = "Foo", columns = [dmstr("name")])])
+    @test optimizes_to([DM.RunJulia(() -> nothing; elidable = true), DM.AddField("pony", dmcol("age"))], [DM.AddField("pony", dmcol("age"))];
+                       before = dm_state("pony" => [dmcol("weight")]))
+    @test optimizes_to([el], [el])                                                       # (nothing to reduce against)
+    @test DM.op_code(el) == "RunSQL(Any[\"UPDATE foo SET name = 'x'\"], Any[]; elidable = true)"
+    @test does_not_optimize([DM.RunSQL("UPDATE foo SET name = 'x'", ""), DM.CreateModel("foo"; columns = [dmstr("name")])])
     # not translated: test_none_app_label (app labels are strings); test_create_alter_model_options,
     # test_create_alter_model_managers, test_create_model_and_remove_model_options (no options or managers
     # in migrations); test_create_alter_index_delete_model, test_create_alter_index_field,

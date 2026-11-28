@@ -142,12 +142,27 @@ end
     a2 = make_password("lètmein"; hasher = "argon2")
     @test startswith(a2, "argon2\$argon2id\$") && check_password("lètmein", a2) && !check_password("lètmeinz", a2)
     @test check_password("", make_password(""; hasher = "argon2"))
-    # (old argon2i hashes, as Django still verifies: #261)
-    @test_broken check_password("secret", "argon2\$argon2i\$v=19\$m=8,t=1,p=1\$c2FsdHNhbHQ\$YC9+jJCrQhs5R6db7LlN8Q")
+    # (old argon2i hashes, as Django still verifies, with a version and without: #261; re-hashed as argon2id)
+    i19 = "argon2\$argon2i\$v=19\$m=8,t=1,p=1\$c2FsdHNhbHQ\$YC9+jJCrQhs5R6db7LlN8Q"
+    @test check_password("secret", i19) && !check_password("wrong", i19)
+    i10 = "argon2\$argon2i\$m=8,t=1,p=1\$c29tZXNhbHQ\$gwQOXSNhxiOxPOA0+PY10P9QFO4NAYysnqRt1GSQLE55m+2GYDt9FEjPMHhP2Cuf0nOEXXMocVrsJAtNSsKyfg"
+    @test check_password("secret", i10) && !check_password("wrong", i10)
+    @test Juango.must_update(Argon2Hasher(), i19) && Juango.must_update(Argon2Hasher(), i10)
+    # TestUtilsHashPass.test_md5
+    override_settings(PASSWORD_HASHERS = Any[MD5PasswordHasher()]) do
+        md = make_password("lètmein"; salt = "seasalt", hasher = "md5")
+        @test md == "md5\$seasalt\$3f86d0d3d465b7b458c231bf3555c0e3"
+        @test is_password_usable(md) && check_password("lètmein", md) && !check_password("lètmeinz", md)
+        @test Juango.algorithm(Juango.identify_hasher(md)) == "md5"
+        bl = make_password(""; salt = "seasalt", hasher = "md5")
+        @test startswith(bl, "md5\$") && check_password("", bl) && !check_password(" ", bl)
+        @test Juango.must_update(MD5PasswordHasher(), make_password("lètmein"; salt = "iodizedsalt", hasher = "md5"))   # (a weak salt)
+        @test !Juango.must_update(MD5PasswordHasher(), make_password("lètmein"; hasher = "md5"))
+    end
     # bcrypt_sha256 (TestUtilsHashPass.test_bcrypt_sha256)
     b = make_password("lètmein"; hasher = "bcrypt_sha256")
     @test startswith(b, "bcrypt_sha256\$") && check_password("lètmein", b) && !check_password("lètmeinz", b)
-    # not translated: the md5 hasher (#261), harden_runtime and the Python hasher API (decode, safe_summary),
+    # not translated: harden_runtime and the Python hasher API (decode, safe_summary),
     # the asynchronous acheck_password, the bytes passwords (Julia strings)
     finally
         old_hashers === nothing ? delete!(Juango.SETTINGS, :PASSWORD_HASHERS) : configure!(PASSWORD_HASHERS = old_hashers)

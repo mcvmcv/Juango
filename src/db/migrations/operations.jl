@@ -294,12 +294,17 @@ routers' `allow_migrate(router, db, app_label; model = nothing, kw...)`, which d
 runs on the database being migrated (Django's hints): `RunSQL(sql; hints = (analytics = true,))`. A router
 whose method takes no such keywords is asked without them. Operations on a model's table ask with
 `model = T` (Django's `allow_migrate_model`).
+
+`elidable = true` (on RunSQL and RunJulia) marks a data fix that only matters to databases migrated at the time:
+the optimizer drops it, so `squashmigrations` leaves it out (Django's elidable).
 """
 struct RunSQL <: Operation
     forward::Vector{Any}                      # SQL strings and (sql, params) tuples
     backward::Union{Nothing,Vector{Any}}
     hints::NamedTuple
-    RunSQL(forward, backward = nothing; hints = (;)) = new(sqllist(forward), backward === nothing ? nothing : sqllist(backward), (; hints...))
+    elidable::Bool
+    RunSQL(forward, backward = nothing; hints = (;), elidable = false) =
+        new(sqllist(forward), backward === nothing ? nothing : sqllist(backward), (; hints...), Bool(elidable))
 end
 sqllist(x::AbstractString) = Any[s for s in split_sql(x)]
 sqllist(x) = Any[sql_item(s) for s in x]
@@ -365,14 +370,17 @@ model structs, whose fields may since have changed):
                      end)
 
 A function of no arguments just runs (e.g. `Juango.execute` with raw SQL). `hints = (...)` go to the
-routers' `allow_migrate` (see `RunSQL`).
+routers' `allow_migrate`, and `elidable = true` lets `squashmigrations` drop it (see `RunSQL`).
 """
 struct RunJulia <: Operation
     forward::Function
     backward::Union{Nothing,Function}
     hints::NamedTuple
-    RunJulia(forward, backward = nothing; hints = (;)) = new(forward, backward, (; hints...))
+    elidable::Bool
+    RunJulia(forward, backward = nothing; hints = (;), elidable = false) = new(forward, backward, (; hints...), Bool(elidable))
 end
+"Whether an operation is an elidable data migration (`RunSQL`/`RunJulia` with `elidable = true`)."
+is_elidable(op) = op isa Union{RunSQL,RunJulia} && op.elidable
 
 """
     Migration(; dependencies=[], operations=[], initial=false, replaces=[], run_before=[])

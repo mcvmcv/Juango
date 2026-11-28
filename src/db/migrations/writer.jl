@@ -60,7 +60,8 @@ op_code(op::AlterField) = "AlterField($(jl(op.table)), $(column_code(op.column))
 op_code(op::RenameField) = "RenameField($(jl(op.table)), $(jl(op.old)), $(jl(op.new)))"
 op_code(op::SeparateDatabaseAndState) = "SeparateDatabaseAndState(database_operations = [" *
     join(op_code.(op.database_operations), ", ") * "], state_operations = [" * join(op_code.(op.state_operations), ", ") * "])"
-op_code(op::RunSQL) = "RunSQL($(jl(op.forward)), $(op.backward === nothing ? "nothing" : jl(op.backward))$(hints_code(op.hints, true)))"
+op_code(op::RunSQL) = "RunSQL($(jl(op.forward)), $(op.backward === nothing ? "nothing" : jl(op.backward))$(hints_code(op.hints, true))" *
+                      "$(op.elidable ? (isempty(op.hints) ? "; " : ", ") * "elidable = true" : ""))"
 
 function migration_code(m::Migration)
     deps = isempty(m.dependencies) ? "[]" :
@@ -299,6 +300,9 @@ are barriers: nothing is moved or folded across them, so their code sees the tab
 they were at that point.
 """
 function optimize_operations(ops::Vector{Operation}, before::SchemaState, app)
+    # elidable data migrations reduce away next to any other operation (Django's Operation.reduce)
+    length(ops) > 1 && any(is_elidable, ops) &&
+        (ops = (kept = filter(!is_elidable, ops); isempty(kept) ? Operation[ops[end]] : kept))
     state = copy_state(before)
     out = Operation[]
     seg = Operation[]
@@ -463,7 +467,8 @@ Write one migration that stands for `app`'s migrations from `start` (default: th
 the range become one `CreateModel` with their final definition. The new file lists the
 migrations it `replaces`: databases that applied all (or none) of them use it, others keep
 using the originals. Once every database has migrated past it, delete the old files and
-the `replaces` line. Ranges with `RunSQL` or `RunJulia` (data migrations) are refused.
+the `replaces` line. Ranges with `RunSQL` or `RunJulia` (data migrations) are refused, unless they're
+`elidable` (then they're left out).
 """
 function squashmigrations(app, stop; start = nothing, name = nothing, dry_run = false, verbose = true)
     log(msg) = verbose && println(msg)
@@ -479,7 +484,7 @@ function squashmigrations(app, stop; start = nothing, name = nothing, dry_run = 
     for k in range
         isempty(g.nodes[k].replaces) || throw(MigrationError("$(k[2]) is itself a squashed migration; squash the originals instead"))
         for op in g.nodes[k].operations
-            op isa Union{RunSQL,RunJulia,SeparateDatabaseAndState} && throw(MigrationError(
+            op isa Union{RunSQL,RunJulia,SeparateDatabaseAndState} && !is_elidable(op) && throw(MigrationError(
                 "$(k[2]) has a $(nameof(typeof(op))) operation; squashmigrations only combines schema changes " *
                 "(squash the migrations before and after it separately)"))
         end

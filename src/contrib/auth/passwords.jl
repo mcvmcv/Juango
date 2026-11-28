@@ -157,6 +157,23 @@ function verify_password(h::PBKDF2SHA1Hasher, raw::AbstractString, encoded::Abst
 end
 must_update(h::PBKDF2SHA1Hasher, encoded) = (p = split(encoded, '$'); length(p) < 3 || fewer_iterations(p, h) || weak_salt(p[3]))
 
+"""
+    MD5PasswordHasher()
+
+Salted MD5 (`md5\$<salt>\$<hex>`), as Django keeps it: insecure, for tests (it's fast) and very old databases.
+Not in the default `PASSWORD_HASHERS`.
+"""
+struct MD5PasswordHasher <: PasswordHasher end
+algorithm(::MD5PasswordHasher) = "md5"
+encode_password(::MD5PasswordHasher, raw::AbstractString, salt::AbstractString) =
+    "md5\$$salt\$" * md5_hex(Vector{UInt8}(codeunits(salt * raw)))
+function verify_password(h::MD5PasswordHasher, raw::AbstractString, encoded::AbstractString)
+    parts = split(encoded, '$')
+    (length(parts) == 3 && parts[1] == "md5") || return false
+    consteq(encode_password(h, raw, parts[2]), encoded)
+end
+must_update(::MD5PasswordHasher, encoded) = (p = split(encoded, '$'); length(p) < 3 || weak_salt(p[2]))
+
 "PBKDF2-HMAC-SHA256 with any output length (scrypt uses one iteration and long outputs)."
 function pbkdf2_sha256(password::AbstractVector{UInt8}, salt::AbstractVector{UInt8}, iterations::Int, dklen::Int)
     out = UInt8[]
@@ -568,15 +585,19 @@ function argon2_g!(out::AbstractVector{UInt64}, x::AbstractVector{UInt64}, y::Ab
 end
 
 """
-    argon2id(password, salt; t = 2, m = 102400, p = 8, len = 32, secret = UInt8[], ad = UInt8[]) -> bytes
+    argon2id(password, salt; t = 2, m = 102400, p = 8, len = 32, secret = UInt8[], ad = UInt8[], variant = :argon2id, version = 0x13) -> bytes
 
-Argon2id (version 1.3) with `t` passes over `m` KiB of memory in `p` lanes.
+Argon2id (version 1.3) with `t` passes over `m` KiB of memory in `p` lanes; `variant = :argon2i` (data-independent
+addressing throughout) and `version = 0x10` (Argon2 1.0, whose later passes overwrite blocks) for old hashes.
 """
 function argon2id(password::AbstractVector{UInt8}, salt::AbstractVector{UInt8}; t::Int = 2, m::Int = 102400, p::Int = 8,
-                  len::Int = 32, secret::AbstractVector{UInt8} = UInt8[], ad::AbstractVector{UInt8} = UInt8[])
+                  len::Int = 32, secret::AbstractVector{UInt8} = UInt8[], ad::AbstractVector{UInt8} = UInt8[],
+                  variant::Symbol = :argon2id, version::Integer = 0x13)
     (t >= 1 && p >= 1 && m >= 8p && len >= 4) || throw(ArgumentError("invalid Argon2 parameters"))
-    y = 2                                                # Argon2id
-    h0 = blake2b(vcat(le32(p), le32(len), le32(m), le32(t), le32(0x13), le32(y),
+    variant in (:argon2id, :argon2i) && version in (0x10, 0x13) || throw(ArgumentError("unsupported Argon2 variant or version"))
+    y = variant === :argon2i ? 1 : 2
+    xor_old = version == 0x13
+    h0 = blake2b(vcat(le32(p), le32(len), le32(m), le32(t), le32(version), le32(y),
                       le32(length(password)), password, le32(length(salt)), salt,
                       le32(length(secret)), secret, le32(length(ad)), ad), 64)
     mp = 4p * (m ÷ (4p))
@@ -592,7 +613,7 @@ function argon2id(password::AbstractVector{UInt8}, salt::AbstractVector{UInt8}; 
     zero_block = zeros(UInt64, 128)
     input, addresses, tmp = zeros(UInt64, 128), zeros(UInt64, 128), zeros(UInt64, 128)
     for pass in 0:t-1, slice in 0:3, l in 0:p-1
-        data_independent = pass == 0 && slice < 2
+        data_independent = y == 1 || (pass == 0 && slice < 2)
         if data_independent
             fill!(input, 0)
             input[1], input[2], input[3], input[4], input[5], input[6] = pass, l, slice, mp, t, y
@@ -625,7 +646,7 @@ function argon2id(password::AbstractVector{UInt8}, salt::AbstractVector{UInt8}; 
             rel = UInt64(area) - 1 - ((UInt64(area) * ((j1 * j1) >> 32)) >> 32)
             startpos = pass == 0 ? 0 : (slice == 3 ? 0 : (slice + 1) * seg)
             refc = Int((UInt64(startpos) + rel) % UInt64(q))
-            argon2_g!(view(B, :, col(l, c)), view(B, :, col(l, prev)), view(B, :, col(rl, refc)), r, z, pass > 0)
+            argon2_g!(view(B, :, col(l, c)), view(B, :, col(l, prev)), view(B, :, col(rl, refc)), r, z, pass > 0 && xor_old)
         end
     end
     final = copy(B[:, col(0, q - 1)])
@@ -641,7 +662,8 @@ b64_nopad_decode(s) = base64decode(s * repeat("=", mod(-length(s), 4)))
 """
     Argon2Hasher(; time_cost = 2, memory_cost = 102400, parallelism = 8)
 
-Argon2id, the winner of the Password Hashing Competition (memory in KiB, as in Django).
+Argon2id, the winner of the Password Hashing Competition (memory in KiB, as in Django). Older argon2i hashes
+(with or without a version, as Django's) verify too, and are re-hashed as argon2id.
 """
 Base.@kwdef struct Argon2Hasher <: PasswordHasher
     time_cost::Int = 2
@@ -654,18 +676,22 @@ function encode_password(h::Argon2Hasher, raw::AbstractString, salt::AbstractStr
     "argon2\$argon2id\$v=19\$m=$(h.memory_cost),t=$(h.time_cost),p=$(h.parallelism)\$$(b64_nopad(codeunits(salt)))\$$(b64_nopad(d))"
 end
 function argon2_params(encoded)
-    m = match(r"^argon2\$argon2id\$v=19\$m=(\d+),t=(\d+),p=(\d+)\$([A-Za-z0-9+/]+)\$([A-Za-z0-9+/]+)$", encoded)
-    m === nothing ? nothing : (m = parse(Int, m[1]), t = parse(Int, m[2]), p = parse(Int, m[3]),
-                               salt = b64_nopad_decode(m[4]), hash = b64_nopad_decode(m[5]))
+    m = match(r"^argon2\$(argon2id|argon2i)\$(?:v=(\d+)\$)?m=(\d+),t=(\d+),p=(\d+)\$([A-Za-z0-9+/]+)\$([A-Za-z0-9+/]+)$", encoded)
+    m === nothing && return nothing
+    v = m[2] === nothing ? 0x10 : parse(Int, m[2])            # (no version: Argon2 1.0)
+    v in (0x10, 0x13) || return nothing
+    (variant = Symbol(m[1]), version = v, m = parse(Int, m[3]), t = parse(Int, m[4]), p = parse(Int, m[5]),
+     salt = b64_nopad_decode(m[6]), hash = b64_nopad_decode(m[7]))
 end
 function verify_password(h::Argon2Hasher, raw::AbstractString, encoded::AbstractString)
     a = argon2_params(encoded)
     a === nothing && return false
-    d = argon2id(codeunits(raw), a.salt; t = a.t, m = a.m, p = a.p, len = length(a.hash))
+    d = argon2id(codeunits(raw), a.salt; t = a.t, m = a.m, p = a.p, len = length(a.hash), variant = a.variant, version = a.version)
     consteq(bytes2hex(d), bytes2hex(a.hash))
 end
 must_update(h::Argon2Hasher, encoded) =
-    (a = argon2_params(encoded); a === nothing || (a.m, a.t, a.p) != (h.memory_cost, h.time_cost, h.parallelism))
+    (a = argon2_params(encoded); a === nothing || a.variant !== :argon2id || a.version != 0x13 ||
+                                 (a.m, a.t, a.p) != (h.memory_cost, h.time_cost, h.parallelism))
 
 salt_for(::PasswordHasher) = random_string(22)
 

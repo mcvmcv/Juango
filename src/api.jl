@@ -153,7 +153,7 @@ public showmigrations, sqlmigrate, squashmigrations, optimizemigration, flush!, 
 public management_form, empty_form, deleted_forms, ordered_forms, clean_form
 # auth
 public username_field, has_module_perms, get_all_permissions, perm_name, auth_urls,
-       PBKDF2Hasher, Argon2Hasher, BCryptSHA256Hasher, BCryptHasher, ScryptPasswordHasher, scrypt, MinimumLengthValidator,
+       PBKDF2Hasher, Argon2Hasher, MD5PasswordHasher, BCryptSHA256Hasher, BCryptHasher, ScryptPasswordHasher, scrypt, MinimumLengthValidator,
        NumericPasswordValidator, CommonPasswordValidator, UserAttributeSimilarityValidator,
        password_summary, password_error, make_reset_token, check_reset_token,
        backend_authenticate, backend_get_user, backend_has_perm, backend_get_user_permissions, backend_get_group_permissions,
